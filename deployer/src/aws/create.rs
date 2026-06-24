@@ -299,17 +299,17 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }
     info!("tools uploaded");
 
-    // Cache Docker images in ECR so instances pull from a registry owned by this AWS account.
-    info!(region = MONITORING_REGION, "caching Docker images in ECR");
+    // Cache images in ECR so instances pull from a registry owned by this AWS account.
+    info!(region = MONITORING_REGION, "caching images in ECR");
     let ecr_client = ecr::create_client(Region::new(MONITORING_REGION)).await;
-    let docker_image_cache = ecr::cache_images(
+    let image_cache = ecr::cache_images(
         &ecr_client,
         MONITORING_REGION,
         &bucket_name,
-        required_docker_images(),
+        required_images(),
     )
     .await?;
-    info!("Docker images cached in ECR");
+    info!("images cached in ECR");
 
     // Upload unique binaries and configs to S3 (deduplicated by digest)
     info!("uploading unique binaries and configs to S3");
@@ -1048,7 +1048,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let ip = deployment.ip.clone();
             let nvme = nvme_supported_by_instance_type[&instance.instance_type];
             let (urls, arch) = instance_urls_map.remove(&instance.name).unwrap();
-            let image_cache = docker_image_cache.clone();
+            let image_cache = image_cache.clone();
             (
                 instance,
                 deployment_id,
@@ -1089,7 +1089,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
             let start_time = Instant::now();
             poll_service_active(private_key, &ip, "binary").await?;
-            for service in binary_docker_services() {
+            for service in binary_image_services() {
                 poll_service_active(private_key, &ip, service).await?;
             }
             let start_dur = format!("{:.1}s", start_time.elapsed().as_secs_f64());
@@ -1134,7 +1134,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             ssh_execute(
                 private_key,
                 &monitoring_ip,
-                &install_monitoring_setup_cmd(&docker_image_cache),
+                &install_monitoring_setup_cmd(&image_cache),
             )
             .await?;
             ssh_execute(
@@ -1146,7 +1146,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let setup = format!("{:.1}s", setup_start.elapsed().as_secs_f64());
 
             let start_time = Instant::now();
-            for service in monitoring_docker_services() {
+            for service in monitoring_image_services() {
                 poll_service_active(private_key, &monitoring_ip, service).await?;
             }
             let start_dur = format!("{:.1}s", start_time.elapsed().as_secs_f64());

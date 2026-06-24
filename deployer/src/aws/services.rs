@@ -35,34 +35,34 @@ const UBUNTU_ARCHIVE_ARM64: &str = "http://ports.ubuntu.com/ubuntu-ports/pool";
 /// Ubuntu package archive base URL for x86_64
 const UBUNTU_ARCHIVE_X86_64: &str = "http://archive.ubuntu.com/ubuntu/pool";
 
-/// Docker image for Prometheus metrics storage and querying
+/// Image for Prometheus metrics storage and querying
 pub const PROMETHEUS_IMAGE: &str = "prom/prometheus:v3.2.0";
 
-/// Docker image for Promtail log forwarding
+/// Image for Promtail log forwarding
 pub const PROMTAIL_IMAGE: &str = "grafana/promtail:3.4.2";
 
-/// Docker image for Node Exporter system metrics
+/// Image for Node Exporter system metrics
 pub const NODE_EXPORTER_IMAGE: &str = "prom/node-exporter:v1.9.0";
 
-/// Docker image for Loki log storage and querying
+/// Image for Loki log storage and querying
 pub const LOKI_IMAGE: &str = "grafana/loki:3.4.2";
 
-/// Docker image for Tempo trace storage and querying
+/// Image for Tempo trace storage and querying
 pub const TEMPO_IMAGE: &str = "grafana/tempo:2.7.1";
 
-/// Docker image for Pyroscope profile storage and querying
+/// Image for Pyroscope profile storage and querying
 pub const PYROSCOPE_IMAGE: &str = "grafana/pyroscope:1.12.0";
 
-/// Docker image for Grafana dashboards
+/// Image for Grafana dashboards
 pub const GRAFANA_IMAGE: &str = "grafana/grafana:11.5.2";
 
-/// Docker image for Tracer trace viewing
+/// Image for Tracer trace viewing
 pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:0.1.1";
 
-/// Docker image for truncating deployed binary logs
+/// Image for truncating deployed binary logs
 pub const BUSYBOX_IMAGE: &str = "busybox:1.37.0";
 
-const DOCKER_IMAGES: &[&str] = &[
+const IMAGES: &[&str] = &[
     PROMETHEUS_IMAGE,
     PROMTAIL_IMAGE,
     NODE_EXPORTER_IMAGE,
@@ -75,7 +75,7 @@ const DOCKER_IMAGES: &[&str] = &[
 ];
 
 #[derive(Clone, Copy)]
-struct DockerService {
+struct ImageService {
     service: &'static str,
     description: &'static str,
     image: &'static str,
@@ -108,8 +108,8 @@ const PROMTAIL_VOLUMES: &[&str] = &[
     "/var/lib/promtail:/var/lib/promtail",
 ];
 
-const MONITORING_DOCKER_SERVICES: &[DockerService] = &[
-    DockerService {
+const MONITORING_IMAGE_SERVICES: &[ImageService] = &[
+    ImageService {
         service: "node_exporter",
         description: "Node Exporter",
         image: NODE_EXPORTER_IMAGE,
@@ -122,7 +122,7 @@ const MONITORING_DOCKER_SERVICES: &[DockerService] = &[
         options: &[],
         after: &[],
     },
-    DockerService {
+    ImageService {
         service: "prometheus",
         description: "Prometheus Monitoring Service",
         image: PROMETHEUS_IMAGE,
@@ -141,7 +141,7 @@ const MONITORING_DOCKER_SERVICES: &[DockerService] = &[
         options: &[],
         after: &["node_exporter.service"],
     },
-    DockerService {
+    ImageService {
         service: "loki",
         description: "Loki Log Aggregation Service",
         image: LOKI_IMAGE,
@@ -154,7 +154,7 @@ const MONITORING_DOCKER_SERVICES: &[DockerService] = &[
         options: &[],
         after: &[],
     },
-    DockerService {
+    ImageService {
         service: "pyroscope",
         description: "Pyroscope Profiling Service",
         image: PYROSCOPE_IMAGE,
@@ -170,7 +170,7 @@ const MONITORING_DOCKER_SERVICES: &[DockerService] = &[
         options: &[],
         after: &[],
     },
-    DockerService {
+    ImageService {
         service: "tempo",
         description: "Tempo Tracing Service",
         image: TEMPO_IMAGE,
@@ -186,7 +186,7 @@ const MONITORING_DOCKER_SERVICES: &[DockerService] = &[
         options: &[],
         after: &[],
     },
-    DockerService {
+    ImageService {
         service: "grafana",
         description: "Grafana Dashboard Service",
         image: GRAFANA_IMAGE,
@@ -211,7 +211,7 @@ const MONITORING_DOCKER_SERVICES: &[DockerService] = &[
             "pyroscope.service",
         ],
     },
-    DockerService {
+    ImageService {
         service: "tracer",
         description: "Tracer Trace Viewer",
         image: TRACER_IMAGE,
@@ -226,8 +226,8 @@ const MONITORING_DOCKER_SERVICES: &[DockerService] = &[
     },
 ];
 
-const BINARY_DOCKER_SERVICES: &[DockerService] = &[
-    DockerService {
+const BINARY_IMAGE_SERVICES: &[ImageService] = &[
+    ImageService {
         service: "promtail",
         description: "Promtail Log Forwarder",
         image: PROMTAIL_IMAGE,
@@ -240,7 +240,7 @@ const BINARY_DOCKER_SERVICES: &[DockerService] = &[
         options: &[],
         after: &["binary.service"],
     },
-    DockerService {
+    ImageService {
         service: "node_exporter",
         description: "Node Exporter",
         image: NODE_EXPORTER_IMAGE,
@@ -255,33 +255,33 @@ const BINARY_DOCKER_SERVICES: &[DockerService] = &[
     },
 ];
 
-impl DockerService {
+impl ImageService {
     fn service_file(self, image: &str) -> String {
         let after = self.after.join(" ");
-        let mut docker_options = String::new();
+        let mut run_options = String::new();
         if self.network_host {
-            docker_options.push_str(" --network host");
+            run_options.push_str(" --network host");
         }
         if self.pid_host {
-            docker_options.push_str(" --pid host");
+            run_options.push_str(" --pid host");
         }
         if let Some(user) = self.user {
-            docker_options.push_str(" --user ");
-            docker_options.push_str(user);
+            run_options.push_str(" --user ");
+            run_options.push_str(user);
         }
         for (key, value) in self.env {
-            docker_options.push_str(" --env ");
-            docker_options.push_str(key);
-            docker_options.push('=');
-            docker_options.push_str(value);
+            run_options.push_str(" --env ");
+            run_options.push_str(key);
+            run_options.push('=');
+            run_options.push_str(value);
         }
         for volume in self.volumes {
-            docker_options.push_str(" --volume ");
-            docker_options.push_str(volume);
+            run_options.push_str(" --volume ");
+            run_options.push_str(volume);
         }
         for option in self.options {
-            docker_options.push(' ');
-            docker_options.push_str(option);
+            run_options.push(' ');
+            run_options.push_str(option);
         }
         let args = if self.args.is_empty() {
             String::new()
@@ -305,7 +305,7 @@ Requires=docker.service
 
 [Service]
 ExecStartPre=-{docker_bin} rm -f {service}
-ExecStart={docker_bin} run --rm --name {service}{docker_options} {image}{args}
+ExecStart={docker_bin} run --rm --name {service}{run_options} {image}{args}
 TimeoutStopSec=60
 Restart=always
 
@@ -316,7 +316,7 @@ WantedBy=multi-user.target
             description = self.description,
             after_line = after_line,
             docker_bin = DOCKER_BIN,
-            docker_options = docker_options,
+            run_options = run_options,
             image = image,
             args = args,
         )
@@ -324,13 +324,13 @@ WantedBy=multi-user.target
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DockerImageCache {
+pub(crate) struct ImageCache {
     registry: String,
     password: Option<String>,
     images: HashMap<&'static str, String>,
 }
 
-impl DockerImageCache {
+impl ImageCache {
     pub(crate) fn new(
         registry: String,
         password: String,
@@ -348,7 +348,7 @@ impl DockerImageCache {
         Self {
             registry: String::new(),
             password: None,
-            images: required_docker_images()
+            images: required_images()
                 .iter()
                 .map(|image| (*image, (*image).to_string()))
                 .collect(),
@@ -359,7 +359,7 @@ impl DockerImageCache {
         self.images
             .get(upstream)
             .map(String::as_str)
-            .expect("all required Docker images must be cached")
+            .expect("all required images must be cached")
     }
 
     fn login_cmd(&self) -> String {
@@ -378,8 +378,8 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'\''"#))
 }
 
-pub(crate) const fn required_docker_images() -> &'static [&'static str] {
-    DOCKER_IMAGES
+pub(crate) const fn required_images() -> &'static [&'static str] {
+    IMAGES
 }
 
 pub(crate) fn docker_bin_s3_key(version: &str, architecture: Architecture) -> String {
@@ -704,10 +704,7 @@ done
     )
 }
 
-fn install_docker_services_cmd(
-    services: &[DockerService],
-    image_cache: &DockerImageCache,
-) -> String {
+fn install_image_services_cmd(services: &[ImageService], image_cache: &ImageCache) -> String {
     if services.is_empty() {
         return String::new();
     }
@@ -795,7 +792,7 @@ Unit=binary-log-truncate.service
 WantedBy=timers.target
 "#;
 
-fn install_binary_log_truncator_cmd(image_cache: &DockerImageCache) -> String {
+fn install_binary_log_truncator_cmd(image_cache: &ImageCache) -> String {
     let image = image_cache.image(BUSYBOX_IMAGE);
     let service = binary_log_truncate_service(image);
     format!(
@@ -808,26 +805,26 @@ sudo tee /etc/systemd/system/binary-log-truncate.timer >/dev/null <<'EOF'
     )
 }
 
-pub(crate) fn monitoring_docker_services() -> impl Iterator<Item = &'static str> {
-    MONITORING_DOCKER_SERVICES
+pub(crate) fn monitoring_image_services() -> impl Iterator<Item = &'static str> {
+    MONITORING_IMAGE_SERVICES
         .iter()
         .map(|service| service.service)
 }
 
-pub(crate) fn binary_docker_services() -> impl Iterator<Item = &'static str> {
-    BINARY_DOCKER_SERVICES.iter().map(|service| service.service)
+pub(crate) fn binary_image_services() -> impl Iterator<Item = &'static str> {
+    BINARY_IMAGE_SERVICES.iter().map(|service| service.service)
 }
 
 /// Phase 2: Setup services on monitoring instance (does not start them)
-pub(crate) fn install_monitoring_setup_cmd(image_cache: &DockerImageCache) -> String {
-    let docker_services = install_docker_services_cmd(MONITORING_DOCKER_SERVICES, image_cache);
+pub(crate) fn install_monitoring_setup_cmd(image_cache: &ImageCache) -> String {
+    let image_services = install_image_services_cmd(MONITORING_IMAGE_SERVICES, image_cache);
     format!(
         r#"set -e
 
 # Enable BBR congestion control
 echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
 
-{docker_services}
+{image_services}
 
 # Create service directories
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
@@ -865,7 +862,7 @@ sudo systemctl daemon-reload
 "#,
     );
 
-    for service in monitoring_docker_services() {
+    for service in monitoring_image_services() {
         cmd.push_str("sudo systemctl start ");
         cmd.push_str(service);
         cmd.push('\n');
@@ -1044,9 +1041,9 @@ sudo chown -R ubuntu:ubuntu "$NVME_MOUNT"
 pub(crate) fn install_binary_setup_cmd(
     profiling: bool,
     _architecture: Architecture,
-    image_cache: &DockerImageCache,
+    image_cache: &ImageCache,
 ) -> String {
-    let docker_services = install_docker_services_cmd(BINARY_DOCKER_SERVICES, image_cache);
+    let image_services = install_image_services_cmd(BINARY_IMAGE_SERVICES, image_cache);
     let log_truncator = install_binary_log_truncator_cmd(image_cache);
     let perf_setup = if profiling {
         r#"
@@ -1070,7 +1067,7 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
 # Enable BBR congestion control
 echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
 
-{docker_services}
+{image_services}
 {log_truncator}
 
 # Install deb packages
@@ -1318,11 +1315,11 @@ mod tests {
         }
     }
 
-    fn ecr_image_cache() -> DockerImageCache {
-        DockerImageCache::new(
+    fn ecr_image_cache() -> ImageCache {
+        ImageCache::new(
             "123456789012.dkr.ecr.us-east-1.amazonaws.com".to_string(),
             "password".to_string(),
-            required_docker_images().iter().map(|image| {
+            required_images().iter().map(|image| {
                 (
                     *image,
                     format!(
@@ -1423,7 +1420,7 @@ mod tests {
         assert!(download.contains("node-exporter-dashboard"));
         assert!(download.contains("node-exporter-full.json"));
 
-        let image_cache = DockerImageCache::public();
+        let image_cache = ImageCache::public();
         let setup = install_monitoring_setup_cmd(&image_cache);
         assert!(setup.contains(
             "sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json"
@@ -1432,7 +1429,7 @@ mod tests {
     }
 
     #[test]
-    fn test_monitoring_installs_docker_services() {
+    fn test_monitoring_installs_image_services() {
         let urls = monitoring_urls();
         let download = install_monitoring_download_cmd(&urls);
         assert!(!download.contains("tracer.service"));
@@ -1440,7 +1437,7 @@ mod tests {
         assert!(!download.contains("grafana.deb"));
         assert!(!download.contains("node_exporter.tar.gz"));
 
-        let image_cache = DockerImageCache::public();
+        let image_cache = ImageCache::public();
         let setup = install_monitoring_setup_cmd(&image_cache);
         assert!(setup.contains("# Install Docker services"));
         assert!(setup.contains("tar xzf /home/ubuntu/docker.tgz -C /home/ubuntu"));
@@ -1467,7 +1464,7 @@ mod tests {
         assert!(setup.contains("sudo tee /etc/systemd/system/grafana.service"));
 
         let start = start_monitoring_services_cmd();
-        for service in monitoring_docker_services() {
+        for service in monitoring_image_services() {
             assert!(start.contains(&format!("sudo systemctl start {service}")));
             assert!(start.contains(&format!("sudo systemctl enable {service}")));
         }
@@ -1479,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_installs_docker_helpers() {
+    fn test_binary_installs_image_helpers() {
         let urls = instance_urls();
         let download = install_binary_download_cmd(&urls);
         assert!(download.contains("-O /home/ubuntu/promtail.yml"));
@@ -1487,7 +1484,7 @@ mod tests {
         assert!(!download.contains("promtail.zip"));
         assert!(!download.contains("node_exporter.tar.gz"));
 
-        let image_cache = DockerImageCache::public();
+        let image_cache = ImageCache::public();
         let setup = install_binary_setup_cmd(false, Architecture::Arm64, &image_cache);
         assert!(setup.contains(&format!("sudo docker pull {PROMTAIL_IMAGE}")));
         assert!(setup.contains(&format!("sudo docker pull {NODE_EXPORTER_IMAGE}")));
@@ -1513,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn test_docker_setup_uses_ecr_cache() {
+    fn test_image_setup_uses_ecr_cache() {
         let image_cache = ecr_image_cache();
         let setup = install_monitoring_setup_cmd(&image_cache);
 

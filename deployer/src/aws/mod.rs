@@ -121,7 +121,7 @@
 //! 2. Persists deployment metadata (tag, regions, instance names) to `$HOME/.commonware_deployer/{tag}/metadata.yaml`.
 //!    This enables `destroy --tag` cleanup if creation fails.
 //! 3. Ensures the shared S3 bucket exists and caches tools if not already present.
-//! 4. Mirrors required Docker images into shared ECR repositories in the monitoring region if not already present.
+//! 4. Mirrors required images into shared ECR repositories in the monitoring region if not already present.
 //! 5. Uploads deployment-specific files (binaries, configs) to S3.
 //! 6. Creates VPCs, subnets, internet gateways, route tables, and security groups per region (concurrently).
 //! 7. Establishes VPC peering between the monitoring region and binary regions.
@@ -159,13 +159,13 @@
 //!
 //! 1. Terminates all instances across regions.
 //! 2. Deletes security groups, subnets, route tables, VPC peering connections, internet gateways, key pairs, and VPCs in dependency order.
-//! 3. Deletes deployment-specific data from S3 (cached tools and Docker images remain for future deployments).
+//! 3. Deletes deployment-specific data from S3 (cached tools and images remain for future deployments).
 //! 4. Marks destruction with `$HOME/.commonware_deployer/{tag}/destroyed`, retaining the directory to prevent tag reuse.
 //!
 //! ## `aws clean`
 //!
 //! 1. Deletes the shared S3 bucket and all its contents (cached support packages and any remaining deployment data).
-//! 2. Deletes the shared ECR Docker image cache.
+//! 2. Deletes the shared ECR image cache.
 //! 3. Use this to fully clean up when you no longer need the deployer cache.
 //!
 //! ## `aws list`
@@ -240,7 +240,7 @@
 //! repositories are created in the monitoring region under the same cache name.
 //!
 //! 1. **Faster deployments**: Tools are downloaded from upstream sources once
-//!    and cached in S3. Required Docker images are mirrored into ECR once and pulled from ECR during
+//!    and cached in S3. Required images are mirrored into ECR once and pulled from ECR during
 //!    instance setup.
 //!
 //! 2. **Reduced bandwidth**: Instead of requiring the deployer to push binaries to each instance,
@@ -564,10 +564,10 @@ cfg_if::cfg_if! {
             DockerCommandFailed { command: String, stderr: String },
             #[error("Docker stdin unavailable")]
             DockerStdinUnavailable,
-            #[error("invalid Docker image reference: {0}")]
-            InvalidDockerImage(String),
-            #[error("unsupported Docker registry for ECR cache: {0}")]
-            UnsupportedDockerRegistry(String),
+            #[error("invalid image reference: {0}")]
+            InvalidImage(String),
+            #[error("unsupported image registry for ECR cache: {0}")]
+            UnsupportedImageRegistry(String),
             #[error("ECR authorization token missing")]
             EcrAuthorizationTokenMissing,
             #[error("ECR authorization token is invalid")]

@@ -1,6 +1,6 @@
-//! AWS ECR SDK wrappers and Docker image cache mirroring.
+//! AWS ECR SDK wrappers and image cache mirroring.
 
-use crate::aws::{services::DockerImageCache, Error};
+use crate::aws::{services::ImageCache, Error};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_ecr::{
     config::retry::ReconnectMode,
@@ -45,7 +45,7 @@ pub(crate) async fn cache_images(
     region: &str,
     repository_prefix: &str,
     images: &[&'static str],
-) -> Result<DockerImageCache, Error> {
+) -> Result<ImageCache, Error> {
     let (registry, password) = ecr_login(client).await?;
 
     let mut refs = HashMap::new();
@@ -58,14 +58,14 @@ pub(crate) async fn cache_images(
                 region,
                 upstream = cached.upstream,
                 image = cached.reference.as_str(),
-                "Docker image already cached in ECR"
+                "image already cached in ECR"
             );
         } else {
             info!(
                 region,
                 upstream = cached.upstream,
                 image = cached.reference.as_str(),
-                "mirroring Docker image to ECR"
+                "mirroring image to ECR"
             );
             if !logged_in {
                 docker_login(&registry, &password).await?;
@@ -76,10 +76,10 @@ pub(crate) async fn cache_images(
         refs.insert(*image, cached.reference);
     }
 
-    Ok(DockerImageCache::new(registry, password, refs))
+    Ok(ImageCache::new(registry, password, refs))
 }
 
-/// Deletes all ECR repositories used for the shared Docker image cache.
+/// Deletes all ECR repositories used for the shared image cache.
 pub(crate) async fn delete_cache(client: &EcrClient, repository_prefix: &str) -> Result<(), Error> {
     let mut repositories = Vec::new();
     let mut next_token = None;
@@ -300,9 +300,9 @@ fn cached_image(
 fn image_name_and_tag(upstream: &str) -> Result<(&str, String), Error> {
     let (name, tag) = upstream
         .rsplit_once(':')
-        .ok_or_else(|| Error::InvalidDockerImage(upstream.to_string()))?;
+        .ok_or_else(|| Error::InvalidImage(upstream.to_string()))?;
     if name.is_empty() || tag.is_empty() || upstream.contains('@') {
-        return Err(Error::InvalidDockerImage(upstream.to_string()));
+        return Err(Error::InvalidImage(upstream.to_string()));
     }
     Ok((name, tag.to_string()))
 }
@@ -311,17 +311,17 @@ fn repository_path(name: &str) -> Result<(&'static str, String), Error> {
     let mut parts = name.splitn(2, '/');
     let first = parts
         .next()
-        .ok_or_else(|| Error::InvalidDockerImage(name.to_string()))?;
+        .ok_or_else(|| Error::InvalidImage(name.to_string()))?;
     let path = parts.next();
     match path {
-        Some(path) if path.is_empty() => Err(Error::InvalidDockerImage(name.to_string())),
+        Some(path) if path.is_empty() => Err(Error::InvalidImage(name.to_string())),
         Some(path) if first == "ghcr.io" => Ok(("ghcr", path.to_string())),
         Some(_) if first.contains('.') || first.contains(':') || first == "localhost" => {
-            Err(Error::UnsupportedDockerRegistry(first.to_string()))
+            Err(Error::UnsupportedImageRegistry(first.to_string()))
         }
         Some(_) => Ok(("docker-hub", name.to_string())),
         None if first.contains('.') || first.contains(':') || first == "localhost" => {
-            Err(Error::InvalidDockerImage(name.to_string()))
+            Err(Error::InvalidImage(name.to_string()))
         }
         None => Ok(("docker-hub", format!("library/{name}"))),
     }
@@ -395,6 +395,6 @@ mod tests {
             "quay.io/org/image:v1",
         )
         .unwrap_err();
-        assert!(matches!(err, Error::UnsupportedDockerRegistry(registry) if registry == "quay.io"));
+        assert!(matches!(err, Error::UnsupportedImageRegistry(registry) if registry == "quay.io"));
     }
 }
