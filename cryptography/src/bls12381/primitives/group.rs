@@ -541,10 +541,8 @@ impl FixedSize for Private {
 }
 
 impl Random for Private {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
-        let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
-        rng.fill_bytes(ikm.as_mut());
-        Self::new(Scalar::from_ikm(&ikm))
+    fn random(rng: impl CryptoRngCore) -> Self {
+        Self::new(Scalar::random(rng))
     }
 }
 
