@@ -239,7 +239,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, &bucket_name, MONITORING_REGION).await?;
 
-    // Cache tools for each architecture needed.
+    // Cache tools for each architecture needed
     info!("uploading tools to S3");
     let cache_tool = |s3_key: String, download_url: String| {
         let tag_directory = tag_directory.clone();
