@@ -19,6 +19,9 @@ const DEPLOYER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// <https://grafana.com/grafana/dashboards/1860-node-exporter-full/>
 pub const GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION: &str = "45";
 
+/// Version of Docker static binaries to download and install
+pub const DOCKER_VERSION: &str = "29.6.0";
+
 /// Version of Samply to download and install
 pub const SAMPLY_VERSION: &str = "0.13.1";
 
@@ -38,7 +41,8 @@ pub const LOKI_IMAGE: &str = "grafana/loki:3.4.2";
 pub const TEMPO_IMAGE: &str = "grafana/tempo:2.7.1";
 pub const PYROSCOPE_IMAGE: &str = "grafana/pyroscope:1.12.0";
 pub const GRAFANA_IMAGE: &str = "grafana/grafana:11.5.2";
-pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:latest";
+pub const TRACER_IMAGE: &str =
+    "ghcr.io/clabby/tracer-web@sha256:254efac6315b9b2f71786243ae4334b1276e44e26188d398911a6d93f484e703";
 pub const BUSYBOX_IMAGE: &str = "busybox:1.37.0";
 
 const DOCKER_IMAGES: &[&str] = &[
@@ -360,6 +364,11 @@ pub(crate) const fn required_docker_images() -> &'static [&'static str] {
     DOCKER_IMAGES
 }
 
+pub(crate) fn docker_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    let arch = docker_static_arch(architecture);
+    format!("{TOOLS_BINARIES_PREFIX}/docker/{version}/linux-{arch}/docker-{version}.tgz")
+}
+
 pub(crate) fn samply_bin_s3_key(version: &str, architecture: Architecture) -> String {
     let arch = match architecture {
         Architecture::Arm64 => "aarch64",
@@ -468,6 +477,21 @@ pub(crate) fn samply_download_url(version: &str, architecture: Architecture) -> 
     format!(
         "https://github.com/mstange/samply/releases/download/samply-v{version}/samply-{arch}-unknown-linux-gnu.tar.xz"
     )
+}
+
+/// Returns the download URL for Docker static binaries
+pub(crate) fn docker_download_url(version: &str, architecture: Architecture) -> String {
+    format!(
+        "https://download.docker.com/linux/static/stable/{arch}/docker-{version}.tgz",
+        arch = docker_static_arch(architecture)
+    )
+}
+
+fn docker_static_arch(architecture: Architecture) -> &'static str {
+    match architecture {
+        Architecture::Arm64 => "aarch64",
+        Architecture::X86_64 => "x86_64",
+    }
 }
 
 /// Returns the download URL for libjemalloc2 from Ubuntu archive
@@ -606,6 +630,7 @@ overrides:
 
 /// URLs for monitoring service installation
 pub struct MonitoringUrls {
+    pub docker_tgz: String,
     pub prometheus_config: String,
     pub datasources_yml: String,
     pub all_yml: String,
@@ -623,12 +648,13 @@ pub(crate) fn install_monitoring_download_cmd(urls: &MonitoringUrls) -> String {
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/prometheus.yml /home/ubuntu/datasources.yml /home/ubuntu/all.yml \
       /home/ubuntu/dashboard.json /home/ubuntu/node-exporter-full.json /home/ubuntu/loki.yml \
-      /home/ubuntu/pyroscope.yml /home/ubuntu/tempo.yml
+      /home/ubuntu/pyroscope.yml /home/ubuntu/tempo.yml /home/ubuntu/docker.tgz
 
 # Unmask services in case previous attempt left them masked
-sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana tracer 2>/dev/null || true
+sudo systemctl unmask docker prometheus loki pyroscope tempo node_exporter grafana tracer 2>/dev/null || true
 
 # Download all files from S3 concurrently via pre-signed URLs
+{WGET} -O /home/ubuntu/docker.tgz '{}' &
 {WGET} -O /home/ubuntu/prometheus.yml '{}' &
 {WGET} -O /home/ubuntu/datasources.yml '{}' &
 {WGET} -O /home/ubuntu/all.yml '{}' &
@@ -641,13 +667,14 @@ wait
 
 # Verify all downloads succeeded
 for f in prometheus.yml datasources.yml all.yml dashboard.json node-exporter-full.json \
-         loki.yml pyroscope.yml tempo.yml; do
+         loki.yml pyroscope.yml tempo.yml docker.tgz; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
     fi
 done
 "#,
+        urls.docker_tgz,
         urls.prometheus_config,
         urls.datasources_yml,
         urls.all_yml,
@@ -669,8 +696,35 @@ fn install_docker_services_cmd(
 
     let mut cmd = String::from(
         r#"# Install Docker services
-sudo apt-get update -y
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
+rm -rf /home/ubuntu/docker
+tar xzf /home/ubuntu/docker.tgz -C /home/ubuntu
+sudo install -m 0755 /home/ubuntu/docker/* /usr/local/bin/
+sudo tee /etc/systemd/system/docker.service >/dev/null <<'EOF'
+[Unit]
+Description=Docker Application Container Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/dockerd --host=unix:///var/run/docker.sock
+ExecReload=/bin/kill -s HUP $MAINPID
+TimeoutStartSec=0
+Restart=always
+RestartSec=2
+Delegate=yes
+KillMode=process
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
 sudo systemctl enable --now docker
 "#,
     );
@@ -813,6 +867,7 @@ pub struct InstanceUrls {
     pub pyroscope_script: String,
     pub pyroscope_service: String,
     pub pyroscope_timer: String,
+    pub docker_tgz: String,
     pub libjemalloc_deb: String,
 }
 
@@ -851,10 +906,10 @@ pub(crate) fn install_binary_download_cmd(urls: &InstanceUrls) -> String {
 rm -f /home/ubuntu/binary /home/ubuntu/config.conf /home/ubuntu/hosts.yaml \
       /home/ubuntu/promtail.yml /home/ubuntu/binary.service \
       /home/ubuntu/pyroscope-agent.sh /home/ubuntu/pyroscope-agent.service \
-      /home/ubuntu/pyroscope-agent.timer /home/ubuntu/libjemalloc2.deb
+      /home/ubuntu/pyroscope-agent.timer /home/ubuntu/docker.tgz /home/ubuntu/libjemalloc2.deb
 
 # Unmask services in case previous attempt left them masked
-sudo systemctl unmask promtail node_exporter binary 2>/dev/null || true
+sudo systemctl unmask docker promtail node_exporter binary 2>/dev/null || true
 
 # Download all files from S3 concurrently via pre-signed URLs
 {WGET} -O /home/ubuntu/binary '{}' &
@@ -865,13 +920,14 @@ sudo systemctl unmask promtail node_exporter binary 2>/dev/null || true
 {WGET} -O /home/ubuntu/pyroscope-agent.sh '{}' &
 {WGET} -O /home/ubuntu/pyroscope-agent.service '{}' &
 {WGET} -O /home/ubuntu/pyroscope-agent.timer '{}' &
+{WGET} -O /home/ubuntu/docker.tgz '{}' &
 {WGET} -O /home/ubuntu/libjemalloc2.deb '{}' &
 wait
 
 # Verify all downloads succeeded
 for f in binary config.conf hosts.yaml promtail.yml binary.service \
          pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer \
-         libjemalloc2.deb; do
+         docker.tgz libjemalloc2.deb; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
@@ -886,6 +942,7 @@ done
         urls.pyroscope_script,
         urls.pyroscope_service,
         urls.pyroscope_timer,
+        urls.docker_tgz,
         urls.libjemalloc_deb,
     )
 }
@@ -1214,6 +1271,7 @@ mod tests {
 
     fn monitoring_urls() -> MonitoringUrls {
         MonitoringUrls {
+            docker_tgz: "docker".to_string(),
             prometheus_config: "prometheus-config".to_string(),
             datasources_yml: "datasources".to_string(),
             all_yml: "dashboards".to_string(),
@@ -1235,6 +1293,7 @@ mod tests {
             pyroscope_script: "pyroscope-script".to_string(),
             pyroscope_service: "pyroscope-service".to_string(),
             pyroscope_timer: "pyroscope-timer".to_string(),
+            docker_tgz: "docker".to_string(),
             libjemalloc_deb: "libjemalloc".to_string(),
         }
     }
@@ -1248,7 +1307,7 @@ mod tests {
                     *image,
                     format!(
                         "123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/{}",
-                        image.replace('/', "_").replace(':', "_")
+                        image.replace(['/', ':', '@'], "_")
                     ),
                 )
             }),
@@ -1258,6 +1317,10 @@ mod tests {
     #[test]
     fn test_binary_s3_keys_arm64() {
         let arch = Architecture::Arm64;
+        assert_eq!(
+            docker_bin_s3_key("29.6.0", arch),
+            "tools/binaries/docker/29.6.0/linux-aarch64/docker-29.6.0.tgz"
+        );
         assert_eq!(
             samply_bin_s3_key("0.13.1", arch),
             "tools/binaries/samply/0.13.1/linux-aarch64/samply-aarch64-unknown-linux-gnu.tar.xz"
@@ -1271,6 +1334,10 @@ mod tests {
     #[test]
     fn test_binary_s3_keys_x86_64() {
         let arch = Architecture::X86_64;
+        assert_eq!(
+            docker_bin_s3_key("29.6.0", arch),
+            "tools/binaries/docker/29.6.0/linux-x86_64/docker-29.6.0.tgz"
+        );
         assert_eq!(
             samply_bin_s3_key("0.13.1", arch),
             "tools/binaries/samply/0.13.1/linux-x86_64/samply-x86_64-unknown-linux-gnu.tar.xz"
@@ -1331,6 +1398,7 @@ mod tests {
     fn test_monitoring_installs_node_exporter_dashboard() {
         let urls = monitoring_urls();
         let download = install_monitoring_download_cmd(&urls);
+        assert!(download.contains("-O /home/ubuntu/docker.tgz"));
         assert!(download.contains("-O /home/ubuntu/node-exporter-full.json"));
         assert!(download.contains("node-exporter-dashboard"));
         assert!(download.contains("node-exporter-full.json"));
@@ -1355,6 +1423,11 @@ mod tests {
         let image_cache = DockerImageCache::public();
         let setup = install_monitoring_setup_cmd(&image_cache);
         assert!(setup.contains("# Install Docker services"));
+        assert!(setup.contains("tar xzf /home/ubuntu/docker.tgz -C /home/ubuntu"));
+        assert!(
+            setup.contains("ExecStart=/usr/local/bin/dockerd --host=unix:///var/run/docker.sock")
+        );
+        assert!(!setup.contains("apt-get install -y docker.io"));
         for image in [
             PROMETHEUS_IMAGE,
             LOKI_IMAGE,
@@ -1387,6 +1460,7 @@ mod tests {
         let urls = instance_urls();
         let download = install_binary_download_cmd(&urls);
         assert!(download.contains("-O /home/ubuntu/promtail.yml"));
+        assert!(download.contains("-O /home/ubuntu/docker.tgz"));
         assert!(!download.contains("promtail.zip"));
         assert!(!download.contains("node_exporter.tar.gz"));
 
@@ -1417,7 +1491,7 @@ mod tests {
         assert!(setup.contains("sudo docker pull 123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/prom_prometheus_v3.2.0"));
         assert!(!setup.contains("sudo docker pull prom/prometheus:v3.2.0"));
         assert!(setup.contains(
-            "--env TEMPO_URL=http://127.0.0.1:3200 123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/ghcr.io_clabby_tracer-web_latest"
+            "--env TEMPO_URL=http://127.0.0.1:3200 123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/ghcr.io_clabby_tracer-web_sha256_254efac6315b9b2f71786243ae4334b1276e44e26188d398911a6d93f484e703"
         ));
     }
 

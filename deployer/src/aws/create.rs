@@ -29,8 +29,9 @@ use tracing::info;
 /// Maximum number of instance IDs per DescribeInstances API call
 const MAX_DESCRIBE_BATCH: usize = 1000;
 
-/// Pre-signed URLs for host-native support packages per architecture
+/// Pre-signed URLs for tools per architecture
 struct ToolUrls {
+    docker: String,
     libjemalloc: String,
 }
 
@@ -232,14 +233,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         architectures_needed.insert(arch);
     }
 
-    // Setup S3 bucket and cache host-native support packages
+    // Setup S3 bucket and cache tools
     let bucket_name = get_bucket_name();
     info!(bucket = bucket_name.as_str(), "setting up S3 bucket");
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, &bucket_name, MONITORING_REGION).await?;
 
-    // Cache host-native support packages for each architecture needed.
-    info!("uploading native support packages to S3");
+    // Cache tools for each architecture needed.
+    info!("uploading tools to S3");
     let cache_tool = |s3_key: String, download_url: String| {
         let tag_directory = tag_directory.clone();
         let s3_client = s3_client.clone();
@@ -273,30 +274,42 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         grafana_node_exporter_dashboard_download_url(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
     )
     .await?;
-    // Cache host-native support packages for each architecture.
+    // Cache tools for each architecture.
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
-        let [libjemalloc_url]: [String; 1] = try_join_all([cache_tool(
-            libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch),
-            libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch),
-        )])
+        let [docker_url, libjemalloc_url]: [String; 2] = try_join_all([
+            cache_tool(
+                docker_bin_s3_key(DOCKER_VERSION, *arch),
+                docker_download_url(DOCKER_VERSION, *arch),
+            ),
+            cache_tool(
+                libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch),
+                libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch),
+            ),
+        ])
         .await?
         .try_into()
         .unwrap();
         tool_urls_by_arch.insert(
             *arch,
             ToolUrls {
+                docker: docker_url,
                 libjemalloc: libjemalloc_url,
             },
         );
     }
-    info!("native support packages uploaded");
+    info!("tools uploaded");
 
     // Cache Docker images in ECR so instances pull from a registry owned by this AWS account.
     info!(region = MONITORING_REGION, "caching Docker images in ECR");
     let ecr_client = ecr::create_client(Region::new(MONITORING_REGION)).await;
-    let docker_image_cache =
-        ecr::cache_images(&ecr_client, MONITORING_REGION, required_docker_images()).await?;
+    let docker_image_cache = ecr::cache_images(
+        &ecr_client,
+        MONITORING_REGION,
+        &bucket_name,
+        required_docker_images(),
+    )
+    .await?;
     info!("Docker images cached in ECR");
 
     // Upload unique binaries and configs to S3 (deduplicated by digest)
@@ -981,7 +994,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         },
     )?;
 
-    // Build instance URLs map with architecture-specific support package URLs.
+    // Build instance URLs map with architecture-specific tool URLs
     let mut instance_urls_map: HashMap<String, (InstanceUrls, Architecture)> = HashMap::new();
     for deployment in &deployments {
         let name = &deployment.instance.name;
@@ -1002,6 +1015,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
                     pyroscope_service: pyroscope_agent_service_url.clone(),
                     pyroscope_timer: pyroscope_agent_timer_url.clone(),
+                    docker_tgz: tool_urls.docker.clone(),
                     libjemalloc_deb: tool_urls.libjemalloc.clone(),
                 },
                 arch,
@@ -1010,8 +1024,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }
     info!("uploaded config files to S3");
 
-    // Build monitoring URLs struct for SSH configuration.
+    // Build monitoring URLs struct for SSH configuration
+    let tool_urls = &tool_urls_by_arch[&monitoring_architecture];
     let monitoring_urls = MonitoringUrls {
+        docker_tgz: tool_urls.docker.clone(),
         prometheus_config: prometheus_config_url,
         datasources_yml: datasources_url,
         all_yml: all_yml_url,

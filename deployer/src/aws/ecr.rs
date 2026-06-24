@@ -16,9 +16,6 @@ use std::{collections::HashMap, process::Stdio, time::Duration};
 use tokio::{io::AsyncWriteExt, process::Command};
 use tracing::info;
 
-const CACHE_REPOSITORY_PREFIX: &str = "commonware-cache";
-const CACHE_REPOSITORY_PREFIX_WITH_SLASH: &str = "commonware-cache/";
-
 #[derive(Debug)]
 struct CachedImage {
     upstream: &'static str,
@@ -46,6 +43,7 @@ pub(crate) async fn create_client(region: Region) -> EcrClient {
 pub(crate) async fn cache_images(
     client: &EcrClient,
     region: &str,
+    repository_prefix: &str,
     images: &[&'static str],
 ) -> Result<DockerImageCache, Error> {
     let (registry, password) = ecr_login(client).await?;
@@ -53,7 +51,7 @@ pub(crate) async fn cache_images(
     let mut refs = HashMap::new();
     let mut logged_in = false;
     for image in images {
-        let cached = cached_image(&registry, image)?;
+        let cached = cached_image(&registry, repository_prefix, image)?;
         ensure_repository(client, &cached.repository).await?;
         if image_exists(client, &cached.repository, &cached.tag).await? {
             info!(
@@ -82,9 +80,10 @@ pub(crate) async fn cache_images(
 }
 
 /// Deletes all ECR repositories used for the shared Docker image cache.
-pub(crate) async fn delete_cache(client: &EcrClient) -> Result<(), Error> {
+pub(crate) async fn delete_cache(client: &EcrClient, repository_prefix: &str) -> Result<(), Error> {
     let mut repositories = Vec::new();
     let mut next_token = None;
+    let repository_prefix_with_slash = format!("{repository_prefix}/");
     loop {
         let mut request = client.describe_repositories();
         if let Some(token) = next_token {
@@ -101,8 +100,7 @@ pub(crate) async fn delete_cache(client: &EcrClient) -> Result<(), Error> {
                 .iter()
                 .filter_map(|repository| repository.repository_name())
                 .filter(|name| {
-                    *name == CACHE_REPOSITORY_PREFIX
-                        || name.starts_with(CACHE_REPOSITORY_PREFIX_WITH_SLASH)
+                    *name == repository_prefix || name.starts_with(&repository_prefix_with_slash)
                 })
                 .map(str::to_string),
         );
@@ -282,16 +280,14 @@ async fn run_docker(args: &[&str], stdin: Option<&str>) -> Result<(), Error> {
     Err(Error::DockerCommandFailed { command, stderr })
 }
 
-fn cached_image(registry: &str, upstream: &'static str) -> Result<CachedImage, Error> {
-    let (name, tag) = upstream
-        .rsplit_once(':')
-        .ok_or_else(|| Error::InvalidDockerImage(upstream.to_string()))?;
-    if name.is_empty() || tag.is_empty() || upstream.contains('@') {
-        return Err(Error::InvalidDockerImage(upstream.to_string()));
-    }
-
+fn cached_image(
+    registry: &str,
+    repository_prefix: &str,
+    upstream: &'static str,
+) -> Result<CachedImage, Error> {
+    let (name, tag) = image_name_and_tag(upstream)?;
     let (source, path) = repository_path(name)?;
-    let repository = format!("{CACHE_REPOSITORY_PREFIX}/{source}/{path}");
+    let repository = format!("{repository_prefix}/{source}/{path}");
     let reference = format!("{registry}/{repository}:{tag}");
     Ok(CachedImage {
         upstream,
@@ -299,6 +295,23 @@ fn cached_image(registry: &str, upstream: &'static str) -> Result<CachedImage, E
         tag: tag.to_string(),
         reference,
     })
+}
+
+fn image_name_and_tag(upstream: &str) -> Result<(&str, String), Error> {
+    if let Some((name, digest)) = upstream.rsplit_once('@') {
+        if name.is_empty() || !digest.starts_with("sha256:") {
+            return Err(Error::InvalidDockerImage(upstream.to_string()));
+        }
+        return Ok((name, digest.replace(':', "-")));
+    }
+
+    let (name, tag) = upstream
+        .rsplit_once(':')
+        .ok_or_else(|| Error::InvalidDockerImage(upstream.to_string()))?;
+    if name.is_empty() || tag.is_empty() {
+        return Err(Error::InvalidDockerImage(upstream.to_string()));
+    }
+    Ok((name, tag.to_string()))
 }
 
 fn repository_path(name: &str) -> Result<(&'static str, String), Error> {
@@ -339,44 +352,58 @@ mod tests {
     fn test_cached_docker_hub_org_image() {
         let image = cached_image(
             "123.dkr.ecr.us-east-1.amazonaws.com",
+            "commonware-deployer-cache",
             "prom/prometheus:v3.2.0",
         )
         .unwrap();
         assert_eq!(
             image.repository,
-            "commonware-cache/docker-hub/prom/prometheus"
+            "commonware-deployer-cache/docker-hub/prom/prometheus"
         );
         assert_eq!(image.tag, "v3.2.0");
         assert_eq!(
             image.reference,
-            "123.dkr.ecr.us-east-1.amazonaws.com/commonware-cache/docker-hub/prom/prometheus:v3.2.0"
+            "123.dkr.ecr.us-east-1.amazonaws.com/commonware-deployer-cache/docker-hub/prom/prometheus:v3.2.0"
         );
     }
 
     #[test]
     fn test_cached_docker_hub_library_image() {
-        let image = cached_image("123.dkr.ecr.us-east-1.amazonaws.com", "busybox:1.37.0").unwrap();
+        let image = cached_image(
+            "123.dkr.ecr.us-east-1.amazonaws.com",
+            "commonware-deployer-cache",
+            "busybox:1.37.0",
+        )
+        .unwrap();
         assert_eq!(
             image.repository,
-            "commonware-cache/docker-hub/library/busybox"
+            "commonware-deployer-cache/docker-hub/library/busybox"
         );
         assert_eq!(
             image.reference,
-            "123.dkr.ecr.us-east-1.amazonaws.com/commonware-cache/docker-hub/library/busybox:1.37.0"
+            "123.dkr.ecr.us-east-1.amazonaws.com/commonware-deployer-cache/docker-hub/library/busybox:1.37.0"
         );
     }
 
     #[test]
-    fn test_cached_ghcr_image() {
+    fn test_cached_digest_image() {
         let image = cached_image(
             "123.dkr.ecr.us-east-1.amazonaws.com",
-            "ghcr.io/clabby/tracer-web:latest",
+            "commonware-deployer-cache",
+            "ghcr.io/clabby/tracer-web@sha256:254efac6315b9b2f71786243ae4334b1276e44e26188d398911a6d93f484e703",
         )
         .unwrap();
-        assert_eq!(image.repository, "commonware-cache/ghcr/clabby/tracer-web");
+        assert_eq!(
+            image.repository,
+            "commonware-deployer-cache/ghcr/clabby/tracer-web"
+        );
+        assert_eq!(
+            image.tag,
+            "sha256-254efac6315b9b2f71786243ae4334b1276e44e26188d398911a6d93f484e703"
+        );
         assert_eq!(
             image.reference,
-            "123.dkr.ecr.us-east-1.amazonaws.com/commonware-cache/ghcr/clabby/tracer-web:latest"
+            "123.dkr.ecr.us-east-1.amazonaws.com/commonware-deployer-cache/ghcr/clabby/tracer-web:sha256-254efac6315b9b2f71786243ae4334b1276e44e26188d398911a6d93f484e703"
         );
     }
 
@@ -384,6 +411,7 @@ mod tests {
     fn test_unsupported_registry() {
         let err = cached_image(
             "123.dkr.ecr.us-east-1.amazonaws.com",
+            "commonware-deployer-cache",
             "quay.io/org/image:v1",
         )
         .unwrap_err();

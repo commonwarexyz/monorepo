@@ -57,12 +57,12 @@
 //!
 //! * Deployed in `us-east-1` with a configurable instance type (e.g., `t4g.small` for ARM64, `t3.small` for x86_64) and storage (e.g., 10GB gp2). Architecture is auto-detected from the instance type.
 //! * Runs:
-//!     * **Prometheus**: Runs as a Docker container, scraping binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
-//!     * **Loki**: Runs as a Docker container, listening at `:3100` and storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
-//!     * **Pyroscope**: Runs as a Docker container, listening at `:4040` and storing profiles in `/var/lib/pyroscope`.
-//!     * **Tempo**: Runs as a Docker container, listening at `:4318` and storing traces in `/tempo`.
-//!     * **Grafana**: Runs as a Docker container at `:3000`, provisioned with Prometheus, Loki, and Tempo datasources and a custom dashboard.
-//!     * **Tracer**: Runs as a Docker container at `:8080`, rendering multi-instance trace flamegraphs from the local Tempo.
+//!     * **Prometheus**: Scrapes binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
+//!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
+//!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
+//!     * **Tempo**: Listens at `:4318`, storing traces in `/tempo`.
+//!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus, Loki, and Tempo datasources and a custom dashboard.
+//!     * **Tracer**: Hosted at `:8080`, rendering multi-instance trace flamegraphs from the local Tempo.
 //! * Ingress:
 //!     * Allows deployer IP access (TCP 0-65535).
 //!     * Binary instance traffic to Loki (TCP 3100) and Tempo (TCP 4318).
@@ -73,8 +73,8 @@
 //!   Instances whose type includes EC2 NVMe instance store automatically mount it at `/home/ubuntu`.
 //! * Run:
 //!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
-//!     * **Promtail**: Runs as a Docker container, forwarding `/var/log/binary.log` to Loki on the monitoring instance.
-//!     * **Node Exporter**: Runs as a Docker container, exposing system metrics at `:9100`.
+//!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
+//!     * **Node Exporter**: Exposes system metrics at `:9100`.
 //!     * **Pyroscope Agent**: Forwards `perf` profiles to Pyroscope on the monitoring instance.
 //! * Ingress:
 //!     * Deployer IP access (TCP 0-65535).
@@ -120,7 +120,7 @@
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
 //! 2. Persists deployment metadata (tag, regions, instance names) to `$HOME/.commonware_deployer/{tag}/metadata.yaml`.
 //!    This enables `destroy --tag` cleanup if creation fails.
-//! 3. Ensures the shared S3 bucket exists and caches host-native support packages if not already present.
+//! 3. Ensures the shared S3 bucket exists and caches tools if not already present.
 //! 4. Mirrors required Docker images into shared ECR repositories in the monitoring region if not already present.
 //! 5. Uploads deployment-specific files (binaries, configs) to S3.
 //! 6. Creates VPCs, subnets, internet gateways, route tables, and security groups per region (concurrently).
@@ -159,7 +159,7 @@
 //!
 //! 1. Terminates all instances across regions.
 //! 2. Deletes security groups, subnets, route tables, VPC peering connections, internet gateways, key pairs, and VPCs in dependency order.
-//! 3. Deletes deployment-specific data from S3 (cached host-native support packages and Docker images remain for future deployments).
+//! 3. Deletes deployment-specific data from S3 (cached tools and Docker images remain for future deployments).
 //! 4. Marks destruction with `$HOME/.commonware_deployer/{tag}/destroyed`, retaining the directory to prevent tag reuse.
 //!
 //! ## `aws clean`
@@ -235,11 +235,11 @@
 //!
 //! ## S3 and ECR Caching
 //!
-//! Shared S3 and ECR caches are used to avoid repeated downloads from upstream sources. The S3 bucket
+//! Shared S3 and ECR caches are used to avoid repeated downloads from upstream sources. The cache
 //! name is stored in `$HOME/.commonware_deployer/bucket` and reused by later deployments. ECR
-//! repositories are created in the monitoring region under `commonware-cache/`.
+//! repositories are created in the monitoring region under the same cache name.
 //!
-//! 1. **Faster deployments**: Host-native support packages are downloaded from upstream sources once
+//! 1. **Faster deployments**: Tools are downloaded from upstream sources once
 //!    and cached in S3. Required Docker images are mirrored into ECR once and pulled from ECR during
 //!    instance setup.
 //!
@@ -250,7 +250,7 @@
 //! conflicts between concurrent deployments.
 //!
 //! The bucket stores:
-//!   * `tools/binaries/{tool}/{version}/{platform}/{filename}` - Host-native support binaries and packages
+//!   * `tools/binaries/{tool}/{version}/{platform}/{filename}` - Tool binaries and packages
 //!   * `tools/configs/{deployer-version}/{component}/{file}` - Static configs and native helper service files
 //!   * `deployments/{tag}/` - Deployment-specific files:
 //!     * `monitoring/` - Prometheus config, dashboard
