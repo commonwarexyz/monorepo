@@ -274,7 +274,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         grafana_node_exporter_dashboard_download_url(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
     )
     .await?;
-    // Cache tools for each architecture.
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
         let [docker_url, libjemalloc_url]: [String; 2] = try_join_all([
