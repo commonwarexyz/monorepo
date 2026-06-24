@@ -1,0 +1,62 @@
+[package]
+name = "commonware-privacy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Build privacy-preserving applications."
+readme = "README.md"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/privacy"
+documentation = "https://docs.rs/commonware-privacy"
+
+[dependencies]
+ark-bn254 = { workspace = true, optional = true, features = ["curve"] }
+ark-ec = { workspace = true, optional = true }
+ark-ff = { workspace = true, optional = true }
+ark-poly = { workspace = true, optional = true }
+ark-serialize = { workspace = true, optional = true, features = ["derive"] }
+ark-std = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+commonware-codec = { workspace = true, optional = true }
+commonware-macros.workspace = true
+commonware-parallel.workspace = true
+merlin = { workspace = true, optional = true }
+rand_core.workspace = true
+
+[features]
+default = [ "std" ]
+codec = [
+    "dep:bytes",
+    "dep:commonware-codec",
+]
+mocks = []
+parallel = [ "commonware-parallel/std" ]
+simulator = []
+zkpari = [
+    "dep:ark-bn254",
+    "dep:ark-ec",
+    "dep:ark-ff",
+    "dep:ark-poly",
+    "dep:ark-serialize",
+    "dep:ark-std",
+    "dep:merlin",
+    "parallel",
+    "std",
+]
+std = [
+    "ark-bn254?/std",
+    "ark-ec?/std",
+    "ark-ff?/std",
+    "ark-poly?/std",
+    "ark-serialize?/std",
+    "ark-std?/std",
+    "bytes?/std",
+    "commonware-codec?/std",
+    "commonware-macros/std",
+    "commonware-parallel/std",
+    "rand_core/std",
+]
+
+[lints]
+workspace = true
