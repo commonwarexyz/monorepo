@@ -102,6 +102,10 @@ aws-sdk-ec2 = { version = "1.228.0", default-features = false, features = [
 	"default-https-client",
 	"rt-tokio",
 ] }
+aws-sdk-ecr = { version = "1.120.0", default-features = false, features = [
+	"default-https-client",
+	"rt-tokio",
+] }
 aws-sdk-s3 = { version = "1.134.0", default-features = false, features = [
 	"default-https-client",
 	"http-1x",
@@ -109,6 +113,7 @@ aws-sdk-s3 = { version = "1.134.0", default-features = false, features = [
 	"sigv4a",
 ] }
 axum = "0.8.1"
+base64 = "0.22.1"
 blake3 = { version = "1.8.2", default-features = false }
 blst = { version = "0.3.13", default-features = false }
 bytes = { version = "1.7.1", default-features = false }

@@ -57,12 +57,12 @@
 //!
 //! * Deployed in `us-east-1` with a configurable instance type (e.g., `t4g.small` for ARM64, `t3.small` for x86_64) and storage (e.g., 10GB gp2). Architecture is auto-detected from the instance type.
 //! * Runs:
-//!     * **Prometheus**: Scrapes binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
-//!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
-//!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
-//!     * **Tempo**: Listens at `:4318`, storing traces in `/var/lib/tempo`.
-//!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus, Loki, and Tempo datasources and a custom dashboard.
-//!     * **Tracer**: Hosted at `:8080` (as a Docker container), rendering multi-instance trace flamegraphs from the local Tempo.
+//!     * **Prometheus**: Runs as a Docker container, scraping binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
+//!     * **Loki**: Runs as a Docker container, listening at `:3100` and storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
+//!     * **Pyroscope**: Runs as a Docker container, listening at `:4040` and storing profiles in `/var/lib/pyroscope`.
+//!     * **Tempo**: Runs as a Docker container, listening at `:4318` and storing traces in `/tempo`.
+//!     * **Grafana**: Runs as a Docker container at `:3000`, provisioned with Prometheus, Loki, and Tempo datasources and a custom dashboard.
+//!     * **Tracer**: Runs as a Docker container at `:8080`, rendering multi-instance trace flamegraphs from the local Tempo.
 //! * Ingress:
 //!     * Allows deployer IP access (TCP 0-65535).
 //!     * Binary instance traffic to Loki (TCP 3100) and Tempo (TCP 4318).
@@ -73,8 +73,8 @@
 //!   Instances whose type includes EC2 NVMe instance store automatically mount it at `/home/ubuntu`.
 //! * Run:
 //!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
-//!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
-//!     * **Node Exporter**: Exposes system metrics at `:9100`.
+//!     * **Promtail**: Runs as a Docker container, forwarding `/var/log/binary.log` to Loki on the monitoring instance.
+//!     * **Node Exporter**: Runs as a Docker container, exposing system metrics at `:9100`.
 //!     * **Pyroscope Agent**: Forwards `perf` profiles to Pyroscope on the monitoring instance.
 //! * Ingress:
 //!     * Deployer IP access (TCP 0-65535).
@@ -120,16 +120,17 @@
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
 //! 2. Persists deployment metadata (tag, regions, instance names) to `$HOME/.commonware_deployer/{tag}/metadata.yaml`.
 //!    This enables `destroy --tag` cleanup if creation fails.
-//! 3. Ensures the shared S3 bucket exists and caches observability tools (Prometheus, Grafana, Loki, etc.) if not already present.
-//! 4. Uploads deployment-specific files (binaries, configs) to S3.
-//! 5. Creates VPCs, subnets, internet gateways, route tables, and security groups per region (concurrently).
-//! 6. Establishes VPC peering between the monitoring region and binary regions.
-//! 7. Launches the monitoring instance.
-//! 8. Launches binary instances.
-//! 9. Caches all static config files and uploads per-instance configs (hosts.yaml, promtail, pyroscope) to S3.
-//! 10. Configures monitoring and binary instances in parallel via SSH (BBR, service installation, service startup).
-//! 11. Updates the monitoring security group to allow telemetry traffic from binary instances.
-//! 12. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
+//! 3. Ensures the shared S3 bucket exists and caches host-native support packages if not already present.
+//! 4. Mirrors required Docker images into shared ECR repositories in the monitoring region if not already present.
+//! 5. Uploads deployment-specific files (binaries, configs) to S3.
+//! 6. Creates VPCs, subnets, internet gateways, route tables, and security groups per region (concurrently).
+//! 7. Establishes VPC peering between the monitoring region and binary regions.
+//! 8. Launches the monitoring instance.
+//! 9. Launches binary instances.
+//! 10. Caches all static config files and uploads per-instance configs (hosts.yaml, Promtail, Pyroscope) to S3.
+//! 11. Configures monitoring and binary instances in parallel via SSH (BBR, service installation, service startup).
+//! 12. Updates the monitoring security group to allow telemetry traffic from binary instances.
+//! 13. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
 //!
 //! ## `aws update`
 //!
@@ -158,13 +159,14 @@
 //!
 //! 1. Terminates all instances across regions.
 //! 2. Deletes security groups, subnets, route tables, VPC peering connections, internet gateways, key pairs, and VPCs in dependency order.
-//! 3. Deletes deployment-specific data from S3 (cached tools remain for future deployments).
+//! 3. Deletes deployment-specific data from S3 (cached host-native support packages and Docker images remain for future deployments).
 //! 4. Marks destruction with `$HOME/.commonware_deployer/{tag}/destroyed`, retaining the directory to prevent tag reuse.
 //!
 //! ## `aws clean`
 //!
-//! 1. Deletes the shared S3 bucket and all its contents (cached tools and any remaining deployment data).
-//! 2. Use this to fully clean up when you no longer need the deployer cache.
+//! 1. Deletes the shared S3 bucket and all its contents (cached support packages and any remaining deployment data).
+//! 2. Deletes the shared ECR Docker image cache.
+//! 3. Use this to fully clean up when you no longer need the deployer cache.
 //!
 //! ## `aws list`
 //!
@@ -231,15 +233,15 @@
 //! * The deployment state is tracked via these files, ensuring operations respect prior create/destroy actions.
 //! * The `metadata.yaml` file enables `aws destroy --tag` and `aws list` to work without the original config file.
 //!
-//! ## S3 Caching
+//! ## S3 and ECR Caching
 //!
-//! A shared S3 bucket (`commonware-deployer-cache`) is used to cache deployment artifacts. The bucket
-//! uses a fixed name intentionally so that all users within the same AWS account share the cache. This
-//! design provides two benefits:
+//! Shared S3 and ECR caches are used to avoid repeated downloads from upstream sources. The S3 bucket
+//! name is stored in `$HOME/.commonware_deployer/bucket` and reused by later deployments. ECR
+//! repositories are created in the monitoring region under `commonware-cache/`.
 //!
-//! 1. **Faster deployments**: Observability tools (Prometheus, Grafana, Loki, etc.) are downloaded from
-//!    upstream sources once and cached in S3. Subsequent deployments by any user skip the download and
-//!    use pre-signed URLs to fetch directly from S3.
+//! 1. **Faster deployments**: Host-native support packages are downloaded from upstream sources once
+//!    and cached in S3. Required Docker images are mirrored into ECR once and pulled from ECR during
+//!    instance setup.
 //!
 //! 2. **Reduced bandwidth**: Instead of requiring the deployer to push binaries to each instance,
 //!    unique binaries are uploaded once to S3 and then pulled from there.
@@ -248,14 +250,14 @@
 //! conflicts between concurrent deployments.
 //!
 //! The bucket stores:
-//!   * `tools/binaries/{tool}/{version}/{platform}/{filename}` - Tool binaries (e.g., prometheus, grafana)
-//!   * `tools/configs/{deployer-version}/{component}/{file}` - Static configs and service files
+//!   * `tools/binaries/{tool}/{version}/{platform}/{filename}` - Host-native support binaries and packages
+//!   * `tools/configs/{deployer-version}/{component}/{file}` - Static configs and native helper service files
 //!   * `deployments/{tag}/` - Deployment-specific files:
 //!     * `monitoring/` - Prometheus config, dashboard
 //!     * `instances/{name}/` - Binary, config, hosts.yaml, promtail config, pyroscope script
 //!
-//! Tool binaries are namespaced by tool version and platform. Static configs are namespaced by deployer
-//! version to ensure cache invalidation when the deployer is updated.
+//! Cached packages are namespaced by tool version and platform. Static configs are namespaced by
+//! deployer version to ensure cache invalidation when the deployer is updated.
 //!
 //! # Example Configuration
 //!
@@ -345,6 +347,7 @@ cfg_if::cfg_if! {
 
         mod create;
         pub mod ec2;
+        pub mod ecr;
         pub mod services;
         pub use create::create;
         mod update;
@@ -482,6 +485,13 @@ cfg_if::cfg_if! {
             AwsDescribeInstances(
                 #[from] aws_sdk_ec2::operation::describe_instances::DescribeInstancesError,
             ),
+            #[error("ECR operation failed: {operation}")]
+            AwsEcr {
+                operation: &'static str,
+                repository: Option<String>,
+                #[source]
+                source: Box<aws_sdk_ecr::Error>,
+            },
             #[error("S3 operation failed: {operation} on bucket '{bucket}'")]
             AwsS3 {
                 bucket: String,
@@ -550,6 +560,22 @@ cfg_if::cfg_if! {
             IpAddrNotV4(std::net::IpAddr),
             #[error("download failed: {0}")]
             DownloadFailed(String),
+            #[error("Docker command failed: {command}: {stderr}")]
+            DockerCommandFailed { command: String, stderr: String },
+            #[error("Docker stdin unavailable")]
+            DockerStdinUnavailable,
+            #[error("invalid Docker image reference: {0}")]
+            InvalidDockerImage(String),
+            #[error("unsupported Docker registry for ECR cache: {0}")]
+            UnsupportedDockerRegistry(String),
+            #[error("ECR authorization token missing")]
+            EcrAuthorizationTokenMissing,
+            #[error("ECR authorization token is invalid")]
+            EcrAuthorizationTokenInvalid,
+            #[error("ECR proxy endpoint missing")]
+            EcrProxyEndpointMissing,
+            #[error("base64 decode error: {0}")]
+            Base64(#[from] base64::DecodeError),
             #[error("S3 presigning config error: {0}")]
             S3PresigningConfig(#[from] aws_sdk_s3::presigning::PresigningConfigError),
             #[error("S3 presigning failed: {0}")]

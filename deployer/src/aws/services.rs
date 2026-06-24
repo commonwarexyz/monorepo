@@ -4,6 +4,7 @@ use crate::aws::{
     s3::{DEPLOYMENTS_PREFIX, TOOLS_BINARIES_PREFIX, TOOLS_CONFIGS_PREFIX, WGET},
     Architecture,
 };
+use std::collections::HashMap;
 
 // Binary artifacts and user SSH state live under this directory. NVMe-backed instances mount
 // instance-store storage here so existing binary configs use NVMe without extra configuration.
@@ -12,32 +13,11 @@ const HOME_DIRECTORY: &str = "/home/ubuntu";
 /// Deployer version used to namespace static configs in S3
 const DEPLOYER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Version of Prometheus to download and install
-pub const PROMETHEUS_VERSION: &str = "3.2.0";
-
-/// Version of Promtail to download and install
-pub const PROMTAIL_VERSION: &str = "3.4.2";
-
-/// Version of Node Exporter to download and install
-pub const NODE_EXPORTER_VERSION: &str = "1.9.0";
-
 /// Version of the Grafana Node Exporter Full dashboard to provision.
 ///
 /// The public dashboard is available at:
 /// <https://grafana.com/grafana/dashboards/1860-node-exporter-full/>
 pub const GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION: &str = "45";
-
-/// Version of Loki to download and install
-pub const LOKI_VERSION: &str = "3.4.2";
-
-/// Version of Tempo to download and install
-pub const TEMPO_VERSION: &str = "2.7.1";
-
-/// Version of Pyroscope to download and install
-pub const PYROSCOPE_VERSION: &str = "1.12.0";
-
-/// Version of Grafana to download and install
-pub const GRAFANA_VERSION: &str = "11.5.2";
 
 /// Version of Samply to download and install
 pub const SAMPLY_VERSION: &str = "0.13.1";
@@ -45,87 +25,266 @@ pub const SAMPLY_VERSION: &str = "0.13.1";
 /// Version of libjemalloc2 package for Ubuntu 24.04
 pub const LIBJEMALLOC2_VERSION: &str = "5.3.0-2build1";
 
-/// Version of logrotate package for Ubuntu 24.04
-pub const LOGROTATE_VERSION: &str = "3.21.0-2build1";
-
-/// Version of libfontconfig1 package for Ubuntu 24.04
-pub const LIBFONTCONFIG1_VERSION: &str = "2.15.0-1.1ubuntu2";
-
-/// Version of fontconfig-config package for Ubuntu 24.04
-pub const FONTCONFIG_CONFIG_VERSION: &str = "2.15.0-1.1ubuntu2";
-
-/// Version of unzip package for Ubuntu 24.04
-pub const UNZIP_VERSION: &str = "6.0-28ubuntu4";
-
-/// Version of adduser package for Ubuntu 24.04 (arch-independent)
-pub const ADDUSER_VERSION: &str = "3.137ubuntu1";
-
-/// Version of fonts-dejavu-mono package for Ubuntu 24.04 (arch-independent)
-pub const FONTS_DEJAVU_MONO_VERSION: &str = "2.37-8";
-
-/// Version of fonts-dejavu-core package for Ubuntu 24.04 (arch-independent)
-pub const FONTS_DEJAVU_CORE_VERSION: &str = "2.37-8";
-
-/// Version of musl package for Ubuntu 24.04
-pub const MUSL_VERSION: &str = "1.2.4-2";
-
 /// Ubuntu package archive base URL for arm64
 const UBUNTU_ARCHIVE_ARM64: &str = "http://ports.ubuntu.com/ubuntu-ports/pool";
 
 /// Ubuntu package archive base URL for x86_64
 const UBUNTU_ARCHIVE_X86_64: &str = "http://archive.ubuntu.com/ubuntu/pool";
 
-/// Docker image for the tracer trace viewer
-///
-/// The image is multi-arch (amd64 and arm64), so the same reference works
-/// regardless of the monitoring instance architecture. The container serves
-/// the UI on port 8080.
+pub const PROMETHEUS_IMAGE: &str = "prom/prometheus:v3.2.0";
+pub const PROMTAIL_IMAGE: &str = "grafana/promtail:3.4.2";
+pub const NODE_EXPORTER_IMAGE: &str = "prom/node-exporter:v1.9.0";
+pub const LOKI_IMAGE: &str = "grafana/loki:3.4.2";
+pub const TEMPO_IMAGE: &str = "grafana/tempo:2.7.1";
+pub const PYROSCOPE_IMAGE: &str = "grafana/pyroscope:1.12.0";
+pub const GRAFANA_IMAGE: &str = "grafana/grafana:11.5.2";
 pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:latest";
+pub const BUSYBOX_IMAGE: &str = "busybox:1.37.0";
+
+const DOCKER_IMAGES: &[&str] = &[
+    PROMETHEUS_IMAGE,
+    PROMTAIL_IMAGE,
+    NODE_EXPORTER_IMAGE,
+    LOKI_IMAGE,
+    TEMPO_IMAGE,
+    PYROSCOPE_IMAGE,
+    GRAFANA_IMAGE,
+    TRACER_IMAGE,
+    BUSYBOX_IMAGE,
+];
 
 #[derive(Clone, Copy)]
-struct DockerTool {
+struct DockerService {
     service: &'static str,
     description: &'static str,
     image: &'static str,
     network_host: bool,
+    pid_host: bool,
+    user: Option<&'static str>,
     env: &'static [(&'static str, &'static str)],
+    volumes: &'static [&'static str],
+    args: &'static [&'static str],
+    options: &'static [&'static str],
     after: &'static [&'static str],
 }
 
-const DOCKER_TOOLS: &[DockerTool] = &[DockerTool {
-    service: "tracer",
-    description: "Tracer Trace Viewer",
-    image: TRACER_IMAGE,
-    network_host: true,
-    env: &[("TEMPO_URL", "http://127.0.0.1:3200")],
-    after: &["tempo.service"],
-}];
+const NODE_EXPORTER_ARGS: &[&str] = &[
+    "--path.procfs=/host/proc",
+    "--path.sysfs=/host/sys",
+    "--path.rootfs=/host/rootfs",
+    "--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/containers/.+)($|/)",
+];
 
-impl DockerTool {
-    fn service_file(self) -> String {
+const NODE_EXPORTER_VOLUMES: &[&str] = &[
+    "/proc:/host/proc:ro",
+    "/sys:/host/sys:ro",
+    "/:/host/rootfs:ro,rslave",
+];
+
+const PROMTAIL_VOLUMES: &[&str] = &[
+    "/etc/promtail:/etc/promtail:ro",
+    "/var/log:/var/log:ro",
+    "/var/lib/promtail:/var/lib/promtail",
+];
+
+const MONITORING_DOCKER_SERVICES: &[DockerService] = &[
+    DockerService {
+        service: "node_exporter",
+        description: "Node Exporter",
+        image: NODE_EXPORTER_IMAGE,
+        network_host: true,
+        pid_host: true,
+        user: Some("0:0"),
+        env: &[],
+        volumes: NODE_EXPORTER_VOLUMES,
+        args: NODE_EXPORTER_ARGS,
+        options: &[],
+        after: &[],
+    },
+    DockerService {
+        service: "prometheus",
+        description: "Prometheus Monitoring Service",
+        image: PROMETHEUS_IMAGE,
+        network_host: true,
+        pid_host: false,
+        user: Some("0:0"),
+        env: &[],
+        volumes: &[
+            "/opt/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro",
+            "/opt/prometheus/data:/prometheus",
+        ],
+        args: &[
+            "--config.file=/etc/prometheus/prometheus.yml",
+            "--storage.tsdb.path=/prometheus",
+        ],
+        options: &[],
+        after: &["node_exporter.service"],
+    },
+    DockerService {
+        service: "loki",
+        description: "Loki Log Aggregation Service",
+        image: LOKI_IMAGE,
+        network_host: true,
+        pid_host: false,
+        user: Some("0:0"),
+        env: &[],
+        volumes: &["/etc/loki/loki.yml:/etc/loki/loki.yml:ro", "/loki:/loki"],
+        args: &["-config.file=/etc/loki/loki.yml"],
+        options: &[],
+        after: &[],
+    },
+    DockerService {
+        service: "pyroscope",
+        description: "Pyroscope Profiling Service",
+        image: PYROSCOPE_IMAGE,
+        network_host: true,
+        pid_host: false,
+        user: Some("0:0"),
+        env: &[],
+        volumes: &[
+            "/etc/pyroscope/pyroscope.yml:/etc/pyroscope/pyroscope.yml:ro",
+            "/var/lib/pyroscope:/var/lib/pyroscope",
+        ],
+        args: &["--config.file=/etc/pyroscope/pyroscope.yml"],
+        options: &[],
+        after: &[],
+    },
+    DockerService {
+        service: "tempo",
+        description: "Tempo Tracing Service",
+        image: TEMPO_IMAGE,
+        network_host: true,
+        pid_host: false,
+        user: Some("0:0"),
+        env: &[],
+        volumes: &[
+            "/etc/tempo/tempo.yml:/etc/tempo/tempo.yml:ro",
+            "/tempo:/tempo",
+        ],
+        args: &["-config.file=/etc/tempo/tempo.yml"],
+        options: &[],
+        after: &[],
+    },
+    DockerService {
+        service: "grafana",
+        description: "Grafana Dashboard Service",
+        image: GRAFANA_IMAGE,
+        network_host: true,
+        pid_host: false,
+        user: Some("0:0"),
+        env: &[
+            ("GF_AUTH_ANONYMOUS_ENABLED", "true"),
+            ("GF_AUTH_ANONYMOUS_ORG_ROLE", "Admin"),
+            ("GF_INSTALL_PLUGINS", "grafana-pyroscope-app"),
+        ],
+        volumes: &[
+            "/etc/grafana/provisioning:/etc/grafana/provisioning:ro",
+            "/var/lib/grafana:/var/lib/grafana",
+        ],
+        args: &[],
+        options: &[],
+        after: &[
+            "prometheus.service",
+            "loki.service",
+            "tempo.service",
+            "pyroscope.service",
+        ],
+    },
+    DockerService {
+        service: "tracer",
+        description: "Tracer Trace Viewer",
+        image: TRACER_IMAGE,
+        network_host: true,
+        pid_host: false,
+        user: None,
+        env: &[("TEMPO_URL", "http://127.0.0.1:3200")],
+        volumes: &[],
+        args: &[],
+        options: &[],
+        after: &["tempo.service"],
+    },
+];
+
+const BINARY_DOCKER_SERVICES: &[DockerService] = &[
+    DockerService {
+        service: "promtail",
+        description: "Promtail Log Forwarder",
+        image: PROMTAIL_IMAGE,
+        network_host: true,
+        pid_host: false,
+        user: Some("0:0"),
+        env: &[],
+        volumes: PROMTAIL_VOLUMES,
+        args: &["-config.file=/etc/promtail/promtail.yml"],
+        options: &[],
+        after: &["binary.service"],
+    },
+    DockerService {
+        service: "node_exporter",
+        description: "Node Exporter",
+        image: NODE_EXPORTER_IMAGE,
+        network_host: true,
+        pid_host: true,
+        user: Some("0:0"),
+        env: &[],
+        volumes: NODE_EXPORTER_VOLUMES,
+        args: NODE_EXPORTER_ARGS,
+        options: &[],
+        after: &[],
+    },
+];
+
+impl DockerService {
+    fn service_file(self, image: &str) -> String {
         let after = self.after.join(" ");
-        let network = if self.network_host {
-            " --network host"
-        } else {
-            ""
-        };
-        let mut env = String::new();
-        for (key, value) in self.env {
-            env.push_str(" --env ");
-            env.push_str(key);
-            env.push('=');
-            env.push_str(value);
+        let mut docker_options = String::new();
+        if self.network_host {
+            docker_options.push_str(" --network host");
         }
+        if self.pid_host {
+            docker_options.push_str(" --pid host");
+        }
+        if let Some(user) = self.user {
+            docker_options.push_str(" --user ");
+            docker_options.push_str(user);
+        }
+        for (key, value) in self.env {
+            docker_options.push_str(" --env ");
+            docker_options.push_str(key);
+            docker_options.push('=');
+            docker_options.push_str(value);
+        }
+        for volume in self.volumes {
+            docker_options.push_str(" --volume ");
+            docker_options.push_str(volume);
+        }
+        for option in self.options {
+            docker_options.push(' ');
+            docker_options.push_str(option);
+        }
+        let args = if self.args.is_empty() {
+            String::new()
+        } else {
+            let mut args = String::from(" ");
+            args.push_str(&self.args.join(" "));
+            args
+        };
+        let after_line = if after.is_empty() {
+            "After=network-online.target docker.service".to_string()
+        } else {
+            format!("After=network-online.target docker.service {after}")
+        };
 
         format!(
             r#"[Unit]
 Description={description}
-After=network.target docker.service {after}
+Wants=network-online.target
+{after_line}
 Requires=docker.service
 
 [Service]
 ExecStartPre=-/usr/bin/docker rm -f {service}
-ExecStart=/usr/bin/docker run --rm --name {service}{network}{env} {image}
+ExecStart=/usr/bin/docker run --rm --name {service}{docker_options} {image}{args}
 TimeoutStopSec=60
 Restart=always
 
@@ -134,71 +293,71 @@ WantedBy=multi-user.target
 "#,
             service = self.service,
             description = self.description,
-            after = after,
-            network = network,
-            env = env,
-            image = self.image,
+            after_line = after_line,
+            docker_options = docker_options,
+            image = image,
+            args = args,
         )
     }
 }
 
-// S3 key functions for tool binaries
-//
-// Convention: {TOOLS_BINARIES_PREFIX}/{tool}/{version}/{platform}/{filename}
-//
-// The filename matches the upstream download URL exactly. The version is placed
-// in the path (not embedded in the filename) to ensure consistent cache organization
-// across all tools, since some upstream releases include version in the filename
-// (e.g., prometheus-3.2.0.linux-arm64.tar.gz) while others do not
-// (e.g., loki-linux-arm64.zip).
-
-pub(crate) fn prometheus_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/prometheus/{version}/linux-{arch}/prometheus-{version}.linux-{arch}.tar.gz",
-        arch = architecture.as_str()
-    )
+#[derive(Clone, Debug)]
+pub(crate) struct DockerImageCache {
+    registry: String,
+    password: Option<String>,
+    images: HashMap<&'static str, String>,
 }
 
-pub(crate) fn grafana_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/grafana/{version}/linux-{arch}/grafana_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
+impl DockerImageCache {
+    pub(crate) fn new(
+        registry: String,
+        password: String,
+        images: impl IntoIterator<Item = (&'static str, String)>,
+    ) -> Self {
+        Self {
+            registry,
+            password: Some(password),
+            images: images.into_iter().collect(),
+        }
+    }
+
+    #[cfg(test)]
+    fn public() -> Self {
+        Self {
+            registry: String::new(),
+            password: None,
+            images: required_docker_images()
+                .iter()
+                .map(|image| (*image, (*image).to_string()))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn image(&self, upstream: &'static str) -> &str {
+        self.images
+            .get(upstream)
+            .map(String::as_str)
+            .expect("all required Docker images must be cached")
+    }
+
+    fn login_cmd(&self) -> String {
+        let Some(password) = &self.password else {
+            return String::new();
+        };
+        format!(
+            "printf %s {} | sudo docker login --username AWS --password-stdin {}\n",
+            shell_quote(password),
+            self.registry
+        )
+    }
 }
 
-pub(crate) fn loki_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/loki/{version}/linux-{arch}/loki-linux-{arch}.zip",
-        arch = architecture.as_str()
-    )
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'\''"#))
 }
 
-pub(crate) fn pyroscope_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/pyroscope/{version}/linux-{arch}/pyroscope_{version}_linux_{arch}.tar.gz",
-        arch = architecture.as_str()
-    )
-}
-
-pub(crate) fn tempo_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/tempo/{version}/linux-{arch}/tempo_{version}_linux_{arch}.tar.gz",
-        arch = architecture.as_str()
-    )
-}
-
-pub(crate) fn node_exporter_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/node-exporter/{version}/linux-{arch}/node_exporter-{version}.linux-{arch}.tar.gz",
-        arch = architecture.as_str()
-    )
-}
-
-pub(crate) fn promtail_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/promtail/{version}/linux-{arch}/promtail-linux-{arch}.zip",
-        arch = architecture.as_str()
-    )
+pub(crate) const fn required_docker_images() -> &'static [&'static str] {
+    DOCKER_IMAGES
 }
 
 pub(crate) fn samply_bin_s3_key(version: &str, architecture: Architecture) -> String {
@@ -216,69 +375,9 @@ pub(crate) fn libjemalloc_bin_s3_key(version: &str, architecture: Architecture) 
     )
 }
 
-pub(crate) fn logrotate_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/logrotate/{version}/linux-{arch}/logrotate_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-pub(crate) fn libfontconfig_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/libfontconfig1/{version}/linux-{arch}/libfontconfig1_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-/// S3 key for fontconfig-config package
-pub(crate) fn fontconfig_config_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/fontconfig-config/{version}/linux-{arch}/fontconfig-config_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-pub(crate) fn unzip_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/unzip/{version}/linux-{arch}/unzip_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-/// S3 key for adduser (architecture-independent package)
-pub(crate) fn adduser_bin_s3_key(version: &str) -> String {
-    format!("{TOOLS_BINARIES_PREFIX}/adduser/{version}/adduser_{version}_all.deb")
-}
-
-/// S3 key for fonts-dejavu-mono (architecture-independent package)
-pub(crate) fn fonts_dejavu_mono_bin_s3_key(version: &str) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/fonts-dejavu-mono/{version}/fonts-dejavu-mono_{version}_all.deb"
-    )
-}
-
-/// S3 key for fonts-dejavu-core (architecture-independent package)
-pub(crate) fn fonts_dejavu_core_bin_s3_key(version: &str) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/fonts-dejavu-core/{version}/fonts-dejavu-core_{version}_all.deb"
-    )
-}
-
-/// S3 key for musl package
-pub(crate) fn musl_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/musl/{version}/linux-{arch}/musl_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
 // S3 key functions for component configs and services (include deployer version for cache invalidation)
 //
 // Convention: {TOOLS_CONFIGS_PREFIX}/{deployer_version}/{component}/{file}
-
-pub fn prometheus_service_s3_key() -> String {
-    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/prometheus/service")
-}
 
 pub fn grafana_datasources_s3_key() -> String {
     format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/grafana/datasources.yml")
@@ -298,32 +397,12 @@ pub fn loki_config_s3_key() -> String {
     format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/loki/config.yml")
 }
 
-pub fn loki_service_s3_key() -> String {
-    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/loki/service")
-}
-
 pub fn pyroscope_config_s3_key() -> String {
     format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/config.yml")
 }
 
-pub fn pyroscope_service_s3_key() -> String {
-    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/service")
-}
-
 pub fn tempo_config_s3_key() -> String {
     format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tempo/config.yml")
-}
-
-pub fn tempo_service_s3_key() -> String {
-    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tempo/service")
-}
-
-pub fn node_exporter_service_s3_key() -> String {
-    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/node-exporter/service")
-}
-
-pub fn promtail_service_s3_key() -> String {
-    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/promtail/service")
 }
 
 // S3 key functions for pyroscope agent (lives with pyroscope component)
@@ -334,12 +413,6 @@ pub fn pyroscope_agent_service_s3_key() -> String {
 
 pub fn pyroscope_agent_timer_s3_key() -> String {
     format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/agent.timer")
-}
-
-// S3 key functions for system configs
-
-pub fn logrotate_config_s3_key() -> String {
-    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/system/logrotate.conf")
 }
 
 // S3 key functions for binary instance configs
@@ -381,65 +454,9 @@ pub fn monitoring_s3_key(tag: &str, digest: &str) -> String {
     format!("{DEPLOYMENTS_PREFIX}/{tag}/monitoring/{digest}")
 }
 
-/// Returns the download URL for Prometheus from GitHub
-pub(crate) fn prometheus_download_url(version: &str, architecture: Architecture) -> String {
-    format!(
-        "https://github.com/prometheus/prometheus/releases/download/v{version}/prometheus-{version}.linux-{arch}.tar.gz",
-        arch = architecture.as_str()
-    )
-}
-
-/// Returns the download URL for Grafana
-pub(crate) fn grafana_download_url(version: &str, architecture: Architecture) -> String {
-    format!(
-        "https://dl.grafana.com/oss/release/grafana_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-/// Returns the download URL for Loki from GitHub
-pub(crate) fn loki_download_url(version: &str, architecture: Architecture) -> String {
-    format!(
-        "https://github.com/grafana/loki/releases/download/v{version}/loki-linux-{arch}.zip",
-        arch = architecture.as_str()
-    )
-}
-
-/// Returns the download URL for Pyroscope from GitHub
-pub(crate) fn pyroscope_download_url(version: &str, architecture: Architecture) -> String {
-    format!(
-        "https://github.com/grafana/pyroscope/releases/download/v{version}/pyroscope_{version}_linux_{arch}.tar.gz",
-        arch = architecture.as_str()
-    )
-}
-
-/// Returns the download URL for Tempo from GitHub
-pub(crate) fn tempo_download_url(version: &str, architecture: Architecture) -> String {
-    format!(
-        "https://github.com/grafana/tempo/releases/download/v{version}/tempo_{version}_linux_{arch}.tar.gz",
-        arch = architecture.as_str()
-    )
-}
-
-/// Returns the download URL for Node Exporter from GitHub
-pub(crate) fn node_exporter_download_url(version: &str, architecture: Architecture) -> String {
-    format!(
-        "https://github.com/prometheus/node_exporter/releases/download/v{version}/node_exporter-{version}.linux-{arch}.tar.gz",
-        arch = architecture.as_str()
-    )
-}
-
 /// Returns the download URL for the Node Exporter Full Grafana dashboard
 pub(crate) fn grafana_node_exporter_dashboard_download_url(version: &str) -> String {
     format!("https://grafana.com/api/dashboards/1860/revisions/{version}/download")
-}
-
-/// Returns the download URL for Promtail from GitHub
-pub(crate) fn promtail_download_url(version: &str, architecture: Architecture) -> String {
-    format!(
-        "https://github.com/grafana/loki/releases/download/v{version}/promtail-linux-{arch}.zip",
-        arch = architecture.as_str()
-    )
 }
 
 /// Returns the download URL for Samply from GitHub
@@ -461,80 +478,6 @@ pub(crate) fn libjemalloc_download_url(version: &str, architecture: Architecture
     };
     format!(
         "{base}/universe/j/jemalloc/libjemalloc2_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-/// Returns the download URL for logrotate from Ubuntu archive
-pub(crate) fn logrotate_download_url(version: &str, architecture: Architecture) -> String {
-    let base = match architecture {
-        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
-        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
-    };
-    format!(
-        "{base}/main/l/logrotate/logrotate_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-/// Returns the download URL for libfontconfig1 from Ubuntu archive
-pub(crate) fn libfontconfig_download_url(version: &str, architecture: Architecture) -> String {
-    let base = match architecture {
-        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
-        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
-    };
-    format!(
-        "{base}/main/f/fontconfig/libfontconfig1_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-/// Returns the download URL for fontconfig-config from Ubuntu archive
-pub(crate) fn fontconfig_config_download_url(version: &str, architecture: Architecture) -> String {
-    let base = match architecture {
-        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
-        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
-    };
-    format!(
-        "{base}/main/f/fontconfig/fontconfig-config_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-/// Returns the download URL for unzip from Ubuntu archive
-pub(crate) fn unzip_download_url(version: &str, architecture: Architecture) -> String {
-    let base = match architecture {
-        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
-        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
-    };
-    format!(
-        "{base}/main/u/unzip/unzip_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-/// Returns the download URL for adduser from Ubuntu archive (arch-independent)
-pub(crate) fn adduser_download_url(version: &str) -> String {
-    format!("{UBUNTU_ARCHIVE_X86_64}/main/a/adduser/adduser_{version}_all.deb")
-}
-
-/// Returns the download URL for fonts-dejavu-mono from Ubuntu archive (arch-independent)
-pub(crate) fn fonts_dejavu_mono_download_url(version: &str) -> String {
-    format!("{UBUNTU_ARCHIVE_X86_64}/main/f/fonts-dejavu/fonts-dejavu-mono_{version}_all.deb")
-}
-
-/// Returns the download URL for fonts-dejavu-core from Ubuntu archive (arch-independent)
-pub(crate) fn fonts_dejavu_core_download_url(version: &str) -> String {
-    format!("{UBUNTU_ARCHIVE_X86_64}/main/f/fonts-dejavu/fonts-dejavu-core_{version}_all.deb")
-}
-
-pub(crate) fn musl_download_url(version: &str, architecture: Architecture) -> String {
-    let base = match architecture {
-        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
-        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
-    };
-    format!(
-        "{base}/universe/m/musl/musl_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
@@ -575,54 +518,6 @@ providers:
     type: file
     options:
       path: /var/lib/grafana/dashboards
-"#;
-
-/// Systemd service file content for Prometheus
-pub const PROMETHEUS_SERVICE: &str = r#"[Unit]
-Description=Prometheus Monitoring Service
-After=network.target
-
-[Service]
-ExecStart=/opt/prometheus/prometheus --config.file=/opt/prometheus/prometheus.yml --storage.tsdb.path=/opt/prometheus/data
-TimeoutStopSec=60
-Restart=always
-User=ubuntu
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
-"#;
-
-/// Systemd service file content for Promtail
-pub const PROMTAIL_SERVICE: &str = r#"[Unit]
-Description=Promtail Log Forwarder
-After=network.target
-
-[Service]
-ExecStart=/opt/promtail/promtail -config.file=/etc/promtail/promtail.yml
-TimeoutStopSec=60
-Restart=always
-User=ubuntu
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
-"#;
-
-/// Systemd service file content for Loki
-pub const LOKI_SERVICE: &str = r#"[Unit]
-Description=Loki Log Aggregation Service
-After=network.target
-
-[Service]
-ExecStart=/opt/loki/loki -config.file=/etc/loki/loki.yml
-TimeoutStopSec=60
-Restart=always
-User=ubuntu
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
 "#;
 
 /// YAML configuration for Loki
@@ -675,36 +570,6 @@ self_profiling:
   disable_push: true
 "#;
 
-/// Systemd service file content for Pyroscope
-pub const PYROSCOPE_SERVICE: &str = r#"[Unit]
-Description=Pyroscope Profiling Service
-After=network.target
-
-[Service]
-ExecStart=/opt/pyroscope/pyroscope --config.file=/etc/pyroscope/pyroscope.yml
-TimeoutStopSec=60
-Restart=always
-User=ubuntu
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
-"#;
-
-/// Systemd service file content for Tempo
-pub const TEMPO_SERVICE: &str = r#"[Unit]
-Description=Tempo Tracing Service
-After=network.target
-[Service]
-ExecStart=/opt/tempo/tempo -config.file=/etc/tempo/tempo.yml
-TimeoutStopSec=60
-Restart=always
-User=ubuntu
-LimitNOFILE=infinity
-[Install]
-WantedBy=multi-user.target
-"#;
-
 /// YAML configuration for Tempo
 pub const TEMPO_CONFIG: &str = r#"
 server:
@@ -741,19 +606,6 @@ overrides:
 
 /// URLs for monitoring service installation
 pub struct MonitoringUrls {
-    pub prometheus_bin: String,
-    pub grafana_bin: String,
-    pub loki_bin: String,
-    pub pyroscope_bin: String,
-    pub tempo_bin: String,
-    pub node_exporter_bin: String,
-    pub fonts_dejavu_mono_deb: String,
-    pub fonts_dejavu_core_deb: String,
-    pub fontconfig_config_deb: String,
-    pub libfontconfig_deb: String,
-    pub unzip_deb: String,
-    pub adduser_deb: String,
-    pub musl_deb: String,
     pub prometheus_config: String,
     pub datasources_yml: String,
     pub all_yml: String,
@@ -762,11 +614,6 @@ pub struct MonitoringUrls {
     pub loki_yml: String,
     pub pyroscope_yml: String,
     pub tempo_yml: String,
-    pub prometheus_service: String,
-    pub loki_service: String,
-    pub pyroscope_service: String,
-    pub tempo_service: String,
-    pub node_exporter_service: String,
 }
 
 /// Phase 1: Download files from S3 on monitoring instance
@@ -774,30 +621,14 @@ pub(crate) fn install_monitoring_download_cmd(urls: &MonitoringUrls) -> String {
     format!(
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
-rm -f /home/ubuntu/prometheus.tar.gz /home/ubuntu/loki.zip /home/ubuntu/pyroscope.tar.gz \
-      /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz /home/ubuntu/fonts-dejavu-mono.deb \
-      /home/ubuntu/fonts-dejavu-core.deb /home/ubuntu/fontconfig-config.deb /home/ubuntu/libfontconfig1.deb \
-      /home/ubuntu/unzip.deb /home/ubuntu/adduser.deb /home/ubuntu/musl.deb
-rm -rf /home/ubuntu/prometheus-* /home/ubuntu/loki-linux-* /home/ubuntu/pyroscope \
-       /home/ubuntu/tempo /home/ubuntu/node_exporter-*
+rm -f /home/ubuntu/prometheus.yml /home/ubuntu/datasources.yml /home/ubuntu/all.yml \
+      /home/ubuntu/dashboard.json /home/ubuntu/node-exporter-full.json /home/ubuntu/loki.yml \
+      /home/ubuntu/pyroscope.yml /home/ubuntu/tempo.yml
 
 # Unmask services in case previous attempt left them masked
-sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana-server tracer 2>/dev/null || true
+sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana tracer 2>/dev/null || true
 
 # Download all files from S3 concurrently via pre-signed URLs
-{WGET} -O /home/ubuntu/prometheus.tar.gz '{}' &
-{WGET} -O /home/ubuntu/grafana.deb '{}' &
-{WGET} -O /home/ubuntu/loki.zip '{}' &
-{WGET} -O /home/ubuntu/pyroscope.tar.gz '{}' &
-{WGET} -O /home/ubuntu/tempo.tar.gz '{}' &
-{WGET} -O /home/ubuntu/node_exporter.tar.gz '{}' &
-{WGET} -O /home/ubuntu/fonts-dejavu-mono.deb '{}' &
-{WGET} -O /home/ubuntu/fonts-dejavu-core.deb '{}' &
-{WGET} -O /home/ubuntu/fontconfig-config.deb '{}' &
-{WGET} -O /home/ubuntu/libfontconfig1.deb '{}' &
-{WGET} -O /home/ubuntu/unzip.deb '{}' &
-{WGET} -O /home/ubuntu/adduser.deb '{}' &
-{WGET} -O /home/ubuntu/musl.deb '{}' &
 {WGET} -O /home/ubuntu/prometheus.yml '{}' &
 {WGET} -O /home/ubuntu/datasources.yml '{}' &
 {WGET} -O /home/ubuntu/all.yml '{}' &
@@ -806,37 +637,17 @@ sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana-serv
 {WGET} -O /home/ubuntu/loki.yml '{}' &
 {WGET} -O /home/ubuntu/pyroscope.yml '{}' &
 {WGET} -O /home/ubuntu/tempo.yml '{}' &
-{WGET} -O /home/ubuntu/prometheus.service '{}' &
-{WGET} -O /home/ubuntu/loki.service '{}' &
-{WGET} -O /home/ubuntu/pyroscope.service '{}' &
-{WGET} -O /home/ubuntu/tempo.service '{}' &
-{WGET} -O /home/ubuntu/node_exporter.service '{}' &
 wait
 
 # Verify all downloads succeeded
-for f in prometheus.tar.gz grafana.deb loki.zip pyroscope.tar.gz tempo.tar.gz node_exporter.tar.gz \
-         fonts-dejavu-mono.deb fonts-dejavu-core.deb fontconfig-config.deb libfontconfig1.deb unzip.deb adduser.deb musl.deb prometheus.yml datasources.yml all.yml dashboard.json node-exporter-full.json \
-         loki.yml pyroscope.yml tempo.yml prometheus.service loki.service pyroscope.service \
-         tempo.service node_exporter.service; do
+for f in prometheus.yml datasources.yml all.yml dashboard.json node-exporter-full.json \
+         loki.yml pyroscope.yml tempo.yml; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
     fi
 done
 "#,
-        urls.prometheus_bin,
-        urls.grafana_bin,
-        urls.loki_bin,
-        urls.pyroscope_bin,
-        urls.tempo_bin,
-        urls.node_exporter_bin,
-        urls.fonts_dejavu_mono_deb,
-        urls.fonts_dejavu_core_deb,
-        urls.fontconfig_config_deb,
-        urls.libfontconfig_deb,
-        urls.unzip_deb,
-        urls.adduser_deb,
-        urls.musl_deb,
         urls.prometheus_config,
         urls.datasources_yml,
         urls.all_yml,
@@ -845,115 +656,110 @@ done
         urls.loki_yml,
         urls.pyroscope_yml,
         urls.tempo_yml,
-        urls.prometheus_service,
-        urls.loki_service,
-        urls.pyroscope_service,
-        urls.tempo_service,
-        urls.node_exporter_service,
     )
 }
 
-fn install_docker_tools_cmd(tools: &[DockerTool]) -> String {
-    if tools.is_empty() {
+fn install_docker_services_cmd(
+    services: &[DockerService],
+    image_cache: &DockerImageCache,
+) -> String {
+    if services.is_empty() {
         return String::new();
     }
 
     let mut cmd = String::from(
-        r#"# Install Docker tools
+        r#"# Install Docker services
 sudo apt-get update -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
+sudo systemctl enable --now docker
 "#,
     );
+    cmd.push_str(&image_cache.login_cmd());
 
-    for tool in tools {
+    for service in services {
+        let image = image_cache.image(service.image);
         cmd.push_str("sudo docker pull ");
-        cmd.push_str(tool.image);
+        cmd.push_str(image);
         cmd.push('\n');
         cmd.push_str("sudo tee /etc/systemd/system/");
-        cmd.push_str(tool.service);
+        cmd.push_str(service.service);
         cmd.push_str(".service >/dev/null <<'EOF'\n");
-        cmd.push_str(&tool.service_file());
+        cmd.push_str(&service.service_file(image));
         cmd.push_str("EOF\n");
     }
 
     cmd
 }
 
-pub(crate) fn docker_tool_services() -> impl Iterator<Item = &'static str> {
-    DOCKER_TOOLS.iter().map(|tool| tool.service)
+fn binary_log_truncate_service(image: &str) -> String {
+    format!(
+        r#"[Unit]
+Description=Truncate Deployed Binary Log
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStartPre=-/usr/bin/docker rm -f binary_log_truncate
+ExecStart=/usr/bin/docker run --rm --name binary_log_truncate --volume /var/log:/var/log {image} sh -c ': > /var/log/binary.log'
+
+[Install]
+WantedBy=multi-user.target
+"#
+    )
+}
+
+const BINARY_LOG_TRUNCATE_TIMER: &str = r#"[Unit]
+Description=Truncate Deployed Binary Log Periodically
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=binary-log-truncate.service
+
+[Install]
+WantedBy=timers.target
+"#;
+
+fn install_binary_log_truncator_cmd(image_cache: &DockerImageCache) -> String {
+    let image = image_cache.image(BUSYBOX_IMAGE);
+    let service = binary_log_truncate_service(image);
+    format!(
+        r#"sudo docker pull {image}
+sudo tee /etc/systemd/system/binary-log-truncate.service >/dev/null <<'EOF'
+{service}EOF
+sudo tee /etc/systemd/system/binary-log-truncate.timer >/dev/null <<'EOF'
+{BINARY_LOG_TRUNCATE_TIMER}EOF
+"#
+    )
+}
+
+pub(crate) fn monitoring_docker_services() -> impl Iterator<Item = &'static str> {
+    MONITORING_DOCKER_SERVICES
+        .iter()
+        .map(|service| service.service)
+}
+
+pub(crate) fn binary_docker_services() -> impl Iterator<Item = &'static str> {
+    BINARY_DOCKER_SERVICES.iter().map(|service| service.service)
 }
 
 /// Phase 2: Setup services on monitoring instance (does not start them)
-pub(crate) fn install_monitoring_setup_cmd(
-    prometheus_version: &str,
-    architecture: Architecture,
-) -> String {
-    let arch = architecture.as_str();
-    let docker_tools = install_docker_tools_cmd(DOCKER_TOOLS);
+pub(crate) fn install_monitoring_setup_cmd(image_cache: &DockerImageCache) -> String {
+    let docker_services = install_docker_services_cmd(MONITORING_DOCKER_SERVICES, image_cache);
     format!(
         r#"set -e
 
 # Enable BBR congestion control
 echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
 
-# Install deb packages
-sudo dpkg -i /home/ubuntu/unzip.deb
-sudo dpkg -i /home/ubuntu/adduser.deb
+{docker_services}
 
-# Install Prometheus
+# Create service directories
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
-sudo chown -R ubuntu:ubuntu /opt/prometheus
-tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
-sudo rm -rf /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}
-sudo mv /home/ubuntu/prometheus-{prometheus_version}.linux-{arch} /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}
-sudo ln -sf /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}/prometheus /opt/prometheus/prometheus
-sudo chmod +x /opt/prometheus/prometheus
-
-# Install Grafana dependencies (fonts-dejavu-mono, fonts-dejavu-core, fontconfig-config, libfontconfig1, musl) and Grafana
-sudo dpkg -i /home/ubuntu/fonts-dejavu-mono.deb
-sudo dpkg -i /home/ubuntu/fonts-dejavu-core.deb
-sudo dpkg -i /home/ubuntu/fontconfig-config.deb
-sudo dpkg -i /home/ubuntu/libfontconfig1.deb
-sudo dpkg -i /home/ubuntu/musl.deb
-sudo dpkg -i /home/ubuntu/grafana.deb
-
-# Install Loki
-sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
-sudo chown -R ubuntu:ubuntu /opt/loki /loki
-unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
-sudo rm -f /opt/loki/loki
-sudo mv /home/ubuntu/loki-linux-{arch} /opt/loki/loki
-sudo chmod +x /opt/loki/loki
-
-# Install Pyroscope
-sudo mkdir -p /opt/pyroscope /var/lib/pyroscope
-sudo chown -R ubuntu:ubuntu /opt/pyroscope /var/lib/pyroscope
-tar xvfz /home/ubuntu/pyroscope.tar.gz -C /home/ubuntu
-sudo rm -f /opt/pyroscope/pyroscope
-sudo mv /home/ubuntu/pyroscope /opt/pyroscope/pyroscope
-sudo chmod +x /opt/pyroscope/pyroscope
-
-# Install Tempo
-sudo mkdir -p /opt/tempo /tempo/traces /tempo/wal
-sudo chown -R ubuntu:ubuntu /opt/tempo /tempo
-tar xvfz /home/ubuntu/tempo.tar.gz -C /home/ubuntu
-sudo rm -f /opt/tempo/tempo
-sudo mv /home/ubuntu/tempo /opt/tempo/tempo
-sudo chmod +x /opt/tempo/tempo
-
-# Install Node Exporter
-sudo mkdir -p /opt/node_exporter
-sudo chown -R ubuntu:ubuntu /opt/node_exporter
-tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
-sudo rm -rf /opt/node_exporter/node_exporter-*.linux-{arch}
-sudo mv /home/ubuntu/node_exporter-*.linux-{arch} /opt/node_exporter/
-sudo ln -sf /opt/node_exporter/node_exporter-*.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
-sudo chmod +x /opt/node_exporter/node_exporter
-
-{docker_tools}
-
-# Configure Grafana
-sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
+sudo mkdir -p /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
+sudo mkdir -p /var/lib/pyroscope
+sudo mkdir -p /tempo/traces /tempo/wal
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
 
 # Install configuration files
@@ -971,13 +777,6 @@ sudo chown root:root /etc/pyroscope/pyroscope.yml
 sudo mkdir -p /etc/tempo
 sudo mv /home/ubuntu/tempo.yml /etc/tempo/tempo.yml
 sudo chown root:root /etc/tempo/tempo.yml
-
-# Install service files
-sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
-sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
-sudo mv /home/ubuntu/pyroscope.service /etc/systemd/system/pyroscope.service
-sudo mv /home/ubuntu/tempo.service /etc/systemd/system/tempo.service
-sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
 "#,
     )
 }
@@ -987,24 +786,12 @@ pub(crate) fn start_monitoring_services_cmd() -> String {
     let mut cmd = String::from(
         r#"set -e
 
-sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
-
 # Start services
 sudo systemctl daemon-reload
-sudo systemctl start node_exporter
-sudo systemctl enable node_exporter
-sudo systemctl start prometheus
-sudo systemctl enable prometheus
-sudo systemctl start loki
-sudo systemctl enable loki
-sudo systemctl start pyroscope
-sudo systemctl enable pyroscope
-sudo systemctl start tempo
-sudo systemctl enable tempo
 "#,
     );
 
-    for service in docker_tool_services() {
+    for service in monitoring_docker_services() {
         cmd.push_str("sudo systemctl start ");
         cmd.push_str(service);
         cmd.push('\n');
@@ -1012,12 +799,6 @@ sudo systemctl enable tempo
         cmd.push_str(service);
         cmd.push('\n');
     }
-
-    cmd.push_str(
-        r#"sudo systemctl restart grafana-server
-sudo systemctl enable grafana-server
-"#,
-    );
 
     cmd
 }
@@ -1027,19 +808,12 @@ pub struct InstanceUrls {
     pub binary: String,
     pub config: String,
     pub hosts: String,
-    pub promtail_bin: String,
     pub promtail_config: String,
-    pub promtail_service: String,
-    pub node_exporter_bin: String,
-    pub node_exporter_service: String,
     pub binary_service: String,
-    pub logrotate_conf: String,
     pub pyroscope_script: String,
     pub pyroscope_service: String,
     pub pyroscope_timer: String,
     pub libjemalloc_deb: String,
-    pub logrotate_deb: String,
-    pub unzip_deb: String,
 }
 
 /// Phase 1 (optional): Install apt packages on binary instances
@@ -1074,9 +848,10 @@ pub(crate) fn install_binary_download_cmd(urls: &InstanceUrls) -> String {
     format!(
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
-rm -f /home/ubuntu/promtail.zip /home/ubuntu/node_exporter.tar.gz \
-      /home/ubuntu/libjemalloc2.deb /home/ubuntu/logrotate.deb /home/ubuntu/unzip.deb
-rm -rf /home/ubuntu/promtail-linux-* /home/ubuntu/node_exporter-*
+rm -f /home/ubuntu/binary /home/ubuntu/config.conf /home/ubuntu/hosts.yaml \
+      /home/ubuntu/promtail.yml /home/ubuntu/binary.service \
+      /home/ubuntu/pyroscope-agent.sh /home/ubuntu/pyroscope-agent.service \
+      /home/ubuntu/pyroscope-agent.timer /home/ubuntu/libjemalloc2.deb
 
 # Unmask services in case previous attempt left them masked
 sudo systemctl unmask promtail node_exporter binary 2>/dev/null || true
@@ -1085,26 +860,18 @@ sudo systemctl unmask promtail node_exporter binary 2>/dev/null || true
 {WGET} -O /home/ubuntu/binary '{}' &
 {WGET} -O /home/ubuntu/config.conf '{}' &
 {WGET} -O /home/ubuntu/hosts.yaml '{}' &
-{WGET} -O /home/ubuntu/promtail.zip '{}' &
 {WGET} -O /home/ubuntu/promtail.yml '{}' &
-{WGET} -O /home/ubuntu/promtail.service '{}' &
-{WGET} -O /home/ubuntu/node_exporter.tar.gz '{}' &
-{WGET} -O /home/ubuntu/node_exporter.service '{}' &
 {WGET} -O /home/ubuntu/binary.service '{}' &
-{WGET} -O /home/ubuntu/logrotate.conf '{}' &
 {WGET} -O /home/ubuntu/pyroscope-agent.sh '{}' &
 {WGET} -O /home/ubuntu/pyroscope-agent.service '{}' &
 {WGET} -O /home/ubuntu/pyroscope-agent.timer '{}' &
 {WGET} -O /home/ubuntu/libjemalloc2.deb '{}' &
-{WGET} -O /home/ubuntu/logrotate.deb '{}' &
-{WGET} -O /home/ubuntu/unzip.deb '{}' &
 wait
 
 # Verify all downloads succeeded
-for f in binary config.conf hosts.yaml promtail.zip promtail.yml promtail.service \
-         node_exporter.tar.gz node_exporter.service binary.service logrotate.conf \
+for f in binary config.conf hosts.yaml promtail.yml binary.service \
          pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer \
-         libjemalloc2.deb logrotate.deb unzip.deb; do
+         libjemalloc2.deb; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
@@ -1114,19 +881,12 @@ done
         urls.binary,
         urls.config,
         urls.hosts,
-        urls.promtail_bin,
         urls.promtail_config,
-        urls.promtail_service,
-        urls.node_exporter_bin,
-        urls.node_exporter_service,
         urls.binary_service,
-        urls.logrotate_conf,
         urls.pyroscope_script,
         urls.pyroscope_service,
         urls.pyroscope_timer,
         urls.libjemalloc_deb,
-        urls.logrotate_deb,
-        urls.unzip_deb,
     )
 }
 
@@ -1204,8 +964,13 @@ sudo chown -R ubuntu:ubuntu "$NVME_MOUNT"
 }
 
 /// Phase 3: Setup and start services on binary instances
-pub(crate) fn install_binary_setup_cmd(profiling: bool, architecture: Architecture) -> String {
-    let arch = architecture.as_str();
+pub(crate) fn install_binary_setup_cmd(
+    profiling: bool,
+    _architecture: Architecture,
+    image_cache: &DockerImageCache,
+) -> String {
+    let docker_services = install_docker_services_cmd(BINARY_DOCKER_SERVICES, image_cache);
+    let log_truncator = install_binary_log_truncator_cmd(image_cache);
     let perf_setup = if profiling {
         r#"
 # Setup pyroscope agent (perf symlink must be created after linux-tools installed via apt)
@@ -1228,47 +993,29 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
 # Enable BBR congestion control
 echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
 
+{docker_services}
+{log_truncator}
+
 # Install deb packages
-sudo dpkg -i /home/ubuntu/unzip.deb
 sudo dpkg -i /home/ubuntu/libjemalloc2.deb
-sudo dpkg -i /home/ubuntu/logrotate.deb
 
-# Install Promtail
-sudo mkdir -p /opt/promtail /etc/promtail
-sudo chown -R ubuntu:ubuntu /opt/promtail
-unzip -o /home/ubuntu/promtail.zip -d /home/ubuntu
-sudo rm -f /opt/promtail/promtail
-sudo mv /home/ubuntu/promtail-linux-{arch} /opt/promtail/promtail
-sudo chmod +x /opt/promtail/promtail
+# Setup Promtail
+sudo mkdir -p /etc/promtail /var/lib/promtail
 sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
-sudo mv /home/ubuntu/promtail.service /etc/systemd/system/promtail.service
 sudo chown root:root /etc/promtail/promtail.yml
-
-# Install Node Exporter
-sudo mkdir -p /opt/node_exporter
-sudo chown -R ubuntu:ubuntu /opt/node_exporter
-tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
-sudo rm -rf /opt/node_exporter/node_exporter-*.linux-{arch}
-sudo mv /home/ubuntu/node_exporter-*.linux-{arch} /opt/node_exporter/
-sudo ln -sf /opt/node_exporter/node_exporter-*.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
-sudo chmod +x /opt/node_exporter/node_exporter
-sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
 
 # Setup binary
 chmod +x /home/ubuntu/binary
 sudo touch /var/log/binary.log && sudo chown ubuntu:ubuntu /var/log/binary.log
 sudo mv /home/ubuntu/binary.service /etc/systemd/system/binary.service
 
-# Setup logrotate
-sudo mv /home/ubuntu/logrotate.conf /etc/logrotate.d/binary
-sudo chown root:root /etc/logrotate.d/binary
-echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/binary" | crontab -
 {perf_setup}
 # Start services
 sudo systemctl daemon-reload
-sudo systemctl enable --now promtail
+sudo systemctl enable --now binary
+sudo systemctl enable --now binary-log-truncate.timer
 sudo systemctl enable --now node_exporter
-sudo systemctl enable --now binary{pyroscope_enable}"#
+sudo systemctl enable --now promtail{pyroscope_enable}"#
     )
 }
 
@@ -1286,7 +1033,7 @@ server:
   http_listen_port: 9080
   grpc_listen_port: 0
 positions:
-  filename: /tmp/positions.yaml
+  filename: /var/lib/promtail/positions.yaml
 clients:
   - url: http://{monitoring_private_ip}:3100/loki/api/v1/push
 scrape_configs:
@@ -1303,22 +1050,6 @@ scrape_configs:
 "#
     )
 }
-
-/// Systemd service file content for Node Exporter
-pub const NODE_EXPORTER_SERVICE: &str = r#"[Unit]
-Description=Node Exporter
-After=network.target
-
-[Service]
-ExecStart=/opt/node_exporter/node_exporter
-TimeoutStopSec=60
-Restart=always
-User=ubuntu
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
-"#;
 
 /// Generates Prometheus configuration with scrape targets for all instance IPs
 pub fn generate_prometheus_config(instances: &[(&str, &str, &str, &str)]) -> String {
@@ -1356,16 +1087,6 @@ scrape_configs:
     }
     config
 }
-
-/// Logrotate configuration for binary logs
-pub const LOGROTATE_CONF: &str = r#"
-/var/log/binary.log {
-    rotate 0
-    copytruncate
-    missingok
-    notifempty
-}
-"#;
 
 /// Generates systemd service file content for the deployed binary
 pub(crate) fn binary_service(architecture: Architecture) -> String {
@@ -1493,19 +1214,6 @@ mod tests {
 
     fn monitoring_urls() -> MonitoringUrls {
         MonitoringUrls {
-            prometheus_bin: "prometheus".to_string(),
-            grafana_bin: "grafana".to_string(),
-            loki_bin: "loki".to_string(),
-            pyroscope_bin: "pyroscope".to_string(),
-            tempo_bin: "tempo".to_string(),
-            node_exporter_bin: "node-exporter".to_string(),
-            fonts_dejavu_mono_deb: "fonts-dejavu-mono".to_string(),
-            fonts_dejavu_core_deb: "fonts-dejavu-core".to_string(),
-            fontconfig_config_deb: "fontconfig-config".to_string(),
-            libfontconfig_deb: "libfontconfig".to_string(),
-            unzip_deb: "unzip".to_string(),
-            adduser_deb: "adduser".to_string(),
-            musl_deb: "musl".to_string(),
             prometheus_config: "prometheus-config".to_string(),
             datasources_yml: "datasources".to_string(),
             all_yml: "dashboards".to_string(),
@@ -1514,60 +1222,49 @@ mod tests {
             loki_yml: "loki-config".to_string(),
             pyroscope_yml: "pyroscope-config".to_string(),
             tempo_yml: "tempo-config".to_string(),
-            prometheus_service: "prometheus-service".to_string(),
-            loki_service: "loki-service".to_string(),
-            pyroscope_service: "pyroscope-service".to_string(),
-            tempo_service: "tempo-service".to_string(),
-            node_exporter_service: "node-exporter-service".to_string(),
         }
+    }
+
+    fn instance_urls() -> InstanceUrls {
+        InstanceUrls {
+            binary: "binary".to_string(),
+            config: "config".to_string(),
+            hosts: "hosts".to_string(),
+            promtail_config: "promtail-config".to_string(),
+            binary_service: "binary-service".to_string(),
+            pyroscope_script: "pyroscope-script".to_string(),
+            pyroscope_service: "pyroscope-service".to_string(),
+            pyroscope_timer: "pyroscope-timer".to_string(),
+            libjemalloc_deb: "libjemalloc".to_string(),
+        }
+    }
+
+    fn ecr_image_cache() -> DockerImageCache {
+        DockerImageCache::new(
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com".to_string(),
+            "password".to_string(),
+            required_docker_images().iter().map(|image| {
+                (
+                    *image,
+                    format!(
+                        "123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/{}",
+                        image.replace('/', "_").replace(':', "_")
+                    ),
+                )
+            }),
+        )
     }
 
     #[test]
     fn test_binary_s3_keys_arm64() {
         let arch = Architecture::Arm64;
         assert_eq!(
-            prometheus_bin_s3_key("3.2.0", arch),
-            "tools/binaries/prometheus/3.2.0/linux-arm64/prometheus-3.2.0.linux-arm64.tar.gz"
-        );
-        assert_eq!(
-            grafana_bin_s3_key("11.5.2", arch),
-            "tools/binaries/grafana/11.5.2/linux-arm64/grafana_11.5.2_arm64.deb"
-        );
-        assert_eq!(
-            loki_bin_s3_key("3.4.2", arch),
-            "tools/binaries/loki/3.4.2/linux-arm64/loki-linux-arm64.zip"
-        );
-        assert_eq!(
-            pyroscope_bin_s3_key("1.12.0", arch),
-            "tools/binaries/pyroscope/1.12.0/linux-arm64/pyroscope_1.12.0_linux_arm64.tar.gz"
-        );
-        assert_eq!(
-            tempo_bin_s3_key("2.7.1", arch),
-            "tools/binaries/tempo/2.7.1/linux-arm64/tempo_2.7.1_linux_arm64.tar.gz"
-        );
-        assert_eq!(
-            node_exporter_bin_s3_key("1.9.0", arch),
-            "tools/binaries/node-exporter/1.9.0/linux-arm64/node_exporter-1.9.0.linux-arm64.tar.gz"
-        );
-        assert_eq!(
-            promtail_bin_s3_key("3.4.2", arch),
-            "tools/binaries/promtail/3.4.2/linux-arm64/promtail-linux-arm64.zip"
+            samply_bin_s3_key("0.13.1", arch),
+            "tools/binaries/samply/0.13.1/linux-aarch64/samply-aarch64-unknown-linux-gnu.tar.xz"
         );
         assert_eq!(
             libjemalloc_bin_s3_key("5.3.0-2build1", arch),
             "tools/binaries/libjemalloc2/5.3.0-2build1/linux-arm64/libjemalloc2_5.3.0-2build1_arm64.deb"
-        );
-        assert_eq!(
-            logrotate_bin_s3_key("3.21.0-2build1", arch),
-            "tools/binaries/logrotate/3.21.0-2build1/linux-arm64/logrotate_3.21.0-2build1_arm64.deb"
-        );
-        assert_eq!(
-            libfontconfig_bin_s3_key("2.15.0-1.1ubuntu2", arch),
-            "tools/binaries/libfontconfig1/2.15.0-1.1ubuntu2/linux-arm64/libfontconfig1_2.15.0-1.1ubuntu2_arm64.deb"
-        );
-        assert_eq!(
-            unzip_bin_s3_key("6.0-28ubuntu4", arch),
-            "tools/binaries/unzip/6.0-28ubuntu4/linux-arm64/unzip_6.0-28ubuntu4_arm64.deb"
         );
     }
 
@@ -1575,48 +1272,12 @@ mod tests {
     fn test_binary_s3_keys_x86_64() {
         let arch = Architecture::X86_64;
         assert_eq!(
-            prometheus_bin_s3_key("3.2.0", arch),
-            "tools/binaries/prometheus/3.2.0/linux-amd64/prometheus-3.2.0.linux-amd64.tar.gz"
-        );
-        assert_eq!(
-            grafana_bin_s3_key("11.5.2", arch),
-            "tools/binaries/grafana/11.5.2/linux-amd64/grafana_11.5.2_amd64.deb"
-        );
-        assert_eq!(
-            loki_bin_s3_key("3.4.2", arch),
-            "tools/binaries/loki/3.4.2/linux-amd64/loki-linux-amd64.zip"
-        );
-        assert_eq!(
-            pyroscope_bin_s3_key("1.12.0", arch),
-            "tools/binaries/pyroscope/1.12.0/linux-amd64/pyroscope_1.12.0_linux_amd64.tar.gz"
-        );
-        assert_eq!(
-            tempo_bin_s3_key("2.7.1", arch),
-            "tools/binaries/tempo/2.7.1/linux-amd64/tempo_2.7.1_linux_amd64.tar.gz"
-        );
-        assert_eq!(
-            node_exporter_bin_s3_key("1.9.0", arch),
-            "tools/binaries/node-exporter/1.9.0/linux-amd64/node_exporter-1.9.0.linux-amd64.tar.gz"
-        );
-        assert_eq!(
-            promtail_bin_s3_key("3.4.2", arch),
-            "tools/binaries/promtail/3.4.2/linux-amd64/promtail-linux-amd64.zip"
+            samply_bin_s3_key("0.13.1", arch),
+            "tools/binaries/samply/0.13.1/linux-x86_64/samply-x86_64-unknown-linux-gnu.tar.xz"
         );
         assert_eq!(
             libjemalloc_bin_s3_key("5.3.0-2build1", arch),
             "tools/binaries/libjemalloc2/5.3.0-2build1/linux-amd64/libjemalloc2_5.3.0-2build1_amd64.deb"
-        );
-        assert_eq!(
-            logrotate_bin_s3_key("3.21.0-2build1", arch),
-            "tools/binaries/logrotate/3.21.0-2build1/linux-amd64/logrotate_3.21.0-2build1_amd64.deb"
-        );
-        assert_eq!(
-            libfontconfig_bin_s3_key("2.15.0-1.1ubuntu2", arch),
-            "tools/binaries/libfontconfig1/2.15.0-1.1ubuntu2/linux-amd64/libfontconfig1_2.15.0-1.1ubuntu2_amd64.deb"
-        );
-        assert_eq!(
-            unzip_bin_s3_key("6.0-28ubuntu4", arch),
-            "tools/binaries/unzip/6.0-28ubuntu4/linux-amd64/unzip_6.0-28ubuntu4_amd64.deb"
         );
     }
 
@@ -1624,10 +1285,6 @@ mod tests {
     fn test_config_s3_keys() {
         let version = DEPLOYER_VERSION;
 
-        assert_eq!(
-            prometheus_service_s3_key(),
-            format!("tools/configs/{version}/prometheus/service")
-        );
         assert_eq!(
             grafana_datasources_s3_key(),
             format!("tools/configs/{version}/grafana/datasources.yml")
@@ -1645,32 +1302,12 @@ mod tests {
             format!("tools/configs/{version}/loki/config.yml")
         );
         assert_eq!(
-            loki_service_s3_key(),
-            format!("tools/configs/{version}/loki/service")
-        );
-        assert_eq!(
             pyroscope_config_s3_key(),
             format!("tools/configs/{version}/pyroscope/config.yml")
         );
         assert_eq!(
-            pyroscope_service_s3_key(),
-            format!("tools/configs/{version}/pyroscope/service")
-        );
-        assert_eq!(
             tempo_config_s3_key(),
             format!("tools/configs/{version}/tempo/config.yml")
-        );
-        assert_eq!(
-            tempo_service_s3_key(),
-            format!("tools/configs/{version}/tempo/service")
-        );
-        assert_eq!(
-            node_exporter_service_s3_key(),
-            format!("tools/configs/{version}/node-exporter/service")
-        );
-        assert_eq!(
-            promtail_service_s3_key(),
-            format!("tools/configs/{version}/promtail/service")
         );
         assert_eq!(
             pyroscope_agent_service_s3_key(),
@@ -1679,10 +1316,6 @@ mod tests {
         assert_eq!(
             pyroscope_agent_timer_s3_key(),
             format!("tools/configs/{version}/pyroscope/agent.timer")
-        );
-        assert_eq!(
-            logrotate_config_s3_key(),
-            format!("tools/configs/{version}/system/logrotate.conf")
         );
         assert_eq!(
             binary_service_s3_key_for_arch(Architecture::Arm64),
@@ -1702,7 +1335,8 @@ mod tests {
         assert!(download.contains("node-exporter-dashboard"));
         assert!(download.contains("node-exporter-full.json"));
 
-        let setup = install_monitoring_setup_cmd(PROMETHEUS_VERSION, Architecture::Arm64);
+        let image_cache = DockerImageCache::public();
+        let setup = install_monitoring_setup_cmd(&image_cache);
         assert!(setup.contains(
             "sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json"
         ));
@@ -1710,24 +1344,81 @@ mod tests {
     }
 
     #[test]
-    fn test_monitoring_installs_tracer() {
+    fn test_monitoring_installs_docker_services() {
         let urls = monitoring_urls();
         let download = install_monitoring_download_cmd(&urls);
         assert!(!download.contains("tracer.service"));
+        assert!(!download.contains("prometheus.tar.gz"));
+        assert!(!download.contains("grafana.deb"));
+        assert!(!download.contains("node_exporter.tar.gz"));
 
-        let setup = install_monitoring_setup_cmd(PROMETHEUS_VERSION, Architecture::Arm64);
-        assert!(setup.contains("# Install Docker tools"));
+        let image_cache = DockerImageCache::public();
+        let setup = install_monitoring_setup_cmd(&image_cache);
+        assert!(setup.contains("# Install Docker services"));
+        for image in [
+            PROMETHEUS_IMAGE,
+            LOKI_IMAGE,
+            PYROSCOPE_IMAGE,
+            TEMPO_IMAGE,
+            GRAFANA_IMAGE,
+            NODE_EXPORTER_IMAGE,
+            TRACER_IMAGE,
+        ] {
+            assert!(setup.contains(&format!("sudo docker pull {image}")));
+        }
         assert!(setup.contains(&format!("sudo docker pull {TRACER_IMAGE}")));
         assert!(setup.contains("sudo tee /etc/systemd/system/tracer.service"));
+        assert!(setup.contains("sudo tee /etc/systemd/system/grafana.service"));
 
         let start = start_monitoring_services_cmd();
-        assert!(start.contains("sudo systemctl start tracer"));
-        assert!(start.contains("sudo systemctl enable tracer"));
+        for service in monitoring_docker_services() {
+            assert!(start.contains(&format!("sudo systemctl start {service}")));
+            assert!(start.contains(&format!("sudo systemctl enable {service}")));
+        }
 
         assert!(setup.contains(&format!(
             "--env TEMPO_URL=http://127.0.0.1:3200 {TRACER_IMAGE}"
         )));
         assert!(setup.contains("--network host"));
+    }
+
+    #[test]
+    fn test_binary_installs_docker_helpers() {
+        let urls = instance_urls();
+        let download = install_binary_download_cmd(&urls);
+        assert!(download.contains("-O /home/ubuntu/promtail.yml"));
+        assert!(!download.contains("promtail.zip"));
+        assert!(!download.contains("node_exporter.tar.gz"));
+
+        let image_cache = DockerImageCache::public();
+        let setup = install_binary_setup_cmd(false, Architecture::Arm64, &image_cache);
+        assert!(setup.contains(&format!("sudo docker pull {PROMTAIL_IMAGE}")));
+        assert!(setup.contains(&format!("sudo docker pull {NODE_EXPORTER_IMAGE}")));
+        assert!(setup.contains(&format!("sudo docker pull {BUSYBOX_IMAGE}")));
+        assert!(setup.contains("sudo tee /etc/systemd/system/promtail.service"));
+        assert!(setup.contains("sudo tee /etc/systemd/system/node_exporter.service"));
+        assert!(setup.contains("sudo tee /etc/systemd/system/binary-log-truncate.service"));
+        assert!(setup.contains("sudo tee /etc/systemd/system/binary-log-truncate.timer"));
+        assert!(setup.contains("sudo systemctl enable --now binary"));
+        assert!(setup.contains("sudo systemctl enable --now binary-log-truncate.timer"));
+        assert!(setup.contains("sudo systemctl enable --now node_exporter"));
+        assert!(setup.contains("sudo systemctl enable --now promtail"));
+
+        let promtail = promtail_config("10.0.0.1", "worker", "10.0.1.2", "us-east-1", "arm64");
+        assert!(promtail.contains("filename: /var/lib/promtail/positions.yaml"));
+    }
+
+    #[test]
+    fn test_docker_setup_uses_ecr_cache() {
+        let image_cache = ecr_image_cache();
+        let setup = install_monitoring_setup_cmd(&image_cache);
+
+        assert!(setup.contains("sudo docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com"));
+        assert!(setup.contains("sudo docker pull 123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/prom_prometheus_v3.2.0"));
+        assert!(!setup.contains("sudo docker pull prom/prometheus:v3.2.0"));
+        assert!(setup.contains(
+            "--env TEMPO_URL=http://127.0.0.1:3200 123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/ghcr.io_clabby_tracer-web_latest"
+        ));
     }
 
     #[test]

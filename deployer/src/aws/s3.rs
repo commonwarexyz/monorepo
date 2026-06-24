@@ -59,7 +59,7 @@ pub fn delete_bucket_config() {
     let _ = std::fs::remove_file(path);
 }
 
-/// Prefix for tool binaries: tools/binaries/{tool}/{version}/{platform}/{filename}
+/// Prefix for host-native support packages: tools/binaries/{tool}/{version}/{platform}/{filename}
 pub const TOOLS_BINARIES_PREFIX: &str = "tools/binaries";
 
 /// Prefix for tool configs: tools/configs/{deployer_version}/{component}/{file}

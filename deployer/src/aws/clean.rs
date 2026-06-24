@@ -1,6 +1,7 @@
 //! `clean` subcommand for `ec2`
 
 use crate::aws::{
+    ecr,
     s3::{
         self, delete_bucket_and_contents, delete_bucket_config, get_bucket_name,
         is_no_such_bucket_error,
@@ -10,7 +11,7 @@ use crate::aws::{
 use aws_config::Region;
 use tracing::info;
 
-/// Deletes the shared S3 cache bucket and all its contents
+/// Deletes the shared deployer caches and their contents.
 pub async fn clean() -> Result<(), Error> {
     let bucket_name = get_bucket_name();
     info!(bucket = bucket_name.as_str(), "cleaning S3 bucket");
@@ -38,6 +39,11 @@ pub async fn clean() -> Result<(), Error> {
     // Delete the config file so a new bucket name is generated on next use
     delete_bucket_config();
     info!(bucket = bucket_name.as_str(), "deleted bucket config");
+
+    // Delete the shared Docker image cache in ECR.
+    let ecr_client = ecr::create_client(Region::new(MONITORING_REGION)).await;
+    ecr::delete_cache(&ecr_client).await?;
+    info!("cleaned ECR Docker image cache");
 
     Ok(())
 }
