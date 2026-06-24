@@ -1256,7 +1256,7 @@ mod tests {
                     (),
                 )
                 .await;
-                mgr.put_block(round, digest, block.clone())
+                mgr.put_notarized(round, digest, block.clone())
                     .await
                     .await
                     .expect("failed to sync block");

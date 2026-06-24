@@ -901,8 +901,9 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: awaiting the handle returned by `marshal.proposed(...)` means the
-/// block survives an immediate crash and repeated recoveries.
+/// Contract: awaiting the sync handle delivered by `marshal.proposed(...)` (the
+/// returned receiver, then the handle) means the block survives an immediate
+/// crash and repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {

@@ -345,7 +345,7 @@ where
     }
 
     /// Add a notarized block to the prunable archive and start syncing it.
-    pub(crate) async fn put_block(
+    pub(crate) async fn put_notarized(
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
