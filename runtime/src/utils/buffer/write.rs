@@ -1,5 +1,5 @@
 use super::{
-    sync::{self, Shared},
+    sync::{self, State as SyncState},
     tip::Buffer,
 };
 use crate::{Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs};
@@ -14,16 +14,8 @@ struct State<B: Blob> {
     /// Buffered bytes at the logical tip of the blob.
     buffer: Buffer,
 
-    /// Whether a prior plain mutation must be persisted with [`Blob::sync`].
-    ///
-    /// [`State::write_at_sync`] uses [`Blob::write_at_sync`] only when this is
-    /// false, otherwise it must use [`Blob::sync`] to cover earlier unsynced
-    /// mutations.
-    needs_sync: bool,
-
-    /// In-flight sync covering all mutations up to the last [`Self::start_sync`] call, if no newer
-    /// mutations have invalidated it.
-    syncing: Option<Shared>,
+    /// Durability state for mutations already issued to the underlying blob.
+    sync: SyncState,
 }
 
 impl<B: Blob> State<B> {
@@ -35,29 +27,30 @@ impl<B: Blob> State<B> {
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.blob.write_at(offset, bufs).await?;
-        self.needs_sync = true;
-        self.syncing = None;
+        self.sync.mark_dirty();
         Ok(())
     }
 
     /// Write bytes to the underlying blob and make them durable.
     ///
-    /// Uses [`Blob::write_at_sync`] when there are no earlier unsynced
-    /// mutations. Otherwise, writes the bytes and then syncs the blob.
+    /// Uses [`Blob::write_at_sync`] when no earlier mutation requires a new full sync. Any
+    /// in-flight sync for earlier plain mutations is observed before returning. Otherwise, writes
+    /// the bytes and then syncs the blob.
     async fn write_at_sync(
         &mut self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        if self.needs_sync {
+        if self.sync.is_dirty() {
             self.write_at(offset, bufs).await?;
             self.sync().await
         } else {
             // If `write_at_sync` fails, a later sync must not treat the drained
             // buffer as durable.
-            self.needs_sync = true;
+            let previous = self.sync.prepare_range_sync();
             self.blob.write_at_sync(offset, bufs).await?;
-            self.needs_sync = false;
+            self.sync.restore(previous);
+            self.sync.observe_in_flight().await;
             Ok(())
         }
     }
@@ -65,37 +58,20 @@ impl<B: Blob> State<B> {
     /// Resize the underlying blob and mark the resize as needing sync.
     async fn resize(&mut self, len: u64) -> Result<(), Error> {
         self.blob.resize(len).await?;
-        self.needs_sync = true;
-        self.syncing = None;
+        self.sync.mark_dirty();
         Ok(())
     }
 
     /// Sync the underlying blob if there are unsynced mutations.
     async fn sync(&mut self) -> Result<(), Error> {
-        if self.needs_sync {
-            self.blob.sync().await?;
-            self.needs_sync = false;
-            self.syncing = None;
-            return Ok(());
-        }
-
-        if let Some(syncing) = self.syncing.take() {
-            syncing.await;
-        }
-        Ok(())
+        self.sync.sync(&self.blob).await.map(|_| ())
     }
 
     /// Start syncing the underlying blob if there are unsynced mutations.
     async fn start_sync(&mut self) -> Handle<()> {
-        if self.needs_sync {
-            let syncing = sync::share(self.blob.start_sync().await, "sync failed");
-            self.needs_sync = false;
-            self.syncing = Some(syncing.clone());
-            return sync::observe(syncing);
-        }
-
-        self.syncing
-            .clone()
+        self.sync
+            .start(&self.blob, "sync failed")
+            .await
             .map(sync::observe)
             .unwrap_or_else(|| Handle::ready(Ok(())))
     }
@@ -166,8 +142,7 @@ impl<B: Blob> Write<B> {
             state: Arc::new(AsyncRwLock::new(State {
                 blob,
                 buffer: Buffer::new(size, capacity.get(), pool),
-                needs_sync: true, // ensure pending writes on the wrapped blob are synced
-                syncing: None,
+                sync: SyncState::dirty(), // ensure pending writes on the wrapped blob are synced
             })),
         }
     }

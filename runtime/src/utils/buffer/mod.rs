@@ -1691,6 +1691,41 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_write_sync_after_buffered_write_observes_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = ControlledSyncBlob::new();
+            let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+
+            writer.write_at(0, b"abc").await.unwrap();
+            let first = writer.start_sync().await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+
+            writer.write_at(3, b"d").await.unwrap();
+
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let sync_writer = writer.clone();
+            let waiter = context.child("sync").spawn(|_| async move {
+                sync_writer.sync().await.unwrap();
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            crate::utils::reschedule().await;
+            assert_eq!(completed.load(Ordering::Relaxed), 0);
+            assert_eq!(blob.pending_syncs(), 1);
+
+            blob.release_next_sync();
+            first.await.unwrap();
+            while completed.load(Ordering::Relaxed) != 1 {
+                crate::utils::reschedule().await;
+            }
+            waiter.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced]
     fn test_write_sync_persists_pre_wrapped_blob_mutation() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

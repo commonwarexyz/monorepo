@@ -27,7 +27,7 @@
 //! recovery, and are not covered by [Append]'s [`Blob::write_at_sync`] fast paths.
 
 use super::{
-    super::sync::{self, Shared},
+    super::sync::{self, Shared, State as SyncState},
     read::{PageReader, Replay},
 };
 use crate::{
@@ -125,41 +125,38 @@ struct BlobState<B: Blob> {
     /// [`Barrier`]).
     barrier: Barrier,
 
-    /// Whether prior plain writes or resizes must be made durable by a full sync.
-    needs_sync: bool,
-
-    /// In-flight sync covering all mutations up to the last [`Self::start_sync`] call, if no newer
-    /// mutations have invalidated it.
-    syncing: Option<Shared>,
+    /// Durability state for mutations already issued to the underlying blob.
+    sync: SyncState,
 }
 
 impl<B: Blob> BlobState<B> {
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.blob.write_at(offset, bufs).await?;
-        self.needs_sync = true;
-        self.syncing = None;
+        self.sync.mark_dirty();
         Ok(())
     }
 
     /// Write bytes to the underlying blob and make them durable.
     ///
-    /// Uses [`Blob::write_at_sync`] when there are no earlier unsynced
-    /// mutations. Otherwise, writes the bytes and then syncs the blob.
+    /// Uses [`Blob::write_at_sync`] when no earlier mutation requires a new full sync. Any
+    /// in-flight sync for earlier plain mutations is observed before returning. Otherwise, writes
+    /// the bytes and then syncs the blob.
     async fn write_at_sync(
         &mut self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        if self.needs_sync {
+        if self.sync.is_dirty() {
             self.write_at(offset, bufs).await?;
             self.sync().await.map(|_| ())
         } else {
             // If `write_at_sync` fails, a later sync must not treat the drained
             // buffer as durable.
-            self.needs_sync = true;
+            let previous = self.sync.prepare_range_sync();
             self.blob.write_at_sync(offset, bufs).await?;
-            self.needs_sync = false;
+            self.sync.restore(previous);
+            self.sync.observe_in_flight().await;
             Ok(())
         }
     }
@@ -181,38 +178,19 @@ impl<B: Blob> BlobState<B> {
     /// Resize the underlying blob and mark it as needing sync.
     async fn resize(&mut self, len: u64) -> Result<(), Error> {
         self.blob.resize(len).await?;
-        self.needs_sync = true;
-        self.syncing = None;
+        self.sync.mark_dirty();
         Ok(())
     }
 
     /// Sync the underlying blob if there are unsynced mutations.
     async fn sync(&mut self) -> Result<bool, Error> {
-        if self.needs_sync {
-            self.blob.sync().await?;
-            self.needs_sync = false;
-            self.syncing = None;
-            return Ok(true);
-        }
-
-        if let Some(syncing) = self.syncing.take() {
-            syncing.await;
-            return Ok(true);
-        }
-        Ok(false)
+        self.sync.sync(&self.blob).await
     }
 
     /// Start syncing the underlying blob if there are unsynced mutations, otherwise return any
     /// in-flight sync that already covers the current state.
     async fn start_sync_shared(&mut self) -> Option<Shared> {
-        if self.needs_sync {
-            let syncing = sync::share(self.blob.start_sync().await, "sync failed");
-            self.needs_sync = false;
-            self.syncing = Some(syncing.clone());
-            return Some(syncing);
-        }
-
-        self.syncing.clone()
+        self.sync.start(&self.blob, "sync failed").await
     }
 
     /// Start syncing the underlying blob if there are unsynced mutations.
@@ -307,7 +285,13 @@ impl<B: Blob> Append<B> {
         }
 
         let capacity = adjusted_capacity(capacity, cache_ref.page_size());
-        let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
+        let initial_sync = || {
+            if invalid_data_found {
+                SyncState::Clean
+            } else {
+                SyncState::dirty() // ensure pending writes on the wrapped blob are synced
+            }
+        };
 
         let (blob_state, partial_data) = match partial_page_state {
             Some((partial_page, crc_record)) => (
@@ -316,8 +300,7 @@ impl<B: Blob> Append<B> {
                     current_page: pages - 1,
                     partial_page_state: Some(crc_record),
                     barrier: Barrier::default(),
-                    needs_sync,
-                    syncing: None,
+                    sync: initial_sync(),
                 },
                 Some(partial_page),
             ),
@@ -327,8 +310,7 @@ impl<B: Blob> Append<B> {
                     current_page: pages,
                     partial_page_state: None,
                     barrier: Barrier::default(),
-                    needs_sync,
-                    syncing: None,
+                    sync: initial_sync(),
                 },
                 None,
             ),
@@ -1421,8 +1403,8 @@ impl<B: Blob> Append<B> {
     /// new barrier is recorded concurrently (flush callers hold the buffer write lock; other callers
     /// rely on the contract that mutable operations are serialized). That lets it discharge
     /// unconditionally without tracking which barrier it observed. The awaited barrier is a
-    /// full-blob sync, so any earlier plain write it covered is now durable too; hence `needs_sync`
-    /// is also cleared.
+    /// full-blob sync, so any earlier plain write it covered is now durable too; hence the sync
+    /// state is also cleared.
     async fn drain_barrier(&self) -> Result<(), Error> {
         let Some(pending) = self.blob_state.read().await.barrier.pending() else {
             return Ok(());
@@ -1430,8 +1412,7 @@ impl<B: Blob> Append<B> {
         pending.await;
         let mut blob_state = self.blob_state.write().await;
         blob_state.barrier.discharge();
-        blob_state.needs_sync = false;
-        blob_state.syncing = None;
+        blob_state.sync = SyncState::Clean;
         Ok(())
     }
 
@@ -3084,6 +3065,45 @@ mod tests {
             append.append(b"abc").await.unwrap();
             let handle = append.start_sync().await.unwrap();
             assert_eq!(blob.pending_syncs(), 1);
+
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let sync_append = append.clone();
+            let waiter = context.child("sync").spawn(|_| async move {
+                sync_append.sync().await.unwrap();
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            crate::utils::reschedule().await;
+            assert_eq!(completed.load(Ordering::Relaxed), 0);
+            assert_eq!(blob.pending_syncs(), 1);
+
+            blob.release_next_sync();
+            handle.await.unwrap();
+            while completed.load(Ordering::Relaxed) != 1 {
+                crate::utils::reschedule().await;
+            }
+            waiter.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_sync_after_buffered_append_waits_for_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = ControlledSyncBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let full_page = vec![0u8; PAGE_SIZE.get() as usize];
+            append.append(&full_page).await.unwrap();
+            let handle = append.start_sync().await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+
+            append.append(b"a").await.unwrap();
 
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
