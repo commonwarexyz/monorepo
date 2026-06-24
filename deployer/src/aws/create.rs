@@ -33,6 +33,7 @@ const MAX_DESCRIBE_BATCH: usize = 1000;
 struct ToolUrls {
     docker: String,
     libjemalloc: String,
+    logrotate: String,
 }
 
 /// Represents a deployed instance with its configuration and public IP
@@ -276,7 +277,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     .await?;
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
-        let [docker_url, libjemalloc_url]: [String; 2] = try_join_all([
+        let [docker_url, libjemalloc_url, logrotate_url]: [String; 3] = try_join_all([
             cache_tool(
                 docker_bin_s3_key(DOCKER_VERSION, *arch),
                 docker_download_url(DOCKER_VERSION, *arch),
@@ -284,6 +285,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             cache_tool(
                 libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch),
                 libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch),
+            ),
+            cache_tool(
+                logrotate_bin_s3_key(LOGROTATE_VERSION, *arch),
+                logrotate_download_url(LOGROTATE_VERSION, *arch),
             ),
         ])
         .await?
@@ -294,6 +299,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             ToolUrls {
                 docker: docker_url,
                 libjemalloc: libjemalloc_url,
+                logrotate: logrotate_url,
             },
         );
     }
@@ -1016,6 +1022,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     pyroscope_timer: pyroscope_agent_timer_url.clone(),
                     docker_tgz: tool_urls.docker.clone(),
                     libjemalloc_deb: tool_urls.libjemalloc.clone(),
+                    logrotate_deb: tool_urls.logrotate.clone(),
                 },
                 arch,
             ),

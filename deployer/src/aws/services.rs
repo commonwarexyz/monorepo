@@ -29,6 +29,9 @@ pub const SAMPLY_VERSION: &str = "0.13.1";
 /// Version of libjemalloc2 package for Ubuntu 24.04
 pub const LIBJEMALLOC2_VERSION: &str = "5.3.0-2build1";
 
+/// Version of logrotate package for Ubuntu 24.04
+pub const LOGROTATE_VERSION: &str = "3.21.0-2build1";
+
 /// Ubuntu package archive base URL for arm64
 const UBUNTU_ARCHIVE_ARM64: &str = "http://ports.ubuntu.com/ubuntu-ports/pool";
 
@@ -59,9 +62,6 @@ pub const GRAFANA_IMAGE: &str = "grafana/grafana:11.5.2";
 /// Image for Tracer trace viewing
 pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:0.1.1";
 
-/// Image for truncating deployed binary logs
-pub const BUSYBOX_IMAGE: &str = "busybox:1.37.0";
-
 const IMAGES: &[&str] = &[
     PROMETHEUS_IMAGE,
     PROMTAIL_IMAGE,
@@ -71,7 +71,6 @@ const IMAGES: &[&str] = &[
     PYROSCOPE_IMAGE,
     GRAFANA_IMAGE,
     TRACER_IMAGE,
-    BUSYBOX_IMAGE,
 ];
 
 #[derive(Clone, Copy)]
@@ -402,6 +401,13 @@ pub(crate) fn libjemalloc_bin_s3_key(version: &str, architecture: Architecture) 
     )
 }
 
+pub(crate) fn logrotate_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/logrotate/{version}/linux-{arch}/logrotate_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
 // S3 key functions for component configs and services (include deployer version for cache invalidation)
 //
 // Convention: {TOOLS_CONFIGS_PREFIX}/{deployer_version}/{component}/{file}
@@ -520,6 +526,18 @@ pub(crate) fn libjemalloc_download_url(version: &str, architecture: Architecture
     };
     format!(
         "{base}/universe/j/jemalloc/libjemalloc2_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
+/// Returns the download URL for logrotate from Ubuntu archive
+pub(crate) fn logrotate_download_url(version: &str, architecture: Architecture) -> String {
+    let base = match architecture {
+        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
+        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
+    };
+    format!(
+        "{base}/main/l/logrotate/logrotate_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
@@ -760,51 +778,6 @@ sudo systemctl enable --now docker
     cmd
 }
 
-fn binary_log_truncate_service(image: &str) -> String {
-    format!(
-        r#"[Unit]
-Description=Truncate Deployed Binary Log
-After=docker.service
-Requires=docker.service
-
-[Service]
-Type=oneshot
-ExecStartPre=-{docker_bin} rm -f binary_log_truncate
-ExecStart={docker_bin} run --rm --name binary_log_truncate --volume /var/log:/var/log {image} sh -c ': > /var/log/binary.log'
-
-[Install]
-WantedBy=multi-user.target
-"#,
-        docker_bin = DOCKER_BIN,
-        image = image,
-    )
-}
-
-const BINARY_LOG_TRUNCATE_TIMER: &str = r#"[Unit]
-Description=Truncate Deployed Binary Log Periodically
-
-[Timer]
-OnCalendar=hourly
-Persistent=true
-Unit=binary-log-truncate.service
-
-[Install]
-WantedBy=timers.target
-"#;
-
-fn install_binary_log_truncator_cmd(image_cache: &ImageCache) -> String {
-    let image = image_cache.image(BUSYBOX_IMAGE);
-    let service = binary_log_truncate_service(image);
-    format!(
-        r#"sudo docker pull {image}
-sudo tee /etc/systemd/system/binary-log-truncate.service >/dev/null <<'EOF'
-{service}EOF
-sudo tee /etc/systemd/system/binary-log-truncate.timer >/dev/null <<'EOF'
-{BINARY_LOG_TRUNCATE_TIMER}EOF
-"#
-    )
-}
-
 pub(crate) fn monitoring_image_services() -> impl Iterator<Item = &'static str> {
     MONITORING_IMAGE_SERVICES
         .iter()
@@ -886,6 +859,7 @@ pub struct InstanceUrls {
     pub pyroscope_timer: String,
     pub docker_tgz: String,
     pub libjemalloc_deb: String,
+    pub logrotate_deb: String,
 }
 
 /// Phase 1 (optional): Install apt packages on binary instances
@@ -923,7 +897,8 @@ pub(crate) fn install_binary_download_cmd(urls: &InstanceUrls) -> String {
 rm -f /home/ubuntu/binary /home/ubuntu/config.conf /home/ubuntu/hosts.yaml \
       /home/ubuntu/promtail.yml /home/ubuntu/binary.service \
       /home/ubuntu/pyroscope-agent.sh /home/ubuntu/pyroscope-agent.service \
-      /home/ubuntu/pyroscope-agent.timer /home/ubuntu/docker.tgz /home/ubuntu/libjemalloc2.deb
+      /home/ubuntu/pyroscope-agent.timer /home/ubuntu/docker.tgz /home/ubuntu/libjemalloc2.deb \
+      /home/ubuntu/logrotate.deb
 
 # Unmask services in case previous attempt left them masked
 sudo systemctl unmask docker promtail node_exporter binary 2>/dev/null || true
@@ -939,12 +914,13 @@ sudo systemctl unmask docker promtail node_exporter binary 2>/dev/null || true
 {WGET} -O /home/ubuntu/pyroscope-agent.timer '{}' &
 {WGET} -O /home/ubuntu/docker.tgz '{}' &
 {WGET} -O /home/ubuntu/libjemalloc2.deb '{}' &
+{WGET} -O /home/ubuntu/logrotate.deb '{}' &
 wait
 
 # Verify all downloads succeeded
 for f in binary config.conf hosts.yaml promtail.yml binary.service \
          pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer \
-         docker.tgz libjemalloc2.deb; do
+         docker.tgz libjemalloc2.deb logrotate.deb; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
@@ -961,6 +937,7 @@ done
         urls.pyroscope_timer,
         urls.docker_tgz,
         urls.libjemalloc_deb,
+        urls.logrotate_deb,
     )
 }
 
@@ -1044,7 +1021,6 @@ pub(crate) fn install_binary_setup_cmd(
     image_cache: &ImageCache,
 ) -> String {
     let image_services = install_image_services_cmd(BINARY_IMAGE_SERVICES, image_cache);
-    let log_truncator = install_binary_log_truncator_cmd(image_cache);
     let perf_setup = if profiling {
         r#"
 # Setup pyroscope agent (perf symlink must be created after linux-tools installed via apt)
@@ -1068,10 +1044,10 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
 echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
 
 {image_services}
-{log_truncator}
 
 # Install deb packages
 sudo dpkg -i /home/ubuntu/libjemalloc2.deb
+sudo dpkg -i /home/ubuntu/logrotate.deb
 
 # Setup Promtail
 sudo mkdir -p /etc/promtail /var/lib/promtail
@@ -1083,13 +1059,20 @@ chmod +x /home/ubuntu/binary
 sudo touch /var/log/binary.log && sudo chown ubuntu:ubuntu /var/log/binary.log
 sudo mv /home/ubuntu/binary.service /etc/systemd/system/binary.service
 
+# Setup logrotate
+sudo tee /etc/logrotate.d/binary >/dev/null <<'EOF'
+{LOGROTATE_CONF}EOF
+echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/binary" | crontab -
+
 {perf_setup}
 # Start services
 sudo systemctl daemon-reload
-sudo systemctl enable --now binary
-sudo systemctl enable --now binary-log-truncate.timer
-sudo systemctl enable --now node_exporter
-sudo systemctl enable --now promtail{pyroscope_enable}"#
+sudo systemctl enable node_exporter
+sudo systemctl enable promtail
+sudo systemctl enable binary
+sudo systemctl start node_exporter
+sudo systemctl start promtail
+sudo systemctl start binary || true{pyroscope_enable}"#
     )
 }
 
@@ -1161,6 +1144,16 @@ scrape_configs:
     }
     config
 }
+
+/// Logrotate configuration for binary logs
+pub const LOGROTATE_CONF: &str = r#"
+/var/log/binary.log {
+    rotate 0
+    copytruncate
+    missingok
+    notifempty
+}
+"#;
 
 /// Generates systemd service file content for the deployed binary
 pub(crate) fn binary_service(architecture: Architecture) -> String {
@@ -1312,6 +1305,7 @@ mod tests {
             pyroscope_timer: "pyroscope-timer".to_string(),
             docker_tgz: "docker".to_string(),
             libjemalloc_deb: "libjemalloc".to_string(),
+            logrotate_deb: "logrotate".to_string(),
         }
     }
 
@@ -1346,6 +1340,10 @@ mod tests {
             libjemalloc_bin_s3_key("5.3.0-2build1", arch),
             "tools/binaries/libjemalloc2/5.3.0-2build1/linux-arm64/libjemalloc2_5.3.0-2build1_arm64.deb"
         );
+        assert_eq!(
+            logrotate_bin_s3_key("3.21.0-2build1", arch),
+            "tools/binaries/logrotate/3.21.0-2build1/linux-arm64/logrotate_3.21.0-2build1_arm64.deb"
+        );
     }
 
     #[test]
@@ -1362,6 +1360,10 @@ mod tests {
         assert_eq!(
             libjemalloc_bin_s3_key("5.3.0-2build1", arch),
             "tools/binaries/libjemalloc2/5.3.0-2build1/linux-amd64/libjemalloc2_5.3.0-2build1_amd64.deb"
+        );
+        assert_eq!(
+            logrotate_bin_s3_key("3.21.0-2build1", arch),
+            "tools/binaries/logrotate/3.21.0-2build1/linux-amd64/logrotate_3.21.0-2build1_amd64.deb"
         );
     }
 
@@ -1481,6 +1483,7 @@ mod tests {
         let download = install_binary_download_cmd(&urls);
         assert!(download.contains("-O /home/ubuntu/promtail.yml"));
         assert!(download.contains("-O /home/ubuntu/docker.tgz"));
+        assert!(download.contains("-O /home/ubuntu/logrotate.deb"));
         assert!(!download.contains("promtail.zip"));
         assert!(!download.contains("node_exporter.tar.gz"));
 
@@ -1488,22 +1491,29 @@ mod tests {
         let setup = install_binary_setup_cmd(false, Architecture::Arm64, &image_cache);
         assert!(setup.contains(&format!("sudo docker pull {PROMTAIL_IMAGE}")));
         assert!(setup.contains(&format!("sudo docker pull {NODE_EXPORTER_IMAGE}")));
-        assert!(setup.contains(&format!("sudo docker pull {BUSYBOX_IMAGE}")));
         assert!(setup.contains("sudo tee /etc/systemd/system/promtail.service"));
         assert!(setup.contains("sudo tee /etc/systemd/system/node_exporter.service"));
-        assert!(setup.contains("sudo tee /etc/systemd/system/binary-log-truncate.service"));
-        assert!(setup.contains("sudo tee /etc/systemd/system/binary-log-truncate.timer"));
         assert!(setup.contains("ExecStartPre=-/usr/local/bin/docker rm -f promtail"));
         assert!(setup.contains("ExecStart=/usr/local/bin/docker run --rm --name promtail"));
-        assert!(setup.contains("ExecStartPre=-/usr/local/bin/docker rm -f binary_log_truncate"));
-        assert!(
-            setup.contains("ExecStart=/usr/local/bin/docker run --rm --name binary_log_truncate")
-        );
         assert!(!setup.contains("/usr/bin/docker"));
-        assert!(setup.contains("sudo systemctl enable --now binary"));
-        assert!(setup.contains("sudo systemctl enable --now binary-log-truncate.timer"));
-        assert!(setup.contains("sudo systemctl enable --now node_exporter"));
-        assert!(setup.contains("sudo systemctl enable --now promtail"));
+        assert!(setup.contains("sudo dpkg -i /home/ubuntu/logrotate.deb"));
+        assert!(setup.contains("copytruncate"));
+        assert!(setup.contains(
+            "echo \"0 * * * * /usr/sbin/logrotate /etc/logrotate.d/binary\" | crontab -"
+        ));
+        assert!(!setup.contains("binary-log-truncate"));
+        assert!(!setup.contains("busybox"));
+        assert!(setup.contains("sudo systemctl enable node_exporter"));
+        assert!(setup.contains("sudo systemctl enable promtail"));
+        assert!(setup.contains("sudo systemctl enable binary"));
+        assert!(setup.contains("sudo systemctl start node_exporter"));
+        assert!(setup.contains("sudo systemctl start promtail"));
+        assert!(setup.contains("sudo systemctl start binary || true"));
+        let node_exporter_start = setup.find("sudo systemctl start node_exporter").unwrap();
+        let promtail_start = setup.find("sudo systemctl start promtail").unwrap();
+        let binary_start = setup.find("sudo systemctl start binary || true").unwrap();
+        assert!(node_exporter_start < binary_start);
+        assert!(promtail_start < binary_start);
 
         let promtail = promtail_config("10.0.0.1", "worker", "10.0.1.2", "us-east-1", "arm64");
         assert!(promtail.contains("filename: /var/lib/promtail/positions.yaml"));

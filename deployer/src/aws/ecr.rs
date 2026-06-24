@@ -355,16 +355,16 @@ mod tests {
         let image = cached_image(
             "123.dkr.ecr.us-east-1.amazonaws.com",
             "commonware-deployer-cache",
-            "busybox:1.37.0",
+            "ubuntu:24.04",
         )
         .unwrap();
         assert_eq!(
             image.repository,
-            "commonware-deployer-cache/docker-hub/library/busybox"
+            "commonware-deployer-cache/docker-hub/library/ubuntu"
         );
         assert_eq!(
             image.reference,
-            "123.dkr.ecr.us-east-1.amazonaws.com/commonware-deployer-cache/docker-hub/library/busybox:1.37.0"
+            "123.dkr.ecr.us-east-1.amazonaws.com/commonware-deployer-cache/docker-hub/library/ubuntu:24.04"
         );
     }
 
