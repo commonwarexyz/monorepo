@@ -43,6 +43,7 @@ use futures::{
     FutureExt as _,
 };
 use std::{
+    future::Future,
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
 };
@@ -55,30 +56,70 @@ enum ProtectedCrc {
     Second,
 }
 
-/// The completion of an in-flight partial-page sync. Shared so the returned handle and any later
-/// rewrite of the page can both await the same sync. The output is `()` because a sync failure is
-/// unrecoverable (see [`shared_sync`]), which also keeps the shared future trivially cloneable.
+/// The completion of an in-flight partial-page sync. Shared so the returned `start_sync` handle and
+/// any later rewrite of the page can both await the same sync. The output is `()`; failures are
+/// handled by panicking in [`Barrier::into_shared`].
 type SharedSync = Shared<BoxFuture<'static, ()>>;
 
-/// Wraps an already-issued blob sync `handle` as a shareable, awaitable completion. Used by
-/// `start_sync`, whose durability barrier is issued eagerly so it overlaps with later work.
+/// Tracks the in-flight partial-page footer sync that a rewrite of the current partial page must
+/// observe before overwriting the page's preserved checksum slot.
 ///
-/// A failed partial-page sync is unrecoverable: the blob must not be reused, so this panics rather
-/// than threading a (non-cloneable) error through the shared future. The panic carries the
-/// underlying error.
-fn shared_sync(handle: Handle<()>) -> SharedSync {
-    async move { handle.await.expect("partial-page sync failed") }
-        .boxed()
-        .shared()
-}
+/// The partial-page footer has only two CRC slots: one preserves the last durable checksum, the
+/// other holds the newly written one. Rewriting the page overwrites the non-preserved slot, so a
+/// not-yet-durable checksum must be made durable (the barrier discharged) before another rewrite can
+/// replace it. `None` means no such barrier is owed.
+#[derive(Clone, Default)]
+struct Barrier(Option<SharedSync>);
 
-/// A lazy partial-page barrier that issues a fresh `blob.sync()` only when first awaited. Used by
-/// `replay`, which writes the partial-page footer plainly and must stay non-durable until a later
-/// rewrite (or an explicit `sync`) forces the barrier before overwriting the preserved slot.
-fn lazy_shared_sync<B: Blob>(blob: B) -> SharedSync {
-    async move { blob.sync().await.expect("partial-page sync failed") }
-        .boxed()
-        .shared()
+impl Barrier {
+    /// Wraps a sync-completion future as a shareable barrier. A failed partial-page sync is
+    /// unrecoverable (the blob must not be reused), so the barrier panics rather than threading a
+    /// (non-cloneable) error through the shared future. The panic carries the underlying error.
+    fn into_shared(fut: impl Future<Output = Result<(), Error>> + Send + 'static) -> SharedSync {
+        async move { fut.await.expect("partial-page sync failed") }
+            .boxed()
+            .shared()
+    }
+
+    /// Records an eagerly-issued sync `handle` as the barrier and returns a clone for the caller to
+    /// observe. Used by `start_sync`, whose durability barrier is issued up front so it overlaps
+    /// with later work.
+    fn record(&mut self, handle: Handle<()>) -> SharedSync {
+        let barrier = Self::into_shared(handle);
+        self.0 = Some(barrier.clone());
+        barrier
+    }
+
+    /// Records a lazy barrier that issues a fresh `blob.sync()` only when first awaited. Used by
+    /// `replay`, which writes the partial-page footer plainly and must stay non-durable until a
+    /// later rewrite (or an explicit `sync`) forces the barrier before overwriting the preserved
+    /// slot.
+    fn record_lazy<B: Blob>(&mut self, blob: B) {
+        self.0 = Some(Self::into_shared(async move { blob.sync().await }));
+    }
+
+    /// The in-flight barrier, if any. Cloning a [`Shared`] is cheap and lets the caller await it
+    /// after dropping its lock.
+    fn pending(&self) -> Option<SharedSync> {
+        self.0.clone()
+    }
+
+    /// Discharges the barrier. The caller must have made the footer durable first (by awaiting the
+    /// barrier or running a full blob sync).
+    fn discharge(&mut self) {
+        self.0 = None;
+    }
+
+    /// A handle that resolves once `pending`'s sync is durable. It only observes the sync; the page
+    /// it covers stays tracked until a later rewrite discharges the barrier. Dropping the handle
+    /// does not stop the sync: the barrier is also held in [`BlobState`] and the underlying fsync
+    /// was already issued before the handle was created.
+    fn observe(pending: SharedSync) -> Handle<()> {
+        Handle::from_future(async move {
+            pending.await;
+            Ok(())
+        })
+    }
 }
 
 /// Describes the state of the underlying blob with respect to the buffer.
@@ -93,12 +134,9 @@ struct BlobState<B: Blob> {
     /// will contain its CRC record.
     partial_page_state: Option<Checksum>,
 
-    /// The in-flight partial-page sync that must complete before this page is rewritten, if any.
-    ///
-    /// The partial-page footer has only two CRC slots: one preserves the last durable checksum, the
-    /// other holds the newly written one. Rewriting the page overwrites the non-preserved slot, so a
-    /// not-yet-durable checksum must be made durable before another rewrite can replace it.
-    pending_partial_sync: Option<SharedSync>,
+    /// The barrier owed before the current partial page may be rewritten again (see
+    /// [`Barrier`]).
+    barrier: Barrier,
 
     /// Whether prior plain writes or resizes must be made durable by a full sync.
     needs_sync: bool,
@@ -267,7 +305,7 @@ impl<B: Blob> Append<B> {
                     blob,
                     current_page: pages - 1,
                     partial_page_state: Some(crc_record),
-                    pending_partial_sync: None,
+                    barrier: Barrier::default(),
                     needs_sync,
                 },
                 Some(partial_page),
@@ -277,7 +315,7 @@ impl<B: Blob> Append<B> {
                     blob,
                     current_page: pages,
                     partial_page_state: None,
-                    pending_partial_sync: None,
+                    barrier: Barrier::default(),
                     needs_sync,
                 },
                 None,
@@ -510,24 +548,40 @@ impl<B: Blob> Append<B> {
     /// This method reads `partial_page_state` from `blob_state` under a read lock, then later
     /// acquires `blob_state` as a write lock to commit the new state. This is safe because the
     /// caller always holds the buffer write lock (`buf_guard`), and all paths into `flush_internal`
-    /// require that lock, so concurrent flushes are impossible.
+    /// require that lock, so concurrent flushes are impossible. When draining a partial-page barrier
+    /// (below) this method briefly releases and re-acquires `buf_guard`; that is safe for the same
+    /// reason, since mutable operations are serialized and only readers can run in the meantime.
     ///
     /// Returns `true` if the flush made its writes durable, so no additional sync is needed.
-    async fn flush_internal(
-        &self,
-        mut buf_guard: AsyncRwLockWriteGuard<'_, Buffer>,
+    async fn flush_internal<'a>(
+        &'a self,
+        mut buf_guard: AsyncRwLockWriteGuard<'a, Buffer>,
         write_partial_page: bool,
         sync: bool,
     ) -> Result<bool, Error> {
-        // If this flush rewrites the current partial page, its earlier in-flight sync must be made
-        // durable first: the two-slot footer can preserve only one prior checksum, and overwriting
-        // the slot of a not-yet-durable sync would lose the only crash-recoverable fallback.
+        // If this flush rewrites the current partial page, drain any prior in-flight sync first so
+        // the page's preserved checksum slot is not overwritten before it is durable (see
+        // [`Barrier`]).
+        //
+        // Draining the barrier means awaiting an fsync, so release the buffer write lock across the
+        // wait (letting concurrent reads and appends proceed, the whole point of the eager async
+        // barrier) and re-acquire it afterward. Mutable operations are serialized by the caller, so
+        // no other writer runs during the wait and this flush still rewrites the page on re-entry.
         let logical_page_size = self.cache_ref.page_size() as usize;
         if self
             .rewrites_current_page(&buf_guard, write_partial_page, logical_page_size)
             .await
+            && self.blob_state.read().await.barrier.pending().is_some()
         {
-            self.wait_for_pending_partial_sync().await?;
+            drop(buf_guard);
+            self.drain_barrier().await?;
+            buf_guard = self.buffer.write().await;
+            debug_assert!(
+                self.rewrites_current_page(&buf_guard, write_partial_page, logical_page_size)
+                    .await,
+                "serialized mutation invariant: flush must still rewrite the partial page after \
+                 draining its barrier"
+            );
         }
         let buffer = &mut *buf_guard;
 
@@ -1268,7 +1322,7 @@ impl<B: Blob> Append<B> {
                 let mut blob_state = self.blob_state.write().await;
                 if blob_state.partial_page_state.is_some() {
                     let blob = blob_state.blob.clone();
-                    blob_state.pending_partial_sync = Some(lazy_shared_sync(blob));
+                    blob_state.barrier.record_lazy(blob);
                 }
             }
         }
@@ -1312,44 +1366,23 @@ impl<B: Blob> Append<B> {
 }
 
 impl<B: Blob> Append<B> {
-    /// The in-flight partial-page sync, if any.
-    async fn pending_partial_sync(&self) -> Option<SharedSync> {
-        self.blob_state.read().await.pending_partial_sync.clone()
-    }
-
-    /// Awaits the in-flight partial-page sync, if any, and clears it so its page can be rewritten.
+    /// Awaits the in-flight barrier, if any, and discharges it so its page can be rewritten.
     ///
-    /// Only this method clears `pending_partial_sync`, and the caller must ensure no new partial
-    /// sync is recorded concurrently (flush callers hold the buffer write lock; other callers rely
-    /// on the contract that mutable operations are serialized). That lets it clear unconditionally
-    /// without tracking which sync it observed.
-    async fn wait_for_pending_partial_sync(&self) -> Result<(), Error> {
-        let Some(pending) = self.pending_partial_sync().await else {
+    /// Only this method (and a full `sync`) discharges the barrier, and the caller must ensure no
+    /// new barrier is recorded concurrently (flush callers hold the buffer write lock; other callers
+    /// rely on the contract that mutable operations are serialized). That lets it discharge
+    /// unconditionally without tracking which barrier it observed. The awaited barrier is a
+    /// full-blob sync, so any earlier plain write it covered is now durable too; hence `needs_sync`
+    /// is also cleared.
+    async fn drain_barrier(&self) -> Result<(), Error> {
+        let Some(pending) = self.blob_state.read().await.barrier.pending() else {
             return Ok(());
         };
         pending.await;
         let mut blob_state = self.blob_state.write().await;
-        blob_state.pending_partial_sync = None;
+        blob_state.barrier.discharge();
         blob_state.needs_sync = false;
         Ok(())
-    }
-
-    /// A handle that resolves once `pending`'s sync is durable. It only observes the sync; the page
-    /// it covers is left tracked until a later rewrite clears it via [`Self::wait_for_pending_partial_sync`].
-    fn pending_partial_sync_handle(pending: SharedSync) -> Handle<()> {
-        Handle::from_future(async move {
-            pending.await;
-            Ok(())
-        })
-    }
-
-    /// Starts an async durability barrier for a just-written partial-page footer and records it as
-    /// the pending sync that a later rewrite of the page must wait for.
-    ///
-    /// Caller must hold the blob_state write lock and have just emitted a plain partial-page write.
-    async fn record_partial_sync(blob_state: &mut BlobState<B>) {
-        let handle = blob_state.start_sync().await;
-        blob_state.pending_partial_sync = Some(shared_sync(handle));
     }
 
     /// Flushes buffered data and makes all pending mutations durable.
@@ -1374,7 +1407,7 @@ impl<B: Blob> Append<B> {
         if synced {
             // A full sync makes the partial-page footer durable, discharging any pending barrier
             // (e.g. one recorded by replay) so a later rewrite need not wait on it.
-            blob_state.pending_partial_sync = None;
+            blob_state.barrier.discharge();
         }
         Ok(())
     }
@@ -1386,46 +1419,24 @@ impl<B: Blob> Append<B> {
     /// mutations are considered issued, so a later [`Self::sync`] without
     /// intervening writes returns immediately and does not wait for this handle.
     pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
-        loop {
-            let buf_guard = self.buffer.write().await;
-            let logical_page_size = self.cache_ref.page_size() as usize;
+        // Flush any buffered data, including any partial page (plain writes only, so the durability
+        // barrier is started separately below). flush_internal drains any prior partial-page
+        // barrier itself, releasing the buffer lock across the wait, so a rewrite never overwrites a
+        // not-yet-durable checksum slot.
+        let buf_guard = self.buffer.write().await;
+        self.flush_internal(buf_guard, true, false).await?;
 
-            // A partial page with an in-flight sync cannot be rewritten until that sync is durable.
-            // If this call has buffered bytes that would rewrite the page, wait here before
-            // returning so the returned handle only observes a sync that has already been started.
-            // (A failed sync would have panicked, so a completed one is always durable.)
-            if let Some(pending) = self.pending_partial_sync().await {
-                if pending.peek().is_none()
-                    && self
-                        .rewrites_current_page(&buf_guard, true, logical_page_size)
-                        .await
-                {
-                    drop(buf_guard);
-                    pending.await;
-                    continue;
-                }
-            }
-
-            // Flush any buffered data, including any partial page (plain writes only, so the durability
-            // barrier is started separately below). A rewrite of the current page clears the now-durable
-            // pending sync via wait_for_pending_partial_sync.
-            self.flush_internal(buf_guard, true, false).await?;
-
-            // Start syncing pending mutations and return the completion handle. If a partial-page write
-            // is in flight, record it so a later rewrite of this page waits for it to become durable
-            // before overwriting its checksum slot.
-            let mut blob_state = self.blob_state.write().await;
-            if blob_state.needs_sync && blob_state.partial_page_state.is_some() {
-                Self::record_partial_sync(&mut blob_state).await;
-                let pending = blob_state
-                    .pending_partial_sync
-                    .clone()
-                    .expect("record_partial_sync recorded a pending sync");
-                drop(blob_state);
-                return Ok(Self::pending_partial_sync_handle(pending));
-            } else {
-                return Ok(blob_state.start_sync().await);
-            }
+        // Start syncing pending mutations and return the completion handle. If a partial-page write
+        // is in flight, record it so a later rewrite of this page waits for it to become durable
+        // before overwriting its checksum slot, and return a handle that only observes that barrier.
+        let mut blob_state = self.blob_state.write().await;
+        if blob_state.needs_sync && blob_state.partial_page_state.is_some() {
+            let handle = blob_state.start_sync().await;
+            let pending = blob_state.barrier.record(handle);
+            drop(blob_state);
+            Ok(Barrier::observe(pending))
+        } else {
+            Ok(blob_state.start_sync().await)
         }
     }
 
@@ -1466,7 +1477,7 @@ impl<B: Blob> Append<B> {
 
         // Flush any buffered data first to ensure we have a consistent state on disk.
         self.sync().await?;
-        self.wait_for_pending_partial_sync().await?;
+        self.drain_barrier().await?;
 
         // Acquire both locks to prevent concurrent operations.
         let mut buf_guard = self.buffer.write().await;
@@ -3069,6 +3080,9 @@ mod tests {
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
             let start_append = append.clone();
+
+            // The spawned task returns the second `start_sync` handle for the parent to await later.
+            #[allow(clippy::async_yields_async)]
             let starter = context.child("second_start").spawn(|_| async move {
                 let second = start_append.start_sync().await.unwrap();
                 completed_clone.fetch_add(1, Ordering::Relaxed);
@@ -3206,6 +3220,9 @@ mod tests {
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
             let start_append = append.clone();
+
+            // The spawned task returns the third `start_sync` handle for the parent to await later.
+            #[allow(clippy::async_yields_async)]
             let starter = context.child("third_start").spawn(|_| async move {
                 let third = start_append.start_sync().await.unwrap();
                 completed_clone.fetch_add(1, Ordering::Relaxed);
