@@ -1,9 +1,10 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
 
-use super::get_page_from_blob;
+use super::{buf::PagedBuf, get_page_from_blob};
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
 use ahash::AHashMap;
+use commonware_codec::Read as CodecRead;
 use commonware_utils::{cache::Clock, sync::RwLock};
 use futures::{future::Shared, FutureExt};
 use std::{
@@ -17,6 +18,22 @@ use std::{
     },
 };
 use tracing::{error, trace};
+
+/// Maximum number of bytes decoded per page-cache read-lock acquisition in
+/// [CacheRef::decode_cached_exact_many]. Bounding hold time by bytes rather than item count
+/// keeps writers from being held off for long stretches when items are large.
+const DECODE_BATCH_BYTES: usize = 8192;
+
+/// Result of attempting to decode a value from cached pages.
+pub(super) enum CachedDecode<T> {
+    /// Decoded successfully from resident bytes; the second field is the number of bytes
+    /// consumed.
+    Decoded(T, usize),
+    /// The required bytes were fully resident but malformed.
+    Invalid(commonware_codec::Error),
+    /// Not enough resident bytes to attempt or finish the decode.
+    Missing,
+}
 
 /// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
 /// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
@@ -235,6 +252,62 @@ impl CacheRef {
         });
     }
 
+    /// Decode a `T` from the resident prefix of `[offset, offset + max_len)` for `blob_id`,
+    /// letting the decoder consume at most `max_len` bytes. The decode runs under the page-cache
+    /// read lock with zero copies, so `T::read_cfg` must be cheap and parse-only.
+    pub(super) fn decode_cached_prefix<T: CodecRead>(
+        &self,
+        blob_id: u64,
+        offset: u64,
+        max_len: usize,
+        cfg: &T::Cfg,
+    ) -> CachedDecode<T> {
+        self.cache
+            .read()
+            .decode_prefix(blob_id, offset, max_len, cfg)
+    }
+
+    /// Like [Self::decode_cached_prefix] but requires the encoding to occupy exactly `len` bytes.
+    pub(super) fn decode_cached_exact<T: CodecRead>(
+        &self,
+        blob_id: u64,
+        offset: u64,
+        len: usize,
+        cfg: &T::Cfg,
+    ) -> CachedDecode<T> {
+        self.cache.read().decode_exact(blob_id, offset, len, cfg)
+    }
+
+    /// Decode multiple items of exactly `len` bytes each at the given offsets for `blob_id`,
+    /// without performing I/O. For each offset, pushes `Some(item)` on success or `None` when the
+    /// item's bytes are not fully resident. Returns an error only when resident bytes are
+    /// malformed; in that case `out` may contain fewer than `offsets.len()` new entries and must
+    /// be discarded.
+    ///
+    /// The page-cache read lock is taken once per chunk of offsets rather than once per item,
+    /// amortizing lock acquisition while bounding hold time.
+    pub(super) fn decode_cached_exact_many<T: CodecRead>(
+        &self,
+        blob_id: u64,
+        offsets: &[u64],
+        len: usize,
+        cfg: &T::Cfg,
+        out: &mut Vec<Option<T>>,
+    ) -> Result<(), commonware_codec::Error> {
+        let chunk_size = (DECODE_BATCH_BYTES / len.max(1)).max(1);
+        for chunk in offsets.chunks(chunk_size) {
+            let cache = self.cache.read();
+            for &offset in chunk {
+                match cache.decode_exact::<T>(blob_id, offset, len, cfg) {
+                    CachedDecode::Decoded(value, _) => out.push(Some(value)),
+                    CachedDecode::Missing => out.push(None),
+                    CachedDecode::Invalid(err) => return Err(err),
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Read the specified bytes, preferentially from the page cache. Bytes not found in the cache
     /// will be read from the provided `blob` and cached for future reads.
     pub(super) async fn read<B: Blob>(
@@ -445,6 +518,166 @@ impl Cache {
         bytes_to_copy
     }
 
+    /// Gather the resident contiguous prefix of `[offset, offset + max_len)` for `blob_id` as
+    /// borrowed slices, marking every touched page as referenced. Stops at the first non-resident
+    /// page, at the [super::buf::MAX_GATHER_PAGES] cap, or at `max_len`; the returned buffer's
+    /// `truncated` flag is set in the first two cases.
+    ///
+    /// The returned buffer borrows the cache's slot buffers, so the caller must hold its read
+    /// guard for the lifetime of the buffer. Slots are only mutated under the cache write lock,
+    /// which keeps the borrowed bytes stable.
+    fn gather(&self, blob_id: u64, offset: u64, max_len: usize) -> PagedBuf<'_> {
+        let mut buf = PagedBuf::new();
+        if max_len == 0 {
+            return buf;
+        }
+        let (mut page_num, offset_in_page) = Self::offset_to_page(self.page_size as u64, offset);
+        let mut start = offset_in_page as usize;
+        let mut gathered = 0;
+        loop {
+            let Some(page) = self.cache.get(&(blob_id, page_num)) else {
+                buf.set_truncated();
+                return buf;
+            };
+            let page = page.as_ref();
+
+            let end = self.page_size.min(start.saturating_add(max_len - gathered));
+            if !buf.push(&page[start..end]) {
+                buf.set_truncated();
+                return buf;
+            }
+            gathered += end - start;
+            if gathered == max_len {
+                return buf;
+            }
+            start = 0;
+            page_num = match page_num.checked_add(1) {
+                Some(next) => next,
+                None => {
+                    buf.set_truncated();
+                    return buf;
+                }
+            };
+        }
+    }
+
+    /// Returns the resident page slice for `[offset, offset + want)` clamped to the page end,
+    /// marking the page as referenced. Returns `None` if the page is not resident.
+    #[inline]
+    fn resident_in_page(&self, blob_id: u64, offset: u64, want: usize) -> Option<&[u8]> {
+        let (page_num, offset_in_page) = Self::offset_to_page(self.page_size as u64, offset);
+        let page = self.cache.get(&(blob_id, page_num))?.as_ref();
+        let start = offset_in_page as usize;
+        let end = self.page_size.min(start.saturating_add(want));
+        Some(&page[start..end])
+    }
+
+    /// Decode a `T` from the resident prefix of `[offset, offset + max_len)`, letting the decoder
+    /// consume at most `max_len` bytes.
+    ///
+    /// Soundness of decoding from a possibly-truncated gather: the cache only ever stores full
+    /// logical pages ([Self::cache] asserts `page.len() == page_size`, `fetch_cacheable_page`
+    /// rejects partial pages, and [Self::invalidate_from] drops pages at and beyond a truncation
+    /// point on resize). Every byte reachable through [Self::gather] is therefore a committed
+    /// logical byte of the blob, and the page overlapping the tip is never resident, so gathering
+    /// naturally stops at the flushed/tip boundary. A successful decode within the gathered prefix
+    /// is thus valid even if gathering was truncated, PROVIDED two caller obligations hold:
+    /// the decoder must be driven solely by the bytes it consumes (one whose result depends on
+    /// `remaining()` would observe a residency-dependent window rather than the requested
+    /// range; documented on the public prefix API), and resizes must be serialized against
+    /// synchronous decodes (between a blob truncation and the cache invalidation a decode could
+    /// otherwise serve pre-resize bytes; the journal wrappers hold exclusive access during
+    /// rewinds).
+    fn decode_prefix<T: CodecRead>(
+        &self,
+        blob_id: u64,
+        offset: u64,
+        max_len: usize,
+        cfg: &T::Cfg,
+    ) -> CachedDecode<T> {
+        if max_len == 0 {
+            return CachedDecode::Missing;
+        }
+
+        // Fast path: most items lie within a single page, where decoding from the contiguous
+        // slice avoids assembling a multi-slice view.
+        let Some(slice) = self.resident_in_page(blob_id, offset, max_len) else {
+            return CachedDecode::Missing;
+        };
+        let in_page = slice.len();
+        let mut buf = slice;
+        match T::read_cfg(&mut buf, cfg) {
+            Ok(value) => return CachedDecode::Decoded(value, in_page - buf.len()),
+            // The whole requested range was available, so the failure is authoritative.
+            Err(err) if in_page == max_len => return CachedDecode::Invalid(err),
+            // The decode may have needed bytes from a following page; retry below with a
+            // gathered multi-page view.
+            Err(_) => {}
+        }
+
+        let mut buf = self.gather(blob_id, offset, max_len);
+        assert!(
+            buf.len() >= in_page,
+            "gather must cover at least the fast-path page slice"
+        );
+        if buf.len() == in_page {
+            // No bytes beyond the already-tried page are resident, so the failure above was
+            // (possibly) an artifact of missing data.
+            return CachedDecode::Missing;
+        }
+        match T::read_cfg(&mut buf, cfg) {
+            Ok(value) => CachedDecode::Decoded(value, buf.consumed()),
+            // Any failure against a truncated view may be an artifact of missing data; the
+            // caller's async fallback re-reads authoritative bytes and surfaces real corruption.
+            Err(_) if buf.truncated() => CachedDecode::Missing,
+            Err(err) => CachedDecode::Invalid(err),
+        }
+    }
+
+    /// Like [Self::decode_prefix] but requires the encoding to occupy exactly `len` bytes,
+    /// matching `Decode::decode_cfg` semantics.
+    fn decode_exact<T: CodecRead>(
+        &self,
+        blob_id: u64,
+        offset: u64,
+        len: usize,
+        cfg: &T::Cfg,
+    ) -> CachedDecode<T> {
+        if len == 0 {
+            return CachedDecode::Missing;
+        }
+
+        // Fast path: the entire encoding lies within a single page, so it can be decoded from
+        // the contiguous slice and every outcome is authoritative.
+        let Some(slice) = self.resident_in_page(blob_id, offset, len) else {
+            return CachedDecode::Missing;
+        };
+        if slice.len() == len {
+            let mut buf = slice;
+            return match T::read_cfg(&mut buf, cfg) {
+                Ok(value) if buf.is_empty() => CachedDecode::Decoded(value, len),
+                // All `len` bytes were resident, so under-consumption means the encoding does
+                // not occupy exactly `len` bytes. Report the same error as `Decode::decode_cfg`.
+                Ok(_) => CachedDecode::Invalid(commonware_codec::Error::ExtraData(buf.len())),
+                Err(err) => CachedDecode::Invalid(err),
+            };
+        }
+
+        let mut buf = self.gather(blob_id, offset, len);
+        let truncated = buf.truncated();
+        match T::read_cfg(&mut buf, cfg) {
+            Ok(value) if buf.consumed() == len => CachedDecode::Decoded(value, len),
+            // A short decode against a truncated gather may be an artifact of missing data
+            // (the decoder may have consumed a prefix that happens to parse standalone).
+            Ok(_) if truncated => CachedDecode::Missing,
+            Ok(_) => {
+                CachedDecode::Invalid(commonware_codec::Error::ExtraData(len - buf.consumed()))
+            }
+            Err(_) if truncated => CachedDecode::Missing,
+            Err(err) => CachedDecode::Invalid(err),
+        }
+    }
+
     /// Put the given `page` into the page cache.
     fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
         assert_eq!(page.len(), self.page_size);
@@ -492,7 +725,10 @@ async fn fetch_cacheable_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{super::Checksum, *};
+    use super::{
+        super::{buf::MAX_GATHER_PAGES, Checksum},
+        *,
+    };
     use crate::{
         buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, Buf, BufferPool,
         BufferPoolConfig, Clock as _, Handle, IoBufsMut, Runner as _, Spawner as _, Storage as _,
@@ -1181,6 +1417,228 @@ mod tests {
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].1, 0);
         assert_eq!(ranges[1].1, PAGE_SIZE_U64);
+    }
+
+    /// Build a page of `PAGE_SIZE` bytes where byte `i` is `(seed + i) as u8`.
+    fn patterned_page(seed: usize) -> Vec<u8> {
+        (0..PAGE_SIZE.get() as usize)
+            .map(|i| (seed + i) as u8)
+            .collect()
+    }
+
+    /// The `u64` stored at `offset` in the logical byte stream of patterned pages.
+    fn patterned_u64(offset: usize) -> u64 {
+        let bytes: Vec<u8> = (offset..offset + 8).map(|i| i as u8).collect();
+        u64::from_be_bytes(bytes.try_into().unwrap())
+    }
+
+    #[test_traced]
+    fn test_decode_cached_within_one_page() {
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        cache_ref.cache(blob_id, &patterned_page(0), 0);
+
+        let offset = 16u64;
+        match cache_ref.decode_cached_exact::<u64>(blob_id, offset, 8, &()) {
+            CachedDecode::Decoded(value, consumed) => {
+                assert_eq!(value, patterned_u64(offset as usize));
+                assert_eq!(consumed, 8);
+            }
+            _ => panic!("expected decode to succeed"),
+        }
+
+        // The prefix variant reports actual consumption when given extra room.
+        match cache_ref.decode_cached_prefix::<u64>(blob_id, offset, 64, &()) {
+            CachedDecode::Decoded(value, consumed) => {
+                assert_eq!(value, patterned_u64(offset as usize));
+                assert_eq!(consumed, 8);
+            }
+            _ => panic!("expected decode to succeed"),
+        }
+    }
+
+    #[test_traced]
+    fn test_decode_cached_spanning_two_pages() {
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        cache_ref.cache(blob_id, &patterned_page(0), 0);
+        cache_ref.cache(
+            blob_id,
+            &patterned_page(PAGE_SIZE.get() as usize),
+            PAGE_SIZE_U64,
+        );
+
+        let offset = PAGE_SIZE_U64 - 4;
+        match cache_ref.decode_cached_exact::<u64>(blob_id, offset, 8, &()) {
+            CachedDecode::Decoded(value, consumed) => {
+                assert_eq!(value, patterned_u64(offset as usize));
+                assert_eq!(consumed, 8);
+            }
+            _ => panic!("expected decode spanning pages to succeed"),
+        }
+    }
+
+    #[test_traced]
+    fn test_decode_cached_missing_second_page() {
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        cache_ref.cache(blob_id, &patterned_page(0), 0);
+
+        // The first page is resident but the second is not, so a decode spanning the
+        // boundary cannot complete.
+        let offset = PAGE_SIZE_U64 - 4;
+        assert!(matches!(
+            cache_ref.decode_cached_exact::<u64>(blob_id, offset, 8, &()),
+            CachedDecode::Missing
+        ));
+
+        // A fully absent range is also missing.
+        assert!(matches!(
+            cache_ref.decode_cached_exact::<u64>(blob_id, PAGE_SIZE_U64 * 5, 8, &()),
+            CachedDecode::Missing
+        ));
+    }
+
+    #[test_traced]
+    fn test_decode_cached_invalid_resident_bytes() {
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        cache_ref.cache(blob_id, &vec![0xFF; PAGE_SIZE.get() as usize], 0);
+
+        // 0xFF is not a valid bool encoding and the byte is resident, so the decode is
+        // authoritatively invalid.
+        assert!(matches!(
+            cache_ref.decode_cached_exact::<bool>(blob_id, 0, 1, &()),
+            CachedDecode::Invalid(_)
+        ));
+    }
+
+    #[test_traced]
+    fn test_decode_cached_truncated_error_is_missing() {
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        cache_ref.cache(blob_id, &vec![0xFF; PAGE_SIZE.get() as usize], 0);
+
+        // The first bool (0xFF) is malformed, but the gather is truncated (the second
+        // page holding the second bool is absent), so ANY decode failure must be treated
+        // as missing data rather than corruption.
+        let offset = PAGE_SIZE_U64 - 1;
+        assert!(matches!(
+            cache_ref.decode_cached_exact::<[bool; 2]>(blob_id, offset, 2, &()),
+            CachedDecode::Missing
+        ));
+    }
+
+    #[test_traced]
+    fn test_decode_cached_short_ok_truncated_is_missing() {
+        // A decoder that succeeds on the truncated gather while consuming fewer than `len`
+        // bytes must be classified as Missing (partial residency), not Invalid(ExtraData):
+        // the absent tail page may hold the rest of the encoding, and the async fallback is
+        // the authority.
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        cache_ref.cache(blob_id, &patterned_page(0), 0);
+
+        // u32 needs 4 bytes; exactly 4 bytes are resident before the absent page 1, but the
+        // caller claims the encoding occupies 8 bytes.
+        let offset = PAGE_SIZE_U64 - 4;
+        assert!(matches!(
+            cache_ref.decode_cached_exact::<u32>(blob_id, offset, 8, &()),
+            CachedDecode::Missing
+        ));
+
+        // Same shape through the prefix variant: a successful decode within the resident
+        // prefix is a valid result there.
+        assert!(matches!(
+            cache_ref.decode_cached_prefix::<u32>(blob_id, offset, 8, &()),
+            CachedDecode::Decoded(_, 4)
+        ));
+    }
+
+    #[test_traced]
+    fn test_decode_cached_gather_cap() {
+        const ITEM_SIZE: usize = MAX_GATHER_PAGES * PAGE_SIZE.get() as usize + 8;
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(MAX_GATHER_PAGES + 2));
+        let blob_id = cache_ref.next_id();
+        for page in 0..=MAX_GATHER_PAGES as u64 {
+            cache_ref.cache(blob_id, &patterned_page(0), page * PAGE_SIZE_U64);
+        }
+
+        // Every page of the item is resident, but it spans more than MAX_GATHER_PAGES
+        // pages, so the gather is capped and the decode reports missing data.
+        assert!(matches!(
+            cache_ref.decode_cached_exact::<[u8; ITEM_SIZE]>(blob_id, 0, ITEM_SIZE, &()),
+            CachedDecode::Missing
+        ));
+    }
+
+    #[test_traced]
+    fn test_decode_cached_sets_referenced_bits() {
+        // Fill a capacity-3 cache with pages 0..3, then insert page 3 to clear all
+        // referenced bits and evict page 0 (Clock sweep), leaving pages 1 and 2
+        // unreferenced.
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(3));
+        let blob_id = cache_ref.next_id();
+        let page = patterned_page(0);
+        for num in 0u64..4 {
+            cache_ref.cache(blob_id, &page, num * PAGE_SIZE_U64);
+        }
+
+        // Touch page 1 via a cached decode, marking it referenced.
+        assert!(matches!(
+            cache_ref.decode_cached_exact::<u64>(blob_id, PAGE_SIZE_U64, 8, &()),
+            CachedDecode::Decoded(..)
+        ));
+
+        // Inserting another page must now evict unreferenced page 2 rather than the
+        // just-referenced page 1.
+        cache_ref.cache(blob_id, &page, 4 * PAGE_SIZE_U64);
+        assert!(matches!(
+            cache_ref.decode_cached_exact::<u64>(blob_id, PAGE_SIZE_U64, 8, &()),
+            CachedDecode::Decoded(..)
+        ));
+        assert!(matches!(
+            cache_ref.decode_cached_exact::<u64>(blob_id, 2 * PAGE_SIZE_U64, 8, &()),
+            CachedDecode::Missing
+        ));
+    }
+
+    #[test_traced]
+    fn test_decode_cached_exact_many_chunked() {
+        // Use more bytes than DECODE_BATCH_BYTES covers in one chunk to exercise multiple
+        // lock acquisitions, with a missing page in the middle.
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        let items_per_page = PAGE_SIZE.get() as usize / 8;
+        cache_ref.cache(blob_id, &patterned_page(0), 0);
+        // Page 1 deliberately absent.
+        cache_ref.cache(
+            blob_id,
+            &patterned_page(2 * PAGE_SIZE.get() as usize),
+            2 * PAGE_SIZE_U64,
+        );
+
+        // Offsets covering pages 0 and 2 (resident) and pages 1 and 3..9 (absent), spanning
+        // enough total bytes to require multiple lock acquisitions.
+        let offsets: Vec<u64> = (0..9 * items_per_page as u64).map(|i| i * 8).collect();
+        assert!(offsets.len() * 8 > DECODE_BATCH_BYTES);
+        let mut out = Vec::with_capacity(offsets.len());
+        cache_ref
+            .decode_cached_exact_many::<u64>(blob_id, &offsets, 8, &(), &mut out)
+            .unwrap();
+
+        assert_eq!(out.len(), offsets.len());
+        for (i, (item, &offset)) in out.iter().zip(&offsets).enumerate() {
+            if matches!(i / items_per_page, 0 | 2) {
+                assert_eq!(
+                    item.as_ref().copied(),
+                    Some(patterned_u64(offset as usize % PAGE_SIZE.get() as usize)),
+                    "offset {offset} should hit"
+                );
+            } else {
+                assert!(item.is_none(), "offset {offset} should miss");
+            }
+        }
     }
 
     #[test_traced]
