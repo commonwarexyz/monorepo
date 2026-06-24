@@ -56,7 +56,7 @@ enum ProtectedCrc {
 }
 
 /// The result of a [`Append::flush_internal`] call.
-struct FlushOutcome {
+struct Flushed {
     /// Whether the flush made its writes durable, so no additional sync is needed.
     made_durable: bool,
 
@@ -546,14 +546,14 @@ impl<B: Blob> Append<B> {
     /// (below) this method briefly releases and re-acquires `buf_guard`; that is safe for the same
     /// reason, since mutable operations are serialized and only readers can run in the meantime.
     ///
-    /// Returns a [`FlushOutcome`] reporting whether the flush made its writes durable and whether it
+    /// Returns a [`Flushed`] reporting whether the flush made its writes durable and whether it
     /// left a partial-page barrier obligation for the caller to record.
     async fn flush_internal<'a>(
         &'a self,
         mut buf_guard: AsyncRwLockWriteGuard<'a, Buffer>,
         write_partial_page: bool,
         sync: bool,
-    ) -> Result<FlushOutcome, Error> {
+    ) -> Result<Flushed, Error> {
         // If this flush rewrites the current partial page, drain any prior in-flight sync first so
         // the page's preserved checksum slot is not overwritten before it is durable (see
         // [`Barrier`]).
@@ -606,7 +606,7 @@ impl<B: Blob> Append<B> {
 
         // If there's nothing to write, return early.
         if physical_pages.is_empty() {
-            return Ok(FlushOutcome {
+            return Ok(Flushed {
                 made_durable: false,
                 rewrote_partial_footer,
             });
@@ -692,7 +692,7 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_second_write {
-                        return Ok(FlushOutcome {
+                        return Ok(Flushed {
                             made_durable: sync,
                             rewrote_partial_footer,
                         });
@@ -713,14 +713,14 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_first_write {
-                        return Ok(FlushOutcome {
+                        return Ok(Flushed {
                             made_durable: sync,
                             rewrote_partial_footer,
                         });
                     }
                 }
 
-                Ok(FlushOutcome {
+                Ok(Flushed {
                     made_durable: false,
                     rewrote_partial_footer,
                 })
@@ -747,7 +747,7 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_second_write {
-                        return Ok(FlushOutcome {
+                        return Ok(Flushed {
                             made_durable: sync,
                             rewrote_partial_footer,
                         });
@@ -768,14 +768,14 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_first_write {
-                        return Ok(FlushOutcome {
+                        return Ok(Flushed {
                             made_durable: sync,
                             rewrote_partial_footer,
                         });
                     }
                 }
 
-                Ok(FlushOutcome {
+                Ok(Flushed {
                     made_durable: false,
                     rewrote_partial_footer,
                 })
@@ -785,7 +785,7 @@ impl<B: Blob> Append<B> {
                 blob_state
                     .write_at_maybe_sync(write_at_offset, physical_pages, sync)
                     .await?;
-                Ok(FlushOutcome {
+                Ok(Flushed {
                     made_durable: sync,
                     rewrote_partial_footer,
                 })
