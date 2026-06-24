@@ -1076,7 +1076,10 @@ sudo systemctl enable promtail
 sudo systemctl enable binary
 sudo systemctl start node_exporter
 sudo systemctl start promtail
-sudo systemctl start binary{pyroscope_enable}"#
+
+# Don't abort provisioning if the caller-provided binary fails to start; the deployer
+# polls the service afterwards and reports an unhealthy binary (see poll_service_active).
+sudo systemctl start binary || true{pyroscope_enable}"#
     )
 }
 
@@ -1557,10 +1560,10 @@ mod tests {
         assert!(setup.contains("sudo systemctl enable binary"));
         assert!(setup.contains("sudo systemctl start node_exporter"));
         assert!(setup.contains("sudo systemctl start promtail"));
-        assert!(setup.contains("sudo systemctl start binary"));
+        assert!(setup.contains("sudo systemctl start binary || true"));
         let node_exporter_start = setup.find("sudo systemctl start node_exporter").unwrap();
         let promtail_start = setup.find("sudo systemctl start promtail").unwrap();
-        let binary_start = setup.find("sudo systemctl start binary").unwrap();
+        let binary_start = setup.find("sudo systemctl start binary || true").unwrap();
         assert!(node_exporter_start < binary_start);
         assert!(promtail_start < binary_start);
 
