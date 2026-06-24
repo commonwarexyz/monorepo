@@ -22,13 +22,13 @@ pub fn share_handle(handle: Handle<()>) -> Shared {
 
 /// Returns a handle that observes a shared sync completion.
 pub fn observe(sync: Shared) -> Handle<()> {
-    Handle::from_future(async move { sync.await })
+    Handle::from_future(sync)
 }
 
 /// Returns a handle that observes all shared sync completions.
 pub fn observe_all(syncs: impl IntoIterator<Item = Shared>) -> Handle<()> {
     let syncs = syncs.into_iter().collect();
-    Handle::from_future(async move { wait_all(syncs).await })
+    Handle::from_future(wait_all(syncs))
 }
 
 /// Waits for all shared sync completions.

@@ -199,7 +199,6 @@ impl<B: Blob> BlobState<B> {
     async fn start_sync_shared(&mut self) -> Option<Shared> {
         self.sync.start(&self.blob).await
     }
-
 }
 
 /// A [Blob] wrapper that supports write-cached appending of data, with checksums for data integrity
@@ -1408,13 +1407,13 @@ impl<B: Blob> Append<B> {
         };
         pending.await?;
         let mut blob_state = self.blob_state.write().await;
-        if blob_state.barrier.discharge_completed() {
-            if matches!(
+        if blob_state.barrier.discharge_completed()
+            && matches!(
                 &blob_state.sync,
                 SyncState::InFlight(syncing) if sync::completed_successfully(syncing)
-            ) {
-                blob_state.sync = SyncState::Clean;
-            }
+            )
+        {
+            blob_state.sync = SyncState::Clean;
         }
         Ok(())
     }
@@ -1482,7 +1481,9 @@ impl<B: Blob> Append<B> {
                     blob_state.barrier.record_shared(syncing.clone());
                 }
             }
-            Ok(syncing.map(sync::observe).unwrap_or_else(|| Handle::ready(Ok(()))))
+            Ok(syncing
+                .map(sync::observe)
+                .unwrap_or_else(|| Handle::ready(Ok(()))))
         }
     }
 
