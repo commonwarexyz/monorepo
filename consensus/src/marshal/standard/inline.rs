@@ -529,8 +529,10 @@ where
                 };
                 let (verdict, durable) = futures::join!(verify_then_vote, store);
                 if let Some(valid) = verdict {
-                    // A false app verdict is a live rejection; only true requires
-                    // a completed durable store.
+                    // A false app verdict is a live rejection; only a true verdict
+                    // requires a completed durable store. `durable` is false only when
+                    // the marshal actor is gone (its mailbox closed at shutdown); a real
+                    // sync failure is fatal and panics rather than returning false.
                     if valid && !durable {
                         return;
                     }

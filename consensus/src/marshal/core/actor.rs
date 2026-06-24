@@ -1799,6 +1799,8 @@ where
         let Some((pending_digest, notarization_sync)) = self.notarization_syncs.take(round) else {
             return block_sync;
         };
+        // A different digest cached for this round than the certified block means the
+        // leader may have equivocated. Gate the barrier on the certified block only.
         if pending_digest != digest {
             warn!(
                 ?round,
@@ -1806,8 +1808,6 @@ where
                 ?digest,
                 "notarization sync does not match certified block"
             );
-            self.notarization_syncs
-                .register(round, pending_digest, notarization_sync);
             return block_sync;
         }
 
