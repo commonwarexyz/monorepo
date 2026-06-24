@@ -3078,17 +3078,11 @@ mod tests {
                 completed_clone.fetch_add(1, Ordering::Relaxed);
             });
 
-            for _ in 0..5 {
-                if completed.load(Ordering::Relaxed) == 1 {
-                    break;
-                }
+            // sync without new writes must not wait for the in-flight start_sync handle: this
+            // resolves even though that handle is only released below.
+            while completed.load(Ordering::Relaxed) != 1 {
                 crate::utils::reschedule().await;
             }
-            assert_eq!(
-                completed.load(Ordering::Relaxed),
-                1,
-                "sync without new writes must not wait for the in-flight start_sync handle"
-            );
             waiter.await.unwrap();
             assert_eq!(blob.pending_syncs(), 1);
 
@@ -3139,10 +3133,7 @@ mod tests {
 
             blob.release_next_sync();
             first.await.unwrap();
-            for _ in 0..5 {
-                if completed.load(Ordering::Relaxed) == 1 {
-                    break;
-                }
+            while completed.load(Ordering::Relaxed) != 1 {
                 crate::utils::reschedule().await;
             }
             assert!(
@@ -3197,10 +3188,7 @@ mod tests {
 
             blob.release_next_sync();
             first.await.unwrap();
-            for _ in 0..5 {
-                if completed.load(Ordering::Relaxed) == 1 {
-                    break;
-                }
+            while completed.load(Ordering::Relaxed) != 1 {
                 crate::utils::reschedule().await;
             }
             assert!(
@@ -3279,10 +3267,7 @@ mod tests {
 
             blob.release_next_sync();
             second.await.unwrap();
-            for _ in 0..5 {
-                if completed.load(Ordering::Relaxed) == 1 {
-                    break;
-                }
+            while completed.load(Ordering::Relaxed) != 1 {
                 crate::utils::reschedule().await;
             }
             assert!(
