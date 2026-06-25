@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_put_start_sync_returns_before_handle_completes() {
+    fn test_put_after_start_sync_waits_for_in_flight_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, pending) = delayed_sync_context(context);
@@ -442,14 +442,31 @@ mod tests {
                 "put_start_sync should return while the sync handle is still pending"
             );
 
-            archive
-                .put(2, test_key("bbb"), 20)
-                .await
-                .expect("archive should remain usable before sync completion");
-            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let writer = context.inner.child("put").spawn(|_| async move {
+                archive
+                    .put(2, test_key("bbb"), 20)
+                    .await
+                    .expect("put should complete");
+                assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+                assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "put should wait for the in-flight start_sync handle"
+            );
 
             release_pending_syncs(&pending);
             handle.await.expect("sync handle should complete");
+            while completed.load(Ordering::Relaxed) != 1 {
+                reschedule().await;
+            }
+            writer.await.expect("put task should complete");
         });
     }
 
@@ -496,6 +513,51 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_prune_after_start_sync_waits_for_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, pending) = delayed_sync_context(context);
+            let cfg = default_config(&context);
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let handle = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert!(
+                !pending.lock().is_empty(),
+                "put_start_sync should return while the sync handle is still pending"
+            );
+
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let pruner = context.inner.child("prune").spawn(|_| async move {
+                archive
+                    .prune(DEFAULT_ITEMS_PER_SECTION)
+                    .await
+                    .expect("prune should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "prune should wait for the in-flight start_sync handle"
+            );
+
+            release_pending_syncs(&pending);
+            handle.await.expect("sync handle should complete");
+            while completed.load(Ordering::Relaxed) != 1 {
+                reschedule().await;
+            }
+            pruner.await.expect("prune task should complete");
+        });
+    }
+
+    #[test_traced]
     fn test_start_sync_after_interleaved_put_starts_new_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -515,19 +577,17 @@ mod tests {
                 "one section sync should start both index and value syncs"
             );
 
-            archive
-                .put(2, test_key("bbb"), 20)
-                .await
-                .expect("interleaved put should succeed");
-            assert_eq!(
-                pending.lock().len(),
-                2,
-                "interleaved put should not be covered by the already-started sync"
-            );
-
+            let put_completed = Arc::new(AtomicUsize::new(0));
+            let put_completed_clone = put_completed.clone();
             let second_started = Arc::new(AtomicUsize::new(0));
             let second_started_clone = second_started.clone();
-            let starter = context.inner.child("second_start").spawn(|_| async move {
+            let worker = context.inner.child("write_then_start").spawn(|_| async move {
+                archive
+                    .put(2, test_key("bbb"), 20)
+                    .await
+                    .expect("interleaved put should succeed");
+                put_completed_clone.fetch_add(1, Ordering::Relaxed);
+
                 let second = archive
                     .start_sync()
                     .await
@@ -538,18 +598,26 @@ mod tests {
 
             reschedule().await;
             assert_eq!(
+                put_completed.load(Ordering::Relaxed),
+                0,
+                "interleaved put should wait for the first sync before mutating"
+            );
+            assert_eq!(
                 second_started.load(Ordering::Relaxed),
                 0,
-                "second start_sync should wait before issuing new disk writes"
+                "second start_sync should not begin until the interleaved put can finish"
             );
             assert_eq!(
                 pending.lock().len(),
                 2,
-                "second start_sync should not reuse the already-started sync for new writes"
+                "no new sync should start while the first sync is still pending"
             );
 
             release_pending_syncs(&pending);
             first.await.expect("first sync handle should complete");
+            while put_completed.load(Ordering::Relaxed) != 1 {
+                reschedule().await;
+            }
             while second_started.load(Ordering::Relaxed) != 1 {
                 reschedule().await;
             }
@@ -560,9 +628,104 @@ mod tests {
             );
 
             release_pending_syncs(&pending);
-            starter
+            worker
+                .await
+                .expect("interleaved put and second start_sync task should complete");
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_while_in_flight_waits_for_pending_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, pending) = delayed_sync_context(context);
+            let cfg = default_config(&context);
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Start an overlapping sync of section 0 and leave it in flight.
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert_eq!(pending.lock().len(), 2);
+
+            // A second start_sync with no new writes must not report durability until the first
+            // (still in-flight) sync completes: the archive gates it behind the outstanding sync.
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("second").spawn(|_| async move {
+                archive
+                    .start_sync()
+                    .await
+                    .expect("second start_sync should succeed")
+                    .await
+                    .expect("second sync handle should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "second start_sync must not report durability while the first sync is in flight"
+            );
+
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+            while completed.load(Ordering::Relaxed) != 1 {
+                reschedule().await;
+            }
+            waiter
                 .await
                 .expect("second start_sync task should complete");
+        });
+    }
+
+    #[test_traced]
+    fn test_repeated_start_sync_does_not_rewalk_history() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, pending) = delayed_sync_context(context);
+            let cfg = default_config(&context);
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Start and fully complete an overlapping sync of section 0 (index + value journals).
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert_eq!(pending.lock().len(), 2);
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+
+            // Repeated start_syncs with no new writes must not re-walk the already-synced section:
+            // the completed sync is dropped and later calls only observe (no new disk sync), so each
+            // journal stays synced exactly once regardless of how many times start_sync is called.
+            for _ in 0..5 {
+                let handle = archive
+                    .start_sync()
+                    .await
+                    .expect("start_sync should succeed");
+                assert!(
+                    pending.lock().is_empty(),
+                    "no new disk sync should be started without new writes"
+                );
+                handle.await.expect("sync handle should complete");
+            }
+
+            let metrics = context.encode();
+            assert!(
+                has_metric_value(&metrics, "synced_total", 1),
+                "each journal should be synced exactly once, not once per start_sync call"
+            );
+            assert!(
+                !has_metric_value(&metrics, "synced_total", 2),
+                "repeated start_sync must not re-walk an already-synced section"
+            );
         });
     }
 

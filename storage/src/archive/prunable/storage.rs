@@ -11,12 +11,18 @@ use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
+    Buf, BufMut, BufferPooler, Error as RError, Handle, Metrics, Storage,
 };
 use commonware_utils::Array;
-use futures::{future::try_join_all, pin_mut, StreamExt};
+use futures::{
+    future::{try_join_all, BoxFuture, Shared},
+    pin_mut, FutureExt as _, StreamExt,
+};
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use tracing::debug;
+
+/// A cloneable observer for an issued archive sync.
+type SyncObserver = Shared<BoxFuture<'static, Result<(), RError>>>;
 
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
@@ -108,7 +114,14 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     /// Combined index + value storage with crash recovery.
     oversized: Oversized<E, Record<K>, V>,
 
+    /// Sections with writes not yet covered by an issued sync.
     pending: BTreeSet<u64>,
+
+    /// Outstanding sync started by [`crate::archive::Archive::start_sync`].
+    ///
+    /// Mutable archive operations wait for this before touching archive state, so later writes are
+    /// never covered by or reordered before an earlier overlapping sync.
+    syncing: Option<SyncObserver>,
 
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -219,6 +232,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             items_per_section: cfg.items_per_section.get(),
             oversized,
             pending: BTreeSet::new(),
+            syncing: None,
             oldest_allowed: None,
             indices,
             extra_indices,
@@ -308,6 +322,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         data: V,
         skip_if_index_exists: bool,
     ) -> Result<(), Error> {
+        self.wait_for_sync().await?;
+
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
@@ -366,6 +382,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 return Ok(());
             }
         }
+        self.wait_for_sync().await?;
         debug!(min, "pruning archive");
 
         // Prune oversized journal (handles both index and values)
@@ -409,6 +426,16 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.syncs.inc_by(pending.len() as u64);
         pending
     }
+
+    /// Wait for any overlapping sync issued by [`crate::archive::Archive::start_sync`].
+    async fn wait_for_sync(&mut self) -> Result<(), Error> {
+        let Some(syncing) = self.syncing.as_ref().cloned() else {
+            return Ok(());
+        };
+        syncing.await.map_err(crate::journal::Error::Runtime)?;
+        self.syncing = None;
+        Ok(())
+    }
 }
 
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
@@ -437,22 +464,24 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
-        // Start an overlapping sync for each pending section but leave `pending` populated: the
-        // per-blob `Gated` wrapper already makes a later `sync`/`start_sync` wait for (or coalesce
-        // with) this in-flight sync, so a section is only counted in the `syncs` metric and removed
-        // from `pending` once a blocking `sync` drains it. A section made durable here and never
-        // rewritten is at worst re-synced once as a no-op (a `Gated::sync` on clean state).
-        let syncs = self.pending.iter().map(|s| self.oversized.start_sync(*s));
-        let handles = try_join_all(syncs).await?;
-        Ok(Handle::join(handles))
+        self.wait_for_sync().await?;
+
+        let pending = self.take_pending();
+        let handles = try_join_all(pending.iter().map(|s| self.oversized.start_sync(*s))).await?;
+        if handles.is_empty() {
+            return Ok(Handle::ready(Ok(())));
+        }
+
+        let syncing = Handle::join(handles).boxed().shared();
+        self.syncing = Some(syncing.clone());
+        Ok(Handle::from_future(syncing))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        // `Gated::sync` waits for any in-flight `start_sync` covering a section, so we just sync each
-        // pending section directly.
+        self.wait_for_sync().await?;
+
         let pending = self.take_pending();
-        let syncs = pending.iter().map(|s| self.oversized.sync(*s));
-        try_join_all(syncs).await?;
+        try_join_all(pending.iter().map(|s| self.oversized.sync(*s))).await?;
         Ok(())
     }
 
