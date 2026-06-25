@@ -194,10 +194,10 @@ where
                     value,
                     response,
                 } => {
-                    self.handle_deliver(key, value, response).await;
+                    self.handle_deliver(key, value, response);
                 }
                 handler::EngineMessage::Produce { key, response } => {
-                    self.handle_produce(key, response).await;
+                    self.handle_produce(key, response);
                 }
             },
         }
@@ -247,7 +247,7 @@ where
         true
     }
 
-    async fn handle_deliver(
+    fn handle_deliver(
         &mut self,
         key: handler::Request<F, H::Digest>,
         value: bytes::Bytes,
@@ -298,13 +298,19 @@ where
             return;
         }
 
-        let mut peer_valid = true;
-        for approval in approvals {
-            if let Ok(approved) = approval.await {
-                peer_valid &= approved;
+        self.context.child("approve").spawn(move |_| async move {
+            let mut peer_valid = true;
+            for approval in approvals {
+                match approval.await {
+                    Ok(true) | Err(_) => {}
+                    Ok(false) => {
+                        peer_valid = false;
+                        break;
+                    }
+                }
             }
-        }
-        response.send_lossy(peer_valid);
+            response.send_lossy(peer_valid);
+        });
     }
 
     fn valid_state_response(
@@ -329,19 +335,23 @@ where
         )
     }
 
-    async fn handle_produce(
-        &mut self,
+    fn handle_produce(
+        &self,
         key: handler::Request<F, H::Digest>,
         response: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
             return;
         };
-        let Ok(fetch) = compact::Resolver::get_compact_state(database, key.to_target()).await
-        else {
-            return;
-        };
-        response.send_lossy(fetch.state.encode());
+        let database = database.clone();
+
+        self.context.child("serve").spawn(move |_| async move {
+            let Ok(fetch) = compact::Resolver::get_compact_state(&database, key.to_target()).await
+            else {
+                return;
+            };
+            response.send_lossy(fetch.state.encode());
+        });
     }
 }
 
@@ -496,9 +506,7 @@ mod tests {
             };
 
             let (valid_tx, valid_rx) = oneshot::channel();
-            actor
-                .handle_deliver(request.clone(), bad_state.encode(), valid_tx)
-                .await;
+            actor.handle_deliver(request.clone(), bad_state.encode(), valid_tx);
 
             assert!(!valid_rx.await.expect("validation response should arrive"));
             assert!(actor.pending.contains_key(&request));
@@ -516,9 +524,7 @@ mod tests {
             fetch.state.pinned_nodes.push(sha256::Digest::from([9; 32]));
 
             let (valid_tx, valid_rx) = oneshot::channel();
-            actor
-                .handle_deliver(request.clone(), fetch.state.encode(), valid_tx)
-                .await;
+            actor.handle_deliver(request.clone(), fetch.state.encode(), valid_tx);
 
             assert!(!valid_rx.await.expect("validation response should arrive"));
             assert!(actor.pending.contains_key(&request));
@@ -542,18 +548,14 @@ mod tests {
             };
 
             let (bad_tx, bad_rx) = oneshot::channel();
-            actor
-                .handle_deliver(request.clone(), bad_state.encode(), bad_tx)
-                .await;
+            actor.handle_deliver(request.clone(), bad_state.encode(), bad_tx);
             assert!(!bad_rx.await.expect("invalid response should be rejected"));
             assert!(actor.pending.contains_key(&request));
 
             let (good_tx, good_rx) = oneshot::channel();
             futures::join!(
                 async {
-                    actor
-                        .handle_deliver(request.clone(), fetch.state.encode(), good_tx)
-                        .await;
+                    actor.handle_deliver(request.clone(), fetch.state.encode(), good_tx);
                 },
                 async {
                     let fetch = subscriber_rx
@@ -579,11 +581,11 @@ mod tests {
             let db = init_db(context.child("db")).await;
             let target = db.target();
             let db = Arc::new(TracedAsyncRwLock::new("test", db));
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(db)));
+            let (actor, _mailbox) = TestActor::new(context, test_config(Some(db)));
             let request = handler::Request::from_target(target.clone());
             let (response_tx, response_rx) = oneshot::channel();
 
-            actor.handle_produce(request, response_tx).await;
+            actor.handle_produce(request, response_tx);
 
             let encoded = response_rx.await.expect("response should be served");
             let cfg = (
@@ -611,9 +613,7 @@ mod tests {
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
                 async {
-                    actor
-                        .handle_deliver(request, fetch.state.encode(), ack_tx)
-                        .await;
+                    actor.handle_deliver(request, fetch.state.encode(), ack_tx);
                 },
                 async {
                     let fetch = subscriber_rx.await.unwrap().unwrap();
@@ -642,9 +642,7 @@ mod tests {
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
                 async {
-                    actor
-                        .handle_deliver(request, fetch.state.encode(), ack_tx)
-                        .await;
+                    actor.handle_deliver(request, fetch.state.encode(), ack_tx);
                 },
                 async {
                     let fetch = subscriber_rx.await.unwrap().unwrap();
