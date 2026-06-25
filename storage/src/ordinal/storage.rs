@@ -8,7 +8,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     Blob, Buf, BufMut, BufferPooler, Error as RError,
 };
-use commonware_utils::{bitmap::BitMap, sync::AsyncMutex};
+use commonware_utils::bitmap::BitMap;
 use futures::future::try_join_all;
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
@@ -79,10 +79,8 @@ pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
     // RMap for interval tracking
     intervals: RMap,
 
-    // Pending sections to be synced. The async mutex serializes
-    // concurrent sync calls so a second sync cannot return before
-    // the first has finished flushing.
-    pending: AsyncMutex<BTreeSet<u64>>,
+    // Pending sections to be synced.
+    pending: BTreeSet<u64>,
 
     // Metrics
     puts: Counter,
@@ -271,7 +269,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             config,
             blobs,
             intervals,
-            pending: AsyncMutex::new(BTreeSet::new()),
+            pending: BTreeSet::new(),
             puts,
             gets,
             has,
@@ -307,7 +305,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
         blob.write_at(offset, record.encode_mut()).await?;
-        self.pending.lock().await.insert(section);
+        self.pending.insert(section);
 
         // Add to intervals
         self.intervals.insert(index);
@@ -415,10 +413,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         }
 
         // Clean pending entries that fall into pruned sections.
-        self.pending
-            .lock()
-            .await
-            .retain(|&section| section >= min_section);
+        self.pending.retain(|&section| section >= min_section);
 
         Ok(())
     }
@@ -427,21 +422,20 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 
-        let mut pending = self.pending.lock().await;
-        if pending.is_empty() {
+        if self.pending.is_empty() {
             return Ok(());
         }
 
         let futures: Vec<_> = self
             .blobs
             .iter_mut()
-            .filter(|(section, _)| pending.contains(section))
+            .filter(|(section, _)| self.pending.contains(section))
             .map(|(_, blob)| blob.sync())
             .collect();
         try_join_all(futures).await?;
 
         // Clear pending sections.
-        pending.clear();
+        self.pending.clear();
 
         Ok(())
     }
