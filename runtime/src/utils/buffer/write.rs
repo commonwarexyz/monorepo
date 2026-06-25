@@ -1,7 +1,4 @@
-use super::{
-    sync::{self, State as SyncState},
-    tip::Buffer,
-};
+use super::{sync::Gated, tip::Buffer};
 use crate::{Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs};
 use commonware_utils::sync::AsyncRwLock;
 use std::{num::NonZeroUsize, sync::Arc};
@@ -9,13 +6,10 @@ use std::{num::NonZeroUsize, sync::Arc};
 /// Shared writer state.
 struct State<B: Blob> {
     /// The underlying blob to write to.
-    blob: B,
+    blob: Gated<B>,
 
     /// Buffered bytes at the logical tip of the blob.
     buffer: Buffer,
-
-    /// Durability state for mutations already issued to the underlying blob.
-    sync: SyncState,
 }
 
 impl<B: Blob> State<B> {
@@ -26,7 +20,7 @@ impl<B: Blob> State<B> {
 
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.sync.write_at(&self.blob, offset, bufs).await
+        self.blob.write_at(offset, bufs).await
     }
 
     /// Write bytes to the underlying blob and make them durable.
@@ -39,26 +33,22 @@ impl<B: Blob> State<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.sync.write_at_sync(&self.blob, offset, bufs).await
+        self.blob.write_at_sync(offset, bufs).await
     }
 
     /// Resize the underlying blob and mark the resize as needing sync.
     async fn resize(&mut self, len: u64) -> Result<(), Error> {
-        self.sync.resize(&self.blob, len).await
+        self.blob.resize(len).await
     }
 
     /// Sync the underlying blob if there are unsynced mutations.
     async fn sync(&mut self) -> Result<(), Error> {
-        self.sync.sync(&self.blob).await.map(|_| ())
+        self.blob.sync().await
     }
 
     /// Start syncing the underlying blob if there are unsynced mutations.
     async fn start_sync(&mut self) -> Handle<()> {
-        self.sync
-            .start(&self.blob)
-            .await
-            .map(sync::observe)
-            .unwrap_or_else(|| Handle::ready(Ok(())))
+        self.blob.start_sync().await
     }
 }
 
@@ -125,9 +115,8 @@ impl<B: Blob> Write<B> {
     pub fn new(blob: B, size: u64, capacity: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             state: Arc::new(AsyncRwLock::new(State {
-                blob,
+                blob: Gated::new(blob, true),
                 buffer: Buffer::new(size, capacity.get(), pool),
-                sync: SyncState::dirty(), // ensure pending writes on the wrapped blob are synced
             })),
         }
     }

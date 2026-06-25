@@ -1,11 +1,12 @@
 //! Shared sync observation and durability bookkeeping for buffered blob wrappers.
 
-use crate::{Blob, Error, Handle, IoBufs};
+use crate::{Blob, Error, Handle, IoBufs, IoBufsMut};
+use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
 use futures::{
     future::{join_all, BoxFuture, Shared as FuturesShared},
     FutureExt as _,
 };
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 /// A cloneable observer for an issued sync.
 pub type Shared = FuturesShared<BoxFuture<'static, Result<(), Error>>>;
@@ -42,6 +43,104 @@ pub async fn wait_all(syncs: Vec<Shared>) -> Result<(), Error> {
 /// Returns whether a shared sync has already completed successfully.
 pub fn completed_successfully(sync: &Shared) -> bool {
     matches!(sync.clone().now_or_never(), Some(Ok(())))
+}
+
+/// A blob wrapper that gates mutations behind any outstanding [`Blob::start_sync`].
+///
+/// Reads pass through immediately. Writes, resizes, and sync operations first wait for the last
+/// started sync to complete, so writes issued after `start_sync` are not covered by or reordered
+/// before that sync.
+#[derive(Clone)]
+pub(crate) struct Gated<B: Blob> {
+    inner: B,
+    state: Arc<AsyncRwLock<State>>,
+}
+
+impl<B: Blob> Gated<B> {
+    pub(crate) fn new(inner: B, dirty: bool) -> Self {
+        Self {
+            inner,
+            state: Arc::new(AsyncRwLock::new(if dirty {
+                State::dirty()
+            } else {
+                State::Clean
+            })),
+        }
+    }
+
+    pub(crate) fn inner(&self) -> B {
+        self.inner.clone()
+    }
+
+    async fn mutation_state(&self) -> Result<AsyncRwLockWriteGuard<'_, State>, Error> {
+        loop {
+            let state = self.state.write().await;
+            let State::InFlight(syncing) = &*state else {
+                return Ok(state);
+            };
+            let syncing = syncing.clone();
+            drop(state);
+
+            syncing.await?;
+
+            let mut state = self.state.write().await;
+            if matches!(
+                &*state,
+                State::InFlight(syncing) if completed_successfully(syncing)
+            ) {
+                *state = State::Clean;
+            }
+        }
+    }
+}
+
+impl<B: Blob> Blob for Gated<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at_buf(offset, len, bufs).await
+    }
+
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let mut state = self.mutation_state().await?;
+        state.write_at(&self.inner, offset, bufs).await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        let mut state = self.mutation_state().await?;
+        state.write_at_sync(&self.inner, offset, bufs).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        let mut state = self.mutation_state().await?;
+        state.resize(&self.inner, len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.state.write().await.sync(&self.inner).await?;
+        Ok(())
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.state
+            .write()
+            .await
+            .start(&self.inner)
+            .await
+            .map(observe)
+            .unwrap_or_else(|| Handle::ready(Ok(())))
+    }
 }
 
 /// Durability state for mutations already issued to the underlying blob.
@@ -109,21 +208,6 @@ impl State {
             blob.write_at_sync(offset, bufs).await?;
             self.restore(previous);
             self.observe_in_flight().await
-        }
-    }
-
-    /// Writes bytes to `blob`, optionally making them durable.
-    pub(crate) async fn write_at_maybe_sync<B: Blob>(
-        &mut self,
-        blob: &B,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-        sync: bool,
-    ) -> Result<(), Error> {
-        if sync {
-            self.write_at_sync(blob, offset, bufs).await
-        } else {
-            self.write_at(blob, offset, bufs).await
         }
     }
 

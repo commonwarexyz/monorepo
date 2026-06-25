@@ -559,7 +559,7 @@ mod tests {
             assert_eq!(
                 second_started.load(Ordering::Relaxed),
                 0,
-                "second start_sync should wait before rewriting the in-flight partial page"
+                "second start_sync should wait before issuing new disk writes"
             );
             assert_eq!(
                 pending.lock().len(),
