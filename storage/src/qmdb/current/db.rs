@@ -33,7 +33,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
-use commonware_cryptography::{Digest, DigestOf, FixedHasher as Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::metrics::{
@@ -207,7 +207,7 @@ where
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
-        hasher: &StandardHasher<H>,
+        hasher: &mut StandardHasher<H>,
         proof: &RangeProof<F, H::Digest>,
         start_loc: Location<F>,
         ops: &[Operation<F, U>],
@@ -272,7 +272,7 @@ where
     /// This can be used to authenticate an ops root against a trusted canonical `current` root.
     pub async fn ops_root_witness(
         &self,
-        hasher: &StandardHasher<H>,
+        hasher: &mut StandardHasher<H>,
     ) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
         let ops_size = storage.size().await;
@@ -322,7 +322,7 @@ where
     /// Returns a proof for the operation at `loc`.
     pub(super) async fn operation_proof(
         &self,
-        hasher: &StandardHasher<H>,
+        hasher: &mut StandardHasher<H>,
         loc: Location<F>,
     ) -> Result<OperationProof<F, H::Digest, N>, Error<F>> {
         let storage = self.grafted_storage();
@@ -361,7 +361,7 @@ where
     )]
     pub async fn range_proof(
         &self,
-        hasher: &StandardHasher<H>,
+        hasher: &mut StandardHasher<H>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<F, H::Digest>, Vec<Operation<F, U>>, Vec<[u8; N]>), Error<F>> {
@@ -637,11 +637,11 @@ where
         // the caller; reads through them now return inconsistent data.
         self.any.rewind(size).await?;
 
-        let hasher = qmdb::hasher::<H>();
+        let mut hasher = qmdb::hasher::<H>();
         let ops_size = self.any.log.merkle.size();
         let ops_leaves = Location::<F>::try_from(ops_size)?;
         let grafted_tree = build_grafted_tree::<F, H, S, N>(
-            &hasher,
+            &mut hasher,
             self.any.bitmap.as_ref(),
             &pinned_nodes,
             &self.any.log.merkle,
@@ -653,12 +653,12 @@ where
             &grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
-            hasher.clone(),
+            StandardHasher::<H>::new(hasher.root_bagging()),
         );
         let partial_chunk = partial_chunk(self.any.bitmap.as_ref());
         let ops_root = self.any.root();
         let root = compute_db_root(
-            &hasher,
+            &mut hasher,
             self.any.bitmap.as_ref(),
             &storage,
             ops_leaves,
@@ -911,7 +911,7 @@ pub(super) fn pending_chunk<F: merkle::Graftable, B: bitmap::Readable<N>, const 
 /// digest size). Different fixed lengths, so the two cannot produce the same input bytes,
 /// even when their digests are identical. Collisions reduce to H.
 pub(super) fn combine_roots<H: Hasher>(
-    hasher: &StandardHasher<H>,
+    hasher: &mut StandardHasher<H>,
     ops_root: &H::Digest,
     grafted_root: &H::Digest,
     pending: Option<&H::Digest>,
@@ -959,7 +959,7 @@ pub(super) async fn compute_db_root<
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
 >(
-    hasher: &StandardHasher<H>,
+    hasher: &mut StandardHasher<H>,
     status: &B,
     storage: &S,
     ops_leaves: Location<F>,
@@ -1000,7 +1000,7 @@ pub(super) async fn compute_grafted_root<
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
 >(
-    hasher: &StandardHasher<H>,
+    hasher: &mut StandardHasher<H>,
     status: &B,
     storage: &S,
     ops_leaves: Location<F>,
@@ -1050,7 +1050,7 @@ pub(super) async fn compute_grafted_leaves<
     S: Strategy,
     const N: usize,
 >(
-    hasher: &StandardHasher<H>,
+    _hasher: &StandardHasher<H>,
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     strategy: &S,
@@ -1073,16 +1073,15 @@ pub(super) async fn compute_grafted_leaves<
     // Compute the grafted leaf digest for each chunk. For all-zero chunks, the
     // grafted leaf equals the chunk_ops_digest directly (zero-chunk identity).
     let zero_chunk = [0u8; N];
-    Ok(strategy.map_init_collect_vec(
+    Ok(strategy.map_collect_vec(
         inputs,
-        || hasher.clone(),
-        |h, (chunk_idx, chunk_ops_digest, chunk)| {
+        |(chunk_idx, chunk_ops_digest, chunk)| {
             if chunk == zero_chunk {
                 (chunk_idx, chunk_ops_digest)
             } else {
                 (
                     chunk_idx,
-                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
+                    H::hash_parts([chunk.as_slice(), chunk_ops_digest.as_ref()]),
                 )
             }
         },
@@ -1109,7 +1108,7 @@ pub(super) async fn build_grafted_tree<
     S: Strategy,
     const N: usize,
 >(
-    hasher: &StandardHasher<H>,
+    hasher: &mut StandardHasher<H>,
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
@@ -1138,7 +1137,10 @@ pub(super) async fn build_grafted_tree<
     .await?;
 
     // Build the base grafted tree: either from pruned components or empty.
-    let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+    let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(
+        StandardHasher::<H>::new(hasher.root_bagging()),
+        grafting_height,
+    );
     let mut grafted_tree = if pruned_chunks > 0 {
         let grafted_pruning_boundary = Location::<F>::new(pruned_chunks as u64);
         Mem::from_components(Vec::new(), grafted_pruning_boundary, pinned_nodes.to_vec())
@@ -1152,7 +1154,7 @@ pub(super) async fn build_grafted_tree<
         let batch = {
             let batch = grafted_tree.new_batch_with_strategy(strategy.clone());
             let batch = batch.add_leaf_digests(leaves.iter().map(|&(_, digest)| digest));
-            batch.merkleize(&grafted_tree, &grafted_hasher)
+            batch.merkleize(&grafted_tree, &mut grafted_hasher)
         };
         grafted_tree.apply_batch(&batch)?;
     }
@@ -1233,7 +1235,7 @@ mod tests {
         translator::OneCap,
     };
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{sha256, Hasher as _, Sha256};
+    use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::bitmap::Prunable as PrunableBitMap;
@@ -1275,50 +1277,50 @@ mod tests {
 
     #[test]
     fn combine_roots_deterministic() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
-        let r1 = combine_roots(&hasher, &ops, &grafted, None, None);
-        let r2 = combine_roots(&hasher, &ops, &grafted, None, None);
+        let r1 = combine_roots(&mut hasher, &ops, &grafted, None, None);
+        let r2 = combine_roots(&mut hasher, &ops, &grafted, None, None);
         assert_eq!(r1, r2);
     }
 
     #[test]
     fn combine_roots_with_partial_differs() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let partial_digest = Sha256::hash(b"partial");
 
-        let without = combine_roots(&hasher, &ops, &grafted, None, None);
-        let with = combine_roots(&hasher, &ops, &grafted, None, Some((5, &partial_digest)));
+        let without = combine_roots(&mut hasher, &ops, &grafted, None, None);
+        let with = combine_roots(&mut hasher, &ops, &grafted, None, Some((5, &partial_digest)));
         assert_ne!(without, with);
     }
 
     #[test]
     fn combine_roots_with_pending_differs() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let pending_digest = Sha256::hash(b"pending");
 
-        let without = combine_roots(&hasher, &ops, &grafted, None, None);
-        let with = combine_roots(&hasher, &ops, &grafted, Some(&pending_digest), None);
+        let without = combine_roots(&mut hasher, &ops, &grafted, None, None);
+        let with = combine_roots(&mut hasher, &ops, &grafted, Some(&pending_digest), None);
         assert_ne!(without, with);
     }
 
     #[test]
     fn combine_roots_pending_and_partial_independent() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let pending_digest = Sha256::hash(b"pending");
         let partial_digest = Sha256::hash(b"partial");
 
-        let only_pending = combine_roots(&hasher, &ops, &grafted, Some(&pending_digest), None);
-        let only_partial = combine_roots(&hasher, &ops, &grafted, None, Some((5, &partial_digest)));
+        let only_pending = combine_roots(&mut hasher, &ops, &grafted, Some(&pending_digest), None);
+        let only_partial = combine_roots(&mut hasher, &ops, &grafted, None, Some((5, &partial_digest)));
         let both = combine_roots(
-            &hasher,
+            &mut hasher,
             &ops,
             &grafted,
             Some(&pending_digest),
@@ -1331,13 +1333,13 @@ mod tests {
 
     #[test]
     fn combine_roots_different_ops_root() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops_a = Sha256::hash(b"ops_a");
         let ops_b = Sha256::hash(b"ops_b");
         let grafted = Sha256::hash(b"grafted");
 
-        let r1 = combine_roots(&hasher, &ops_a, &grafted, None, None);
-        let r2 = combine_roots(&hasher, &ops_b, &grafted, None, None);
+        let r1 = combine_roots(&mut hasher, &ops_a, &grafted, None, None);
+        let r2 = combine_roots(&mut hasher, &ops_b, &grafted, None, None);
         assert_ne!(r1, r2);
     }
 
@@ -1346,7 +1348,7 @@ mod tests {
     /// would silently break wire compatibility; this test catches that.
     #[test]
     fn combine_roots_format_golden() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let pending = Sha256::hash(b"pending");
@@ -1355,19 +1357,19 @@ mod tests {
 
         // Neither pending nor partial.
         assert_eq!(
-            combine_roots(&hasher, &ops, &grafted, None, None),
+            combine_roots(&mut hasher, &ops, &grafted, None, None),
             hasher.hash([ops.as_ref(), grafted.as_ref()])
         );
 
         // Pending only.
         assert_eq!(
-            combine_roots(&hasher, &ops, &grafted, Some(&pending), None),
+            combine_roots(&mut hasher, &ops, &grafted, Some(&pending), None),
             hasher.hash([ops.as_ref(), grafted.as_ref(), pending.as_ref()])
         );
 
         // Partial only.
         assert_eq!(
-            combine_roots(&hasher, &ops, &grafted, None, Some((next_bit, &partial))),
+            combine_roots(&mut hasher, &ops, &grafted, None, Some((next_bit, &partial))),
             hasher.hash([
                 ops.as_ref(),
                 grafted.as_ref(),
@@ -1379,7 +1381,7 @@ mod tests {
         // Both: pending precedes partial.
         assert_eq!(
             combine_roots(
-                &hasher,
+                &mut hasher,
                 &ops,
                 &grafted,
                 Some(&pending),
@@ -1450,23 +1452,23 @@ mod tests {
                 next_idx += 1;
             }
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let mut hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
             assert!(witness.partial_chunk.is_none());
-            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
 
             let wrong_ops_root = Sha256::hash(b"wrong ops root");
-            assert!(!witness.verify(&hasher, &wrong_ops_root, &canonical_root));
+            assert!(!witness.verify(&mut hasher, &wrong_ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
         });
     }
 
@@ -1482,31 +1484,31 @@ mod tests {
             .unwrap();
             populate_fixed_db::<mmb::Family, _>(&mut db, 0, 260).await;
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let mut hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
             assert!(witness.partial_chunk.is_some());
-            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
 
             let wrong_ops_root = Sha256::hash(b"wrong ops root");
-            assert!(!witness.verify(&hasher, &wrong_ops_root, &canonical_root));
+            assert!(!witness.verify(&mut hasher, &wrong_ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness.clone();
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
 
             let mut tampered = witness.clone();
             tampered.partial_chunk.as_mut().unwrap().0 += 1;
-            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
 
             let mut tampered = witness;
             tampered.partial_chunk.as_mut().unwrap().1 = Sha256::hash(b"wrong partial chunk");
-            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
         });
     }
 
@@ -1531,19 +1533,19 @@ mod tests {
                 "test requires at least one pruned chunk to exercise the zero-chunk path"
             );
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let mut hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
-            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
         });
     }
 
@@ -1558,12 +1560,12 @@ mod tests {
             .await
             .unwrap();
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let mut hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
-            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
         });
     }
 }

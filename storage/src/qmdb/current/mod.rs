@@ -330,7 +330,7 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, full::Config as MerkleConfig, Location},
+    merkle::{self, full::Config as MerkleConfig, hasher::Standard, Location},
     qmdb::{
         self,
         any::{
@@ -345,7 +345,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{CodecShared, FixedSize};
-use commonware_cryptography::FixedHasher as Hasher;
+use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
@@ -442,11 +442,11 @@ where
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
 
     // Build the grafted tree from the bitmap and ops tree.
-    let hasher = qmdb::hasher::<H>();
+    let mut hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = crate::merkle::Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
-        &hasher,
+        &mut hasher,
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
@@ -460,12 +460,12 @@ where
         &grafted_tree,
         grafting::height::<N>(),
         &any.log.merkle,
-        hasher.clone(),
+        Standard::<H>::new(hasher.root_bagging()),
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.root();
     let root = db::compute_db_root(
-        &hasher,
+        &mut hasher,
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
@@ -1375,7 +1375,7 @@ pub mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
+            let mut hasher = qmdb::hasher::<Sha256>();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
@@ -1442,17 +1442,17 @@ pub mod tests {
 
             // Honest exclusion proving refuses a live key.
             assert!(matches!(
-                db.exclusion_proof(&hasher, &c).await,
+                db.exclusion_proof(&mut hasher, &c).await,
                 Err(Error::KeyExists)
             ));
 
             // Forge attempt: package `b`'s authenticated update as an exclusion proof for `c`. The
             // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
             // [b, a), which cyclically covered `c` and verified).
-            let kvp = db.key_value_proof(&hasher, b.clone()).await.unwrap();
+            let kvp = db.key_value_proof(&mut hasher, b.clone()).await.unwrap();
             let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
             assert!(!ForgedExclusionDb::verify_exclusion_proof(
-                &hasher, &c, &forged, &root
+                &mut hasher, &c, &forged, &root
             ));
 
             db.destroy().await.unwrap();
@@ -1946,8 +1946,8 @@ pub mod tests {
             assert_eq!(reopened.get(&k).await.unwrap(), expected);
 
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
-            let hasher = qmdb::hasher::<Sha256>();
-            let _proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let mut hasher = qmdb::hasher::<Sha256>();
+            let _proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
 
             reopened.destroy().await.unwrap();
         });
@@ -2187,10 +2187,10 @@ pub mod tests {
                 mmb_commit(&mut db, [(key(1), Some(val(round)))]).await;
             }
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = db.key_value_proof(&hasher, k).await.unwrap();
+            let mut hasher = qmdb::hasher::<Sha256>();
+            let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
+                &mut hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2210,10 +2210,10 @@ pub mod tests {
 
             assert_eq!(reopened.root(), target_root);
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let mut hasher = qmdb::hasher::<Sha256>();
+            let proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
+                &mut hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2437,11 +2437,11 @@ pub mod tests {
                     "root mismatch after prune at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let mut hasher = qmdb::hasher::<Sha256>();
+                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
+                        &mut hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -2470,11 +2470,11 @@ pub mod tests {
                     "value mismatch after reopen at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let mut hasher = qmdb::hasher::<Sha256>();
+                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
+                        &mut hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -3905,9 +3905,9 @@ pub mod tests {
                 .unwrap();
 
             // Verifies under the QMDB ops-tree hasher configuration.
-            let hasher = qmdb::hasher::<Sha256>();
+            let mut hasher = qmdb::hasher::<Sha256>();
             assert!(verify_proof(
-                &hasher,
+                &mut hasher,
                 &proof,
                 Location::new(0),
                 &ops,
@@ -3915,9 +3915,9 @@ pub mod tests {
             ));
 
             // Sanity: a different Merkle hasher configuration must not accept this proof.
-            let plain = Standard::<Sha256>::new(ForwardFold);
+            let mut plain = Standard::<Sha256>::new(ForwardFold);
             assert!(!verify_proof(
-                &plain,
+                &mut plain,
                 &proof,
                 Location::new(0),
                 &ops,

@@ -18,14 +18,14 @@ mod tests {
 
     /// Build an in-memory MMB with `n` elements (element i = i.to_be_bytes()).
     fn make_mmb(n: u64) -> (H, Mmb<D>) {
-        let hasher = H::new(ForwardFold);
+        let mut hasher = H::new(ForwardFold);
         let mut mmb = Mmb::new();
         let batch = {
             let mut batch = mmb.new_batch();
             for i in 0..n {
-                batch = batch.add(&hasher, &i.to_be_bytes());
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
             }
-            batch.merkleize(&mmb, &hasher)
+            batch.merkleize(&mmb, &mut hasher)
         };
         mmb.apply_batch(&batch).unwrap();
         (hasher, mmb)
@@ -36,8 +36,8 @@ mod tests {
     /// from finer-grained pinned peaks.
     #[test]
     fn test_verify_proof_and_pinned_nodes_recursive_fold_prefix_regression() {
-        let (hasher, mmb) = make_mmb(5);
-        let root = mmb.root(&hasher, 0).unwrap();
+        let (mut hasher, mmb) = make_mmb(5);
+        let root = mmb.root(&mut hasher, 0).unwrap();
         let start = 4;
 
         let pinned: Vec<D> = crate::merkle::mmb::Family::nodes_to_pin(Location::new(start))
@@ -45,11 +45,11 @@ mod tests {
             .collect();
 
         let proof = mmb
-            .range_proof(&hasher, Location::new(start)..Location::new(start + 1), 0)
+            .range_proof(&mut hasher, Location::new(start)..Location::new(start + 1), 0)
             .unwrap();
 
         assert!(proof.verify_proof_and_pinned_nodes(
-            &hasher,
+            &mut hasher,
             &[start.to_be_bytes()],
             Location::new(start),
             &pinned,
@@ -61,13 +61,13 @@ mod tests {
     fn test_last_element_proof_size_is_two() {
         // An MMB property is that the most recent item always has a small proof
         // (at most 2 digests). Verify this holds as the tree grows.
-        let hasher = H::new(ForwardFold);
+        let mut hasher = H::new(ForwardFold);
         let (_, mut mmb) = make_mmb(1000);
         let mut n = 1000u64;
 
         while n <= 5000 {
             let leaves = mmb.leaves();
-            let root = mmb.root(&hasher, 0).unwrap();
+            let root = mmb.root(&mut hasher, 0).unwrap();
 
             let loc = n - 1;
             let inactive_peaks =
@@ -90,10 +90,10 @@ mod tests {
             );
 
             // Verify the proof actually works.
-            let proof = mmb.proof(&hasher, Location::new(loc), 0).unwrap();
+            let proof = mmb.proof(&mut hasher, Location::new(loc), 0).unwrap();
             assert!(
                 proof.verify_element_inclusion(
-                    &hasher,
+                    &mut hasher,
                     &loc.to_be_bytes(),
                     Location::new(loc),
                     &root
@@ -105,9 +105,9 @@ mod tests {
             let batch = {
                 let mut batch = mmb.new_batch();
                 for i in n..n + 100 {
-                    batch = batch.add(&hasher, &i.to_be_bytes());
+                    batch = batch.add(&mut hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&mmb, &hasher)
+                batch.merkleize(&mmb, &mut hasher)
             };
             mmb.apply_batch(&batch).unwrap();
             n += 100;

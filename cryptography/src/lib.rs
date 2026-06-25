@@ -276,6 +276,7 @@ commonware_macros::stability_scope!(BETA {
         }
 
         /// Hash an arbitrary sequence of byte slices into a single digest.
+        #[inline]
         fn hash_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
             let mut hasher = Self::new();
             for part in parts {
@@ -284,36 +285,86 @@ commonware_macros::stability_scope!(BETA {
             hasher.finalize()
         }
 
+        /// Hash an arbitrary sequence of byte slices into a single digest using this hasher.
+        #[inline]
+        fn hash_parts_mut<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+            Self::hash_parts(parts)
+        }
+
         /// Hash `left || right`.
+        #[inline]
         fn hash_pair(left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
             Self::hash_parts([left.as_ref(), right.as_ref()])
         }
 
+        /// Hash `left || right` using this hasher.
+        #[inline]
+        fn hash_pair_mut(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
+            Self::hash_pair(left, right)
+        }
+
         /// Hash `prefix || digest`, where `prefix` is encoded as big-endian `u32`.
+        #[inline]
         fn hash_u32_with_digest(prefix: u32, digest: &Self::Digest) -> Self::Digest {
             let prefix = prefix.to_be_bytes();
             Self::hash_parts([prefix.as_slice(), digest.as_ref()])
         }
 
+        /// Hash `prefix || digest` using this hasher, where `prefix` is encoded as big-endian `u32`.
+        #[inline]
+        fn hash_u32_with_digest_mut(
+            &mut self,
+            prefix: u32,
+            digest: &Self::Digest,
+        ) -> Self::Digest {
+            Self::hash_u32_with_digest(prefix, digest)
+        }
+
         /// Hash `prefix || bytes`, where `prefix` is encoded as big-endian `u32`.
+        #[inline]
         fn hash_u32_with_bytes(prefix: u32, bytes: &[u8]) -> Self::Digest {
             let prefix = prefix.to_be_bytes();
             Self::hash_parts([prefix.as_slice(), bytes])
         }
 
+        /// Hash `prefix || bytes` using this hasher, where `prefix` is encoded as big-endian `u32`.
+        #[inline]
+        fn hash_u32_with_bytes_mut(&mut self, prefix: u32, bytes: &[u8]) -> Self::Digest {
+            Self::hash_u32_with_bytes(prefix, bytes)
+        }
+
         /// Hash `prefix || digest`, where `prefix` is encoded as big-endian `u64`.
+        #[inline]
         fn hash_u64_with_digest(prefix: u64, digest: &Self::Digest) -> Self::Digest {
             let prefix = prefix.to_be_bytes();
             Self::hash_parts([prefix.as_slice(), digest.as_ref()])
         }
 
+        /// Hash `prefix || digest` using this hasher, where `prefix` is encoded as big-endian `u64`.
+        #[inline]
+        fn hash_u64_with_digest_mut(
+            &mut self,
+            prefix: u64,
+            digest: &Self::Digest,
+        ) -> Self::Digest {
+            Self::hash_u64_with_digest(prefix, digest)
+        }
+
         /// Hash `prefix || bytes`, where `prefix` is encoded as big-endian `u64`.
+        #[inline]
         fn hash_u64_with_bytes(prefix: u64, bytes: &[u8]) -> Self::Digest {
             let prefix = prefix.to_be_bytes();
             Self::hash_parts([prefix.as_slice(), bytes])
         }
 
+        /// Hash `prefix || bytes` using this hasher, where `prefix` is encoded as big-endian `u64`.
+        #[inline]
+        fn hash_u64_with_bytes_mut(&mut self, prefix: u64, bytes: &[u8]) -> Self::Digest {
+            Self::hash_u64_with_bytes(prefix, bytes)
+        }
+
         /// Hash `prefix || left || right`, where `prefix` is encoded as big-endian `u64`.
+        #[inline]
         fn hash_u64_with_pair(
             prefix: u64,
             left: &Self::Digest,
@@ -323,7 +374,19 @@ commonware_macros::stability_scope!(BETA {
             Self::hash_parts([prefix.as_slice(), left.as_ref(), right.as_ref()])
         }
 
+        /// Hash `prefix || left || right` using this hasher, where `prefix` is encoded as big-endian `u64`.
+        #[inline]
+        fn hash_u64_with_pair_mut(
+            &mut self,
+            prefix: u64,
+            left: &Self::Digest,
+            right: &Self::Digest,
+        ) -> Self::Digest {
+            Self::hash_u64_with_pair(prefix, left, right)
+        }
+
         /// Hash `first || second || digest`, where both prefixes are big-endian `u64`.
+        #[inline]
         fn hash_u64_u64_with_digest(
             first: u64,
             second: u64,
@@ -333,14 +396,19 @@ commonware_macros::stability_scope!(BETA {
             let second = second.to_be_bytes();
             Self::hash_parts([first.as_slice(), second.as_slice(), digest.as_ref()])
         }
+
+        /// Hash `first || second || digest` using this hasher, where both prefixes are big-endian `u64`.
+        #[inline]
+        fn hash_u64_u64_with_digest_mut(
+            &mut self,
+            first: u64,
+            second: u64,
+            digest: &Self::Digest,
+        ) -> Self::Digest {
+            Self::hash_u64_u64_with_digest(first, second, digest)
+        }
     }
 
-    /// Marker for hashers intended for fixed-size preimages in Merkle structures.
-    ///
-    /// Implement this trait when the default fixed-shape helpers on [`Hasher`] are acceptable, or
-    /// override those helpers in the [`Hasher`] implementation when the hasher has a faster
-    /// fixed-size path.
-    pub trait FixedHasher: Hasher {}
 });
 
 #[cfg(test)]

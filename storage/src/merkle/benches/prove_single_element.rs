@@ -17,7 +17,7 @@ const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
 type Sample<F> = (Location<F>, sha256::Digest);
 
 fn make_test_data<F: Family>(n: usize) -> (Mem<F, sha256::Digest>, sha256::Digest, Vec<Sample<F>>) {
-    let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+    let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
     let mut mem = Mem::<F, _>::new();
     let mut elements = Vec::with_capacity(n);
     let mut sampler = StdRng::seed_from_u64(0);
@@ -26,14 +26,14 @@ fn make_test_data<F: Family>(n: usize) -> (Mem<F, sha256::Digest>, sha256::Diges
             let mut batch = mem.new_batch();
             for i in 0..n {
                 let element = sha256::Digest::random(&mut sampler);
-                batch = batch.add(&hasher, &element);
+                batch = batch.add(&mut hasher, &element);
                 elements.push((i, element));
             }
-            batch.merkleize(&mem, &hasher)
+            batch.merkleize(&mem, &mut hasher)
         };
         mem.apply_batch(&batch).unwrap();
     });
-    let root = mem.root(&hasher, 0).unwrap();
+    let root = mem.root(&mut hasher, 0).unwrap();
     let samples = elements
         .choose_multiple(&mut sampler, SAMPLE_SIZE)
         .cloned()
@@ -54,12 +54,15 @@ fn bench_prove_single_element_family<F: Family>(c: &mut Criterion, family: &str)
                     || make_test_data::<F>(n),
                     |(mem, root, samples)| {
                         block_on(async {
-                            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+                            let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
                             for (loc, element) in samples {
-                                let proof = mem.proof(&hasher, loc, 0).unwrap();
-                                assert!(
-                                    proof.verify_element_inclusion(&hasher, &element, loc, &root)
-                                );
+                                let proof = mem.proof(&mut hasher, loc, 0).unwrap();
+                                assert!(proof.verify_element_inclusion(
+                                    &mut hasher,
+                                    &element,
+                                    loc,
+                                    &root
+                                ));
                             }
                         });
                     },

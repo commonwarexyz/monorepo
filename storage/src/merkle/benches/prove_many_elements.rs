@@ -23,7 +23,7 @@ fn make_test_data<F: Family>(
     n: usize,
     range: u64,
 ) -> (Mem<F, sha256::Digest>, sha256::Digest, Vec<Sample<F>>) {
-    let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+    let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
     let mut mem = Mem::<F, _>::new();
     let mut elements = Vec::with_capacity(n);
     let mut sampler = StdRng::seed_from_u64(0);
@@ -33,14 +33,14 @@ fn make_test_data<F: Family>(
             let mut batch = mem.new_batch();
             for _ in 0..n {
                 let element = sha256::Digest::random(&mut sampler);
-                batch = batch.add(&hasher, &element);
+                batch = batch.add(&mut hasher, &element);
                 elements.push(element);
             }
-            batch.merkleize(&mem, &hasher)
+            batch.merkleize(&mem, &mut hasher)
         };
         mem.apply_batch(&batch).unwrap();
     });
-    let root = mem.root(&hasher, 0).unwrap();
+    let root = mem.root(&mut hasher, 0).unwrap();
     let max_start = n as u64 - range;
     let mut samples: Vec<Sample<F>> = Vec::with_capacity(SAMPLE_SIZE);
     while samples.len() < SAMPLE_SIZE {
@@ -70,12 +70,13 @@ fn bench_prove_many_elements_family<F: Family>(c: &mut Criterion, family: &str) 
                     b.iter_batched(
                         || make_test_data::<F>(n, range),
                         |(mem, root, samples)| {
-                            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+                            let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
                             block_on(async {
                                 for (range, elements) in samples {
-                                    let proof = mem.range_proof(&hasher, range.clone(), 0).unwrap();
+                                    let proof =
+                                        mem.range_proof(&mut hasher, range.clone(), 0).unwrap();
                                     assert!(proof.verify_range_inclusion(
-                                        &hasher,
+                                        &mut hasher,
                                         &elements,
                                         range.start,
                                         &root

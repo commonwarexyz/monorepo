@@ -52,7 +52,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     /// with different fold prefix boundaries can be generated without requiring individual peak
     /// digests.
     pub fn new<H, E>(
-        hasher: &H,
+        hasher: &mut H,
         proof: &Proof<F, D>,
         elements: &[E],
         start_loc: Location<F>,
@@ -114,7 +114,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     /// individually available in the store (original range peaks now preceding the sub-range).
     pub fn range_proof<H: Hasher<F, Digest = D>>(
         &self,
-        hasher: &H,
+        hasher: &mut H,
         range: Range<Location<F>>,
     ) -> Result<Proof<F, D>, Error<F>> {
         let leaves = Location::try_from(self.size)?;
@@ -163,7 +163,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
 
     fn suffix_acc<H: Hasher<F, Digest = D>>(
         &self,
-        hasher: &H,
+        hasher: &mut H,
         suffix_peaks: &[Position<F>],
     ) -> Result<D, Error<F>> {
         if suffix_peaks.is_empty() {
@@ -290,7 +290,7 @@ pub async fn range_proof<
     H: Hasher<F, Digest = D>,
     S: Storage<F, Digest = D>,
 >(
-    hasher: &H,
+    hasher: &mut H,
     merkle: &S,
     range: Range<Location<F>>,
     inactive_peaks: usize,
@@ -314,7 +314,7 @@ pub async fn historical_range_proof<
     H: Hasher<F, Digest = D>,
     S: Storage<F, Digest = D>,
 >(
-    hasher: &H,
+    hasher: &mut H,
     merkle: &S,
     leaves: Location<F>,
     range: Range<Location<F>>,
@@ -420,18 +420,18 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
-            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mut hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmr = Mmr::new();
             let elements: Vec<_> = (0..49).map(test_digest).collect();
             let batch = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
-                    batch = batch.add(&hasher, element);
+                    batch = batch.add(&mut hasher, element);
                 }
-                batch.merkleize(&mmr, &hasher)
+                batch.merkleize(&mmr, &mut hasher)
             };
             mmr.apply_batch(&batch).unwrap();
-            let root = mmr.root(&hasher, 0).unwrap();
+            let root = mmr.root(&mut hasher, 0).unwrap();
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
             // range and shrinking each endpoint with each iteration.
@@ -439,9 +439,9 @@ mod tests {
             let mut range_end = Location::new(49);
             while range_start < range_end {
                 let range = range_start..range_end;
-                let range_proof = mmr.range_proof(&hasher, range.clone(), 0).unwrap();
+                let range_proof = mmr.range_proof(&mut hasher, range.clone(), 0).unwrap();
                 let proof_store = ProofStore::new(
-                    &hasher,
+                    &mut hasher,
                     &range_proof,
                     &elements[range.to_usize_range()],
                     range_start,
@@ -458,9 +458,9 @@ mod tests {
                     // Verify a proof over a sub-range of the original range.
                     let sub_range = subrange_start..subrange_end;
                     let sub_range_proof =
-                        proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
+                        proof_store.range_proof(&mut hasher, sub_range.clone()).unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
-                        &hasher,
+                        &mut hasher,
                         &elements[sub_range.to_usize_range()],
                         sub_range.start,
                         &root
@@ -480,26 +480,26 @@ mod tests {
         executor.start(|_| async move {
             // Build MMR with 49 elements. Peaks cover locations 0-31, 32-47, 48.
             // A proof starting at location 32 puts the first peak entirely in the fold prefix.
-            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mut hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmr = Mmr::new();
             let elements: Vec<_> = (0..49).map(test_digest).collect();
             let batch = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
-                    batch = batch.add(&hasher, element);
+                    batch = batch.add(&mut hasher, element);
                 }
-                batch.merkleize(&mmr, &hasher)
+                batch.merkleize(&mmr, &mut hasher)
             };
             mmr.apply_batch(&batch).unwrap();
-            let root = mmr.root(&hasher, 0).unwrap();
+            let root = mmr.root(&mut hasher, 0).unwrap();
 
             // Proof for range 32..49 has a non-empty fold prefix (the 32-leaf peak).
             // The ProofStore derives the fold accumulator from the proof itself, so
             // sub-proofs should succeed for all sub-ranges without needing peaks.
             let range = Location::new(32)..Location::new(49);
-            let range_proof = mmr.range_proof(&hasher, range.clone(), 0).unwrap();
+            let range_proof = mmr.range_proof(&mut hasher, range.clone(), 0).unwrap();
             let proof_store = ProofStore::new(
-                &hasher,
+                &mut hasher,
                 &range_proof,
                 &elements[range.to_usize_range()],
                 range.start,
@@ -511,10 +511,10 @@ mod tests {
             for start in 32u64..49 {
                 for end in (start + 1)..=49 {
                     let sub_range = Location::new(start)..Location::new(end);
-                    let sub_proof = proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
+                    let sub_proof = proof_store.range_proof(&mut hasher, sub_range.clone()).unwrap();
                     assert!(
                         sub_proof.verify_range_inclusion(
-                            &hasher,
+                            &mut hasher,
                             &elements[sub_range.to_usize_range()],
                             sub_range.start,
                             &root
@@ -530,26 +530,26 @@ mod tests {
     fn test_verification_proof_store_with_fold_prefix_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mut hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmb = Mmb::new();
             let elements: Vec<_> = (0..8).map(test_digest).collect();
             let batch = {
                 let mut batch = mmb.new_batch();
                 for element in &elements {
-                    batch = batch.add(&hasher, element);
+                    batch = batch.add(&mut hasher, element);
                 }
-                batch.merkleize(&mmb, &hasher)
+                batch.merkleize(&mmb, &mut hasher)
             };
             mmb.apply_batch(&batch).unwrap();
-            let root = mmb.root(&hasher, 0).unwrap();
+            let root = mmb.root(&mut hasher, 0).unwrap();
 
             // With 8 leaves, the oldest MMB peak covers locations 0..4 but sits at position 7,
             // while the first leaf in the proven range (location 4) sits at position 6.
             // A position-based peak comparison therefore misclassifies the fold prefix.
             let range = MmbLocation::new(4)..MmbLocation::new(8);
-            let range_proof = mmb.range_proof(&hasher, range.clone(), 0).unwrap();
+            let range_proof = mmb.range_proof(&mut hasher, range.clone(), 0).unwrap();
             let proof_store = ProofStore::new(
-                &hasher,
+                &mut hasher,
                 &range_proof,
                 &elements[range.to_usize_range()],
                 range.start,
@@ -560,10 +560,10 @@ mod tests {
             for start in 4u64..8 {
                 for end in (start + 1)..=8 {
                     let sub_range = MmbLocation::new(start)..MmbLocation::new(end);
-                    let sub_proof = proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
+                    let sub_proof = proof_store.range_proof(&mut hasher, sub_range.clone()).unwrap();
                     assert!(
                         sub_proof.verify_range_inclusion(
-                            &hasher,
+                            &mut hasher,
                             &elements[sub_range.to_usize_range()],
                             sub_range.start,
                             &root
@@ -579,28 +579,28 @@ mod tests {
     fn test_verification_proof_store_with_backward_fold_suffix_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mut hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let inactive_peaks = 0;
             let mut mmb = Mmb::new();
             let elements: Vec<_> = (0..123).map(test_digest).collect();
             let batch = {
                 let mut batch = mmb.new_batch();
                 for element in &elements {
-                    batch = batch.add(&hasher, element);
+                    batch = batch.add(&mut hasher, element);
                 }
-                batch.merkleize(&mmb, &hasher)
+                batch.merkleize(&mmb, &mut hasher)
             };
             mmb.apply_batch(&batch).unwrap();
-            let hasher: Standard<Sha256> = Standard::new(BackwardFold);
-            let root = mmb.root(&hasher, inactive_peaks).unwrap();
+            let mut hasher: Standard<Sha256> = Standard::new(BackwardFold);
+            let root = mmb.root(&mut hasher, inactive_peaks).unwrap();
 
             let range = MmbLocation::new(0)..MmbLocation::new(1);
             let proof =
-                historical_range_proof(&hasher, &mmb, mmb.leaves(), range.clone(), inactive_peaks)
+                historical_range_proof(&mut hasher, &mmb, mmb.leaves(), range.clone(), inactive_peaks)
                     .await
                     .unwrap();
             let proof_store = ProofStore::new(
-                &hasher,
+                &mut hasher,
                 &proof,
                 &elements[range.to_usize_range()],
                 range.start,
@@ -608,15 +608,15 @@ mod tests {
             )
             .unwrap();
 
-            let same_range_proof = proof_store.range_proof(&hasher, range.clone()).unwrap();
+            let same_range_proof = proof_store.range_proof(&mut hasher, range.clone()).unwrap();
             assert!(same_range_proof.verify_range_inclusion(
-                &hasher,
+                &mut hasher,
                 &elements[range.to_usize_range()],
                 range.start,
                 &root
             ));
             assert!(matches!(
-                proof_store.range_proof(&hasher, MmbLocation::new(64)..MmbLocation::new(65)),
+                proof_store.range_proof(&mut hasher, MmbLocation::new(64)..MmbLocation::new(65)),
                 Err(Error::ElementPruned(_))
             ));
         });
@@ -628,15 +628,15 @@ mod tests {
     fn test_verification_proof_store_with_backward_fold_inactive_prefix_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mut hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmb = Mmb::new();
             let elements: Vec<_> = (0..123).map(test_digest).collect();
             let batch = {
                 let mut batch = mmb.new_batch();
                 for element in &elements {
-                    batch = batch.add(&hasher, element);
+                    batch = batch.add(&mut hasher, element);
                 }
-                batch.merkleize(&mmb, &hasher)
+                batch.merkleize(&mmb, &mut hasher)
             };
             mmb.apply_batch(&batch).unwrap();
 
@@ -649,16 +649,16 @@ mod tests {
             let total_leaves = *mmb.leaves();
             assert!(active_start > 0 && active_start < total_leaves);
 
-            let hasher: Standard<Sha256> = Standard::new(BackwardFold);
-            let root = mmb.root(&hasher, inactive_peaks).unwrap();
+            let mut hasher: Standard<Sha256> = Standard::new(BackwardFold);
+            let root = mmb.root(&mut hasher, inactive_peaks).unwrap();
 
             let range = MmbLocation::new(active_start)..MmbLocation::new(total_leaves);
             let range_proof =
-                historical_range_proof(&hasher, &mmb, mmb.leaves(), range.clone(), inactive_peaks)
+                historical_range_proof(&mut hasher, &mmb, mmb.leaves(), range.clone(), inactive_peaks)
                     .await
                     .unwrap();
             let proof_store = ProofStore::new(
-                &hasher,
+                &mut hasher,
                 &range_proof,
                 &elements[range.to_usize_range()],
                 range.start,
@@ -669,10 +669,10 @@ mod tests {
             for start in active_start..total_leaves {
                 for end in (start + 1)..=total_leaves {
                     let sub_range = MmbLocation::new(start)..MmbLocation::new(end);
-                    let sub_proof = proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
+                    let sub_proof = proof_store.range_proof(&mut hasher, sub_range.clone()).unwrap();
                     assert!(
                         sub_proof.verify_range_inclusion(
-                            &hasher,
+                            &mut hasher,
                             &elements[sub_range.to_usize_range()],
                             sub_range.start,
                             &root),
@@ -684,7 +684,7 @@ mod tests {
             // Sub-ranges into the inactive prefix are unrecoverable: those peaks were folded
             // into the prefix accumulator and individual digests are not retained.
             assert!(matches!(
-                proof_store.range_proof(&hasher, MmbLocation::new(0)..MmbLocation::new(1)),
+                proof_store.range_proof(&mut hasher, MmbLocation::new(0)..MmbLocation::new(1)),
                 Err(Error::ElementPruned(_))
             ));
         });
@@ -696,20 +696,20 @@ mod tests {
     fn test_verification_proof_store_multi_proof_backward_fold_suffix_peaks() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mut hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmb = Mmb::new();
             let elements: Vec<_> = (0..123).map(test_digest).collect();
             let batch = {
                 let mut batch = mmb.new_batch();
                 for element in &elements {
-                    batch = batch.add(&hasher, element);
+                    batch = batch.add(&mut hasher, element);
                 }
-                batch.merkleize(&mmb, &hasher)
+                batch.merkleize(&mmb, &mut hasher)
             };
             mmb.apply_batch(&batch).unwrap();
-            let hasher: Standard<Sha256> = Standard::new(BackwardFold);
+            let mut hasher: Standard<Sha256> = Standard::new(BackwardFold);
             let inactive_peaks = 0usize;
-            let root = mmb.root(&hasher, inactive_peaks).unwrap();
+            let root = mmb.root(&mut hasher, inactive_peaks).unwrap();
 
             let target = vec![MmbLocation::new(0)];
             let selected: Vec<_> = target
@@ -721,17 +721,17 @@ mod tests {
             let direct = multi_proof(&mmb, inactive_peaks, Bagging::BackwardFold, &target)
                 .await
                 .unwrap();
-            assert!(direct.verify_multi_inclusion(&hasher, &selected, &root));
+            assert!(direct.verify_multi_inclusion(&mut hasher, &selected, &root));
 
             // Build a ProofStore from a backward-folded range proof over a single leaf.
             // The other ~6 active peaks are folded into one synthetic suffix accumulator.
             let range = MmbLocation::new(0)..MmbLocation::new(1);
             let range_proof =
-                historical_range_proof(&hasher, &mmb, mmb.leaves(), range.clone(), inactive_peaks)
+                historical_range_proof(&mut hasher, &mmb, mmb.leaves(), range.clone(), inactive_peaks)
                     .await
                     .unwrap();
             let proof_store = ProofStore::new(
-                &hasher,
+                &mut hasher,
                 &range_proof,
                 &elements[range.to_usize_range()],
                 range.start,
@@ -767,7 +767,7 @@ mod tests {
                 .map(|&pos| (pos, mmb.get_node(pos).unwrap()))
                 .collect();
             let derived = proof_store.multi_proof(&target, &peaks).unwrap();
-            assert!(derived.verify_multi_inclusion(&hasher, &selected, &root));
+            assert!(derived.verify_multi_inclusion(&mut hasher, &selected, &root));
         });
     }
 }

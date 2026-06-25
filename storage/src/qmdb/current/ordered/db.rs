@@ -20,7 +20,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Read, Write};
-use commonware_cryptography::{Digest, FixedHasher as Hasher};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use futures::stream::Stream;
 
@@ -107,7 +107,7 @@ where
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(
-        hasher: &StandardHasher<H>,
+        hasher: &mut StandardHasher<H>,
         key: K,
         value: V::Value,
         proof: &KeyValueProof<F, K, H::Digest, N>,
@@ -143,7 +143,7 @@ where
     /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
     /// provided `root`.
     pub fn verify_exclusion_proof(
-        hasher: &StandardHasher<H>,
+        hasher: &mut StandardHasher<H>,
         key: &K,
         proof: &super::ExclusionProof<F, K, V, H::Digest, N>,
         root: &H::Digest,
@@ -205,7 +205,7 @@ where
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
-        hasher: &StandardHasher<H>,
+        hasher: &mut StandardHasher<H>,
         key: K,
     ) -> Result<KeyValueProof<F, K, H::Digest, N>, Error<F>> {
         let op_loc = self.any.get_with_loc(&key).await?;
@@ -227,7 +227,7 @@ where
     /// Returns [Error::KeyExists] if the key exists in the db.
     pub async fn exclusion_proof(
         &self,
-        hasher: &StandardHasher<H>,
+        hasher: &mut StandardHasher<H>,
         key: &K,
     ) -> Result<super::ExclusionProof<F, K, V, H::Digest, N>, Error<F>> {
         match self.any.get_span(key).await? {

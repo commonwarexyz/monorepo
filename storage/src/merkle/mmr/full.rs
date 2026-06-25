@@ -61,14 +61,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 199;
-            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mut hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let test_mmr = mem::Mmr::new();
-            let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
-            let expected_root = test_mmr.root(&hasher, 0).unwrap();
+            let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
+            let expected_root = test_mmr.root(&mut hasher, 0).unwrap();
 
             let mmr = Mmr::init(
                 context.child("storage"),
-                &Standard::<Sha256>::new(ForwardFold),
+                &mut hasher,
                 test_config(&context),
             )
             .await
@@ -77,11 +77,11 @@ mod tests {
             let mut batch = mmr.new_batch();
             for i in 0u64..NUM_ELEMENTS {
                 let element = hasher.digest(&i.to_be_bytes());
-                batch = batch.add(&hasher, &element);
+                batch = batch.add(&mut hasher, &element);
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
             mmr.apply_batch(&batch).unwrap();
-            assert_eq!(mmr.root(&hasher, 0).unwrap(), expected_root);
+            assert_eq!(mmr.root(&mut hasher, 0).unwrap(), expected_root);
 
             mmr.destroy().await.unwrap();
         });
@@ -93,38 +93,38 @@ mod tests {
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 200;
 
-            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mut hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let cfg = test_config(&context);
-            let mut mmr = Mmr::init(context, &hasher, cfg).await.unwrap();
+            let mut mmr = Mmr::init(context, &mut hasher, cfg).await.unwrap();
 
             let mut c_hasher = Sha256::new();
             let mut batch = mmr.new_batch();
             for i in 0u64..NUM_ELEMENTS {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
-                batch = batch.add(&hasher, &element);
+                batch = batch.add(&mut hasher, &element);
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
             mmr.apply_batch(&batch).unwrap();
 
             // Rewind one node at a time without syncing until empty, confirming the root matches.
             for i in (0..NUM_ELEMENTS).rev() {
                 assert!(mmr.rewind(1).await.is_ok());
-                let root = mmr.root(&hasher, 0).unwrap();
+                let root = mmr.root(&mut hasher, 0).unwrap();
                 let mut reference_mmr = mem::Mmr::new();
                 let batch = {
                     let mut batch = reference_mmr.new_batch();
                     for j in 0..i {
                         c_hasher.update(&j.to_be_bytes());
                         let element = c_hasher.finalize();
-                        batch = batch.add(&hasher, &element);
+                        batch = batch.add(&mut hasher, &element);
                     }
-                    batch.merkleize(&reference_mmr, &hasher)
+                    batch.merkleize(&reference_mmr, &mut hasher)
                 };
                 reference_mmr.apply_batch(&batch).unwrap();
                 assert_eq!(
                     root,
-                    reference_mmr.root(&hasher, 0).unwrap(),
+                    reference_mmr.root(&mut hasher, 0).unwrap(),
                     "root mismatch after rewind at {i}"
                 );
             }
@@ -138,34 +138,34 @@ mod tests {
                 for i in 0u64..NUM_ELEMENTS {
                     c_hasher.update(&i.to_be_bytes());
                     let element = c_hasher.finalize();
-                    batch = batch.add(&hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                     if i == 101 {
                         // We can't sync mid-batch, so apply the first part,
                         // sync, then start a new batch for the rest.
                         break;
                     }
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
                 mmr.apply_batch(&batch).unwrap();
                 mmr.sync().await.unwrap();
                 let mut batch = mmr.new_batch();
                 for i in 102u64..NUM_ELEMENTS {
                     c_hasher.update(&i.to_be_bytes());
                     let element = c_hasher.finalize();
-                    batch = batch.add(&hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
                 mmr.apply_batch(&batch).unwrap();
             }
 
             for i in (0..NUM_ELEMENTS - 1).rev().step_by(2) {
                 assert!(mmr.rewind(2).await.is_ok(), "at position {i:?}");
-                let root = mmr.root(&hasher, 0).unwrap();
+                let root = mmr.root(&mut hasher, 0).unwrap();
                 let reference_mmr = mem::Mmr::new();
-                let reference_mmr = build_test_mmr(&hasher, reference_mmr, i);
+                let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
                 assert_eq!(
                     root,
-                    reference_mmr.root(&hasher, 0).unwrap(),
+                    reference_mmr.root(&mut hasher, 0).unwrap(),
                     "root mismatch at position {i:?}"
                 );
             }
@@ -177,18 +177,18 @@ mod tests {
                 for i in 0u64..102 {
                     c_hasher.update(&i.to_be_bytes());
                     let element = c_hasher.finalize();
-                    batch = batch.add(&hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
                 mmr.apply_batch(&batch).unwrap();
                 mmr.sync().await.unwrap();
                 let mut batch = mmr.new_batch();
                 for i in 102u64..NUM_ELEMENTS {
                     c_hasher.update(&i.to_be_bytes());
                     let element = c_hasher.finalize();
-                    batch = batch.add(&hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
                 mmr.apply_batch(&batch).unwrap();
             }
             let prune_loc = Location::new(50);
@@ -197,7 +197,7 @@ mod tests {
             // Rewind enough nodes to cause the mem-mmr to be completely emptied, and then some.
             mmr.rewind(80).await.unwrap();
             // Make sure the pinned node boundary is valid by generating a proof for the oldest item.
-            mmr.proof(&hasher, prune_loc, 0).await.unwrap();
+            mmr.proof(&mut hasher, prune_loc, 0).await.unwrap();
             // prune all remaining leaves 1 at a time.
             while mmr.size() > prune_pos {
                 assert!(mmr.rewind(1).await.is_ok());
@@ -218,12 +218,12 @@ mod tests {
     fn test_full_mmr_batch_stacking() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mut hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
             // Build base full MMR with 10 elements.
             let mmr = Mmr::init(
                 context.child("storage"),
-                &Standard::<Sha256>::new(ForwardFold),
+                &mut hasher,
                 test_config(&context),
             )
             .await
@@ -232,9 +232,9 @@ mod tests {
             let mut batch = mmr.new_batch();
             for i in 0u64..10 {
                 let element = hasher.digest(&i.to_be_bytes());
-                batch = batch.add(&hasher, &element);
+                batch = batch.add(&mut hasher, &element);
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
             mmr.apply_batch(&batch).unwrap();
             mmr.sync().await.unwrap();
 
@@ -242,31 +242,31 @@ mod tests {
             let mut batch_a = mmr.new_batch();
             for i in 10u64..15 {
                 let element = hasher.digest(&i.to_be_bytes());
-                batch_a = batch_a.add(&hasher, &element);
+                batch_a = batch_a.add(&mut hasher, &element);
             }
-            let merkleized_a = mmr.with_mem(|mem| batch_a.merkleize(mem, &hasher));
+            let merkleized_a = mmr.with_mem(|mem| batch_a.merkleize(mem, &mut hasher));
 
             // Batch B on merkleized A: add 5 more elements.
             let mut batch_b = merkleized_a.new_batch();
             for i in 15u64..20 {
                 let element = hasher.digest(&i.to_be_bytes());
-                batch_b = batch_b.add(&hasher, &element);
+                batch_b = batch_b.add(&mut hasher, &element);
             }
-            let merkleized_b = mmr.with_mem(|mem| batch_b.merkleize(mem, &hasher));
+            let merkleized_b = mmr.with_mem(|mem| batch_b.merkleize(mem, &mut hasher));
             let expected_root = mmr
-                .with_mem(|mem| merkleized_b.root(mem, &hasher, 0))
+                .with_mem(|mem| merkleized_b.root(mem, &mut hasher, 0))
                 .unwrap();
 
             // Apply.
             mmr.apply_batch(&merkleized_b).unwrap();
-            assert_eq!(mmr.root(&hasher, 0).unwrap(), expected_root);
+            assert_eq!(mmr.root(&mut hasher, 0).unwrap(), expected_root);
 
             // Build a reference in-memory MMR with 20 elements to verify.
             let empty = mem::Mmr::new();
-            let reference = build_test_mmr(&hasher, empty, 20);
+            let reference = build_test_mmr(&mut hasher, empty, 20);
             assert_eq!(
-                mmr.root(&hasher, 0).unwrap(),
-                reference.root(&hasher, 0).unwrap()
+                mmr.root(&mut hasher, 0).unwrap(),
+                reference.root(&mut hasher, 0).unwrap()
             );
 
             mmr.destroy().await.unwrap();
@@ -281,21 +281,21 @@ mod tests {
     fn test_init_sync_fresh_start_updates_journal_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = Standard::<Sha256>::new(ForwardFold);
+            let mut hasher = Standard::<Sha256>::new(ForwardFold);
 
             // Build an MMR with 5 leaves (size 8), sync, drop.
             let mmr = Mmr::<_, Digest, Sequential>::init(
                 context.child("init"),
-                &hasher,
+                &mut hasher,
                 test_config(&context),
             )
             .await
             .unwrap();
             let mut batch = mmr.new_batch();
             for i in 0..5 {
-                batch = batch.add(&hasher, &test_digest(i));
+                batch = batch.add(&mut hasher, &test_digest(i));
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
             mmr.apply_batch(&batch).unwrap();
             mmr.sync().await.unwrap();
             drop(mmr);
@@ -311,14 +311,14 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let ref_mmr =
-                Mmr::<_, Digest, Sequential>::init(context.child("ref"), &hasher, ref_cfg)
+                Mmr::<_, Digest, Sequential>::init(context.child("ref"), &mut hasher, ref_cfg)
                     .await
                     .unwrap();
             let mut batch = ref_mmr.new_batch();
             for i in 0..100 {
-                batch = batch.add(&hasher, &test_digest(i));
+                batch = batch.add(&mut hasher, &test_digest(i));
             }
-            let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
             ref_mmr.apply_batch(&batch).unwrap();
             let expected_size = ref_mmr.size();
             let prune_loc = Location::new(100);
@@ -343,8 +343,8 @@ mod tests {
             assert_eq!(sync_mmr.size(), expected_size);
 
             // Should be able to add new elements without panic.
-            let batch = sync_mmr.new_batch().add(&hasher, &test_digest(999));
-            let batch = sync_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = sync_mmr.new_batch().add(&mut hasher, &test_digest(999));
+            let batch = sync_mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
             sync_mmr.apply_batch(&batch).unwrap();
 
             sync_mmr.destroy().await.unwrap();

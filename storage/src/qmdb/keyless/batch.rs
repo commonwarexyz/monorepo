@@ -12,13 +12,13 @@ use crate::{
     Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::{Digest, FixedHasher as Hasher, Hasher as CryptoHasher};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use std::sync::{Arc, Weak};
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] in the keyless-batch chain.
 type MerkleizedParent<F, H, V, S> =
-    Arc<MerkleizedBatch<F, <H as CryptoHasher>::Digest, V, S>>;
+    Arc<MerkleizedBatch<F, <H as Hasher>::Digest, V, S>>;
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
@@ -278,9 +278,10 @@ where
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
+        let mut hasher = crate::qmdb::hasher::<H>();
         let root = db
             .journal
-            .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
+            .with_mem(|mem| journal.root(mem, &mut hasher, inactive_peaks))
             .expect("inactive_peaks computed from batch size");
 
         // Compute the batch chain bounds.

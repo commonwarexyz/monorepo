@@ -15,7 +15,7 @@ use crate::{
     Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::{Digest, FixedHasher as CHasher};
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_parallel::Strategy;
 use std::{
     collections::BTreeMap,
@@ -270,9 +270,10 @@ where
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
+        let mut hasher = crate::qmdb::hasher::<H>();
         let root = db
             .journal
-            .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
+            .with_mem(|mem| journal.root(mem, &mut hasher, inactive_peaks))
             .expect("inactive_peaks computed from batch size");
 
         // Compute the batch chain bounds.

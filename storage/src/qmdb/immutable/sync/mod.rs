@@ -21,7 +21,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{EncodeShared, Read};
-use commonware_cryptography::FixedHasher as Hasher;
+use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 

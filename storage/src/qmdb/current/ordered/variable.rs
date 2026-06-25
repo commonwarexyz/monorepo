@@ -21,7 +21,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::FixedHasher as Hasher;
+use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<

@@ -28,14 +28,14 @@ fn bench_append_family<F: Family>(c: &mut Criterion, family: &str) {
                 || make_elements(n),
                 |elements| {
                     block_on(async {
-                        let h = StandardHasher::<Sha256>::new(ForwardFold);
+                        let mut h = StandardHasher::<Sha256>::new(ForwardFold);
                         let mut mem = Mem::<F, _>::new();
                         let batch = {
                             let mut batch = mem.new_batch();
                             for digest in &elements {
-                                batch = batch.add(&h, digest);
+                                batch = batch.add(&mut h, digest);
                             }
-                            batch.merkleize(&mem, &h)
+                            batch.merkleize(&mem, &mut h)
                         };
                         mem.apply_batch(&batch).unwrap();
                         mem

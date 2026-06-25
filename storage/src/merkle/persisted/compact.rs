@@ -33,7 +33,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Hash `element` and add it as a leaf.
-    pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
+    pub fn add(self, hasher: &mut impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
         Self {
             inner: self.inner.add(hasher, element),
         }
@@ -55,7 +55,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     pub fn merkleize(
         self,
         base: &Mem<F, D>,
-        hasher: &impl Hasher<F, Digest = D>,
+        hasher: &mut impl Hasher<F, Digest = D>,
     ) -> Arc<batch::MerkleizedBatch<F, D, S>> {
         self.inner.merkleize(base, hasher)
     }
@@ -131,7 +131,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     /// Return the root digest of the current state.
     pub fn root(
         &self,
-        hasher: &impl Hasher<F, Digest = D>,
+        hasher: &mut impl Hasher<F, Digest = D>,
         inactive_peaks: usize,
     ) -> Result<D, Error<F>> {
         self.inner.read().root(hasher, inactive_peaks)
@@ -184,13 +184,13 @@ mod tests {
     type TestMerkle<F> = Merkle<F, <Sha256 as commonware_cryptography::Hasher>::Digest, Sequential>;
 
     fn append<F: Family>(merkle: &mut TestMerkle<F>, values: &[&[u8]]) {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let batch = {
             let mut b = merkle.new_batch();
             for v in values {
-                b = b.add(&hasher, v);
+                b = b.add(&mut hasher, v);
             }
-            merkle.with_mem(|mem| b.merkleize(mem, &hasher))
+            merkle.with_mem(|mem| b.merkleize(mem, &mut hasher))
         };
         merkle.apply_batch(&batch).unwrap();
     }
@@ -206,35 +206,35 @@ mod tests {
     }
 
     fn assert_reset_to_round_trip<F: Family>() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut merkle = TestMerkle::<F>::new(Sequential);
         append(&mut merkle, &[b"a", b"b", b"c"]);
-        let root = merkle.root(&hasher, 0).unwrap();
+        let root = merkle.root(&mut hasher, 0).unwrap();
         let leaves = merkle.leaves();
         let pins = pinned_nodes(&merkle);
 
         // Pruning to the frontier does not change the root.
         merkle.prune_to_frontier();
-        assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+        assert_eq!(merkle.root(&mut hasher, 0).unwrap(), root);
 
         // A fresh tree reset to the snapshot reproduces the same state.
         let mut restored = TestMerkle::<F>::new(Sequential);
         append(&mut restored, &[b"x"]);
         restored.reset_to(leaves, pins.clone()).unwrap();
-        assert_eq!(restored.root(&hasher, 0).unwrap(), root);
+        assert_eq!(restored.root(&mut hasher, 0).unwrap(), root);
         assert_eq!(restored.leaves(), leaves);
 
         // Both trees evolve identically from the snapshot.
         append(&mut merkle, &[b"d"]);
         append(&mut restored, &[b"d"]);
         assert_eq!(
-            restored.root(&hasher, 0).unwrap(),
-            merkle.root(&hasher, 0).unwrap()
+            restored.root(&mut hasher, 0).unwrap(),
+            merkle.root(&mut hasher, 0).unwrap()
         );
 
         // from_compact_state builds the same tree as reset_to.
         let from_state = TestMerkle::<F>::from_compact_state(Sequential, leaves, pins).unwrap();
-        assert_eq!(from_state.root(&hasher, 0).unwrap(), root);
+        assert_eq!(from_state.root(&mut hasher, 0).unwrap(), root);
     }
 
     #[test]

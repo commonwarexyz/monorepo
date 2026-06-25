@@ -6,7 +6,8 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
-        self, batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
+        self, batch::MerkleizedBatch as GenericMerkleizedBatch, hasher::Standard as StandardHasher,
+        mem::Mem,
         storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
     },
     qmdb::{
@@ -30,7 +31,7 @@ use crate::{
 };
 use ahash::AHasher;
 use commonware_codec::Codec;
-use commonware_cryptography::{Digest, FixedHasher as Hasher};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap::{self, Readable as _};
 use std::{
@@ -650,9 +651,9 @@ where
         (idx, chunk)
     });
 
-    let hasher = qmdb::hasher::<H>();
+    let mut hasher = qmdb::hasher::<H>();
     let new_leaves = compute_grafted_leaves::<F, H, S, N>(
-        &hasher,
+        &mut hasher,
         &ops_tree_adapter,
         chunks_to_update,
         &current_db.strategy,
@@ -672,8 +673,11 @@ where
                 grafted_batch = grafted_batch.add_leaf_digest(digest);
             }
         }
-        let gh = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-        grafted_batch.merkleize(&current_db.grafted_tree, &gh)
+        let mut gh = grafting::GraftedHasher::<F, _>::new(
+            StandardHasher::<H>::new(hasher.root_bagging()),
+            grafting_height,
+        );
+        grafted_batch.merkleize(&current_db.grafted_tree, &mut gh)
     };
 
     // Build the layered bitmap (parent + overlay) before computing the canonical root, so that
@@ -692,8 +696,12 @@ where
         batch: &grafted_batch,
         mem: &current_db.grafted_tree,
     };
-    let grafted_storage =
-        grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, hasher.clone());
+    let grafted_storage = grafting::Storage::new(
+        &layered,
+        grafting_height,
+        &ops_tree_adapter,
+        StandardHasher::<H>::new(hasher.root_bagging()),
+    );
     // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
     // index `new_complete_chunks` (the chunk currently being filled with bits) -- distinct
     // from `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can
@@ -710,7 +718,7 @@ where
         }
     };
     let canonical_root = compute_db_root::<F, H, _, _, N>(
-        &hasher,
+        &mut hasher,
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,

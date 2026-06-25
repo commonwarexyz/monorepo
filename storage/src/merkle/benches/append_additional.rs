@@ -21,15 +21,15 @@ fn make_elements(n: usize, sampler: &mut StdRng) -> Vec<sha256::Digest> {
 }
 
 fn make_mem<F: Family>(elements: &[sha256::Digest]) -> Mem<F, sha256::Digest> {
-    let h = StandardHasher::<Sha256>::new(ForwardFold);
+    let mut h = StandardHasher::<Sha256>::new(ForwardFold);
     let mut mem = Mem::<F, _>::new();
     block_on(async {
         let batch = {
             let mut batch = mem.new_batch();
             for digest in elements {
-                batch = batch.add(&h, digest);
+                batch = batch.add(&mut h, digest);
             }
-            batch.merkleize(&mem, &h)
+            batch.merkleize(&mem, &mut h)
         };
         mem.apply_batch(&batch).unwrap();
     });
@@ -52,13 +52,13 @@ fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
                     b.iter_batched(
                         || setup::<F>(n, a),
                         |(mem, additional)| {
-                            let h = StandardHasher::<Sha256>::new(ForwardFold);
+                            let mut h = StandardHasher::<Sha256>::new(ForwardFold);
                             block_on(async {
                                 let mut batch = mem.new_batch();
                                 for digest in &additional {
-                                    batch = batch.add(&h, digest);
+                                    batch = batch.add(&mut h, digest);
                                 }
-                                batch.merkleize(&mem, &h);
+                                batch.merkleize(&mem, &mut h);
                             });
                         },
                         BatchSize::LargeInput,

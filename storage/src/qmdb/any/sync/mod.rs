@@ -43,7 +43,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
-use commonware_cryptography::FixedHasher as Hasher;
+use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::{range::NonEmptyRange, Array};
 
@@ -164,10 +164,10 @@ macro_rules! impl_sync_database {
                 }
                 drop(reader);
 
-                let hasher = qmdb::hasher::<H>();
+                let mut hasher = qmdb::hasher::<H>();
                 let merkle = full::Merkle::<F, _, _, S>::init(
                     context.child("local_boundary_merkle"),
-                    &hasher,
+                    &mut hasher,
                     config.merkle_config.clone(),
                 )
                 .await?;
@@ -180,7 +180,7 @@ macro_rules! impl_sync_database {
                     F::location_to_position(target.range.end()),
                     target.range.start(),
                 );
-                if merkle.root(&hasher, inactive_peaks)? != target.root {
+                if merkle.root(&mut hasher, inactive_peaks)? != target.root {
                     return Ok(None);
                 }
 

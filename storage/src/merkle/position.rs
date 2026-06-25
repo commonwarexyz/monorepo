@@ -534,7 +534,7 @@ mod tests {
         // Build an MMR one node at a time and check that the validity check is correct for all
         // sizes up to the current size.
         let mut size_to_check = Position::new(0);
-        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let mut hasher = Standard::<Sha256>::new(ForwardFold);
         let mut mmr = Mmr::new();
         let digest = [1u8; 32];
         for _i in 0..10000 {
@@ -550,8 +550,8 @@ mod tests {
             assert!(size_to_check.is_valid_size());
             let batch = mmr
                 .new_batch()
-                .add(&hasher, &digest)
-                .merkleize(&mmr, &hasher);
+                .add(&mut hasher, &digest)
+                .merkleize(&mmr, &mut hasher);
             mmr.apply_batch(&batch).unwrap();
             size_to_check += 1;
         }

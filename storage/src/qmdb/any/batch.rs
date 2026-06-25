@@ -24,7 +24,7 @@ use crate::{
 };
 use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
-use commonware_cryptography::{Digest, FixedHasher as Hasher};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap, sync::Mutex};
 use core::{cmp::Ordering, ops::Range};
@@ -883,9 +883,10 @@ where
         // Hash before `with_mem` borrows committed Merkle state under its read lock.
         let journal_batch = self.journal_batch.add_many(ops);
         let journal = db.log.with_mem(|base| journal_batch.merkleize(base));
+        let mut hasher = crate::qmdb::hasher::<H>();
         let root = db
             .log
-            .with_mem(|base| journal.root(base, &db.log.hasher, inactive_peaks))?;
+            .with_mem(|base| journal.root(base, &mut hasher, inactive_peaks))?;
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
         let ancestors: Vec<_> = self
@@ -2217,7 +2218,7 @@ mod tests {
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256, Hasher as _, Sha256};
+    use commonware_cryptography::{sha256, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::test_rng;

@@ -20,7 +20,7 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-use crate::{FixedHasher, Hasher};
+use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use bytes::{Buf, BufMut};
@@ -35,7 +35,8 @@ use core::{
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
-use sha2::{block_api::compress256, Digest as _, Sha256 as ISha256};
+use sha2::block_api::compress256;
+use sha2::{Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
@@ -49,9 +50,19 @@ const INITIAL_STATE: [u32; 8] = [
 ];
 
 /// SHA-256 hasher.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Sha256 {
     hasher: ISha256,
+    blocks: [[u8; BLOCK_LENGTH]; 2],
+}
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self {
+            hasher: ISha256::new(),
+            blocks: [[0u8; BLOCK_LENGTH]; 2],
+        }
+    }
 }
 
 impl Clone for Sha256 {
@@ -88,6 +99,16 @@ impl Hasher for Sha256 {
         self
     }
 
+    #[inline]
+    fn hash_parts_mut<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+        self.reset();
+        for part in parts {
+            self.update(part);
+        }
+        self.finalize()
+    }
+
+    #[inline]
     fn hash_pair(left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
         let mut blocks = [[0u8; BLOCK_LENGTH]; 2];
         blocks[0][..DIGEST_LENGTH].copy_from_slice(left.as_ref());
@@ -95,6 +116,15 @@ impl Hasher for Sha256 {
         finalize_two_blocks(blocks, 2 * DIGEST_LENGTH)
     }
 
+    #[inline]
+    fn hash_pair_mut(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
+        self.blocks[0][..DIGEST_LENGTH].copy_from_slice(left.as_ref());
+        self.blocks[0][DIGEST_LENGTH..].copy_from_slice(right.as_ref());
+        finish_padding(&mut self.blocks[1], 0, 2 * DIGEST_LENGTH);
+        finalize_two_blocks_ref(&self.blocks)
+    }
+
+    #[inline]
     fn hash_u32_with_digest(prefix: u32, digest: &Self::Digest) -> Self::Digest {
         let prefix = prefix.to_be_bytes();
         let mut block = [0u8; BLOCK_LENGTH];
@@ -103,19 +133,39 @@ impl Hasher for Sha256 {
         finalize_one_block(block, prefix.len() + DIGEST_LENGTH)
     }
 
-    fn hash_u32_with_bytes(prefix: u32, bytes: &[u8]) -> Self::Digest {
-        if bytes.len() == DIGEST_LENGTH {
-            let prefix = prefix.to_be_bytes();
-            let mut block = [0u8; BLOCK_LENGTH];
-            block[..prefix.len()].copy_from_slice(&prefix);
-            block[prefix.len()..prefix.len() + DIGEST_LENGTH].copy_from_slice(bytes);
-            finalize_one_block(block, prefix.len() + DIGEST_LENGTH)
-        } else {
-            let prefix = prefix.to_be_bytes();
-            Self::hash_parts([prefix.as_slice(), bytes])
-        }
+    #[inline]
+    fn hash_u32_with_digest_mut(&mut self, prefix: u32, digest: &Self::Digest) -> Self::Digest {
+        let prefix = prefix.to_be_bytes();
+        self.blocks[0][..prefix.len()].copy_from_slice(&prefix);
+        self.blocks[0][prefix.len()..prefix.len() + DIGEST_LENGTH].copy_from_slice(digest.as_ref());
+        finish_padding(
+            &mut self.blocks[0],
+            prefix.len() + DIGEST_LENGTH,
+            prefix.len() + DIGEST_LENGTH,
+        );
+        finalize_one_block_ref(&self.blocks[0])
     }
 
+    #[inline]
+    fn hash_u32_with_bytes(prefix: u32, bytes: &[u8]) -> Self::Digest {
+        let prefix = prefix.to_be_bytes();
+        hash_prefix_bytes(&prefix, bytes)
+    }
+
+    #[inline]
+    fn hash_u32_with_bytes_mut(&mut self, prefix: u32, bytes: &[u8]) -> Self::Digest {
+        let prefix = prefix.to_be_bytes();
+        let message_len = prefix.len() + bytes.len();
+        if message_len > 55 {
+            return hash_prefix_bytes(&prefix, bytes);
+        }
+        self.blocks[0][..prefix.len()].copy_from_slice(&prefix);
+        self.blocks[0][prefix.len()..message_len].copy_from_slice(bytes);
+        finish_padding(&mut self.blocks[0], message_len, message_len);
+        finalize_one_block_ref(&self.blocks[0])
+    }
+
+    #[inline]
     fn hash_u64_with_digest(prefix: u64, digest: &Self::Digest) -> Self::Digest {
         let prefix = prefix.to_be_bytes();
         let mut block = [0u8; BLOCK_LENGTH];
@@ -124,19 +174,39 @@ impl Hasher for Sha256 {
         finalize_one_block(block, prefix.len() + DIGEST_LENGTH)
     }
 
-    fn hash_u64_with_bytes(prefix: u64, bytes: &[u8]) -> Self::Digest {
-        if bytes.len() == DIGEST_LENGTH {
-            let prefix = prefix.to_be_bytes();
-            let mut block = [0u8; BLOCK_LENGTH];
-            block[..prefix.len()].copy_from_slice(&prefix);
-            block[prefix.len()..prefix.len() + DIGEST_LENGTH].copy_from_slice(bytes);
-            finalize_one_block(block, prefix.len() + DIGEST_LENGTH)
-        } else {
-            let prefix = prefix.to_be_bytes();
-            Self::hash_parts([prefix.as_slice(), bytes])
-        }
+    #[inline]
+    fn hash_u64_with_digest_mut(&mut self, prefix: u64, digest: &Self::Digest) -> Self::Digest {
+        let prefix = prefix.to_be_bytes();
+        self.blocks[0][..prefix.len()].copy_from_slice(&prefix);
+        self.blocks[0][prefix.len()..prefix.len() + DIGEST_LENGTH].copy_from_slice(digest.as_ref());
+        finish_padding(
+            &mut self.blocks[0],
+            prefix.len() + DIGEST_LENGTH,
+            prefix.len() + DIGEST_LENGTH,
+        );
+        finalize_one_block_ref(&self.blocks[0])
     }
 
+    #[inline]
+    fn hash_u64_with_bytes(prefix: u64, bytes: &[u8]) -> Self::Digest {
+        let prefix = prefix.to_be_bytes();
+        hash_prefix_bytes(&prefix, bytes)
+    }
+
+    #[inline]
+    fn hash_u64_with_bytes_mut(&mut self, prefix: u64, bytes: &[u8]) -> Self::Digest {
+        let prefix = prefix.to_be_bytes();
+        let message_len = prefix.len() + bytes.len();
+        if message_len > 55 {
+            return hash_prefix_bytes(&prefix, bytes);
+        }
+        self.blocks[0][..prefix.len()].copy_from_slice(&prefix);
+        self.blocks[0][prefix.len()..message_len].copy_from_slice(bytes);
+        finish_padding(&mut self.blocks[0], message_len, message_len);
+        finalize_one_block_ref(&self.blocks[0])
+    }
+
+    #[inline]
     fn hash_u64_with_pair(
         prefix: u64,
         left: &Self::Digest,
@@ -151,48 +221,111 @@ impl Hasher for Sha256 {
         finalize_two_blocks(blocks, prefix.len() + 2 * DIGEST_LENGTH)
     }
 
+    #[inline]
+    fn hash_u64_with_pair_mut(
+        &mut self,
+        prefix: u64,
+        left: &Self::Digest,
+        right: &Self::Digest,
+    ) -> Self::Digest {
+        let prefix = prefix.to_be_bytes();
+        self.blocks[0][..prefix.len()].copy_from_slice(&prefix);
+        self.blocks[0][prefix.len()..prefix.len() + DIGEST_LENGTH].copy_from_slice(left.as_ref());
+        self.blocks[0][prefix.len() + DIGEST_LENGTH..]
+            .copy_from_slice(&right.as_ref()[..24]);
+        self.blocks[1][..8].copy_from_slice(&right.as_ref()[24..]);
+        finish_padding(
+            &mut self.blocks[1],
+            8,
+            prefix.len() + 2 * DIGEST_LENGTH,
+        );
+        finalize_two_blocks_ref(&self.blocks)
+    }
+
+    #[inline]
     fn hash_u64_u64_with_digest(
         first: u64,
         second: u64,
         digest: &Self::Digest,
     ) -> Self::Digest {
-        let first = first.to_be_bytes();
-        let second = second.to_be_bytes();
+        let mut prefix = [0u8; 16];
+        prefix[..8].copy_from_slice(&first.to_be_bytes());
+        prefix[8..].copy_from_slice(&second.to_be_bytes());
         let mut block = [0u8; BLOCK_LENGTH];
-        block[..first.len()].copy_from_slice(&first);
-        block[first.len()..first.len() + second.len()].copy_from_slice(&second);
-        block[first.len() + second.len()..first.len() + second.len() + DIGEST_LENGTH]
-            .copy_from_slice(digest.as_ref());
-        finalize_one_block(block, first.len() + second.len() + DIGEST_LENGTH)
+        block[..prefix.len()].copy_from_slice(&prefix);
+        block[prefix.len()..prefix.len() + DIGEST_LENGTH].copy_from_slice(digest.as_ref());
+        finalize_one_block(block, prefix.len() + DIGEST_LENGTH)
+    }
+
+    #[inline]
+    fn hash_u64_u64_with_digest_mut(
+        &mut self,
+        first: u64,
+        second: u64,
+        digest: &Self::Digest,
+    ) -> Self::Digest {
+        self.blocks[0][..8].copy_from_slice(&first.to_be_bytes());
+        self.blocks[0][8..16].copy_from_slice(&second.to_be_bytes());
+        self.blocks[0][16..16 + DIGEST_LENGTH].copy_from_slice(digest.as_ref());
+        finish_padding(&mut self.blocks[0], 16 + DIGEST_LENGTH, 16 + DIGEST_LENGTH);
+        finalize_one_block_ref(&self.blocks[0])
     }
 }
 
-impl FixedHasher for Sha256 {}
-
+#[inline]
 fn finalize_one_block(mut block: [u8; BLOCK_LENGTH], message_len: usize) -> Digest {
     debug_assert!(message_len <= 55);
     finish_padding(&mut block, message_len, message_len);
-    finalize_blocks(&[block])
+    finalize_one_block_ref(&block)
 }
 
+#[inline]
+fn hash_prefix_bytes(prefix: &[u8], bytes: &[u8]) -> Digest {
+    let message_len = prefix.len() + bytes.len();
+    if message_len <= 55 {
+        let mut block = [0u8; BLOCK_LENGTH];
+        block[..prefix.len()].copy_from_slice(prefix);
+        block[prefix.len()..message_len].copy_from_slice(bytes);
+        return finalize_one_block(block, message_len);
+    }
+    Sha256::hash_parts([prefix, bytes])
+}
+
+#[inline]
 fn finalize_two_blocks(mut blocks: [[u8; BLOCK_LENGTH]; 2], message_len: usize) -> Digest {
     debug_assert!((56..=119).contains(&message_len));
     let block = message_len / BLOCK_LENGTH;
     let offset = message_len % BLOCK_LENGTH;
     blocks[block][offset] = 0x80;
     blocks[1][56..].copy_from_slice(&((message_len as u64) * 8).to_be_bytes());
-    finalize_blocks(&blocks)
+    finalize_two_blocks_ref(&blocks)
 }
 
+#[inline]
+fn finalize_one_block_ref(block: &[u8; BLOCK_LENGTH]) -> Digest {
+    let mut state = INITIAL_STATE;
+    compress256(&mut state, core::slice::from_ref(block));
+    digest_from_state(state)
+}
+
+#[inline]
+fn finalize_two_blocks_ref(blocks: &[[u8; BLOCK_LENGTH]; 2]) -> Digest {
+    let mut state = INITIAL_STATE;
+    compress256(&mut state, blocks);
+    digest_from_state(state)
+}
+
+#[inline]
 fn finish_padding(block: &mut [u8; BLOCK_LENGTH], offset: usize, message_len: usize) {
     block[offset] = 0x80;
+    if offset + 1 < 56 {
+        block[offset + 1..56].fill(0);
+    }
     block[56..].copy_from_slice(&((message_len as u64) * 8).to_be_bytes());
 }
 
-fn finalize_blocks(blocks: &[[u8; BLOCK_LENGTH]]) -> Digest {
-    let mut state = INITIAL_STATE;
-    compress256(&mut state, blocks);
-
+#[inline]
+fn digest_from_state(state: [u32; 8]) -> Digest {
     let mut digest = [0u8; DIGEST_LENGTH];
     for (bytes, word) in digest.chunks_exact_mut(4).zip(state) {
         bytes.copy_from_slice(&word.to_be_bytes());
@@ -346,6 +479,7 @@ mod tests {
         let left = Sha256::hash(b"left");
         let right = Sha256::hash(b"right");
         let payload = b"payload";
+        let long_payload = [42u8; 64];
 
         assert_eq!(
             Sha256::hash_pair(&left, &right),
@@ -364,6 +498,10 @@ mod tests {
             standard_hash([7u32.to_be_bytes().as_slice(), payload])
         );
         assert_eq!(
+            Sha256::hash_u32_with_bytes(7, &long_payload),
+            standard_hash([7u32.to_be_bytes().as_slice(), long_payload.as_slice()])
+        );
+        assert_eq!(
             Sha256::hash_u64_with_digest(9, &left),
             standard_hash([9u64.to_be_bytes().as_slice(), left.as_ref()])
         );
@@ -376,6 +514,10 @@ mod tests {
             standard_hash([9u64.to_be_bytes().as_slice(), payload])
         );
         assert_eq!(
+            Sha256::hash_u64_with_bytes(9, &long_payload),
+            standard_hash([9u64.to_be_bytes().as_slice(), long_payload.as_slice()])
+        );
+        assert_eq!(
             Sha256::hash_u64_with_pair(11, &left, &right),
             standard_hash([
                 11u64.to_be_bytes().as_slice(),
@@ -385,6 +527,56 @@ mod tests {
         );
         assert_eq!(
             Sha256::hash_u64_u64_with_digest(13, 17, &left),
+            standard_hash([
+                13u64.to_be_bytes().as_slice(),
+                17u64.to_be_bytes().as_slice(),
+                left.as_ref()
+            ])
+        );
+
+        let mut hasher = Sha256::new();
+        assert_eq!(
+            hasher.hash_parts_mut([b"left".as_slice(), b"right".as_slice()]),
+            standard_hash([b"left".as_slice(), b"right".as_slice()])
+        );
+        assert_eq!(
+            hasher.hash_pair_mut(&left, &right),
+            standard_hash([left.as_ref(), right.as_ref()])
+        );
+        assert_eq!(
+            hasher.hash_u32_with_digest_mut(7, &left),
+            standard_hash([7u32.to_be_bytes().as_slice(), left.as_ref()])
+        );
+        assert_eq!(
+            hasher.hash_u32_with_bytes_mut(7, payload),
+            standard_hash([7u32.to_be_bytes().as_slice(), payload])
+        );
+        assert_eq!(
+            hasher.hash_u32_with_bytes_mut(7, &long_payload),
+            standard_hash([7u32.to_be_bytes().as_slice(), long_payload.as_slice()])
+        );
+        assert_eq!(
+            hasher.hash_u64_with_digest_mut(9, &left),
+            standard_hash([9u64.to_be_bytes().as_slice(), left.as_ref()])
+        );
+        assert_eq!(
+            hasher.hash_u64_with_bytes_mut(9, payload),
+            standard_hash([9u64.to_be_bytes().as_slice(), payload])
+        );
+        assert_eq!(
+            hasher.hash_u64_with_bytes_mut(9, &long_payload),
+            standard_hash([9u64.to_be_bytes().as_slice(), long_payload.as_slice()])
+        );
+        assert_eq!(
+            hasher.hash_u64_with_pair_mut(11, &left, &right),
+            standard_hash([
+                11u64.to_be_bytes().as_slice(),
+                left.as_ref(),
+                right.as_ref()
+            ])
+        );
+        assert_eq!(
+            hasher.hash_u64_u64_with_digest_mut(13, 17, &left),
             standard_hash([
                 13u64.to_be_bytes().as_slice(),
                 17u64.to_be_bytes().as_slice(),

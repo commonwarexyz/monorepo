@@ -40,7 +40,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
-use commonware_cryptography::{Digest, FixedHasher as Hasher};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::sync::{Arc, Weak};
@@ -212,10 +212,10 @@ where
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let hasher = qmdb::hasher::<H>();
+        let mut hasher = qmdb::hasher::<H>();
         let root = db
             .merkle
-            .with_mem(|mem| merkle.root(mem, &hasher, inactive_peaks))
+            .with_mem(|mem| merkle.root(mem, &mut hasher, inactive_peaks))
             .expect("inactive_peaks computed from batch size");
 
         let ancestors =
@@ -359,13 +359,13 @@ where
     where
         F: Family,
     {
-        let hasher = qmdb::hasher::<H>();
+        let mut hasher = qmdb::hasher::<H>();
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(*self.last_commit_loc + 1)),
             self.inactivity_floor_loc,
         );
         self.merkle
-            .root(&hasher, inactive_peaks)
+            .root(&mut hasher, inactive_peaks)
             .expect("compact Merkle root should not fail")
     }
 

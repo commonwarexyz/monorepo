@@ -33,6 +33,7 @@ use crate::{
     },
     merkle::{
         full::{self, Merkle},
+        hasher::Standard,
         Graftable, Location,
     },
     qmdb::{
@@ -68,7 +69,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
-use commonware_cryptography::{DigestOf, FixedHasher as Hasher};
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, sync::AsyncMutex, Array,
@@ -178,11 +179,11 @@ where
     };
 
     // Build grafted tree.
-    let hasher = qmdb::hasher::<H>();
+    let mut hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
-        &hasher,
+        &mut hasher,
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
@@ -198,11 +199,11 @@ where
         &grafted_tree,
         grafting::height::<N>(),
         &any.log.merkle,
-        hasher.clone(),
+        Standard::<H>::new(hasher.root_bagging()),
     );
     let partial = db::partial_chunk(any.bitmap.as_ref());
     let grafted_root = db::compute_grafted_root(
-        &hasher,
+        &mut hasher,
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
@@ -218,7 +219,7 @@ where
         db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
             .map(|chunk| hasher.digest(&chunk));
     let root = db::combine_roots(
-        &hasher,
+        &mut hasher,
         &ops_root,
         &grafted_root,
         pending_digest.as_ref(),
@@ -325,10 +326,10 @@ macro_rules! impl_current_sync_database {
                 .await?;
                 drop(reader);
 
-                let hasher = qmdb::hasher::<H>();
+                let mut hasher = qmdb::hasher::<H>();
                 let merkle = Merkle::<F, _, _, S>::init(
                     context.child("local_boundary_merkle"),
-                    &hasher,
+                    &mut hasher,
                     config.merkle_config.clone(),
                 )
                 .await?;
@@ -341,7 +342,7 @@ macro_rules! impl_current_sync_database {
                     F::location_to_position(target.range.end()),
                     inactivity_floor,
                 );
-                if merkle.root(&hasher, inactive_peaks)? != target.root {
+                if merkle.root(&mut hasher, inactive_peaks)? != target.root {
                     return Ok(None);
                 }
 

@@ -458,14 +458,14 @@ mod tests {
     fn test_leftmost_leaf() {
         // Verify leftmost_leaf is consistent with subtree_root_position:
         // subtree_root_position(leftmost_leaf(pos, h), h) == pos.
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut mmb = Mmb::new();
         let digest = [1u8; 32];
         for _ in 0..200 {
             let merkleized = mmb
                 .new_batch()
-                .add(&hasher, &digest)
-                .merkleize(&mmb, &hasher);
+                .add(&mut hasher, &digest)
+                .merkleize(&mmb, &mut hasher);
             mmb.apply_batch(&merkleized).unwrap();
         }
         for (peak_pos, peak_height) in Family::peaks(mmb.size()) {
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_chunk_peaks() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut mmb = Mmb::new();
         let digest = [1u8; 32];
 
@@ -508,8 +508,8 @@ mod tests {
         for _ in 0..200 {
             let merkleized = mmb
                 .new_batch()
-                .add(&hasher, &digest)
-                .merkleize(&mmb, &hasher);
+                .add(&mut hasher, &digest)
+                .merkleize(&mmb, &mut hasher);
             mmb.apply_batch(&merkleized).unwrap();
         }
         let size = mmb.size();
