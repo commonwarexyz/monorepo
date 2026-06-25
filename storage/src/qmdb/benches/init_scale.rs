@@ -1,5 +1,6 @@
-//! Standalone, opt-in large-scale measurement of QMDB init (snapshot rebuild) with the init-time
-//! `(location -> key)` cache off vs on.
+//! Standalone, opt-in large-scale measurement of two QMDB operations at multi-GB scale: building a
+//! database (`generate`) and reopening it, i.e. rebuilding the snapshot (`bench`), with the
+//! init-time `(location -> key)` cache off vs on.
 //!
 //! The criterion init benchmark ([init](super::init)) can't reach these sizes: it resamples, and the
 //! database is multi-GB. This binary instead builds a *real* on-disk database once and then times a
@@ -7,7 +8,9 @@
 //! cache's effect on the redundant collision-resolution log reads shows at scale.
 //!
 //! Generation and benchmarking are split so the (multi-minute, multi-GB) database is built once and
-//! reused across many measurement runs. A folder names the database's on-disk location:
+//! reused across many reopen runs -- but generation is itself an interesting benchmark: building a
+//! database of this size is a large-scale seed/churn/commit workload, and `generate` reports its
+//! elapsed build time. A folder names the database's on-disk location:
 //!
 //! ```text
 //! cargo bench -p commonware-storage --bench init_scale --features test-traits -- generate /tmp/db 50000000
@@ -19,9 +22,9 @@
 //! keyspace) then `elements * CHURN` Zipf-distributed updates over that whole keyspace -- so churn is
 //! skewed (a hot subset is re-updated, which makes collision resolution, and thus the cache, matter)
 //! and some updates land on unseeded keys, inserting them (a growing keyspace). It then prunes and
-//! syncs. `bench` reopens it (read-only) at cache off / a quarter of the replay region / the whole
-//! replay region, reporting each init time plus the replay-region size `R` (what the cache must cover
-//! to avoid eviction).
+//! syncs, reporting the total build time. `bench` reopens it (read-only) at cache off / a quarter of
+//! the replay region / the whole replay region, reporting each init time plus the replay-region size
+//! `R` (what the cache must cover to avoid eviction).
 
 #[allow(dead_code, unused_imports, unused_macros)]
 #[path = "common.rs"]
@@ -102,8 +105,9 @@ fn main() {
     }
 }
 
-/// Build a database of `elements` keys (plus `elements * CHURN` random updates) at `folder` and
-/// leave it on disk for later `bench` runs.
+/// Build a database of `elements` keys (plus `elements * CHURN` random updates) at `folder`, leaving
+/// it on disk for later `bench` runs. Reports the elapsed build time -- a large-scale
+/// seed/churn/commit benchmark in its own right, not just setup for the reopen measurement.
 fn generate(folder: &str, elements: u64) {
     if db_dir_nonempty(folder) {
         eprintln!("{folder} already contains data; `destroy` it first or pick a new folder");
@@ -111,13 +115,15 @@ fn generate(folder: &str, elements: u64) {
     }
     let operations = elements * CHURN;
     let cfg = Config::default().with_storage_directory(folder);
-    Runner::new(cfg).start(|ctx| async move {
+    let elapsed = Runner::new(cfg).start(|ctx| async move {
         let mut db = AnyOFixDb::<Mmr>::init(
             ctx.child("storage"),
             any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
         )
         .await
         .unwrap();
+        // Time the build itself (seed + churn + prune + sync); opening the empty db above is cheap.
+        let start = Instant::now();
         gen_random_kv::<Mmr, _>(
             &mut db,
             elements,
@@ -132,8 +138,9 @@ fn generate(folder: &str, elements: u64) {
         .await;
         db.prune(db.sync_boundary()).await.unwrap();
         db.sync().await.unwrap();
+        start.elapsed()
     });
-    println!("generated {elements} keys + {operations} updates at {folder}");
+    println!("generated {elements} keys + {operations} updates at {folder} in {elapsed:?}");
 }
 
 /// Reopen the database at `folder` (read-only) and time `init` at three cache regimes: off, a

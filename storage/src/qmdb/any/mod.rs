@@ -112,8 +112,7 @@ pub struct Config<T: Translator, J, S: Strategy> {
     pub translator: T,
 
     /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
-    /// collisions without re-reading the log; `0` disables it. The cache is held only for the
-    /// duration of init.
+    /// collisions without re-reading the log; `0` disables it.
     pub init_cache_size: usize,
 }
 

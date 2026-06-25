@@ -570,6 +570,10 @@ pub(crate) use define_vec_variants;
 /// Seed a database with `num_elements` entries, then perform `num_operations` random
 /// updates/deletes. Commits periodically when `commit_frequency` is `Some`.
 ///
+/// `seed_batch` caps how many seeds accumulate before each merkleize+apply+commit (bounding peak
+/// memory); `None` seeds in a single batch. `prune_frequency` prunes to the inactivity floor every
+/// `Some(n)` commits to bound on-disk growth; `None` never prunes during generation.
+///
 /// `key_zipf_exponent` selects how update/delete keys are sampled: `None` is uniform; `Some(s)`
 /// draws keys from a Zipf distribution with exponent `s`, so a hot subset is churned far more than
 /// the long tail (a more realistic workload than uniform churn).
@@ -579,6 +583,7 @@ pub(crate) use define_vec_variants;
 /// `k >= num_elements`) seeds a uniform-random subset of `num_elements` keys out of `k` and samples
 /// updates over all of `k`, so some updates land on unseeded keys and insert them organically -- a
 /// growing keyspace rather than a fixed population.
+#[allow(clippy::too_many_arguments)]
 pub async fn gen_random_kv<F, M>(
     db: &mut M,
     num_elements: u64,
@@ -610,10 +615,7 @@ pub async fn gen_random_kv<F, M>(
         for i in 0u64..num_elements {
             // With a sparse `keyspace`, seed a uniform-random subset of it (so later updates can land
             // on unseeded keys and insert them); otherwise seed keys 0..num_elements.
-            let idx = match keyspace {
-                Some(k) => rng.next_u64() % k,
-                None => i,
-            };
+            let idx = keyspace.map_or(i, |k| rng.next_u64() % k);
             let key = Sha256::hash(&idx.to_be_bytes());
             batch = batch.write(key, Some(make_value(&mut rng)));
             pending += 1;
@@ -622,7 +624,7 @@ pub async fn gen_random_kv<F, M>(
                 db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap();
                 commits += 1;
-                if prune_frequency.is_some_and(|n| commits % n == 0) {
+                if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
                     let boundary = db.sync_boundary().await;
                     db.prune(boundary).await.unwrap();
                 }
@@ -662,7 +664,7 @@ pub async fn gen_random_kv<F, M>(
                     db.apply_batch(merkleized).await.unwrap();
                     db.commit().await.unwrap();
                     commits += 1;
-                    if prune_frequency.is_some_and(|n| commits % n == 0) {
+                    if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
                         let boundary = db.sync_boundary().await;
                         db.prune(boundary).await.unwrap();
                     }

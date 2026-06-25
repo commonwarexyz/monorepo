@@ -232,8 +232,7 @@ const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
 /// inactivates (if any). Returns the number of active keys in the db.
 ///
 /// `cache_size` bounds a `(location -> key)` cache that lets collision resolution resolve
-/// candidates from memory instead of re-reading the log; `0` disables it. The cache is sized to
-/// the smaller of `cache_size` and the replay region.
+/// candidates from memory instead of re-reading the log; `0` disables it.
 pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
@@ -256,10 +255,9 @@ where
 
     // Memoize `(location -> key)` for replayed update ops so collision resolution in
     // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
-    // log. The mapping is immutable (append-only log), so the cache never goes stale.
-    let replay_len = bounds.end.saturating_sub(*inactivity_floor_loc) as usize;
-    let mut cache = NonZeroUsize::new(cache_size.min(replay_len))
-        .map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    // log.
+    let mut cache =
+        NonZeroUsize::new(cache_size).map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
 
     let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
