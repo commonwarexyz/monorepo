@@ -15,7 +15,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::FixedHasher as Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;

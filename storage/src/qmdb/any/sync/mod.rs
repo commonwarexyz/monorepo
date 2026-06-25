@@ -43,7 +43,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::FixedHasher as Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::{range::NonEmptyRange, Array};
 

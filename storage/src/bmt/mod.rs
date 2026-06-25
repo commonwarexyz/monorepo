@@ -50,7 +50,7 @@ use alloc::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, FixedHasher, Hasher as CryptoHasher};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
@@ -74,12 +74,12 @@ pub enum Error {
 }
 
 /// Constructor for a Binary Merkle Tree (BMT).
-pub struct Builder<H: Hasher> {
+pub struct Builder<H: FixedHasher> {
     hasher: H,
     leaves: Vec<H::Digest>,
 }
 
-impl<H: Hasher> Builder<H> {
+impl<H: FixedHasher> Builder<H> {
     /// Creates a new Binary Merkle Tree builder.
     pub fn new(leaves: usize) -> Self {
         Self {
@@ -93,9 +93,7 @@ impl<H: Hasher> Builder<H> {
     /// When added, the leaf is hashed with its position.
     pub fn add(&mut self, leaf: &H::Digest) -> u32 {
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
-        self.hasher.update(&position.to_be_bytes());
-        self.hasher.update(leaf);
-        self.leaves.push(self.hasher.finalize());
+        self.leaves.push(H::hash_u32_with_digest(position, leaf));
         position
     }
 
@@ -127,7 +125,7 @@ pub struct Tree<D: Digest> {
 
 impl<D: Digest> Tree<D> {
     /// Builds a Merkle Tree from a slice of position-hashed leaf digests.
-    fn new<H: Hasher<Digest = D>>(mut hasher: H, mut leaves: Vec<D>) -> Self {
+    fn new<H: FixedHasher + CryptoHasher<Digest = D>>(mut hasher: H, mut leaves: Vec<D>) -> Self {
         // If no leaves, add an empty node.
         //
         // Because this node only includes a position, there is no way a valid proof
@@ -147,19 +145,13 @@ impl<D: Digest> Tree<D> {
         while !current_level.is_singleton() {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
             for chunk in current_level.chunks(2) {
-                // Hash the left child
-                hasher.update(&chunk[0]);
-
-                // Hash the right child
-                if chunk.len() == 2 {
-                    hasher.update(&chunk[1]);
+                let parent = if chunk.len() == 2 {
+                    H::hash_pair(&chunk[0], &chunk[1])
                 } else {
                     // If no right child exists, duplicate left child.
-                    hasher.update(&chunk[0]);
+                    H::hash_pair(&chunk[0], &chunk[0])
                 };
-
-                // Compute the parent digest
-                next_level.push(hasher.finalize());
+                next_level.push(parent);
             }
 
             // Add the computed level to the tree
@@ -170,9 +162,7 @@ impl<D: Digest> Tree<D> {
         // Compute the finalized root: H(leaf_count || tree_root)
         // This binds the root to the tree size, preventing malleability attacks.
         let tree_root = levels.last().first();
-        hasher.update(&leaf_count.to_be_bytes());
-        hasher.update(tree_root);
-        let root = hasher.finalize();
+        let root = H::hash_u32_with_digest(leaf_count, tree_root);
 
         Self {
             empty,
@@ -471,9 +461,9 @@ impl<D: Digest> Proof<D> {
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
-    pub fn verify_element_inclusion<H: Hasher<Digest = D>>(
+    pub fn verify_element_inclusion<H: FixedHasher + CryptoHasher<Digest = D>>(
         &self,
-        hasher: &mut H,
+        _hasher: &mut H,
         leaf: &D,
         mut position: u32,
         root: &D,
@@ -484,9 +474,7 @@ impl<D: Digest> Proof<D> {
         }
 
         // Compute the position-hashed leaf
-        hasher.update(&position.to_be_bytes());
-        hasher.update(leaf);
-        let mut computed = hasher.finalize();
+        let mut computed = H::hash_u32_with_digest(position, leaf);
 
         // Track level size to handle odd-sized levels
         let mut level_size = self.leaf_count as usize;
@@ -510,10 +498,7 @@ impl<D: Digest> Proof<D> {
                 (sibling, &computed)
             };
 
-            // Compute the parent digest
-            hasher.update(left_node);
-            hasher.update(right_node);
-            computed = hasher.finalize();
+            computed = H::hash_pair(left_node, right_node);
 
             // Move up the tree
             position /= 2;
@@ -527,9 +512,7 @@ impl<D: Digest> Proof<D> {
 
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
-        hasher.update(&self.leaf_count.to_be_bytes());
-        hasher.update(&computed);
-        let finalized = hasher.finalize();
+        let finalized = H::hash_u32_with_digest(self.leaf_count, &computed);
 
         if finalized == *root {
             Ok(())
@@ -546,7 +529,7 @@ impl<D: Digest> Proof<D> {
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
-    pub fn verify_multi_inclusion<H: Hasher<Digest = D>>(
+    pub fn verify_multi_inclusion<H: FixedHasher + CryptoHasher<Digest = D>>(
         &self,
         hasher: &mut H,
         elements: &[(D, u32)],
@@ -557,9 +540,7 @@ impl<D: Digest> Proof<D> {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
                 let empty_tree_root = hasher.finalize();
-                hasher.update(&0u32.to_be_bytes());
-                hasher.update(&empty_tree_root);
-                let finalized = hasher.finalize();
+                let finalized = H::hash_u32_with_digest(0, &empty_tree_root);
                 if finalized == *root {
                     return Ok(());
                 } else {
@@ -575,9 +556,7 @@ impl<D: Digest> Proof<D> {
             if *position >= self.leaf_count {
                 return Err(Error::InvalidPosition(*position));
             }
-            hasher.update(&position.to_be_bytes());
-            hasher.update(leaf);
-            sorted.push((*position, hasher.finalize()));
+            sorted.push((*position, H::hash_u32_with_digest(*position, leaf)));
         }
         sorted.sort_unstable_by_key(|(pos, _)| *pos);
 
@@ -627,10 +606,7 @@ impl<D: Digest> Proof<D> {
                     (left, right)
                 };
 
-                // Hash parent
-                hasher.update(&left);
-                hasher.update(&right);
-                next_level.push((parent_pos, hasher.finalize()));
+                next_level.push((parent_pos, H::hash_pair(&left, &right)));
 
                 idx += 1;
             }
@@ -653,9 +629,7 @@ impl<D: Digest> Proof<D> {
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
         let tree_root = current[0].1;
-        hasher.update(&self.leaf_count.to_be_bytes());
-        hasher.update(&tree_root);
-        let finalized = hasher.finalize();
+        let finalized = H::hash_u32_with_digest(self.leaf_count, &tree_root);
 
         if finalized == *root {
             Ok(())
@@ -672,7 +646,7 @@ impl<D: Digest> Proof<D> {
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
-    pub fn verify_range_inclusion<H: Hasher<Digest = D>>(
+    pub fn verify_range_inclusion<H: FixedHasher + CryptoHasher<Digest = D>>(
         &self,
         hasher: &mut H,
         position: u32,

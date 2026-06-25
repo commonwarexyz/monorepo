@@ -20,7 +20,7 @@ use crate::{
     translator::Translator,
     Context,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::FixedHasher as Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
@@ -110,7 +110,7 @@ pub mod test {
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::{

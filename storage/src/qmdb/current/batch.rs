@@ -30,7 +30,7 @@ use crate::{
 };
 use ahash::AHasher;
 use commonware_codec::Codec;
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, FixedHasher as Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap::{self, Readable as _};
 use std::{

@@ -26,7 +26,7 @@
 //! assert_eq!(digest.as_u32(), checksum);
 //! ```
 
-use crate::Hasher;
+use crate::{FixedHasher, Hasher};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
@@ -94,6 +94,8 @@ impl Hasher for Crc32 {
         self
     }
 }
+
+impl FixedHasher for Crc32 {}
 
 /// Digest of a CRC32 hashing operation (4 bytes).
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]

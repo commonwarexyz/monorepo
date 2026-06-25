@@ -5,7 +5,7 @@ use crate::{
     qmdb,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::FixedHasher as Hasher;
 use commonware_parallel::Strategy;
 use std::sync::Arc;
 

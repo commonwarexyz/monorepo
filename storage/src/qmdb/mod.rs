@@ -50,7 +50,7 @@ use crate::{
     merkle::{hasher::Standard as StandardHasher, Bagging, Family, Location},
     qmdb::operation::Operation,
 };
-use commonware_cryptography::Hasher as CryptoHasher;
+use commonware_cryptography::FixedHasher as CryptoHasher;
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};

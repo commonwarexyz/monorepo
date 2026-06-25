@@ -80,7 +80,7 @@ use crate::{
     Context,
 };
 use commonware_codec::CodecShared;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::FixedHasher as Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::sync::Arc;
@@ -190,7 +190,7 @@ pub(crate) mod test {
         translator::OneCap,
     };
     use commonware_codec::{Codec, CodecShared};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic::Context, BufferPooler, Supervisor as _,
     };
@@ -2622,7 +2622,7 @@ mod bitmap_tests {
         merkle::Location,
         qmdb::any::unordered::variable::test::{create_test_config, AnyTest},
     };
-    use commonware_cryptography::{Hasher, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self, Context},

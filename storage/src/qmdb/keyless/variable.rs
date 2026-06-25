@@ -16,7 +16,7 @@ use crate::{
     },
 };
 use commonware_codec::Read;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::FixedHasher as Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 

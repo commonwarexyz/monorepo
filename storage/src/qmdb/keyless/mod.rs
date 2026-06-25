@@ -58,7 +58,7 @@ use crate::{
     Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::FixedHasher as Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::{num::NonZeroU64, sync::Arc};
@@ -576,7 +576,7 @@ pub(crate) mod tests {
         journal::contiguous::Mutable,
         qmdb::{self, verify_proof},
     };
-    use commonware_cryptography::Sha256;
+    use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_parallel::Strategy;
     use commonware_runtime::{deterministic, Supervisor as _};
     use commonware_utils::NZU64;

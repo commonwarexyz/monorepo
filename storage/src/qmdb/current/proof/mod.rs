@@ -46,7 +46,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt as _, Write};
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::{Digest, FixedHasher as CHasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
@@ -678,7 +678,7 @@ mod tests {
         qmdb::current::{db, grafting},
     };
     use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{sha256, Hasher as _, Sha256};
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
     use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};

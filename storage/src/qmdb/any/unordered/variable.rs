@@ -17,7 +17,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::FixedHasher as Hasher;
 use commonware_parallel::Strategy;
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
@@ -71,7 +71,7 @@ pub mod partitioned {
         Context,
     };
     use commonware_codec::{Codec, Read};
-    use commonware_cryptography::Hasher;
+    use commonware_cryptography::FixedHasher as Hasher;
     use commonware_parallel::Strategy;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
@@ -134,7 +134,7 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{index::Unordered as _, mmr, translator::TwoCap};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;

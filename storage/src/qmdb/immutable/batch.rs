@@ -15,7 +15,7 @@ use crate::{
     Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::{Digest, FixedHasher as CHasher};
 use commonware_parallel::Strategy;
 use std::{
     collections::BTreeMap,

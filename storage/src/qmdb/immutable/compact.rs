@@ -41,7 +41,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, FixedHasher as Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use core::marker::PhantomData;
@@ -605,7 +605,7 @@ mod tests {
         merkle::mmr,
         qmdb::{any::value::FixedEncoding, compact::witness},
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{

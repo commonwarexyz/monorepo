@@ -66,7 +66,7 @@ use crate::{
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, FixedHasher as Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor};

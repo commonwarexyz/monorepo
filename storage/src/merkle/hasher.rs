@@ -169,11 +169,7 @@ impl<H: CHasher> Standard<H> {
 
     /// Hash an arbitrary sequence of byte slices into a single digest.
     pub fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        let mut h = H::new();
-        for part in parts {
-            h.update(part);
-        }
-        h.finalize()
+        H::hash_parts(parts)
     }
 
     /// Compute the digest of a byte slice.
@@ -192,6 +188,74 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     fn root_bagging(&self) -> Bagging {
         Self::root_bagging(self)
     }
+
+    fn node_digest(
+        &self,
+        pos: Position<F>,
+        left: &Self::Digest,
+        right: &Self::Digest,
+    ) -> Self::Digest {
+        H::hash_u64_with_pair(*pos, left, right)
+    }
+
+    fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
+        H::hash_u64_with_bytes(*pos, element)
+    }
+
+    fn fold(&self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
+        H::hash_pair(acc, peak)
+    }
+
+    fn root_with_folded_peaks<'a>(
+        &self,
+        leaves: Location<F>,
+        inactive_peaks_to_fold: usize,
+        committed_inactive_peaks: usize,
+        peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
+    ) -> Option<Self::Digest> {
+        let mut peak_digests = peak_digests.into_iter();
+        let Some(first) = peak_digests.next() else {
+            return (inactive_peaks_to_fold == 0 && committed_inactive_peaks == 0)
+                .then(|| self.digest(&(*leaves).to_be_bytes()));
+        };
+
+        let mut acc = *first;
+        for _ in 0..inactive_peaks_to_fold.saturating_sub(1) {
+            let peak = peak_digests.next()?;
+            acc = H::hash_pair(&acc, peak);
+        }
+
+        let folded_peaks = match self.root_bagging() {
+            Bagging::ForwardFold => {
+                for peak in peak_digests {
+                    acc = H::hash_pair(&acc, peak);
+                }
+                acc
+            }
+            Bagging::BackwardFold => {
+                let (lower, upper) = peak_digests.size_hint();
+                let mut active_peaks = Vec::with_capacity(1 + upper.unwrap_or(lower));
+                active_peaks.push(acc);
+                active_peaks.extend(peak_digests.copied());
+
+                let mut acc = *active_peaks.last().unwrap();
+                for peak in active_peaks.iter().rev().skip(1) {
+                    acc = H::hash_pair(peak, &acc);
+                }
+                acc
+            }
+        };
+
+        if committed_inactive_peaks == 0 {
+            Some(H::hash_u64_with_digest(*leaves, &folded_peaks))
+        } else {
+            Some(H::hash_u64_u64_with_digest(
+                *leaves,
+                committed_inactive_peaks as u64,
+                &folded_peaks,
+            ))
+        }
+    }
 }
 
 impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
@@ -203,6 +267,38 @@ impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
 
     fn root_bagging(&self) -> Bagging {
         (**self).root_bagging()
+    }
+
+    fn node_digest(
+        &self,
+        pos: Position<F>,
+        left: &Self::Digest,
+        right: &Self::Digest,
+    ) -> Self::Digest {
+        (**self).node_digest(pos, left, right)
+    }
+
+    fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
+        (**self).leaf_digest(pos, element)
+    }
+
+    fn fold(&self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
+        (**self).fold(acc, peak)
+    }
+
+    fn root_with_folded_peaks<'a>(
+        &self,
+        leaves: Location<F>,
+        inactive_peaks_to_fold: usize,
+        committed_inactive_peaks: usize,
+        peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
+    ) -> Option<Self::Digest> {
+        (**self).root_with_folded_peaks(
+            leaves,
+            inactive_peaks_to_fold,
+            committed_inactive_peaks,
+            peak_digests,
+        )
     }
 }
 
