@@ -611,6 +611,27 @@ mod zkc {
             let committed = self.committed_indices.clone();
             for (i, c_pos) in committed.into_iter().enumerate() {
                 self.linearize(zkc, c_pos);
+                // If a committed witness still resolves to its own `Committed`
+                // column, its binding row would collapse to
+                // `Committed(i) - Committed(i) = 0`. That happens whenever no
+                // non-tautological constraint references it (it is used
+                // nowhere, or only in `assert(w == w)`), leaving the commitment
+                // with an all-zero column: a prover could then swap it for an
+                // arbitrary group element and still verify. Anchor it to a fresh
+                // padding wire and redirect every reference there, so its
+                // binding row reads `Left(k) - Committed(i) = 0`, tying the
+                // column to a value genuinely committed in `M`. A wire-anchored
+                // entry (e.g. a duplicate of an already-anchored index) is left
+                // as is.
+                if matches!(
+                    self.linearize_cache.get(&c_pos),
+                    Some(LinComb::Location(Location::Committed(_)))
+                ) {
+                    let k = self.internal_vars.len();
+                    self.internal_vars.push((c_pos, None, None));
+                    self.linearize_cache
+                        .insert(c_pos, LinComb::Location(Location::Left(k)));
+                }
                 self.extra_assertions.push((c_pos, Location::Committed(i)));
             }
         }
@@ -1859,24 +1880,29 @@ pub mod fuzz {
     use commonware_utils::test_rng;
     use std::sync::OnceLock;
 
-    const NUM_GENERATORS: usize = 5;
     const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_CIRCUIT";
+
+    /// Number of IPA generator pairs in the test setup. Large enough to prove
+    /// and verify any circuit produced by the fuzz plans, whose op count
+    /// bounds `internal_vars` well below this.
+    const TEST_SETUP_PAIRS: usize = 64;
 
     pub(super) fn test_setup() -> &'static Setup<G> {
         static TEST_SETUP: OnceLock<Setup<G>> = OnceLock::new();
         TEST_SETUP.get_or_init(|| {
-            let generators = (1..=NUM_GENERATORS)
-                .map(|i| G::generator() * &F::from(i as u8))
+            let count = 2 * TEST_SETUP_PAIRS + 3;
+            let gens = (1..=count)
+                .map(|i| G::generator() * &F::from(i as u64))
                 .collect::<Vec<_>>();
             Setup::new(
                 ipa::Setup::new(
-                    generators[0],
-                    generators[1..3]
+                    gens[2 * TEST_SETUP_PAIRS],
+                    gens[..2 * TEST_SETUP_PAIRS]
                         .chunks_exact(2)
-                        .map(|chunk| (chunk[0], chunk[1])),
+                        .map(|c| (c[0], c[1])),
                 ),
-                generators[3],
-                generators[4],
+                gens[2 * TEST_SETUP_PAIRS + 1],
+                gens[2 * TEST_SETUP_PAIRS + 2],
             )
         })
     }
@@ -1912,23 +1938,6 @@ pub mod fuzz {
     }
 
     impl Case {
-        fn prove(&self, setup: &Setup<G>) -> (Claim<G>, Proof<F, G>) {
-            let mut rng = test_rng();
-            let mut transcript = Transcript::new(NAMESPACE);
-            let claim = self.witness.claim(setup);
-            let proof = super::prove(
-                &mut rng,
-                &mut transcript,
-                setup,
-                &self.circuit,
-                &claim,
-                &self.witness,
-                &Sequential,
-            )
-            .expect("generated case should always create a proof");
-            (claim, proof)
-        }
-
         fn is_satisfied(&self) -> bool {
             self.circuit.is_satisfied(
                 &self.witness.values,
@@ -1988,19 +1997,43 @@ pub mod fuzz {
     }
 
     fn assert_verify_matches_satisfaction(case: &Case) {
-        let mut rng = test_rng();
         let setup = test_setup();
-        let (claim, proof) = case.prove(setup);
-        let mut transcript = Transcript::new(NAMESPACE);
-        let verified = setup
+        let claim = case.witness.claim(setup);
+        let verified = prove_and_verify(setup, &case.circuit, &claim, &case.witness);
+        assert_eq!(verified, case.is_satisfied());
+    }
+
+    /// Prove `claim` against `circuit` with `witness`, then verify, returning
+    /// whether verification accepted. A `prove` failure counts as rejection.
+    fn prove_and_verify(
+        setup: &Setup<G>,
+        circuit: &Circuit<F>,
+        claim: &Claim<G>,
+        witness: &Witness<F>,
+    ) -> bool {
+        let mut rng = test_rng();
+        let mut prover_transcript = Transcript::new(NAMESPACE);
+        let Some(proof) = super::prove(
+            &mut rng,
+            &mut prover_transcript,
+            setup,
+            circuit,
+            claim,
+            witness,
+            &Sequential,
+        ) else {
+            return false;
+        };
+        let mut verifier_transcript = Transcript::new(NAMESPACE);
+        setup
             .eval(
                 |vs| {
                     verify(
                         &mut rng,
-                        &mut transcript,
+                        &mut verifier_transcript,
                         vs,
-                        &case.circuit,
-                        &claim,
+                        circuit,
+                        claim,
                         proof,
                         &Sequential,
                     )
@@ -2008,13 +2041,19 @@ pub mod fuzz {
                 &Sequential,
             )
             .map(|g| g == G::zero())
-            .unwrap_or(false);
-        assert_eq!(verified, case.is_satisfied());
+            .unwrap_or(false)
     }
 
     /// Check that converting a ZK circuit to a bulletproofs circuit and
     /// witness preserves satisfaction, committing a random subset of the
     /// witnesses.
+    ///
+    /// For satisfied circuits this also runs a full prove/verify roundtrip and
+    /// checks that tampering with a committed commitment is rejected. The
+    /// latter is the binding property: every committed value (including a
+    /// witness constrained by nothing) must enter the verification equation
+    /// with a nonzero coefficient, so it cannot be swapped for an arbitrary
+    /// group element.
     pub(super) fn assert_zkc_conversion_preserves_satisfaction(
         plan: &crate::zk::circuit::fuzz::Plan,
         u: &mut Unstructured<'_>,
@@ -2028,11 +2067,31 @@ pub mod fuzz {
         }
         let (circuit, witness) =
             zkc_to_circuit_and_witness(Some(&mut test_rng()), valued, &committed);
-        assert_eq!(
-            witness.is_satisfied(&circuit),
-            plan.satisfied(),
-            "plan: {plan:?}"
-        );
+        let satisfied = witness.is_satisfied(&circuit);
+        assert_eq!(satisfied, plan.satisfied(), "plan: {plan:?}");
+
+        if satisfied {
+            let setup = test_setup();
+            assert!(
+                circuit.internal_vars() <= TEST_SETUP_PAIRS,
+                "circuit too large for test setup ({} > {TEST_SETUP_PAIRS}); plan: {plan:?}",
+                circuit.internal_vars()
+            );
+            let honest = witness.claim(setup);
+            assert!(
+                prove_and_verify(setup, &circuit, &honest, &witness),
+                "honest claim must verify; plan: {plan:?}"
+            );
+            if !committed.is_empty() {
+                let j = u.choose_index(committed.len())?;
+                let mut tampered = witness.claim(setup);
+                tampered.commitments[j] += setup.value_generator();
+                assert!(
+                    !prove_and_verify(setup, &circuit, &tampered, &witness),
+                    "tampering committed value {j} must break verification; plan: {plan:?}"
+                );
+            }
+        }
         Ok(())
     }
 
