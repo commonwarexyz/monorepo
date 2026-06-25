@@ -48,7 +48,7 @@ impl<B: Blob> Gated<B> {
         self.inner.clone()
     }
 
-    async fn mutation_state(&self) -> Result<AsyncRwLockWriteGuard<'_, State>, Error> {
+    async fn lock_for_mutation(&self) -> Result<AsyncRwLockWriteGuard<'_, State>, Error> {
         let mut state = self.state.write().await;
         if let State::InFlight(syncing) = &*state {
             syncing.clone().await?;
@@ -73,7 +73,7 @@ impl<B: Blob> Blob for Gated<B> {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let mut state = self.mutation_state().await?;
+        let mut state = self.lock_for_mutation().await?;
         state.write_at(&self.inner, offset, bufs).await
     }
 
@@ -82,12 +82,12 @@ impl<B: Blob> Blob for Gated<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        let mut state = self.mutation_state().await?;
+        let mut state = self.lock_for_mutation().await?;
         state.write_at_sync(&self.inner, offset, bufs).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        let mut state = self.mutation_state().await?;
+        let mut state = self.lock_for_mutation().await?;
         state.resize(&self.inner, len).await
     }
 
@@ -150,7 +150,7 @@ impl State {
     /// Uses [`Blob::write_at_sync`] when no earlier mutation requires a new full sync. Otherwise,
     /// writes the bytes and then syncs the blob.
     ///
-    /// [`Gated`] only calls this after [`Gated::mutation_state`] has drained any in-flight sync
+    /// [`Gated`] only calls this after [`Gated::lock_for_mutation`] has drained any in-flight sync
     /// under the held write guard, so the state here is only ever `Clean` or `Dirty`.
     async fn write_at_sync<B: Blob>(
         &mut self,

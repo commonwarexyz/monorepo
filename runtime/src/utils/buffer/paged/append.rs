@@ -1205,8 +1205,10 @@ impl<B: Blob> Append<B> {
     pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
         // Flush buffered data, then start a sync for the issued writes. Later disk writes are gated
         // on that sync, but in-memory appends can continue.
-        let buf_guard = self.buffer.write().await;
-        self.flush_internal(buf_guard, true, false).await?;
+        {
+            let buf_guard = self.buffer.write().await;
+            self.flush_internal(buf_guard, true, false).await?;
+        }
 
         let blob_state = self.blob_state.write().await;
         Ok(blob_state.blob.start_sync().await)
