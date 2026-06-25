@@ -114,6 +114,12 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         &self.vals[idx]
     }
 
+    /// Iterate every value held by the partition (in array order, all runs).
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn values_iter(&self) -> std::slice::Iter<'_, V> {
+        self.vals.iter()
+    }
+
     /// Insert `(key, value)` at array index `idx`. The caller must pass an `idx` that keeps `keys`
     /// sorted (i.e. within or adjacent to `key`'s run).
     pub(super) fn insert_at(&mut self, idx: usize, key: K, value: V) {

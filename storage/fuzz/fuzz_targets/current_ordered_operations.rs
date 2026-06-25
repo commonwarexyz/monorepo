@@ -159,6 +159,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             grafted_metadata_partition: format!("fuzz-current-ord-{suffix}-grafted-merkle-metadata"),
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(3)),
+            init_parallelism: 0,
         };
 
         let mut db: Db<F> = Db::init(context.child("storage"), cfg)

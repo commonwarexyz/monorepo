@@ -19,6 +19,7 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
 pub type Operation<F, K, V> = unordered::Operation<F, K, VariableEncoding<V>>;
@@ -36,8 +37,15 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
+impl<
+        F: Family,
+        E: Context + Spawner + 'static,
+        K: Key,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -73,6 +81,7 @@ pub mod partitioned {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
+    use commonware_runtime::Spawner;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -96,7 +105,7 @@ pub mod partitioned {
 
     impl<
             F: Family,
-            E: Context,
+            E: Context + Spawner + 'static,
             K: Key,
             V: VariableValue,
             H: Hasher,
@@ -156,6 +165,7 @@ pub(crate) mod test {
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
+            init_parallelism: 0,
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("journal-{seed}"),
                 metadata_partition: format!("metadata-{seed}"),

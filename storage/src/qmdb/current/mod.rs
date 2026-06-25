@@ -348,6 +348,7 @@ use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::bitmap::Prunable as BitMap;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
@@ -381,6 +382,12 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
+
+    /// Number of parallel worker tasks the ordered-partitioned snapshot build uses during init;
+    /// `0` derives it from the runtime's available parallelism. Other index types ignore it. Returns
+    /// can diminish once the main replay/routing task becomes the bottleneck; benchmark
+    /// representative workloads before configuring more than two workers.
+    pub init_parallelism: usize,
 }
 
 impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
@@ -390,6 +397,7 @@ impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S>
             journal_config: cfg.journal_config,
             translator: cfg.translator,
             init_cache_size: cfg.init_cache_size,
+            init_parallelism: cfg.init_parallelism,
         }
     }
 }
@@ -408,14 +416,15 @@ pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: merkle::Graftable,
-    E: Context,
+    E: Context + Spawner + 'static,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
-    I: IndexFactory<T, Value = Location<F>>,
+    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: Inner<E, Item = Operation<F, U>>,
     S: Strategy,
     Operation<F, U>: Committable + CodecShared,
+    crate::journal::authenticated::Journal<F, E, J, H, S>: Send + Sync + 'static,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
@@ -557,6 +566,7 @@ pub mod tests {
     ) -> FixedConfig<T, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
+            init_parallelism: 0,
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -584,6 +594,7 @@ pub mod tests {
     ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
+            init_parallelism: 0,
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -1386,6 +1397,7 @@ pub mod tests {
             let hasher = qmdb::hasher::<Sha256>();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
+                init_parallelism: 0,
                 merkle_config: MerkleConfig {
                     journal_partition: "forged-exclusion-journal".to_string(),
                     metadata_partition: "forged-exclusion-metadata".to_string(),

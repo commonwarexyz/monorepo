@@ -322,6 +322,7 @@ fn main() {
         match db_kind.as_str() {
             "current::unordered::fixed::mmb" => {
                 let cfg = CurrentFixedConfig {
+                    init_parallelism: 0,
                     merkle_config,
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
@@ -338,6 +339,7 @@ fn main() {
             }
             "current::ordered::fixed::mmb" => {
                 let cfg = CurrentFixedConfig {
+                    init_parallelism: 0,
                     merkle_config,
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
@@ -354,6 +356,7 @@ fn main() {
             }
             "any::ordered::fixed::mmb" => {
                 let cfg = FixedConfig {
+                    init_parallelism: 0,
                     merkle_config,
                     journal_config,
                     translator: EightCap,
@@ -364,6 +367,7 @@ fn main() {
             }
             "any::unordered::variable::mmb" => {
                 let cfg = commonware_storage::qmdb::any::VariableConfig {
+                    init_parallelism: 0,
                     merkle_config,
                     journal_config: VConfig {
                         partition: "constantinople-var-log".into(),
@@ -381,6 +385,7 @@ fn main() {
             }
             _ => {
                 let cfg = FixedConfig {
+                    init_parallelism: 0,
                     merkle_config,
                     journal_config,
                     translator: EightCap,

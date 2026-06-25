@@ -13,7 +13,7 @@ use crate::{
     merkle::{Family, Location, Proof},
     qmdb::{
         bitmap::Shared,
-        build_snapshot_from_log, delete_known_loc,
+        delete_known_loc,
         metrics::{KeyReadMetrics, OperationMetrics, StateMetrics},
         operation::Operation as OperationTrait,
         update_known_loc, Error,
@@ -24,6 +24,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
@@ -666,12 +667,23 @@ where
     /// Panics if the last operation is not a commit floor operation. Empty logs are handled
     /// upstream by [`crate::qmdb::any::init_with_bitmap`].
     pub(crate) async fn init_from_log(
+        context: E,
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
         cache_size: Option<NonZeroUsize>,
+        parallelism: usize,
         metrics: Metrics<E>,
-    ) -> Result<Self, crate::qmdb::Error<F>> {
+    ) -> Result<Self, crate::qmdb::Error<F>>
+    where
+        E: Spawner + 'static,
+        I: crate::qmdb::SnapshotBuild<F>,
+        AuthenticatedLog<F, E, C, H, S>: Send + Sync + 'static,
+    {
+        // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
+        // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
+        let strategy = log.strategy().clone();
+        let log = Arc::new(log);
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let bounds = log.bounds();
             let last_commit_loc = Location::new(
@@ -681,7 +693,7 @@ where
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &log,
+                &*log,
                 Location::new(bounds.end),
                 |op| op.has_floor(),
             )
@@ -712,34 +724,41 @@ where
                 guard.extend_to(*inactivity_floor_loc);
             }
 
-            // Replay through `build_snapshot_from_log`. The closure fires synchronously between
-            // the helper's awaits, so each invocation does its own brief lock-update-release.
-            // Holding the guard across `.await` would not be `Send`-safe.
+            // Build the snapshot. The closure fires synchronously between the build's awaits, so
+            // each invocation does its own brief lock-update-release; holding the guard across
+            // `.await` would not be `Send`-safe. The serial build supplies `old_loc` to clear
+            // superseded bits; the parallel build pushes already-resolved bits with `old_loc =
+            // None`.
             let active_keys = {
                 let bitmap = &bitmap;
-                build_snapshot_from_log(
-                    inactivity_floor_loc,
-                    &log,
-                    &mut index,
-                    cache_size,
-                    |is_active, old_loc| {
-                        let mut guard = bitmap.write();
-                        guard.push(is_active);
-                        if let Some(loc) = old_loc {
-                            guard.set_bit(*loc, false);
-                        }
-                    },
-                )
-                .await?
+                index
+                    .build_snapshot(
+                        context,
+                        inactivity_floor_loc,
+                        &log,
+                        &strategy,
+                        parallelism,
+                        cache_size,
+                        |is_active, old_loc| {
+                            let mut guard = bitmap.write();
+                            guard.push(is_active);
+                            if let Some(loc) = old_loc {
+                                guard.set_bit(*loc, false);
+                            }
+                        },
+                    )
+                    .await?
             };
 
             // CommitFloor convention: only the current `last_commit_loc` carries bit=1; earlier
-            // CommitFloors are 0. `build_snapshot_from_log` reports `is_active = (loc ==
-            // last_commit_loc)` for each CommitFloor op, so the per-op push above already
-            // encodes this.
+            // CommitFloors are 0. The build reports `is_active = (loc == last_commit_loc)` for each
+            // CommitFloor op, so the per-op push above already encodes this.
 
             (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
         };
+
+        // The build has returned, so every worker clone of the log is dropped; reclaim it.
+        let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
 
         // The bitmap must have exactly one bit per retained log location.
         if bitmap::Readable::<N>::len(bitmap.as_ref()) != log.size() {

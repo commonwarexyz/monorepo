@@ -45,6 +45,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::{range::NonEmptyRange, Array};
 use core::num::NonZeroUsize;
 
@@ -65,14 +66,15 @@ async fn build_db<F, E, U, I, H, C, T, S>(
 ) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
-    E: Context,
+    E: Context + Spawner + 'static,
     U: Update + Send + Sync + 'static,
-    I: IndexFactory<T, Value = Location<F>>,
+    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
     T: Translator,
     C: Mutable<Item = Operation<F, U>>,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
+    authenticated::Journal<F, E, C, H, S>: Send + Sync + 'static,
 {
     let hasher = qmdb::hasher::<H>();
 
@@ -95,8 +97,10 @@ where
         apply_batch_size as u64,
     )
     .await?;
+    let snapshot_context = context.child("snapshot");
     let metrics = Metrics::new(context);
-    let db = Db::init_from_log(index, log, None, cache_size, metrics).await?;
+    // State-sync rebuilds use auto-derived parallelism (`0`) for the snapshot build.
+    let db = Db::init_from_log(snapshot_context, index, log, None, cache_size, 0, metrics).await?;
 
     Ok(db)
 }
@@ -109,7 +113,7 @@ macro_rules! impl_sync_database {
         impl<F, E, K, V, H, T, S> qmdb::sync::Database for $db<F, E, K, V, H, T, S>
         where
             F: merkle::Family,
-            E: Context,
+            E: Context + Spawner + 'static,
             K: $key_bound,
             V: $value_bound + 'static,
             H: Hasher,
