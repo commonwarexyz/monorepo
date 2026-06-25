@@ -55,6 +55,7 @@ pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequential> {
     let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     Config {
+        init_parallelism: 0,
         merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),

@@ -325,6 +325,7 @@ fn any_fix_cfg(
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::any::FixedConfig {
+        init_parallelism: 0,
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
         translator: EightCap,
@@ -338,6 +339,7 @@ fn any_var_cfg(
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::any::VariableConfig {
+        init_parallelism: 0,
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
         translator: EightCap,
@@ -351,6 +353,7 @@ fn cur_fix_cfg(
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::current::FixedConfig {
+        init_parallelism: 0,
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
@@ -365,6 +368,7 @@ fn cur_var_cfg(
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
     commonware_storage::qmdb::current::VariableConfig {
+        init_parallelism: 0,
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),

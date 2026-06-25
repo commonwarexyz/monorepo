@@ -65,9 +65,17 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     /// Translates the prefix-stripped key bytes into a partition-local key.
     translator: T,
 
-    /// The `2^(8*P)` partitions, indexed by the `P`-byte key prefix. Each stores its translated
-    /// keys and values as sorted arrays (the inline representation); an emptied partition may
-    /// instead have spilled (see `spilled`).
+    /// Global index of the first partition this instance covers; `0` for a normal full index. A
+    /// parallel snapshot-build worker (see [`Self::new_range`]) sets this so it can allocate only its
+    /// range of partitions yet still be addressed by the global partition index a key maps to. The
+    /// build maps `global -> global - offset` in `get_mut`/`get_mut_or_insert`; ordered queries are
+    /// only valid on a full (`offset == 0`) index.
+    offset: usize,
+
+    /// The partitions this instance covers, indexed by `global_partition - offset`. A full index
+    /// holds all `2^(8*P)` (offset `0`); a build worker holds only its range. Each stores its
+    /// translated keys and values as sorted arrays (the inline representation); an emptied partition
+    /// may instead have spilled (see `spilled`).
     partitions: Box<[Partition<T::Key, V>]>,
 
     /// Partitions that have spilled out of their sorted arrays (reached `SPILL_THRESHOLD` entries),
@@ -102,6 +110,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
             .into_boxed_slice();
         Self {
             translator,
+            offset: 0,
             partitions,
             spilled: HashMap::new(),
             threshold: SPILL_THRESHOLD,
@@ -197,6 +206,79 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     pub(crate) fn spilled_count(&self) -> usize {
         self.spilled.len()
     }
+
+    /// The number of partitions (`2^(8*P)`).
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn partition_count(&self) -> usize {
+        self.partitions.len()
+    }
+
+    /// Create an index covering only partitions `[offset, offset + count)` for a parallel
+    /// snapshot-build worker, matching this index's translator and spill threshold. It allocates just
+    /// `count` partition slots but is still addressed by the global partition index (mapped to a local
+    /// slot in `get_mut`/`get_mut_or_insert`), so per-worker memory is the range, not the full
+    /// `2^(8*P)` -- which is what makes a large `P` affordable. Only the build (Unordered) operations
+    /// are valid on it; [`Self::install_range`] folds it back into a full index.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn new_range(&self, ctx: impl Metrics, offset: usize, count: usize) -> Self {
+        let partitions = (0..count)
+            .map(|_| Partition::default())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            translator: self.translator.clone(),
+            offset,
+            partitions,
+            spilled: HashMap::new(),
+            threshold: self.threshold,
+            keys: ctx.gauge("keys", "Number of translated keys in the index"),
+            items: ctx.gauge("items", "Number of items in the index"),
+            pruned: ctx.counter("pruned", "Number of items pruned"),
+        }
+    }
+
+    /// Move a build `worker`'s partitions and spilled entries into self (a full `offset == 0` index),
+    /// at the global slots `[worker.offset, worker.offset + worker.partitions.len())`, which must be
+    /// empty. Returns the `(keys, items)` counts moved so the caller can total them across workers;
+    /// does not update self's gauges (call [`Self::set_metrics`] once after installing all ranges).
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn install_range(&mut self, worker: &mut Self) -> (i64, i64) {
+        let lo = worker.offset;
+        for (local, partition) in worker.partitions.iter_mut().enumerate() {
+            self.partitions[lo + local] = std::mem::take(partition);
+        }
+        // Drain only the partitions that actually spilled (remapping local -> global), rather than
+        // probing every slot in the range.
+        for (local, inner) in worker.spilled.drain() {
+            self.spilled.insert(lo + local, inner);
+        }
+        (worker.keys.get(), worker.items.get())
+    }
+
+    /// Set the `keys`/`items` gauges to the given totals (used after a parallel build installs all
+    /// worker ranges).
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn set_metrics(&self, keys: i64, items: i64) {
+        self.keys.set(keys);
+        self.items.set(items);
+    }
+
+    /// Visit every value held across all partitions (inline and spilled), in unspecified order.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn for_each_value(&self, mut f: impl FnMut(&V)) {
+        for (p, partition) in self.partitions.iter().enumerate() {
+            for v in partition.values_iter() {
+                f(v);
+            }
+            if let Some(inner) = self.spilled_partition(p) {
+                for vals in inner.values() {
+                    for v in vals {
+                        f(v);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl<T: Translator, V: Send + Sync, const P: usize> Factory<T> for Index<T, V, P> {
@@ -246,6 +328,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
 
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
+        // Map the global partition index to this instance's local slot (`offset == 0` for a full
+        // index, so this is a no-op there; a build worker covers only `[offset, offset + len)`).
+        let i = i - self.offset;
         let k = self.translator.transform(sub);
         if !self.partitions[i].is_empty() {
             let run = self.partitions[i].run_range(&k);
@@ -287,6 +372,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         value: Self::Value,
     ) -> Option<Self::Cursor<'a>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
+        // Map the global partition index to this instance's local slot (see `get_mut`).
+        let i = i - self.offset;
         let k = self.translator.transform(sub);
         if !self.partitions[i].is_empty() {
             let run = self.partitions[i].run_range(&k);

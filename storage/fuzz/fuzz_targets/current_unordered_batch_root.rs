@@ -96,6 +96,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
         grafted_metadata_partition: format!("{name}-grafted"),
         translator: OneCap,
         init_cache_size: Some(NZUsize!(3)),
+        init_parallelism: 0,
     }
 }
 
