@@ -31,7 +31,7 @@ pub(super) struct PageReader<B: Blob> {
     logical_page_size: usize,
     /// The physical size of the blob.
     physical_blob_size: u64,
-    /// The logical size of the blob.
+    /// The size of the blob.
     logical_blob_size: u64,
     /// Next page index to read from the blob.
     blob_page: u64,
@@ -69,7 +69,7 @@ impl<B: Blob> PageReader<B> {
         }
     }
 
-    /// Returns the logical size of the blob.
+    /// Returns the size of the blob.
     pub(super) const fn blob_size(&self) -> u64 {
         self.logical_blob_size
     }
@@ -294,7 +294,7 @@ impl<B: Blob> Replay<B> {
         }
     }
 
-    /// Returns the logical size of the blob.
+    /// Returns the size of the blob.
     pub const fn blob_size(&self) -> u64 {
         self.reader.blob_size()
     }

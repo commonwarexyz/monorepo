@@ -96,7 +96,7 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::{
-    blobs::{Blob, Blobs, Partition, Writable},
+    blobs::{Partition, Source, View as BlobsView, Writable},
     checkpoint::Checkpoint,
     replay::{self, Source as _},
 };
@@ -109,7 +109,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Replay, Snapshot as PagedSnapshot, Writer},
+    buffer::paged::{CacheRef, Replay, View as BlobView, Writer},
     Blob as RBlob, Buf, IoBuf,
 };
 use futures::{
@@ -154,7 +154,7 @@ enum BlobFill {
 struct RecoveredBounds {
     /// First retained position.
     pruning_boundary: u64,
-    /// Logical size: one past the last recovered item.
+    /// Size: one past the last recovered item.
     size: u64,
     /// Recovery watermark to persist (a floor on durable size).
     recovery_watermark: u64,
@@ -540,7 +540,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         })
     }
 
-    /// Recover logical size by walking blob lengths from oldest to newest, truncating at the
+    /// Recover size by walking blob lengths from oldest to newest, truncating at the
     /// first short or missing non-tail blob.
     ///
     /// `pruning_boundary` is trusted (already reconciled by `recover_pruning_boundary`); blob
@@ -707,8 +707,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// into its range is refused ([Error::BlobInUse]) while it is alive.
     pub fn snapshot(&self) -> Reader<'static, E, A> {
         Reader {
-            blobs: Blobs::Snapshot {
-                snapshot: self.blobs.to_snapshot(),
+            source: Source::Snapshot {
+                blobs: self.blobs.to_snapshot(),
                 bounds: self.bounds.clone(),
             },
             items_per_blob: self.items_per_blob,
@@ -720,8 +720,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// A reader borrowing the journal's live state.
     pub(super) fn reader(&self) -> Reader<'_, E, A> {
         Reader {
-            blobs: Blobs::Writable {
-                writable: &self.blobs,
+            source: Source::Owned {
+                blobs: &self.blobs,
                 bounds: self.bounds.clone(),
             },
             items_per_blob: self.items_per_blob,
@@ -1027,32 +1027,37 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
 /// A reader over a fixed journal.
 pub struct Reader<'a, E: Context, A> {
-    blobs: Blobs<'a, E>,
+    source: Source<'a, E>,
     items_per_blob: NonZeroU64,
     metrics: Arc<Metrics<E>>,
     _phantom: PhantomData<A>,
 }
 
 impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
-    /// Resolve `pos` to its read handle and byte offset within the blob.
-    fn locate(&self, pos: u64) -> Result<(Blob<'_, E::Blob>, u64), Error> {
-        self.blobs.validate_readable(pos)?;
+    /// A borrowed view over this reader.
+    fn view(&self) -> BlobsView<'_, E::Blob> {
+        self.source.view()
+    }
+
+    /// Resolve `pos` to its read view and byte offset within the blob.
+    fn locate(&self, pos: u64) -> Result<(BlobView<'_, E::Blob>, u64), Error> {
+        let view = self.view();
+        view.validate_readable(pos)?;
         let items_per_blob = self.items_per_blob.get();
         let blob = pos / items_per_blob;
-        let pos_in_blob = pos - first_in_blob(self.blobs.bounds().start, blob, items_per_blob)?;
+        let pos_in_blob = pos - first_in_blob(view.bounds().start, blob, items_per_blob)?;
         let offset = Journal::<E, A>::items_to_bytes(pos_in_blob)?;
-        let handle = self
-            .blobs
+        let blob_view = view
             .get(blob)
             .expect("position in bounds maps to a retained blob");
-        Ok((handle, offset))
+        Ok((blob_view, offset))
     }
 
     /// Read the item at `pos` synchronously if its bytes are cached, else `None`.
     fn try_read_sync_cached(&self, pos: u64) -> Option<A> {
-        let (handle, offset) = self.locate(pos).ok()?;
+        let (blob_view, offset) = self.locate(pos).ok()?;
         let mut buf = vec![0u8; A::SIZE];
-        if !handle.try_read_sync(offset, &mut buf) {
+        if !blob_view.try_read_sync(offset, &mut buf) {
             return None;
         }
         A::decode(&buf[..]).ok()
@@ -1063,7 +1068,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
     type Item = A;
 
     fn bounds(&self) -> Range<u64> {
-        self.blobs.bounds()
+        self.source.bounds()
     }
 
     async fn read(&self, pos: u64) -> Result<A, Error> {
@@ -1078,8 +1083,8 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
         self.metrics.record_cache_misses(1);
 
         let _timer = self.metrics.read_timer();
-        let (handle, offset) = self.locate(pos)?;
-        let bufs = handle.read_at(offset, A::SIZE).await?;
+        let (blob_view, offset) = self.locate(pos)?;
+        let bufs = blob_view.read_at(offset, A::SIZE).await?;
         let item = A::decode(bufs.coalesce()).map_err(Error::Codec)?;
         self.metrics.items_read.inc();
         Ok(item)
@@ -1097,15 +1102,16 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
                 return Err(Error::PositionsNotIncreasing);
             }
             prev = Some(pos);
-            self.blobs.validate_readable(pos)?;
+            self.view().validate_readable(pos)?;
         }
 
+        let view = self.view();
         let items_per_blob = self.items_per_blob.get();
-        let pruning_boundary = self.blobs.bounds().start;
+        let pruning_boundary = view.bounds().start;
         let chunk_size = A::SIZE;
 
         // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
-        // maximal runs that share one blob. Each group goes through the blob handle's batched read,
+        // maximal runs that share one blob. Each group goes through the blob view's batched read,
         // which serves page-cache and tip-buffer hits under a single lock acquisition and reads only
         // true misses from the blob (concurrently).
         let mut result: Vec<A> = Vec::with_capacity(positions.len());
@@ -1119,12 +1125,11 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
                 .map(|&pos| Journal::<E, A>::items_to_bytes(pos - first_position))
                 .collect::<Result<_, _>>()?;
 
-            let handle = self
-                .blobs
+            let blob_view = view
                 .get(blob)
                 .expect("positions in bounds map to a retained blob");
             let buf = &mut reusable_buf[..group.len() * chunk_size];
-            let group_hits = handle
+            let group_hits = blob_view
                 .read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
                 .await?;
             hits += group_hits as u64;
@@ -1161,22 +1166,21 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        replay_stream::<E, A>(&self.blobs, self.items_per_blob.get(), buffer, start_pos)
+        replay_stream::<E, A>(self.view(), self.items_per_blob.get(), buffer, start_pos)
     }
 }
 
-/// Build the replay stream over `blobs`, starting at `start_pos`.
+/// Build the replay stream over `view`, starting at `start_pos`.
 ///
-/// The returned stream owns everything it reads (seeded sealed-blob replays and a cloned tail
-/// reader), so it borrows nothing from `blobs` (`use<E, A>` keeps the borrow's lifetime out of
-/// the return type). Shared by [`Reader`] and [`Journal`]'s [`super::Contiguous`] impl.
-fn replay_stream<E: Context, A: CodecFixedShared>(
-    blobs: &Blobs<'_, E>,
+/// The returned stream borrows the tail read view from `view`; the replay source must outlive the
+/// stream.
+fn replay_stream<'a, E: Context, A: CodecFixedShared + 'a>(
+    view: BlobsView<'a, E::Blob>,
     items_per_blob: u64,
     buffer: NonZeroUsize,
     start_pos: u64,
-) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + use<E, A>, Error> {
-    let bounds = blobs.bounds();
+) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + 'a, Error> {
+    let bounds = view.bounds();
     let pruning_boundary = bounds.start;
     let chunk_size = A::SIZE;
     let chunk_size_u64 = Journal::<E, A>::CHUNK_SIZE_U64;
@@ -1194,9 +1198,9 @@ fn replay_stream<E: Context, A: CodecFixedShared>(
 
     // Check all middle blobs (not oldest, not tail) in range are complete. Sealed blob
     // sizes are known synchronously.
-    let oldest = blobs.oldest_blob_index();
-    let tail_blob = blobs.tail_blob_index();
-    let sealed_blobs = blobs.sealed();
+    let oldest = view.oldest_blob_index();
+    let tail_blob = view.tail_blob_index();
+    let sealed_blobs = view.sealed();
     let first_to_check = oldest
         .checked_add(1)
         .map_or(tail_blob, |after_oldest| start_blob.max(after_oldest));
@@ -1210,9 +1214,8 @@ fn replay_stream<E: Context, A: CodecFixedShared>(
         }
     }
 
-    // Seed each sealed blob's `Replay` upfront so the returned stream borrows nothing from
-    // `blobs`. The tail is streamed through its read handle instead: a `Replay` reads physical
-    // pages from the blob and would miss the tail's buffered bytes.
+    // Seed each sealed blob's `Replay` upfront. The tail is streamed through its read view instead:
+    // a `Replay` reads physical pages from the blob and would miss the tail's buffered bytes.
     let mut per_blob_replays: Vec<(u64, Replay<E::Blob>, u64)> = Vec::new();
     for blob in start_blob..tail_blob.min(bounds.end / items_per_blob) {
         let idx = (blob - oldest) as usize;
@@ -1236,7 +1239,7 @@ fn replay_stream<E: Context, A: CodecFixedShared>(
     // of items; the trailing `flat_map(stream::iter)` flattens batches back into items.
     let sealed_batches =
         stream::iter(per_blob_replays).flat_map(move |(blob_first, replay, initial_position)| {
-            BlobReplayState::<E::Blob, A> {
+            BlobReplayState {
                 blob_first,
                 replay,
                 position: initial_position,
@@ -1252,8 +1255,8 @@ fn replay_stream<E: Context, A: CodecFixedShared>(
     } else {
         tail_first
     };
-    let tail_batches = TailReplayState::<E::Blob, A> {
-        reader: blobs.tail_reader(),
+    let tail_batches = TailReplayState {
+        view: view.tail(),
         positions: tail_start.max(tail_first)..bounds.end,
         tail_first,
         items_per_batch: (buffer.get() / chunk_size).max(1),
@@ -1301,9 +1304,9 @@ impl<B: RBlob, A: CodecFixedShared> replay::Source for BlobReplayState<B, A> {
     }
 }
 
-/// Replays the writable tail through an owned paged snapshot of it.
-struct TailReplayState<B: RBlob, A> {
-    reader: PagedSnapshot<B>,
+/// Replays the tail through a borrowed read view.
+struct TailReplayState<'a, B: RBlob, A> {
+    view: BlobView<'a, B>,
     /// Positions still to emit; `positions.end` is the view's end bound.
     positions: Range<u64>,
     /// First retained position in the tail; origin for byte offsets.
@@ -1313,7 +1316,7 @@ struct TailReplayState<B: RBlob, A> {
     _marker: PhantomData<A>,
 }
 
-impl<B: RBlob, A: CodecFixedShared> replay::Source for TailReplayState<B, A> {
+impl<B: RBlob, A: CodecFixedShared> replay::Source for TailReplayState<'_, B, A> {
     type Item = A;
 
     /// Read and decode up to `items_per_batch` fixed-size items from the tail.
@@ -1329,7 +1332,7 @@ impl<B: RBlob, A: CodecFixedShared> replay::Source for TailReplayState<B, A> {
             .checked_mul(A::SIZE as u64)
             .ok_or(Error::OffsetOverflow)?;
         let mut buf = vec![0u8; count * A::SIZE];
-        self.reader
+        self.view
             .read_into(&mut buf, byte_offset)
             .await
             .map_err(Error::Runtime)?;
@@ -1368,11 +1371,12 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        let blobs = Blobs::Writable {
-            writable: &self.blobs,
-            bounds: self.bounds.clone(),
-        };
-        replay_stream::<E, A>(&blobs, self.items_per_blob.get(), buffer, start_pos)
+        replay_stream::<E, A>(
+            Source::owned_view(&self.blobs, self.bounds.clone()),
+            self.items_per_blob.get(),
+            buffer,
+            start_pos,
+        )
     }
 }
 

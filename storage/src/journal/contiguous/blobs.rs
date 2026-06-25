@@ -3,9 +3,9 @@
 use crate::{journal::Error, Context};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Sealed, Snapshot as PagedSnapshot, Writer},
+    buffer::paged::{CacheRef, Sealed, Snapshot as PagedSnapshot, View as BlobView, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
-    Blob as RBlob, Error as RError, IoBuf, IoBufMut, IoBufs,
+    Blob as RBlob, Error as RError,
 };
 use futures::future::try_join_all;
 use std::{
@@ -143,13 +143,13 @@ pub(super) struct Writable<E: Context> {
     partition: Partition<E>,
     metrics: Metrics,
 
-    /// The one writable blob, at `oldest_blob_index + sealed.len()`; appends go here.
+    /// The writable tail.
     tail: Writer<E::Blob>,
 
     /// Index of the first blob in [Self::sealed].
     oldest_blob_index: u64,
 
-    /// Sealed historical blobs, ascending and contiguous from `oldest_blob_index`.
+    /// Sealed historical blobs.
     sealed: Arc<[Sealed<E::Blob>]>,
 
     /// Number of live [`Snapshot`]s. Gates in-place truncation during rewind.
@@ -423,94 +423,6 @@ impl<E: Context> Writable<E> {
     }
 }
 
-/// A read handle for one blob.
-pub(super) enum Blob<'a, B: RBlob> {
-    Sealed(&'a Sealed<B>),
-    Snapshot(&'a PagedSnapshot<B>),
-    Tail(&'a Writer<B>),
-}
-
-impl<B: RBlob> Blob<'_, B> {
-    pub(super) async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        match self {
-            Self::Sealed(s) => s.read_at(offset, len).await.map_err(Error::Runtime),
-            Self::Snapshot(s) => s.read_at(offset, len).await.map_err(Error::Runtime),
-            Self::Tail(t) => t.read_at(offset, len).await.map_err(Error::Runtime),
-        }
-    }
-
-    /// Read up to `len` bytes starting at `offset`, returning the bytes and how many were
-    /// available.
-    pub(super) async fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-    ) -> Result<(IoBuf, usize), Error> {
-        match self {
-            Self::Sealed(s) => {
-                let (buf, available) = s
-                    .read_up_to(offset, len, IoBufMut::with_capacity(len))
-                    .await
-                    .map_err(Error::Runtime)?;
-                Ok((buf.freeze(), available))
-            }
-            Self::Snapshot(s) => {
-                let (buf, available) = s
-                    .read_up_to(offset, len, IoBufMut::with_capacity(len))
-                    .await
-                    .map_err(Error::Runtime)?;
-                Ok((buf.freeze(), available))
-            }
-            Self::Tail(t) => {
-                let (buf, available) = t
-                    .read_up_to(offset, len, IoBufMut::with_capacity(len))
-                    .await
-                    .map_err(Error::Runtime)?;
-                Ok((buf.freeze(), available))
-            }
-        }
-    }
-
-    /// The blob's logical size, including any buffered tail bytes.
-    pub(super) fn size(&self) -> u64 {
-        match self {
-            Self::Sealed(s) => s.size(),
-            Self::Snapshot(s) => s.size(),
-            Self::Tail(t) => t.size(),
-        }
-    }
-
-    pub(super) async fn read_many_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Result<usize, Error> {
-        match self {
-            Self::Sealed(s) => s
-                .read_many_into(buf, offsets, item_size)
-                .await
-                .map_err(Error::Runtime),
-            Self::Snapshot(s) => s
-                .read_many_into(buf, offsets, item_size)
-                .await
-                .map_err(Error::Runtime),
-            Self::Tail(t) => t
-                .read_many_into(buf, offsets, item_size)
-                .await
-                .map_err(Error::Runtime),
-        }
-    }
-
-    pub(super) fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        match self {
-            Self::Sealed(s) => s.try_read_sync(offset, buf),
-            Self::Snapshot(s) => s.try_read_sync(offset, buf),
-            Self::Tail(t) => t.try_read_sync(offset, buf),
-        }
-    }
-}
-
 /// An owned copy of the journal's blob handles, captured by [`Writable::to_snapshot`]. Later
 /// appends, seals, and prunes are invisible to it: it serves reads from the handles retained at
 /// capture, so even pruned blobs stay readable. A rewind would mutate the tail (shared with the
@@ -538,95 +450,118 @@ impl<B: RBlob> Drop for Snapshot<B> {
     }
 }
 
-/// Resolves a blob index to a blob within a frozen `bounds`, over either a [`Snapshot`] or the
-/// live [`Writable`] (borrowed). The per-position read logic is written once against this.
-pub(super) enum Blobs<'a, E: Context> {
+/// Reader-owned blob source, either journal-owned or snapshot-backed.
+pub(super) enum Source<'a, E: Context> {
     Snapshot {
-        snapshot: Snapshot<E::Blob>,
+        blobs: Snapshot<E::Blob>,
         bounds: Range<u64>,
     },
-    Writable {
-        writable: &'a Writable<E>,
+    Owned {
+        blobs: &'a Writable<E>,
         bounds: Range<u64>,
     },
 }
 
-impl<E: Context> Blobs<'_, E> {
-    /// Validate a position to be read: must lie within `bounds`.
-    pub(super) fn validate_readable(&self, pos: u64) -> Result<(), Error> {
-        let bounds = self.bounds();
-        if pos >= bounds.end {
-            return Err(Error::ItemOutOfRange(pos));
+impl<E: Context> Source<'_, E> {
+    /// Returns a borrowed view over owned journal blobs.
+    pub(super) fn owned_view(blobs: &Writable<E>, bounds: Range<u64>) -> View<'_, E::Blob> {
+        View {
+            bounds,
+            oldest_blob_index: blobs.oldest_blob_index,
+            sealed: &blobs.sealed,
+            tail: blobs.tail.view(),
         }
-        if pos < bounds.start {
-            return Err(Error::ItemPruned(pos));
-        }
-        Ok(())
     }
 
     /// The readable position range `[start, end)`.
     pub(super) fn bounds(&self) -> Range<u64> {
         match self {
-            Self::Snapshot { bounds, .. } | Self::Writable { bounds, .. } => bounds.clone(),
+            Self::Snapshot { bounds, .. } | Self::Owned { bounds, .. } => bounds.clone(),
         }
     }
 
-    /// Resolve the read handle for `blob`, if retained.
-    pub(super) fn get(&self, blob: u64) -> Option<Blob<'_, E::Blob>> {
-        let oldest = self.oldest_blob_index();
-        let sealed = self.sealed();
-        if blob == oldest + sealed.len() as u64 {
-            return Some(match self {
-                Self::Snapshot { snapshot, .. } => Blob::Snapshot(&snapshot.tail),
-                Self::Writable { writable, .. } => Blob::Tail(&writable.tail),
-            });
+    /// Returns a borrowed view over the retained blobs.
+    pub(super) fn view(&self) -> View<'_, E::Blob> {
+        match self {
+            Self::Snapshot { blobs, bounds } => View {
+                bounds: bounds.clone(),
+                oldest_blob_index: blobs.oldest_blob_index,
+                sealed: &blobs.sealed,
+                tail: blobs.tail.view(),
+            },
+            Self::Owned { blobs, bounds } => Self::owned_view(blobs, bounds.clone()),
         }
-        sealed
-            .get(blob.checked_sub(oldest)? as usize)
-            .map(Blob::Sealed)
+    }
+}
+
+/// A borrowed view of sealed blobs and a tail.
+pub(super) struct View<'a, B: RBlob> {
+    /// The readable position range `[start, end)`.
+    bounds: Range<u64>,
+    /// Index of the first sealed blob.
+    oldest_blob_index: u64,
+    /// Sealed historical blobs, ascending and contiguous from [`Self::oldest_blob_index`].
+    sealed: &'a [Sealed<B>],
+    /// Read view of the tail blob.
+    tail: BlobView<'a, B>,
+}
+
+impl<'a, B: RBlob> View<'a, B> {
+    /// The readable position range `[start, end)`.
+    pub(super) fn bounds(&self) -> Range<u64> {
+        self.bounds.clone()
+    }
+
+    /// Validate a position to be read: must lie within `bounds`.
+    pub(super) const fn validate_readable(&self, pos: u64) -> Result<(), Error> {
+        if pos >= self.bounds.end {
+            return Err(Error::ItemOutOfRange(pos));
+        }
+        if pos < self.bounds.start {
+            return Err(Error::ItemPruned(pos));
+        }
+        Ok(())
     }
 
     /// Index of the first sealed blob.
     pub(super) const fn oldest_blob_index(&self) -> u64 {
-        match self {
-            Self::Snapshot { snapshot, .. } => snapshot.oldest_blob_index,
-            Self::Writable { writable, .. } => writable.oldest_blob_index,
-        }
+        self.oldest_blob_index
     }
 
     /// Index of the newest blob (the tail).
-    pub(super) fn tail_blob_index(&self) -> u64 {
-        self.oldest_blob_index() + self.sealed().len() as u64
+    pub(super) const fn tail_blob_index(&self) -> u64 {
+        self.oldest_blob_index + self.sealed.len() as u64
     }
 
     /// Sealed historical blobs, ascending and contiguous from [`Self::oldest_blob_index`].
-    pub(super) fn sealed(&self) -> &[Sealed<E::Blob>] {
-        match self {
-            Self::Snapshot { snapshot, .. } => &snapshot.sealed,
-            Self::Writable { writable, .. } => &writable.sealed,
-        }
+    pub(super) const fn sealed(&self) -> &'a [Sealed<B>] {
+        self.sealed
     }
 
-    /// An owned read handle for the tail blob (a paged snapshot, so it outlives this view).
-    pub(super) fn tail_reader(&self) -> PagedSnapshot<E::Blob> {
-        match self {
-            Self::Snapshot { snapshot, .. } => snapshot.tail.clone(),
-            Self::Writable { writable, .. } => writable.tail.snapshot(),
+    /// Read view of the tail blob.
+    pub(super) const fn tail(&self) -> BlobView<'a, B> {
+        self.tail
+    }
+
+    /// Resolve the read view for `blob`, if retained.
+    pub(super) fn get(&self, blob: u64) -> Option<BlobView<'a, B>> {
+        if blob == self.tail_blob_index() {
+            return Some(self.tail());
         }
+        self.sealed
+            .get(blob.checked_sub(self.oldest_blob_index)? as usize)
+            .map(Sealed::view)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, Runner as _, Storage as _};
+    use commonware_runtime::{deterministic, IoBufMut, Runner as _, Storage as _};
     use commonware_utils::{NZUsize, NZU16};
 
-    fn assert_insufficient_length(result: Result<(IoBuf, usize), Error>) {
-        assert!(matches!(
-            result,
-            Err(Error::Runtime(RError::BlobInsufficientLength))
-        ));
+    fn assert_insufficient_length(result: Result<(IoBufMut, usize), RError>) {
+        assert!(matches!(result, Err(RError::BlobInsufficientLength)));
     }
 
     impl<E: Context> Writable<E> {
@@ -662,18 +597,30 @@ mod tests {
                 .open("read_up_to_eof_parity", b"blob")
                 .await
                 .unwrap();
-            let mut tail = Writer::new(blob, size, 128, cache_ref).await.unwrap();
-            tail.append(b"abc").await.unwrap();
+            let mut writer = Writer::new(blob, size, 128, cache_ref).await.unwrap();
+            writer.append(b"abc").await.unwrap();
 
-            let size = tail.size();
-            assert_insufficient_length(Blob::Tail(&tail).read_up_to(size, 1).await);
-            assert_eq!(Blob::Tail(&tail).read_up_to(size, 0).await.unwrap().1, 0);
-
-            let snapshot = tail.snapshot();
-            assert_insufficient_length(Blob::Snapshot(&snapshot).read_up_to(size, 1).await);
+            let size = writer.size();
+            let tail = writer.view();
+            assert_insufficient_length(tail.read_up_to(size, 1, IoBufMut::with_capacity(1)).await);
             assert_eq!(
-                Blob::Snapshot(&snapshot)
-                    .read_up_to(size, 0)
+                tail.read_up_to(size, 0, IoBufMut::with_capacity(0))
+                    .await
+                    .unwrap()
+                    .1,
+                0
+            );
+
+            let snapshot = writer.snapshot();
+            let snapshot_view = snapshot.view();
+            assert_insufficient_length(
+                snapshot_view
+                    .read_up_to(size, 1, IoBufMut::with_capacity(1))
+                    .await,
+            );
+            assert_eq!(
+                snapshot_view
+                    .read_up_to(size, 0, IoBufMut::with_capacity(0))
                     .await
                     .unwrap()
                     .1,
@@ -681,10 +628,19 @@ mod tests {
             );
             drop(snapshot);
 
-            let sealed = tail.seal().await.unwrap();
-            assert_insufficient_length(Blob::Sealed(&sealed).read_up_to(size, 1).await);
+            let sealed = writer.seal().await.unwrap();
+            let sealed_view = sealed.view();
+            assert_insufficient_length(
+                sealed_view
+                    .read_up_to(size, 1, IoBufMut::with_capacity(1))
+                    .await,
+            );
             assert_eq!(
-                Blob::Sealed(&sealed).read_up_to(size, 0).await.unwrap().1,
+                sealed_view
+                    .read_up_to(size, 0, IoBufMut::with_capacity(0))
+                    .await
+                    .unwrap()
+                    .1,
                 0
             );
         });

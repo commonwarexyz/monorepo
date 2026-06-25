@@ -40,6 +40,7 @@ pub use read::Replay;
 pub use sealed::Sealed;
 pub use snapshot::Snapshot;
 use tracing::{debug, error};
+pub use view::View;
 pub use writer::Writer;
 
 // A checksum record contains two slots. Each slot stores one u16 length and one CRC.
@@ -47,7 +48,7 @@ const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 const CHECKSUM_SLOT_SIZE: usize = u16::SIZE + crc32::Digest::SIZE;
 
 /// Ensure `buf` has one `item_size` slot per offset, offsets are sorted and non-overlapping, and
-/// every requested range lies within the blob's logical size.
+/// every requested range lies within the blob's size.
 fn validate_read_many_into(
     buf_len: usize,
     offsets: &[u64],

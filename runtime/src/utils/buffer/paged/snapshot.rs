@@ -1,6 +1,6 @@
 //! Immutable read view of a cache-backed blob.
 
-use super::{view::ReadView, CacheRef};
+use super::{view::View, CacheRef};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
 use std::{
     num::NonZeroUsize,
@@ -27,7 +27,7 @@ struct SnapshotInner<B: Blob> {
     /// Underlying blob used for bytes below [`Self::tail_offset`].
     blob: B,
 
-    /// Logical size of the blob, in bytes.
+    /// Size of the blob, in bytes.
     size: u64,
 
     /// Offset where tail bytes begin.
@@ -76,14 +76,14 @@ impl<B: Blob> Snapshot<B> {
         }
     }
 
-    /// Returns the logical size of the blob.
+    /// Returns the size of the blob.
     pub fn size(&self) -> u64 {
         self.inner.size
     }
 
-    /// A borrowed read view over this snapshot's frozen contents.
-    fn view(&self) -> ReadView<'_, B> {
-        ReadView {
+    /// Returns a borrowed view over this blob.
+    pub fn view(&self) -> View<'_, B> {
+        View {
             blob: &self.inner.blob,
             cache_ref: &self.inner.cache_ref,
             id: self.inner.id,
@@ -94,8 +94,8 @@ impl<B: Blob> Snapshot<B> {
     }
 
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
-    /// `buf.len()` bytes were satisfied from the page cache and/or the copied tail. When `false` is
-    /// returned, the contents of `buf` are unspecified.
+    /// `buf.len()` bytes were satisfied from the page cache and/or the in-memory tail. When `false`
+    /// is returned, the contents of `buf` are unspecified.
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
         self.view().try_read_sync(offset, buf)
     }
@@ -123,7 +123,7 @@ impl<B: Blob> Snapshot<B> {
     /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
     /// non-overlapping, and within bounds.
     ///
-    /// Returns the number of items fully served without a blob read (from the copied tail and the
+    /// Returns the number of items fully served without a blob read (from the in-memory tail and the
     /// page cache). The remaining items required at least one blob read.
     pub async fn read_many_into(
         &self,

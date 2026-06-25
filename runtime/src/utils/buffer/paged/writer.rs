@@ -37,7 +37,7 @@
 
 use super::{
     read::{PageReader, Replay},
-    view::ReadView,
+    view::View,
 };
 use crate::{
     buffer::{
@@ -594,15 +594,14 @@ impl<B: Blob> Writer<B> {
         }
     }
 
-    /// Returns the logical size of the blob. This accounts for both written and buffered data.
+    /// Returns the size of the blob.
     pub const fn size(&self) -> u64 {
         self.buffer.size()
     }
 
-    /// A borrowed read view over this writer's current contents: the persisted prefix plus
-    /// the live tip buffer.
-    fn view(&self) -> ReadView<'_, B> {
-        ReadView {
+    /// Returns a borrowed view over this blob.
+    pub fn view(&self) -> View<'_, B> {
+        View {
             blob: &self.blob,
             cache_ref: &self.cache_ref,
             id: self.id,
@@ -612,11 +611,9 @@ impl<B: Blob> Writer<B> {
         }
     }
 
-    /// Read into `buf` if it can be done synchronously (e.g. without I/O), returning `false`
-    /// otherwise.
-    ///
-    /// Returns `true` only if all `buf.len()` bytes were satisfied from the page cache and/or the
-    /// tip buffer. When `false` is returned, the contents of `buf` are unspecified.
+    /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
+    /// `buf.len()` bytes were satisfied from the page cache and/or the in-memory tail. When `false`
+    /// is returned, the contents of `buf` are unspecified.
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
         self.view().try_read_sync(offset, buf)
     }
@@ -626,29 +623,25 @@ impl<B: Blob> Writer<B> {
         self.view().read_at(offset, len).await
     }
 
-    /// Reads up to `len` bytes starting at `logical_offset`, but only as many as are available.
-    ///
-    /// This is useful for reading variable-length prefixes (like varints) where you want to read
-    /// up to a maximum number of bytes but the actual data might be shorter.
+    /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
     ///
     /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns
     /// an error if no bytes are available at the given offset.
     pub async fn read_up_to(
         &self,
-        logical_offset: u64,
+        offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
-        self.view().read_up_to(logical_offset, len, bufs).await
+        self.view().read_up_to(offset, len, bufs).await
     }
 
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
     ///
     /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
-    /// non-overlapping, and within bounds. This amortizes lock acquisition and avoids
-    /// per-item buffer allocation compared to calling [`read_at`](Self::read_at) in a loop.
+    /// non-overlapping, and within bounds.
     ///
-    /// Returns the number of items fully served without a blob read (from the tip buffer and the
+    /// Returns the number of items fully served without a blob read (from the in-memory tail and the
     /// page cache). The remaining items required at least one blob read.
     pub async fn read_many_into(
         &self,
@@ -659,12 +652,9 @@ impl<B: Blob> Writer<B> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
-    /// Reads bytes starting at `logical_offset` into `buf`.
-    ///
-    /// This method allows reading directly into a mutable slice without taking ownership of the
-    /// buffer or requiring a specific buffer type.
-    pub async fn read_into(&self, buf: &mut [u8], logical_offset: u64) -> Result<(), Error> {
-        self.view().read_into(buf, logical_offset).await
+    /// Reads bytes starting at `offset` into `buf`.
+    pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+        self.view().read_into(buf, offset).await
     }
 
     /// Returns the protected region info for a partial page, if any.
@@ -1063,7 +1053,7 @@ impl<B: Blob> Writer<B> {
         // Flush any buffered data first to ensure we have a consistent state on disk.
         self.sync().await?;
 
-        // Calculate the physical size needed for the new logical size.
+        // Calculate the physical size needed for the new size.
         let full_pages = target_size / logical_page_size;
         let partial_bytes = target_size % logical_page_size;
         let physical_pages = full_pages
@@ -1095,7 +1085,7 @@ impl<B: Blob> Writer<B> {
 
         // Evict cached pages at or beyond the new full-page boundary. The page at
         // `full_pages` (if partial) is now owned by the tip buffer, and anything above is
-        // beyond the new logical size. Leaving their pre-resize contents in the cache
+        // beyond the new size. Leaving their pre-resize contents in the cache
         // lets `try_read_sync` (which bypasses the tip buffer) observe stale bytes once
         // the tip is repopulated.
         self.cache_ref.invalidate_from(self.id, full_pages);
@@ -1123,7 +1113,7 @@ impl<B: Blob> Writer<B> {
         logical_page_size: u64,
         tail_offset: u64,
     ) -> Result<(), Error> {
-        // Update blob state and buffer based on the desired logical size. The page data is
+        // Update blob state and buffer based on the desired size. The page data is
         // read with CRC validation, then durably rewritten below with a shorter CRC.
         self.current_page = full_pages;
         self.buffer.offset = tail_offset;

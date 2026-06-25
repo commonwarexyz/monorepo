@@ -4,7 +4,7 @@
 //! the preferred recovery point for replaying data to rebuild offset entries.
 
 use super::{
-    blobs::{Blob, Blobs, Partition, Writable},
+    blobs::{Partition, Source, View as BlobsView, Writable},
     fixed,
     metrics::VariableMetrics as Metrics,
     replay::{self, Source as _},
@@ -20,7 +20,7 @@ use crate::{
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Replay, Snapshot as PagedSnapshot, Writer},
+    buffer::paged::{CacheRef, Replay, View as BlobView, Writer},
     Blob as RBlob, Buf, IoBuf, IoBufMut,
 };
 use commonware_utils::NZUsize;
@@ -289,8 +289,8 @@ pub struct Journal<E: Context, V: Codec> {
 
 /// A reader over a variable journal.
 pub struct Reader<'a, E: Context, V: Codec> {
-    /// Resolves a data-blob index to a read handle.
-    data: Blobs<'a, E>,
+    /// The journal's data blobs.
+    data: Source<'a, E>,
 
     /// Maps positions to byte offsets within the data blobs.
     offsets: fixed::Reader<'a, E, u64>,
@@ -309,10 +309,26 @@ pub struct Reader<'a, E: Context, V: Codec> {
 }
 
 impl<E: Context, V: CodecShared> Reader<'_, E, V> {
-    /// Read the varint-framed item at byte `offset` via `handle`.
-    async fn read_at_offset(&self, handle: &Blob<'_, E::Blob>, offset: u64) -> Result<V, Error> {
+    /// A borrowed view over this reader's data.
+    fn view(&self) -> BlobsView<'_, E::Blob> {
+        self.data.view()
+    }
+
+    /// Read the varint-framed item at byte `offset` via `blob_view`.
+    async fn read_at_offset(
+        &self,
+        blob_view: &BlobView<'_, E::Blob>,
+        offset: u64,
+    ) -> Result<V, Error> {
         // Read the varint header (max 5 bytes for u32).
-        let (buf, available) = handle.read_up_to(offset, MAX_U32_VARINT_SIZE).await?;
+        let (buf, available) = blob_view
+            .read_up_to(
+                offset,
+                MAX_U32_VARINT_SIZE,
+                IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
+            )
+            .await?;
+        let buf = buf.freeze();
         let mut cursor = Cursor::new(buf.slice(..available));
         let (_, item_info) = find_frame(&mut cursor, offset)?;
 
@@ -337,7 +353,9 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                     .checked_add(varint_len as u64)
                     .and_then(|offset| offset.checked_add(prefix_len as u64))
                     .ok_or(Error::OffsetOverflow)?;
-                let remainder = handle.read_at(read_offset, total_len - prefix_len).await?;
+                let remainder = blob_view
+                    .read_at(read_offset, total_len - prefix_len)
+                    .await?;
                 decode_item::<V>(prefix.chain(remainder), &self.codec_config, self.compressed)
             }
         }
@@ -351,7 +369,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
     /// strictly increasing.
     async fn read_consecutive(
         &self,
-        handle: &Blob<'_, E::Blob>,
+        blob_view: &BlobView<'_, E::Blob>,
         blob: u64,
         offsets: &[u64],
     ) -> Result<Vec<V>, Error> {
@@ -359,7 +377,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         if offsets.len() <= 1 {
             let mut items = Vec::with_capacity(offsets.len());
             for &offset in offsets {
-                items.push(self.read_at_offset(handle, offset).await?);
+                items.push(self.read_at_offset(blob_view, offset).await?);
             }
             return Ok(items);
         }
@@ -378,7 +396,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         let start = offsets[0];
         let end = offsets[offsets.len() - 1];
         let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
-        let bytes = handle.read_at(start, range_len).await?.coalesce();
+        let bytes = blob_view.read_at(start, range_len).await?.coalesce();
         let bytes = bytes.as_ref();
 
         let mut items = Vec::with_capacity(offsets.len());
@@ -418,18 +436,17 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             local_offset = data_end;
         }
 
-        items.push(self.read_at_offset(handle, end).await?);
+        items.push(self.read_at_offset(blob_view, end).await?);
         Ok(items)
     }
 
     /// Read an item synchronously from cached bytes, returning `None` on any miss.
     fn try_read_sync_into(&self, position: u64, buf: &mut Vec<u8>) -> Option<V> {
-        self.data.validate_readable(position).ok()?;
+        let view = self.view();
+        view.validate_readable(position).ok()?;
         let offset = self.offsets.try_read_sync(position)?;
-        let handle = self
-            .data
-            .get(position_to_blob(position, self.items_per_blob.get()))?;
-        let remaining = handle.size().checked_sub(offset)?;
+        let blob_view = view.get(position_to_blob(position, self.items_per_blob.get()))?;
+        let remaining = blob_view.size().checked_sub(offset)?;
         let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
         if header_len == 0 {
             return None;
@@ -437,7 +454,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
 
         // Read the varint header to determine item size.
         let mut header = [0u8; MAX_U32_VARINT_SIZE];
-        if !handle.try_read_sync(offset, &mut header[..header_len]) {
+        if !blob_view.try_read_sync(offset, &mut header[..header_len]) {
             return None;
         }
         let mut cursor = Cursor::new(&header[..header_len]);
@@ -471,7 +488,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
 
         // Otherwise try reading the full item from cache.
         buf.resize(item_len, 0);
-        if !handle.try_read_sync(offset, buf) {
+        if !blob_view.try_read_sync(offset, buf) {
             return None;
         }
         decode_item::<V>(
@@ -482,24 +499,20 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         .ok()
     }
 
-    /// Build the replay stream over [`Self::data`], starting at `start_pos`. The stream owns its
-    /// handles, so it borrows neither `self.data` nor `self` (hence `use<E, V>`).
-    async fn replay_from(
-        &self,
+    /// Build the replay stream over `view`, starting at `start_pos`.
+    async fn replay_from<'a>(
+        &'a self,
+        view: BlobsView<'a, E::Blob>,
         buffer: NonZeroUsize,
         start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send + use<E, V>, Error> {
-        let items_per_blob = self.items_per_blob.get();
-        let bounds = self.data.bounds();
+    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send + 'a, Error> {
+        let bounds = view.bounds();
         if start_pos > bounds.end {
             return Err(Error::ItemOutOfRange(start_pos));
         }
         if start_pos < bounds.start {
             return Err(Error::ItemPruned(start_pos));
         }
-
-        let start_blob = position_to_blob(start_pos, items_per_blob);
-        let tail_blob = self.data.tail_blob_index();
 
         // The byte offset of the first replayed item; later blobs start at byte 0 (a data blob's
         // first item is at byte 0 even when the pruning boundary is mid-blob).
@@ -509,72 +522,95 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             0
         };
 
-        // Seed each sealed blob's `Replay` upfront so the returned stream borrows nothing from
-        // `self.data`. The tail is streamed through its read handle instead: a `Replay` reads
-        // physical pages from the blob and would miss the tail's buffered bytes.
-        //
-        // Each entry is (first position to emit, one past the last position, replay).
-        let mut per_blob_replays: Vec<(u64, u64, Replay<E::Blob>)> = Vec::new();
-        let end_blob = tail_blob.min(position_to_blob(bounds.end, items_per_blob));
-        let sealed_blobs = self.data.sealed();
-        for blob in start_blob..end_blob {
-            let idx = (blob - self.data.oldest_blob_index()) as usize;
-            let sealed = &sealed_blobs[idx];
-            let mut replay = sealed.replay(buffer).map_err(Error::Runtime)?;
-            let first_pos = if blob == start_blob {
-                if start_byte > sealed.size() {
-                    return Err(Error::Corruption(format!(
-                        "offset {start_byte} for position {start_pos} exceeds blob size {}",
-                        sealed.size()
-                    )));
-                }
-                replay.seek_to(start_byte).map_err(Error::Runtime)?;
-                start_pos
-            } else {
-                blob_first_position(blob, items_per_blob)?
-            };
-            // Sealed blobs are full: they end at the next blob boundary.
-            let next_blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
-            let end_pos = blob_first_position(next_blob, items_per_blob)?;
-            per_blob_replays.push((first_pos, end_pos, replay));
-        }
+        build_replay_stream::<E, V>(
+            view,
+            self.items_per_blob.get(),
+            self.codec_config.clone(),
+            self.compressed,
+            buffer,
+            start_pos,
+            start_byte,
+        )
+    }
+}
 
-        // Stream the sealed blobs in ascending order, then the tail. Each source yields batches
-        // of items; the trailing `flat_map(stream::iter)` flattens batches back into items.
-        let codec_config = self.codec_config.clone();
-        let compressed = self.compressed;
-        let sealed_batches =
-            stream::iter(per_blob_replays).flat_map(move |(first_pos, end_pos, replay)| {
-                SealedReplayState::<E::Blob, V> {
-                    replay,
-                    positions: first_pos..end_pos,
-                    codec_config: codec_config.clone(),
-                    compressed,
-                }
-                .into_batches()
-            });
+/// Build a replay stream from already resolved replay inputs.
+fn build_replay_stream<'a, E: Context, V: CodecShared + 'a>(
+    view: BlobsView<'a, E::Blob>,
+    items_per_blob: u64,
+    codec_config: V::Cfg,
+    compressed: bool,
+    buffer: NonZeroUsize,
+    start_pos: u64,
+    start_byte: u64,
+) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send + 'a, Error> {
+    let bounds = view.bounds();
+    let start_blob = position_to_blob(start_pos, items_per_blob);
+    let tail_blob = view.tail_blob_index();
 
-        let tail_first = if start_blob == tail_blob {
+    // Seed each sealed blob's `Replay` upfront. The tail is streamed through its read view instead:
+    // a `Replay` reads physical pages from the blob and would miss the tail's buffered bytes.
+    //
+    // Each entry is (first position to emit, one past the last position, replay).
+    let mut per_blob_replays: Vec<(u64, u64, Replay<E::Blob>)> = Vec::new();
+    let end_blob = tail_blob.min(position_to_blob(bounds.end, items_per_blob));
+    let sealed_blobs = view.sealed();
+    for blob in start_blob..end_blob {
+        let idx = (blob - view.oldest_blob_index()) as usize;
+        let sealed = &sealed_blobs[idx];
+        let mut replay = sealed.replay(buffer).map_err(Error::Runtime)?;
+        let first_pos = if blob == start_blob {
+            if start_byte > sealed.size() {
+                return Err(Error::Corruption(format!(
+                    "offset {start_byte} for position {start_pos} exceeds blob size {}",
+                    sealed.size()
+                )));
+            }
+            replay.seek_to(start_byte).map_err(Error::Runtime)?;
             start_pos
         } else {
-            blob_first_position(tail_blob, items_per_blob)?.max(bounds.start)
+            blob_first_position(blob, items_per_blob)?
         };
-        let tail_batches = TailReplayState::<E::Blob, V> {
-            reader: self.data.tail_reader(),
-            positions: tail_first..bounds.end,
-            byte_offset: if start_blob == tail_blob {
-                start_byte
-            } else {
-                0
-            },
-            chunk_len: buffer.get().max(MAX_U32_VARINT_SIZE),
-            codec_config: self.codec_config.clone(),
-            compressed: self.compressed,
-        }
-        .into_batches();
-
-        Ok(sealed_batches.chain(tail_batches).flat_map(stream::iter))
+        // Sealed blobs are full: they end at the next blob boundary.
+        let next_blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
+        let end_pos = blob_first_position(next_blob, items_per_blob)?;
+        per_blob_replays.push((first_pos, end_pos, replay));
     }
+
+    // Stream the sealed blobs in ascending order, then the tail. Each source yields batches
+    // of items; the trailing `flat_map(stream::iter)` flattens batches back into items.
+    let sealed_codec_config = codec_config.clone();
+    let sealed_batches =
+        stream::iter(per_blob_replays).flat_map(move |(first_pos, end_pos, replay)| {
+            SealedReplayState {
+                replay,
+                positions: first_pos..end_pos,
+                codec_config: sealed_codec_config.clone(),
+                compressed,
+            }
+            .into_batches()
+        });
+
+    let tail_first = if start_blob == tail_blob {
+        start_pos
+    } else {
+        blob_first_position(tail_blob, items_per_blob)?.max(bounds.start)
+    };
+    let tail_batches = TailReplayState {
+        view: view.tail(),
+        positions: tail_first..bounds.end,
+        byte_offset: if start_blob == tail_blob {
+            start_byte
+        } else {
+            0
+        },
+        chunk_len: buffer.get().max(MAX_U32_VARINT_SIZE),
+        codec_config,
+        compressed,
+    }
+    .into_batches();
+
+    Ok(sealed_batches.chain(tail_batches).flat_map(stream::iter))
 }
 
 impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
@@ -596,13 +632,13 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         }
 
         let _timer = self.metrics.read_timer();
-        self.data.validate_readable(position)?;
+        let view = self.view();
+        view.validate_readable(position)?;
         let offset = self.offsets.read(position).await?;
-        let handle = self
-            .data
+        let blob_view = view
             .get(position_to_blob(position, self.items_per_blob.get()))
             .expect("position in bounds maps to a retained blob");
-        let item = self.read_at_offset(&handle, offset).await?;
+        let item = self.read_at_offset(&blob_view, offset).await?;
         self.metrics.items_read.inc();
         Ok(item)
     }
@@ -613,7 +649,8 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         }
         let _timer = self.metrics.read_many_timer();
         self.metrics.read_many_calls.inc();
-        let bounds = self.data.bounds();
+        let view = self.view();
+        let bounds = view.bounds();
         if positions[0] < bounds.start {
             return Err(Error::ItemPruned(positions[0]));
         }
@@ -672,8 +709,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 group_end += 1;
             }
 
-            let handle = self
-                .data
+            let blob_view = view
                 .get(blob)
                 .expect("positions in bounds map to a retained blob");
             let mut run_start = group_start;
@@ -686,7 +722,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 }
 
                 let items = self
-                    .read_consecutive(&handle, blob, &miss_offsets[run_start..run_end])
+                    .read_consecutive(&blob_view, blob, &miss_offsets[run_start..run_end])
                     .await?;
 
                 for (item, &miss_idx) in items.into_iter().zip(&miss_indices[run_start..run_end]) {
@@ -714,7 +750,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        self.replay_from(buffer, start_pos).await
+        self.replay_from(self.view(), buffer, start_pos).await
     }
 }
 
@@ -1175,8 +1211,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// into its range is refused ([Error::BlobInUse]) while it is alive.
     pub fn snapshot(&self) -> Reader<'static, E, V> {
         Reader {
-            data: Blobs::Snapshot {
-                snapshot: self.blobs.to_snapshot(),
+            data: Source::Snapshot {
+                blobs: self.blobs.to_snapshot(),
                 bounds: self.bounds.clone(),
             },
             offsets: self.offsets.snapshot(),
@@ -1190,8 +1226,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// A reader borrowing the journal's live state.
     fn reader(&self) -> Reader<'_, E, V> {
         Reader {
-            data: Blobs::Writable {
-                writable: &self.blobs,
+            data: Source::Owned {
+                blobs: &self.blobs,
                 bounds: self.bounds.clone(),
             },
             offsets: self.offsets.reader(),
@@ -1826,9 +1862,9 @@ impl<B: RBlob, V: CodecShared> replay::Source for SealedReplayState<B, V> {
     }
 }
 
-/// Replays the writable tail through an owned paged snapshot of it.
-struct TailReplayState<B: RBlob, V: CodecShared> {
-    reader: PagedSnapshot<B>,
+/// Replays the tail through a borrowed read view.
+struct TailReplayState<'a, B: RBlob, V: CodecShared> {
+    view: BlobView<'a, B>,
     /// Positions still to emit; `positions.end` is the view's end bound.
     positions: Range<u64>,
     /// Byte offset of the next frame.
@@ -1839,7 +1875,7 @@ struct TailReplayState<B: RBlob, V: CodecShared> {
     compressed: bool,
 }
 
-impl<B: RBlob, V: CodecShared> replay::Source for TailReplayState<B, V> {
+impl<B: RBlob, V: CodecShared> replay::Source for TailReplayState<'_, B, V> {
     type Item = V;
 
     /// Decode every whole frame in one chunk-sized read. A frame larger than the chunk is read
@@ -1849,7 +1885,7 @@ impl<B: RBlob, V: CodecShared> replay::Source for TailReplayState<B, V> {
             return Ok(());
         }
         let (buf, available) = self
-            .reader
+            .view
             .read_up_to(
                 self.byte_offset,
                 self.chunk_len,
@@ -1913,7 +1949,7 @@ impl<B: RBlob, V: CodecShared> replay::Source for TailReplayState<B, V> {
             .checked_add(varint_len as u64)
             .ok_or(Error::OffsetOverflow)?;
         let bufs = self
-            .reader
+            .view
             .read_at(payload_offset, item_size)
             .await
             .map_err(Error::Runtime)?;
@@ -1952,7 +1988,28 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        self.reader().replay_from(buffer, start_pos).await
+        let view = Source::owned_view(&self.blobs, self.bounds.clone());
+        let bounds = view.bounds();
+        if start_pos > bounds.end {
+            return Err(Error::ItemOutOfRange(start_pos));
+        }
+        if start_pos < bounds.start {
+            return Err(Error::ItemPruned(start_pos));
+        }
+        let start_byte = if start_pos < bounds.end {
+            self.offsets.reader().read(start_pos).await?
+        } else {
+            0
+        };
+        build_replay_stream::<E, V>(
+            view,
+            self.items_per_blob.get(),
+            self.codec_config.clone(),
+            self.compression.is_some(),
+            buffer,
+            start_pos,
+            start_byte,
+        )
     }
 }
 

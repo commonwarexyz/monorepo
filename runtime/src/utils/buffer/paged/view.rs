@@ -1,27 +1,25 @@
-//! Shared read view for the paged buffer's read-capable types.
+//! Shared view for the paged buffer's read-capable types.
 //!
 //! [`Writer`](super::Writer), [`Sealed`](super::Sealed), and [`Snapshot`](super::Snapshot) all read
 //! the same way: logical bytes in `[tail_offset, size)` come from an in-memory tail slice (the
 //! writer's tip buffer, the sealed blob's partial last page, or a snapshot's copied tail), and bytes
 //! in `[0, tail_offset)` come from the page cache, falling back to a blob read. Each type exposes
-//! itself as a borrowed [`ReadView`] so this algorithm lives in exactly one place.
+//! itself as a borrowed [`View`] so this algorithm lives in exactly one place.
 
 use super::CacheRef;
 use crate::{Blob, Error, IoBufMut, IoBufs};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::num::NonZeroUsize;
 
-/// A borrowed read view over a paged blob: the persisted prefix below `tail_offset` plus the
-/// in-memory `tail` covering `[tail_offset, size)`. Constructed cheaply (all borrows) by each
-/// read-capable type's `view()`.
-pub(super) struct ReadView<'a, B: Blob> {
+/// A borrowed view over a paged blob.
+pub struct View<'a, B: Blob> {
     /// Underlying blob, used for bytes below `tail_offset` not resident in the cache.
     pub(super) blob: &'a B,
     /// Page cache used for bytes below `tail_offset`.
     pub(super) cache_ref: &'a CacheRef,
     /// Page-cache id of the originating blob.
     pub(super) id: u64,
-    /// Logical size of the view, in bytes.
+    /// Size of the blob, in bytes.
     pub(super) size: u64,
     /// Offset at which the in-memory `tail` bytes begin.
     pub(super) tail_offset: u64,
@@ -29,11 +27,24 @@ pub(super) struct ReadView<'a, B: Blob> {
     pub(super) tail: &'a [u8],
 }
 
-impl<B: Blob> ReadView<'_, B> {
+impl<B: Blob> Clone for View<'_, B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<B: Blob> Copy for View<'_, B> {}
+
+impl<B: Blob> View<'_, B> {
+    /// Return the size of the blob, in bytes.
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
     /// `buf.len()` bytes were satisfied from the page cache and/or the in-memory tail. When `false`
     /// is returned, the contents of `buf` are unspecified.
-    pub(super) fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
+    pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
         let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
             return false;
         };
@@ -66,7 +77,7 @@ impl<B: Blob> ReadView<'_, B> {
     }
 
     /// Reads bytes starting at `offset` into `buf`.
-    pub(super) async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+    pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         let end_offset = offset
             .checked_add(buf.len() as u64)
             .ok_or(Error::OffsetOverflow)?;
@@ -111,7 +122,7 @@ impl<B: Blob> ReadView<'_, B> {
     }
 
     /// Read exactly `len` immutable bytes starting at `offset`.
-    pub(super) async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         // SAFETY: read_into below initializes all `len` bytes.
         let mut buf = unsafe { self.cache_ref.pool().alloc_len(len) };
         self.read_into(buf.as_mut(), offset).await?;
@@ -122,7 +133,7 @@ impl<B: Blob> ReadView<'_, B> {
     ///
     /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns an
     /// error if no bytes are available at the given offset.
-    pub(super) async fn read_up_to(
+    pub async fn read_up_to(
         &self,
         offset: u64,
         len: usize,
@@ -150,7 +161,7 @@ impl<B: Blob> ReadView<'_, B> {
     ///
     /// Returns the number of items fully served without a blob read (from the in-memory tail and the
     /// page cache). The remaining items required at least one blob read.
-    pub(super) async fn read_many_into(
+    pub async fn read_many_into(
         &self,
         buf: &mut [u8],
         offsets: &[u64],
@@ -197,7 +208,7 @@ mod tests {
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
 
     /// A read straddling the persisted prefix and the in-memory tail is served synchronously once
-    /// the prefix page is cached (the unified `ReadView` serves the prefix from the cache and the
+    /// the prefix page is cached (the unified `View` serves the prefix from the cache and the
     /// suffix from the tail in one call).
     #[test]
     fn test_view_try_read_sync_straddles_cache_and_tail() {

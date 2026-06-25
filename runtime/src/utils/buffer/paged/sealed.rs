@@ -15,7 +15,7 @@
 //! any lock; they share the underlying [`Blob`] handle (which provides its own synchronization)
 //! and the page cache.
 
-use super::{read::PageReader, view::ReadView, CacheRef, Replay, CHECKSUM_SIZE};
+use super::{read::PageReader, view::View, CacheRef, Replay, CHECKSUM_SIZE};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
@@ -40,7 +40,7 @@ struct SealedInner<B: Blob> {
     /// The underlying blob being wrapped.
     blob: B,
 
-    /// Logical size of the sealed view, in bytes.
+    /// Size of the sealed view, in bytes.
     size: u64,
 
     /// Logical bytes of the partial last page, if the blob ends in one. Bytes at offsets
@@ -76,7 +76,7 @@ impl<B: Blob> Sealed<B> {
         }
     }
 
-    /// Returns the logical size of the sealed view.
+    /// Returns the size of the blob.
     pub fn size(&self) -> u64 {
         self.inner.size
     }
@@ -97,10 +97,9 @@ impl<B: Blob> Sealed<B> {
                 .map_or(0, |p| p.len() as u64)
     }
 
-    /// A borrowed read view over this sealed blob. Its tail is the in-memory partial last
-    /// page (which is also persisted on the blob).
-    fn view(&self) -> ReadView<'_, B> {
-        ReadView {
+    /// Returns a borrowed view over this blob.
+    pub fn view(&self) -> View<'_, B> {
+        View {
             blob: &self.inner.blob,
             cache_ref: &self.inner.cache_ref,
             id: self.inner.id,
@@ -120,29 +119,28 @@ impl<B: Blob> Sealed<B> {
     }
 
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
-    /// `buf.len()` bytes were satisfied from either the page cache or the in-memory partial page.
-    /// When `false` is returned, the contents of `buf` are unspecified.
+    /// `buf.len()` bytes were satisfied from the page cache and/or the in-memory tail. When `false`
+    /// is returned, the contents of `buf` are unspecified.
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
         self.view().try_read_sync(offset, buf)
     }
 
-    /// Reads bytes starting at `logical_offset` into `buf`.
-    pub async fn read_into(&self, buf: &mut [u8], logical_offset: u64) -> Result<(), Error> {
-        self.view().read_into(buf, logical_offset).await
+    /// Reads bytes starting at `offset` into `buf`.
+    pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+        self.view().read_into(buf, offset).await
     }
 
-    /// Reads up to `len` bytes starting at `logical_offset`, but only as many as are available
-    /// within the sealed view.
+    /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
     ///
     /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns
     /// an error if no bytes are available at the given offset.
     pub async fn read_up_to(
         &self,
-        logical_offset: u64,
+        offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
-        self.view().read_up_to(logical_offset, len, bufs).await
+        self.view().read_up_to(offset, len, bufs).await
     }
 
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
@@ -150,8 +148,8 @@ impl<B: Blob> Sealed<B> {
     /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
     /// non-overlapping, and within bounds.
     ///
-    /// Returns the number of items fully served without a blob read (from the in-memory partial
-    /// page and the page cache). The remaining items required at least one blob read.
+    /// Returns the number of items fully served without a blob read (from the in-memory tail and the
+    /// page cache). The remaining items required at least one blob read.
     pub async fn read_many_into(
         &self,
         buf: &mut [u8],
@@ -401,7 +399,7 @@ mod tests {
         });
     }
 
-    /// Sealing a blob whose logical size is exactly a page-multiple has no partial page.
+    /// Sealing a blob whose size is exactly a page-multiple has no partial page.
     #[test_traced("DEBUG")]
     fn test_seal_full_pages_only() {
         let executor = deterministic::Runner::default();
@@ -428,7 +426,7 @@ mod tests {
         });
     }
 
-    /// Sealing a blob whose logical size is smaller than one page yields only a partial page.
+    /// Sealing a blob whose size is smaller than one page yields only a partial page.
     #[test_traced("DEBUG")]
     fn test_seal_partial_only() {
         let executor = deterministic::Runner::default();
