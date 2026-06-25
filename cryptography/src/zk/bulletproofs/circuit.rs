@@ -448,7 +448,7 @@ fn r1cs_to_circuit_maybe_witness<F: Ring>(
     // The length of the l, r and o vectors.
     let internal_len = x_len + r1cs.height();
     let witness = witness.map(|(witness, blinding)| {
-        debug_assert!(
+        assert!(
             witness.first().is_none_or(|w| w == &F::one()),
             "R1CS witness slot 0 must be the constant 1"
         );

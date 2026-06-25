@@ -422,18 +422,13 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         });
     }
 
-    /// Return observers for every in-flight sync that still matters for a later durability barrier.
-    fn in_flight_syncs(&self) -> Vec<Shared> {
+    /// Return observers for syncs that still matter to the archive.
+    fn in_flight_syncs(&mut self) -> Vec<Shared> {
+        self.prune_completed_syncs();
         self.syncing.values().flatten().cloned().collect()
     }
 
-    /// Collect existing sync observers and drain newly pending sections.
-    fn collect_sync_work(&mut self) -> (Vec<Shared>, BTreeSet<u64>) {
-        self.prune_completed_syncs();
-        (self.in_flight_syncs(), self.take_pending())
-    }
-
-    /// Start syncing pending sections and record their observers for later durability barriers.
+    /// Start syncing pending sections and record their observers for later sync calls.
     async fn start_pending_syncs(&mut self, pending: BTreeSet<u64>) -> Result<Vec<Shared>, Error> {
         let syncs = pending.iter().map(|s| self.oversized.start_sync(*s));
         let handles = try_join_all(syncs).await?;
@@ -473,13 +468,15 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
-        let (mut observers, pending) = self.collect_sync_work();
+        let mut observers = self.in_flight_syncs();
+        let pending = self.take_pending();
         observers.extend(self.start_pending_syncs(pending).await?);
         Ok(sync::observe_all(observers))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        let (in_flight, pending) = self.collect_sync_work();
+        let in_flight = self.in_flight_syncs();
+        let pending = self.take_pending();
         sync::wait_all(in_flight)
             .await
             .map_err(crate::journal::Error::Runtime)?;

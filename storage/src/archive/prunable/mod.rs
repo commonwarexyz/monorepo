@@ -256,6 +256,21 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
+    fn default_config<E: BufferPooler>(context: &E) -> Config<FourCap, ()> {
+        Config {
+            translator: FourCap,
+            key_partition: "test-index".into(),
+            key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            value_partition: "test-value".into(),
+            codec_config: (),
+            compression: None,
+            key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+            value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+            replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+        }
+    }
+
     type SyncSender = oneshot::Sender<Result<(), RError>>;
     type PendingSyncs = Arc<Mutex<Vec<SyncSender>>>;
 
@@ -263,6 +278,17 @@ mod tests {
     struct DelayedSyncContext<E> {
         inner: E,
         pending: PendingSyncs,
+    }
+
+    fn delayed_sync_context<E>(inner: E) -> (DelayedSyncContext<E>, PendingSyncs) {
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        (
+            DelayedSyncContext {
+                inner,
+                pending: pending.clone(),
+            },
+            pending,
+        )
     }
 
     impl<E: commonware_runtime::Supervisor> commonware_runtime::Supervisor for DelayedSyncContext<E> {
@@ -401,23 +427,8 @@ mod tests {
     fn test_put_start_sync_returns_before_handle_completes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
-            let context = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
-            let cfg = Config {
-                translator: FourCap,
-                key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value".into(),
-                codec_config: (),
-                compression: None,
-                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-            };
+            let (context, pending) = delayed_sync_context(context);
+            let cfg = default_config(&context);
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -446,23 +457,8 @@ mod tests {
     fn test_sync_after_start_sync_waits_for_in_flight_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
-            let context = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
-            let cfg = Config {
-                translator: FourCap,
-                key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value".into(),
-                codec_config: (),
-                compression: None,
-                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-            };
+            let (context, pending) = delayed_sync_context(context);
+            let cfg = default_config(&context);
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -503,23 +499,8 @@ mod tests {
     fn test_start_sync_after_interleaved_put_starts_new_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
-            let context = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
-            let cfg = Config {
-                translator: FourCap,
-                key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value".into(),
-                codec_config: (),
-                compression: None,
-                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-            };
+            let (context, pending) = delayed_sync_context(context);
+            let cfg = default_config(&context);
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");

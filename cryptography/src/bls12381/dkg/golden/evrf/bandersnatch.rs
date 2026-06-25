@@ -542,7 +542,7 @@ fn vrf_batch_checked_inner(
     .expect("constraint synthesization should not fail");
     cs.finalize();
     if x.is_some() {
-        debug_assert!(
+        assert!(
             cs.is_satisfied().unwrap_or(false),
             "arkworks constraint system unsatisfied"
         );
