@@ -448,18 +448,18 @@ impl<B: RBlob> Blob<'_, B> {
     ) -> Result<(IoBuf, usize), Error> {
         match self {
             Self::Sealed(s) => {
-                let available = usize::try_from(s.size().saturating_sub(offset))
-                    .unwrap_or(usize::MAX)
-                    .min(len);
-                let bufs = s.read_at(offset, available).await.map_err(Error::Runtime)?;
-                Ok((bufs.coalesce(), available))
+                let (buf, available) = s
+                    .read_up_to(offset, len, IoBufMut::with_capacity(len))
+                    .await
+                    .map_err(Error::Runtime)?;
+                Ok((buf.freeze(), available))
             }
             Self::Snapshot(s) => {
-                let available = usize::try_from(s.size().saturating_sub(offset))
-                    .unwrap_or(usize::MAX)
-                    .min(len);
-                let bufs = s.read_at(offset, available).await.map_err(Error::Runtime)?;
-                Ok((bufs.coalesce(), available))
+                let (buf, available) = s
+                    .read_up_to(offset, len, IoBufMut::with_capacity(len))
+                    .await
+                    .map_err(Error::Runtime)?;
+                Ok((buf.freeze(), available))
             }
             Self::Tail(t) => {
                 let (buf, available) = t
@@ -619,6 +619,15 @@ impl<E: Context> Blobs<'_, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_runtime::{deterministic, Runner as _, Storage as _};
+    use commonware_utils::{NZUsize, NZU16};
+
+    fn assert_insufficient_length(result: Result<(IoBuf, usize), Error>) {
+        assert!(matches!(
+            result,
+            Err(Error::Runtime(RError::BlobInsufficientLength))
+        ));
+    }
 
     impl<E: Context> Writable<E> {
         /// Open `blob` as an independent writer, outside this journal's tracking
@@ -640,5 +649,44 @@ mod tests {
                 None => Ok(()),
             }
         }
+    }
+
+    #[test]
+    fn test_read_up_to_eof_parity() {
+        const PAGE_SIZE: std::num::NonZeroU16 = NZU16!(64);
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(3));
+            let (blob, size) = context
+                .open("read_up_to_eof_parity", b"blob")
+                .await
+                .unwrap();
+            let mut tail = Writer::new(blob, size, 128, cache_ref).await.unwrap();
+            tail.append(b"abc").await.unwrap();
+
+            let size = tail.size();
+            assert_insufficient_length(Blob::Tail(&tail).read_up_to(size, 1).await);
+            assert_eq!(Blob::Tail(&tail).read_up_to(size, 0).await.unwrap().1, 0);
+
+            let snapshot = tail.snapshot();
+            assert_insufficient_length(Blob::Snapshot(&snapshot).read_up_to(size, 1).await);
+            assert_eq!(
+                Blob::Snapshot(&snapshot)
+                    .read_up_to(size, 0)
+                    .await
+                    .unwrap()
+                    .1,
+                0
+            );
+            drop(snapshot);
+
+            let sealed = tail.seal().await.unwrap();
+            assert_insufficient_length(Blob::Sealed(&sealed).read_up_to(size, 1).await);
+            assert_eq!(
+                Blob::Sealed(&sealed).read_up_to(size, 0).await.unwrap().1,
+                0
+            );
+        });
     }
 }
