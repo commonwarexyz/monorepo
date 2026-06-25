@@ -18,9 +18,9 @@ hash = "55b287b5530fc9ba77c45ec5030ada38f86b2ddf66a1595fde27d4699667b1a3"
 n_cases = 65536
 hash = "51b04637257c54cecdc4e5ded4568efccafbc08f20be3fe0951369cab43ba2b6"
 
-["commonware_consensus::marshal::coding::types::test::conformance::CodecConformance<Shard<ReedSolomon<Sha256>,Sha256>>"]
+["commonware_consensus::marshal::coding::types::test::conformance::CodecConformance<Shard<Block,ReedSolomon<Sha256>,Sha256>>"]
 n_cases = 65536
-hash = "e53b4b684f0344590427aae976d298e3b6fd2b08ef46ff2cad5def04b4f7690b"
+hash = "ec3dc188f84f7b163c59e15d21ec9a7c5c2ea1f3f12c3098de52ee57a9c2b70e"
 
 ["commonware_consensus::marshal::conformance::CodingStorageConformance"]
 n_cases = 32
@@ -154,9 +154,9 @@ hash = "b9fbf2cfcbc37c87cb7aa8ede95c4ddf93c8bbd9f1a01e86ed72ba14bed920fa"
 n_cases = 65536
 hash = "01cc3b0d41d0ef29f02de2729d51b1b31bb96f00c6390e56aadd0fb5117cc7b1"
 
-["commonware_consensus::types::tests::conformance::CodecConformance<Commitment>"]
+["commonware_consensus::types::tests::conformance::CodecConformance<Commitment<TestBlock<Sha256Digest>,ReedSolomon<\nSha256>,Sha256>>"]
 n_cases = 65536
-hash = "4cc05ec53b515415070f3634ad2b56677c2a938f596ffc99f7909f24e06a8c99"
+hash = "2ce8beed4a11c22fcb65c614f250f5758d71229a729a2fef13faf765b2d9a5ea"
 
 ["commonware_consensus::types::tests::conformance::CodecConformance<Epoch>"]
 n_cases = 65536

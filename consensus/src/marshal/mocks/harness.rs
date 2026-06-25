@@ -23,16 +23,18 @@ use crate::{
         types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
     },
     types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-    Heightable, Reporter,
+    CertifiableBlock, Heightable, Reporter,
 };
+use bytes::{Buf, BufMut};
 use commonware_broadcast::buffered;
+use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
     certificate::{mocks::Fixture, ConstantProvider, Provider, Scoped, Verifier as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
-    Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
+    Committable, Digest as DigestTrait, Digestible, Hasher, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
@@ -75,8 +77,70 @@ pub type S = bls12381_threshold_vrf::Scheme<K, V>;
 pub type P = ConstantProvider<S, Epoch>;
 
 // Coding variant type aliases (uses Commitment in context)
-pub type CodingCtx = Context<Commitment, K>;
-pub type CodingB = Block<D, CodingCtx>;
+type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
+pub type CodingCtx = Context<TestCommitment, K>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodingB(Block<D, CodingCtx>);
+
+impl CodingB {
+    pub fn new<H: Hasher<Digest = D>>(
+        context: CodingCtx,
+        parent: D,
+        height: Height,
+        timestamp: u64,
+    ) -> Self {
+        Self(Block::new::<H>(context, parent, height, timestamp))
+    }
+}
+
+impl Write for CodingB {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.0.write(writer);
+    }
+}
+
+impl Read for CodingB {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Block::read_cfg(reader, cfg).map(Self)
+    }
+}
+
+impl EncodeSize for CodingB {
+    fn encode_size(&self) -> usize {
+        self.0.encode_size()
+    }
+}
+
+impl Digestible for CodingB {
+    type Digest = D;
+
+    fn digest(&self) -> Self::Digest {
+        self.0.digest()
+    }
+}
+
+impl Heightable for CodingB {
+    fn height(&self) -> Height {
+        self.0.height()
+    }
+}
+
+impl crate::Block for CodingB {
+    fn parent(&self) -> Self::Digest {
+        self.0.parent()
+    }
+}
+
+impl crate::CertifiableBlock for CodingB {
+    type Context = CodingCtx;
+
+    fn context(&self) -> Self::Context {
+        self.0.context()
+    }
+}
 
 // Common test constants
 pub const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -2390,7 +2454,7 @@ pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::
 };
 
 /// Create a genesis Commitment (all zeros for digests, genesis config).
-pub fn genesis_commitment() -> Commitment {
+pub fn genesis_commitment() -> TestCommitment {
     Commitment::from((
         D::EMPTY,
         D::EMPTY,
@@ -2419,7 +2483,7 @@ impl TestHarness for CodingHarness {
     type Variant = CodingVariant;
     type TestBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
     type ValidatorExtra = ShardsMailbox;
-    type Commitment = Commitment;
+    type Commitment = TestCommitment;
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -2598,7 +2662,7 @@ impl TestHarness for CodingHarness {
 
     fn make_test_block(
         parent: D,
-        parent_commitment: Commitment,
+        parent_commitment: TestCommitment,
         height: Height,
         timestamp: u64,
         num_participants: u16,
@@ -2617,7 +2681,7 @@ impl TestHarness for CodingHarness {
         CodedBlock::new(raw, coding_config, &Sequential)
     }
 
-    fn genesis_parent_commitment(_num_participants: u16) -> Commitment {
+    fn genesis_parent_commitment(_num_participants: u16) -> TestCommitment {
         genesis_commitment()
     }
 
@@ -2626,13 +2690,13 @@ impl TestHarness for CodingHarness {
         let commitment = Commitment::from((
             inner.digest(),
             inner.digest(),
-            hash_context::<Sha256, _>(&inner.context),
+            hash_context::<Sha256, _>(&inner.context()),
             GENESIS_CODING_CONFIG,
         ));
         CodedBlock::new_trusted(inner, commitment)
     }
 
-    fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Commitment {
+    fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> TestCommitment {
         block.commitment()
     }
 
@@ -2670,10 +2734,10 @@ impl TestHarness for CodingHarness {
     }
 
     fn make_finalization(
-        proposal: Proposal<Commitment>,
+        proposal: Proposal<TestCommitment>,
         schemes: &[S],
         quorum: u32,
-    ) -> Finalization<S, Commitment> {
+    ) -> Finalization<S, TestCommitment> {
         let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -2683,10 +2747,10 @@ impl TestHarness for CodingHarness {
     }
 
     fn make_notarization(
-        proposal: Proposal<Commitment>,
+        proposal: Proposal<TestCommitment>,
         schemes: &[S],
         quorum: u32,
-    ) -> Notarization<S, Commitment> {
+    ) -> Notarization<S, TestCommitment> {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -2697,14 +2761,14 @@ impl TestHarness for CodingHarness {
 
     async fn report_finalization(
         mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, Commitment>,
+        finalization: Finalization<S, TestCommitment>,
     ) {
         mailbox.report(Activity::Finalization(finalization));
     }
 
     async fn report_notarization(
         mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, Commitment>,
+        notarization: Notarization<S, TestCommitment>,
     ) {
         mailbox.report(Activity::Notarization(notarization));
     }

@@ -144,7 +144,7 @@ use super::{
 };
 use crate::{
     marshal::coding::{
-        types::{CodedBlock, Shard},
+        types::{hash_context, CodedBlock, Shard},
         validation::{validate_reconstruction, ReconstructionError as InvariantError},
     },
     types::{coding::Commitment, Epoch, Round},
@@ -205,12 +205,6 @@ pub enum Error<C: CodingScheme> {
     ContextMismatch,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum BlockSubscriptionKey<D> {
-    Commitment(Commitment),
-    Digest(D),
-}
-
 /// Configuration for the [`Engine`].
 pub struct Config<P, S, X, D, C, H, B, T>
 where
@@ -230,7 +224,7 @@ where
     pub blocker: X,
 
     /// [`Read`] configuration for decoding [`Shard`]s.
-    pub shard_codec_cfg: <Shard<C, H> as Read>::Cfg,
+    pub shard_codec_cfg: <Shard<B, C, H> as Read>::Cfg,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
     pub block_codec_cfg: B::Cfg,
@@ -279,6 +273,10 @@ where
     block: CodedBlock<B, C, H>,
 }
 
+type ReconstructionStates<P, B, C, H> =
+    BTreeMap<Commitment<B, C, H>, ReconstructionState<P, B, C, H>>;
+type BlockSubscribers<B, C, H> = Vec<oneshot::Sender<CodedBlock<B, C, H>>>;
+
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
 ///
 /// When enough [`Shard`]s are present in the mailbox, the [`Engine`] may facilitate
@@ -309,7 +307,7 @@ where
     blocker: X,
 
     /// [`Read`] configuration for decoding [`Shard`]s.
-    shard_codec_cfg: <Shard<C, H> as Read>::Cfg,
+    shard_codec_cfg: <Shard<B, C, H> as Read>::Cfg,
 
     /// [`Read`] configuration for decoding [`CodedBlock`]s.
     block_codec_cfg: B::Cfg,
@@ -318,13 +316,13 @@ where
     strategy: T,
 
     /// A map of [`Commitment`]s to [`ReconstructionState`]s.
-    state: BTreeMap<Commitment, ReconstructionState<P, C, H>>,
+    state: ReconstructionStates<P, B, C, H>,
 
     /// Per-peer ring buffers for shards received before leader announcement.
     ///
     /// Empty buffers are retained for active peers and only evicted when the
     /// peer leaves `latest.primary`.
-    peer_buffers: BTreeMap<P, VecDeque<Shard<C, H>>>,
+    peer_buffers: BTreeMap<P, VecDeque<Shard<B, C, H>>>,
 
     /// Maximum buffered pre-leader shards per peer.
     peer_buffer_size: NonZeroUsize,
@@ -345,7 +343,7 @@ where
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
     /// These blocks are evicted after a durability signal from the marshal.
-    reconstructed_blocks: BTreeMap<Commitment, ReconstructedBlock<B, C, H>>,
+    reconstructed_blocks: BTreeMap<Commitment<B, C, H>, ReconstructedBlock<B, C, H>>,
 
     /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
@@ -357,13 +355,13 @@ where
     ///
     /// Proposers are a special case: they satisfy readiness once their local
     /// proposal is cached because they already hold all shards.
-    assigned_shard_verified_subscriptions: BTreeMap<Commitment, Vec<oneshot::Sender<()>>>,
+    assigned_shard_verified_subscriptions: BTreeMap<Commitment<B, C, H>, Vec<oneshot::Sender<()>>>,
 
-    /// Open subscriptions for the reconstruction of a [`CodedBlock`] with
-    /// the keyed [`Commitment`].
-    #[allow(clippy::type_complexity)]
-    block_subscriptions:
-        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<CodedBlock<B, C, H>>>>,
+    /// Open subscriptions for reconstruction by [`Commitment`].
+    commitment_subscriptions: BTreeMap<Commitment<B, C, H>, BlockSubscribers<B, C, H>>,
+
+    /// Open subscriptions for reconstruction by block digest.
+    digest_subscriptions: BTreeMap<B::Digest, BlockSubscribers<B, C, H>>,
 
     /// Metrics for the shard engine.
     metrics: ShardMetrics<P>,
@@ -404,7 +402,8 @@ where
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
-                block_subscriptions: BTreeMap::new(),
+                commitment_subscriptions: BTreeMap::new(),
+                digest_subscriptions: BTreeMap::new(),
                 metrics,
             },
             Mailbox::new(sender),
@@ -424,12 +423,12 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        let mut sender = WrappedSender::<_, Shard<C, H>>::new(
+        let mut sender = WrappedSender::<_, Shard<B, C, H>>::new(
             self.context.network_buffer_pool().clone(),
             sender,
         );
         let (receiver_service, mut receiver) =
-            WrappedBackgroundReceiver::<_, P, X, _, Shard<C, H>>::new(
+            WrappedBackgroundReceiver::<_, P, X, _, Shard<B, C, H>>::new(
                 self.context.child("shard_ingress"),
                 receiver,
                 self.shard_codec_cfg.clone(),
@@ -454,7 +453,11 @@ where
                     .try_set(self.reconstructed_blocks.len());
 
                 // Clean up closed subscriptions.
-                self.block_subscriptions.retain(|_, subscribers| {
+                self.commitment_subscriptions.retain(|_, subscribers| {
+                    subscribers.retain(|tx| !tx.is_closed());
+                    !subscribers.is_empty()
+                });
+                self.digest_subscriptions.retain(|_, subscribers| {
                     subscribers.retain(|tx| !tx.is_closed());
                     !subscribers.is_empty()
                 });
@@ -523,16 +526,10 @@ where
                         commitment,
                         response,
                     } => {
-                        self.handle_block_subscription(
-                            BlockSubscriptionKey::Commitment(commitment),
-                            response,
-                        );
+                        self.handle_commitment_subscription(commitment, response);
                     }
                     Message::SubscribeByDigest { digest, response } => {
-                        self.handle_block_subscription(
-                            BlockSubscriptionKey::Digest(digest),
-                            response,
-                        );
+                        self.handle_digest_subscription(digest, response);
                     }
                     Message::Prune { through } => {
                         self.prune(through);
@@ -551,9 +548,9 @@ where
     /// Handles a decoded shard received from the network.
     fn handle_network_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
         peer: P,
-        shard: Shard<C, H>,
+        shard: Shard<B, C, H>,
     ) {
         self.metrics.shards_received.get_or_create_by(&peer).inc();
 
@@ -612,7 +609,7 @@ where
     /// exception is the late leader-delivered shard for the assigned index,
     /// which we still accept so we can notify readiness and gossip it to
     /// slower peers.
-    fn should_handle_network_shard(&self, commitment: Commitment) -> bool {
+    fn should_handle_network_shard(&self, commitment: Commitment<B, C, H>) -> bool {
         if self.reconstructed_blocks.contains_key(&commitment) {
             // State can be populated without a leader when a notarization arrives
             // before the leader announcement, or when our assigned shard was not
@@ -636,7 +633,7 @@ where
     #[allow(clippy::type_complexity)]
     fn try_reconstruct(
         &mut self,
-        commitment: Commitment,
+        commitment: Commitment<B, C, H>,
     ) -> Result<Option<CodedBlock<B, C, H>>, Error<C>> {
         if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(entry.block.clone()));
@@ -666,7 +663,8 @@ where
         let (inner, config): (B, CodingConfig) =
             Decode::decode_cfg(&mut blob.as_slice(), &(self.block_codec_cfg.clone(), ()))?;
 
-        match validate_reconstruction::<H, _>(&inner, config, commitment) {
+        let context_digest = hash_context::<H, _>(&inner.context());
+        match validate_reconstruction(&inner, config, context_digest, commitment) {
             Ok(()) => {}
             Err(InvariantError::BlockDigest) => {
                 return Err(Error::DigestMismatch);
@@ -702,8 +700,8 @@ where
     /// Handles leader announcements for a commitment and advances reconstruction.
     fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
-        commitment: Commitment,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
+        commitment: Commitment<B, C, H>,
         leader: P,
         round: Round,
     ) {
@@ -764,8 +762,8 @@ where
     /// local assigned shard as verified.
     fn handle_notarized_commitment<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
-        commitment: Commitment,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
+        commitment: Commitment<B, C, H>,
         round: Round,
     ) {
         if self.reconstructed_blocks.contains_key(&commitment) {
@@ -795,7 +793,7 @@ where
     }
 
     /// Buffer a shard from a peer until a leader is known.
-    fn buffer_peer_shard(&mut self, peer: P, shard: Shard<C, H>) {
+    fn buffer_peer_shard(&mut self, peer: P, shard: Shard<B, C, H>) {
         if self.latest_primary_peers.position(&peer).is_none() {
             debug!(
                 ?peer,
@@ -825,7 +823,7 @@ where
     /// reconstruct from many peer-gossiped shards. The local assigned shard is
     /// different: it is only valid when it came from the leader, and the leader's
     /// identity is needed before it can be accepted as assigned-shard evidence.
-    fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
+    fn ingest_buffered_shards(&mut self, commitment: Commitment<B, C, H>) -> bool {
         let state = self
             .state
             .get(&commitment)
@@ -898,7 +896,7 @@ where
     /// - Non-participants in aggregate membership receive the leader's shard.
     fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
         round: Round,
         mut block: CodedBlock<B, C, H>,
     ) {
@@ -974,8 +972,8 @@ where
     /// Gossips a validated [`Shard`] using [`commonware_p2p::Recipients::All`].
     fn broadcast_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
-        shard: Shard<C, H>,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
+        shard: Shard<B, C, H>,
     ) {
         let commitment = shard.commitment();
         let peers = sender.send(Recipients::All, shard, true);
@@ -991,8 +989,8 @@ where
     /// up and subscribers are notified.
     fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
-        commitment: Commitment,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
+        commitment: Commitment<B, C, H>,
     ) {
         if let Some(state) = self.state.get_mut(&commitment) {
             match state.take_pending_action() {
@@ -1039,7 +1037,7 @@ where
     /// shard for the local index, not to generic block reconstruction.
     fn handle_assigned_shard_verified_subscription(
         &mut self,
-        commitment: Commitment,
+        commitment: Commitment<B, C, H>,
         response: oneshot::Sender<()>,
     ) {
         // Answer immediately if our own shard has been verified.
@@ -1068,38 +1066,47 @@ where
             .push(response);
     }
 
-    /// Handles the registry of a block subscription.
-    fn handle_block_subscription(
+    /// Handles the registry of a block subscription by commitment.
+    fn handle_commitment_subscription(
         &mut self,
-        key: BlockSubscriptionKey<B::Digest>,
+        commitment: Commitment<B, C, H>,
         response: oneshot::Sender<CodedBlock<B, C, H>>,
     ) {
-        let block = match key {
-            BlockSubscriptionKey::Commitment(commitment) => self
-                .reconstructed_blocks
-                .get(&commitment)
-                .map(|entry| &entry.block),
-            BlockSubscriptionKey::Digest(digest) => self
-                .reconstructed_blocks
-                .values()
-                .find_map(|entry| (entry.block.digest() == digest).then_some(&entry.block)),
-        };
+        if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
+            response.send_lossy(entry.block.clone());
+            return;
+        }
 
-        // Answer immediately if we have the block cached.
-        if let Some(block) = block {
+        self.commitment_subscriptions
+            .entry(commitment)
+            .or_default()
+            .push(response);
+    }
+
+    /// Handles the registry of a block subscription by digest.
+    fn handle_digest_subscription(
+        &mut self,
+        digest: B::Digest,
+        response: oneshot::Sender<CodedBlock<B, C, H>>,
+    ) {
+        if let Some(block) = self
+            .reconstructed_blocks
+            .values()
+            .find_map(|entry| (entry.block.digest() == digest).then_some(&entry.block))
+        {
             response.send_lossy(block.clone());
             return;
         }
 
-        self.block_subscriptions
-            .entry(key)
+        self.digest_subscriptions
+            .entry(digest)
             .or_default()
             .push(response);
     }
 
     /// Notifies and cleans up any subscriptions waiting for assigned shard
     /// verification.
-    fn notify_assigned_shard_verified_subscribers(&mut self, commitment: Commitment) {
+    fn notify_assigned_shard_verified_subscribers(&mut self, commitment: Commitment<B, C, H>) {
         if let Some(mut subscribers) = self
             .assigned_shard_verified_subscriptions
             .remove(&commitment)
@@ -1116,20 +1123,14 @@ where
         let digest = block.digest();
 
         // Notify by-commitment subscribers.
-        if let Some(mut subscribers) = self
-            .block_subscriptions
-            .remove(&BlockSubscriptionKey::Commitment(commitment))
-        {
+        if let Some(mut subscribers) = self.commitment_subscriptions.remove(&commitment) {
             for subscriber in subscribers.drain(..) {
                 subscriber.send_lossy(block.clone());
             }
         }
 
         // Notify by-digest subscribers.
-        if let Some(mut subscribers) = self
-            .block_subscriptions
-            .remove(&BlockSubscriptionKey::Digest(digest))
-        {
+        if let Some(mut subscribers) = self.digest_subscriptions.remove(&digest) {
             for subscriber in subscribers.drain(..) {
                 subscriber.send_lossy(block.clone());
             }
@@ -1140,15 +1141,11 @@ where
     ///
     /// Removing these entries drops all senders, causing receivers to resolve
     /// with cancellation (`RecvError`) instead of hanging indefinitely.
-    fn drop_subscriptions(&mut self, commitment: Commitment) {
+    fn drop_subscriptions(&mut self, commitment: Commitment<B, C, H>) {
         self.assigned_shard_verified_subscriptions
             .remove(&commitment);
-        self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Commitment(commitment));
-        self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Digest(
-                commitment.block::<B::Digest>(),
-            ));
+        self.commitment_subscriptions.remove(&commitment);
+        self.digest_subscriptions.remove(&commitment.block());
     }
 
     /// Prunes all blocks in the reconstructed block cache that are older than the block
@@ -1160,7 +1157,7 @@ where
     /// Byzantine leader can equivocate, producing multiple valid commitments
     /// in the same round. Both must remain recoverable until finalization
     /// determines which one is canonical.
-    fn prune(&mut self, through: Commitment) {
+    fn prune(&mut self, through: Commitment<B, C, H>) {
         let cached = self
             .reconstructed_blocks
             .get(&through)
@@ -1195,28 +1192,29 @@ where
 }
 
 /// Erasure coded block reconstruction state machine.
-enum ReconstructionState<P, C, H>
+enum ReconstructionState<P, B, C, H>
 where
     P: PublicKey,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
     /// Stage 1: accumulate shards. The leader's shard for our index is
     /// verified immediately; all other shards are buffered until enough
     /// are available for batch verification.
-    AwaitingQuorum(AwaitingQuorumState<P, C, H>),
+    AwaitingQuorum(AwaitingQuorumState<P, B, C, H>),
     /// Stage 2: batch validation passed; checked shards are available for
     /// reconstruction.
-    Ready(ReadyState<P, C, H>),
+    Ready(ReadyState<P, B, C, H>),
 }
 
 /// Action to take once assigned shard verification has been established.
 ///
 /// Participants broadcast the shard to all peers, while non-participants
 /// only notify local subscribers.
-enum AssignedShardVerifiedAction<C: CodingScheme, H: Hasher> {
+enum AssignedShardVerifiedAction<B: Digestible, C: CodingScheme, H: Hasher> {
     /// Broadcast the shard to all peers and notify local subscribers.
-    Broadcast(Shard<C, H>),
+    Broadcast(Shard<B, C, H>),
     /// Only notify local subscribers (non-participant validated the leader's shard).
     NotifyOnly,
 }
@@ -1228,9 +1226,10 @@ struct IndexedShard<C: CodingScheme> {
 }
 
 /// State shared across all reconstruction phases.
-struct CommonState<P, C, H>
+struct CommonState<P, B, C, H>
 where
     P: PublicKey,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
@@ -1238,7 +1237,7 @@ where
     /// provided it.
     leader: Option<P>,
     /// Our validated shard and the action to take with it.
-    pending_action: Option<AssignedShardVerifiedAction<C, H>>,
+    pending_action: Option<AssignedShardVerifiedAction<B, C, H>>,
     /// Shards that have been verified and are ready to contribute to reconstruction.
     checked_shards: Vec<C::CheckedShard>,
     /// Bitmap tracking which participant indices have contributed a shard.
@@ -1258,13 +1257,14 @@ where
 /// buffered until enough are available to attempt batch validation. Once the
 /// leader is known, the leader's shard for our index is verified eagerly via
 /// `C::check`.
-struct AwaitingQuorumState<P, C, H>
+struct AwaitingQuorumState<P, B, C, H>
 where
     P: PublicKey,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
-    common: CommonState<P, C, H>,
+    common: CommonState<P, B, C, H>,
     /// Shards pending batch validation, keyed by sender.
     pending_shards: BTreeMap<P, IndexedShard<C>>,
 }
@@ -1273,18 +1273,20 @@ where
 ///
 /// Batch validation has passed. Checked shards are available for
 /// reconstruction.
-struct ReadyState<P, C, H>
+struct ReadyState<P, B, C, H>
 where
     P: PublicKey,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
-    common: CommonState<P, C, H>,
+    common: CommonState<P, B, C, H>,
 }
 
-impl<P, C, H> CommonState<P, C, H>
+impl<P, B, C, H> CommonState<P, B, C, H>
 where
     P: PublicKey,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
@@ -1302,9 +1304,10 @@ where
     }
 }
 
-impl<P, C, H> CommonState<P, C, H>
+impl<P, B, C, H> CommonState<P, B, C, H>
 where
     P: PublicKey,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
@@ -1319,7 +1322,7 @@ where
     fn verify_assigned_shard(
         &mut self,
         sender: P,
-        commitment: Commitment,
+        commitment: Commitment<B, C, H>,
         shard: IndexedShard<C>,
         is_participant: bool,
         blocker: &mut impl Blocker<PublicKey = P>,
@@ -1352,9 +1355,10 @@ where
     }
 }
 
-impl<P, C, H> AwaitingQuorumState<P, C, H>
+impl<P, B, C, H> AwaitingQuorumState<P, B, C, H>
 where
     P: PublicKey,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
@@ -1362,11 +1366,11 @@ where
     /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
     fn try_transition(
         &mut self,
-        commitment: Commitment,
+        commitment: Commitment<B, C, H>,
         participants_len: u64,
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
-    ) -> Option<ReadyState<P, C, H>> {
+    ) -> Option<ReadyState<P, B, C, H>> {
         let minimum = usize::from(commitment.config().minimum_shards.get());
         if self.common.checked_shards.len() + self.pending_shards.len() < minimum {
             return None;
@@ -1439,9 +1443,10 @@ impl<'a, Sch: CertificateScheme, S: Strategy> InsertCtx<'a, Sch, S> {
     }
 }
 
-impl<P, C, H> ReconstructionState<P, C, H>
+impl<P, B, C, H> ReconstructionState<P, B, C, H>
 where
     P: PublicKey,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
@@ -1454,7 +1459,7 @@ where
     }
 
     /// Access common state shared across all phases.
-    const fn common(&self) -> &CommonState<P, C, H> {
+    const fn common(&self) -> &CommonState<P, B, C, H> {
         match self {
             Self::AwaitingQuorum(state) => &state.common,
             Self::Ready(state) => &state.common,
@@ -1462,7 +1467,7 @@ where
     }
 
     /// Mutably access common state shared across all phases.
-    const fn common_mut(&mut self) -> &mut CommonState<P, C, H> {
+    const fn common_mut(&mut self) -> &mut CommonState<P, B, C, H> {
         match self {
             Self::AwaitingQuorum(state) => &mut state.common,
             Self::Ready(state) => &mut state.common,
@@ -1501,7 +1506,7 @@ where
     /// Takes the pending action for this commitment's validated shard.
     ///
     /// Returns [`None`] if the leader's shard hasn't been validated yet.
-    const fn take_pending_action(&mut self) -> Option<AssignedShardVerifiedAction<C, H>> {
+    const fn take_pending_action(&mut self) -> Option<AssignedShardVerifiedAction<B, C, H>> {
         self.common_mut().pending_action.take()
     }
 
@@ -1554,7 +1559,7 @@ where
     fn on_network_shard<Sch, S, X>(
         &mut self,
         sender: P,
-        shard: Shard<C, H>,
+        shard: Shard<B, C, H>,
         ctx: InsertCtx<'_, Sch, S>,
         blocker: &mut X,
     ) -> bool
@@ -4245,8 +4250,8 @@ mod tests {
                 // commitment), but try_reconstruct will decode block2 and find its digest != D1.
                 let fake_commitment = Commitment::from((
                     coded_block1.digest(),
-                    real_commitment2.root::<Sha256Digest>(),
-                    real_commitment2.context::<Sha256Digest>(),
+                    real_commitment2.root(),
+                    real_commitment2.context(),
                     coding_config,
                 ));
 
@@ -4371,13 +4376,13 @@ mod tests {
 
                 let wrong_context_digest = Sha256::hash(b"wrong_context");
                 assert_ne!(
-                    real_commitment.context::<Sha256Digest>(),
+                    real_commitment.context(),
                     wrong_context_digest,
                     "test requires a distinct context digest"
                 );
                 let fake_commitment = Commitment::from((
                     coded_block.digest(),
-                    real_commitment.root::<Sha256Digest>(),
+                    real_commitment.root(),
                     wrong_context_digest,
                     coding_config,
                 ));
