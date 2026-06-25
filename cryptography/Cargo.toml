@@ -28,7 +28,7 @@ commonware-parallel.workspace = true
 commonware-utils.workspace = true
 crc-fast = { workspace = true, features = ["std"], optional = true }
 ctutils.workspace = true
-curve25519-dalek = { workspace = true, features = ["digest"] }
+curve25519-dalek.workspace = true
 ecdsa.workspace = true
 fixedbitset.workspace = true
 num-rational = { workspace = true, optional = true }
@@ -77,7 +77,6 @@ bench = false
 [features]
 default = [ "std" ]
 blake3-parallel = [ "blake3/rayon", "std" ]
-sha2-asm = [ "sha2/asm" ]
 mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
@@ -114,7 +113,6 @@ std = [
 	"rand/std_rng",
 	"rand_chacha/std",
 	"rand_core/std",
-	"sha2/std",
 	"thiserror/std",
 	"zeroize/std",
 ]
