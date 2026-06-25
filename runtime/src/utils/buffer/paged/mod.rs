@@ -32,6 +32,7 @@ mod cache;
 mod read;
 mod sealed;
 mod snapshot;
+mod view;
 mod writer;
 
 pub use cache::CacheRef;

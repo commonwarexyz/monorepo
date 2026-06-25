@@ -35,7 +35,10 @@
 //! blob while a [Writer] exists: such writes bypass the write buffer and page cache and can
 //! invalidate checksum recovery.
 
-use super::read::{PageReader, Replay};
+use super::{
+    read::{PageReader, Replay},
+    view::ReadView,
+};
 use crate::{
     buffer::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
@@ -45,7 +48,6 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
-use futures::stream::{FuturesUnordered, StreamExt};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::{
@@ -597,67 +599,47 @@ impl<B: Blob> Writer<B> {
         self.buffer.size()
     }
 
-    /// Read into `buf` if it can be done synchronously (e.g. without I/O), returning `false` otherwise.
+    /// A borrowed read view over this writer's current contents: the persisted prefix plus
+    /// the live tip buffer.
+    fn view(&self) -> ReadView<'_, B> {
+        ReadView {
+            blob: &self.blob,
+            cache_ref: &self.cache_ref,
+            id: self.id,
+            size: self.buffer.size(),
+            tail_offset: self.buffer.offset,
+            tail: self.buffer.as_ref(),
+        }
+    }
+
+    /// Read into `buf` if it can be done synchronously (e.g. without I/O), returning `false`
+    /// otherwise.
     ///
-    /// Returns `true` only if all `buf.len()` bytes were satisfied. When `false` is returned, the
-    /// contents of `buf` are unspecified. The caller must have already validated that
-    /// `offset + buf.len()` is within the blob's logical size.
-    ///
-    /// The page cache is consulted first to minimize the risk of writer starvation from a
-    /// burst of buffer reads (which jump ahead of queued writers on the buffer lock).
+    /// Returns `true` only if all `buf.len()` bytes were satisfied from the page cache and/or the
+    /// tip buffer. When `false` is returned, the contents of `buf` are unspecified.
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        if self.cache_ref.read_cached(self.id, buf, offset) == buf.len() {
-            return true;
-        }
-        let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
-            return false;
-        };
-        if offset < self.buffer.offset || end_offset > self.buffer.size() {
-            return false;
-        }
-        let src_start = (offset - self.buffer.offset) as usize;
-        buf.copy_from_slice(&self.buffer.as_ref()[src_start..src_start + buf.len()]);
-        true
+        self.view().try_read_sync(offset, buf)
     }
 
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        // Read into a temporary contiguous buffer and copy back to preserve structure.
-        // SAFETY: read_into below initializes all `len` bytes.
-        let mut buf = unsafe { self.cache_ref.pool().alloc_len(len) };
-        self.read_into(buf.as_mut(), offset).await?;
-        Ok(buf.into())
+        self.view().read_at(offset, len).await
     }
 
-    /// Reads up to `buf.len()` bytes starting at `logical_offset`, but only as many as are
-    /// available.
+    /// Reads up to `len` bytes starting at `logical_offset`, but only as many as are available.
     ///
     /// This is useful for reading variable-length prefixes (like varints) where you want to read
     /// up to a maximum number of bytes but the actual data might be shorter.
     ///
-    /// Returns the buffer (truncated to actual bytes read) and the number of bytes read.
-    /// Returns an error if no bytes are available at the given offset.
+    /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns
+    /// an error if no bytes are available at the given offset.
     pub async fn read_up_to(
         &self,
         logical_offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
-        let mut bufs = bufs.into();
-        if len == 0 {
-            bufs.truncate(0);
-            return Ok((bufs, 0));
-        }
-        let blob_size = self.buffer.size();
-        let available = (blob_size.saturating_sub(logical_offset) as usize).min(len);
-        if available == 0 {
-            return Err(Error::BlobInsufficientLength);
-        }
-        // SAFETY: read_into below fills all `available` bytes.
-        unsafe { bufs.set_len(available) };
-        self.read_into(bufs.as_mut(), logical_offset).await?;
-
-        Ok((bufs, available))
+        self.view().read_up_to(logical_offset, len, bufs).await
     }
 
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
@@ -674,43 +656,7 @@ impl<B: Blob> Writer<B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        super::validate_read_many_into(buf.len(), offsets, item_size, self.buffer.size())?;
-        if offsets.is_empty() {
-            return Ok(0);
-        }
-
-        // Copy items overlapping the tip buffer into place and collect the rest as
-        // (slice, offset) pairs for cache/blob reads.
-        let mut cache_ranges = super::split_read_many(
-            buf,
-            offsets,
-            item_size,
-            self.buffer.offset,
-            self.buffer.as_ref(),
-        );
-
-        if cache_ranges.is_empty() {
-            return Ok(offsets.len());
-        }
-
-        // Fast path: try page cache for all ranges in a single lock acquisition.
-        // Fully-cached ranges are removed from cache_ranges; only misses remain.
-        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
-        let blob_reads = cache_ranges.len();
-        if cache_ranges.is_empty() {
-            return Ok(offsets.len());
-        }
-
-        // Slow path: read only the ranges that had cache misses, concurrently.
-        let mut reads = cache_ranges
-            .iter_mut()
-            .map(|(item_buf, offset)| self.cache_ref.read(&self.blob, self.id, item_buf, *offset))
-            .collect::<FuturesUnordered<_>>();
-        while let Some(result) = reads.next().await {
-            result?;
-        }
-
-        Ok(offsets.len() - blob_reads)
+        self.view().read_many_into(buf, offsets, item_size).await
     }
 
     /// Reads bytes starting at `logical_offset` into `buf`.
@@ -718,56 +664,7 @@ impl<B: Blob> Writer<B> {
     /// This method allows reading directly into a mutable slice without taking ownership of the
     /// buffer or requiring a specific buffer type.
     pub async fn read_into(&self, buf: &mut [u8], logical_offset: u64) -> Result<(), Error> {
-        // Ensure the read doesn't overflow.
-        let end_offset = logical_offset
-            .checked_add(buf.len() as u64)
-            .ok_or(Error::OffsetOverflow)?;
-
-        // If the data required is beyond the size of the blob, return an error.
-        if end_offset > self.buffer.size() {
-            return Err(Error::BlobInsufficientLength);
-        }
-
-        // Extract any bytes from the buffer that overlap with the requested range.
-        let remaining = if end_offset <= self.buffer.offset {
-            // No overlap with tip.
-            buf.len()
-        } else {
-            // Overlap is always a suffix of requested range.
-            let overlap_start = self.buffer.offset.max(logical_offset);
-            let dst_start = (overlap_start - logical_offset) as usize;
-            let src_start = (overlap_start - self.buffer.offset) as usize;
-            let copied = buf.len() - dst_start;
-            buf[dst_start..].copy_from_slice(&self.buffer.as_ref()[src_start..src_start + copied]);
-            dst_start
-        };
-
-        if remaining == 0 {
-            return Ok(());
-        }
-
-        // Fast path: try to read only from the page cache.
-        let cached = self
-            .cache_ref
-            .read_cached(self.id, &mut buf[..remaining], logical_offset);
-
-        if cached == remaining {
-            // All bytes found in cache.
-            return Ok(());
-        }
-
-        // Slow path: cache miss (partial or full), read from the blob.
-        // Read remaining bytes that were not already obtained from the earlier cache read.
-        let uncached_offset = logical_offset + cached as u64;
-        let uncached_len = remaining - cached;
-        self.cache_ref
-            .read(
-                &self.blob,
-                self.id,
-                &mut buf[cached..cached + uncached_len],
-                uncached_offset,
-            )
-            .await
+        self.view().read_into(buf, logical_offset).await
     }
 
     /// Returns the protected region info for a partial page, if any.

@@ -1,8 +1,7 @@
 //! Immutable read view of a cache-backed blob.
 
-use super::CacheRef;
+use super::{view::ReadView, CacheRef};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
-use futures::stream::{FuturesUnordered, StreamExt};
 use std::{
     num::NonZeroUsize,
     sync::{
@@ -82,46 +81,28 @@ impl<B: Blob> Snapshot<B> {
         self.inner.size
     }
 
+    /// A borrowed read view over this snapshot's frozen contents.
+    fn view(&self) -> ReadView<'_, B> {
+        ReadView {
+            blob: &self.inner.blob,
+            cache_ref: &self.inner.cache_ref,
+            id: self.inner.id,
+            size: self.inner.size,
+            tail_offset: self.inner.tail_offset,
+            tail: self.inner.tail.as_ref(),
+        }
+    }
+
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
-    /// `buf.len()` bytes were satisfied from either the page cache or the copied tail.
-    /// When `false` is returned, the contents of `buf` are unspecified.
+    /// `buf.len()` bytes were satisfied from the page cache and/or the copied tail. When `false` is
+    /// returned, the contents of `buf` are unspecified.
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
-            return false;
-        };
-        if end_offset > self.inner.size {
-            return false;
-        }
-        if buf.is_empty() {
-            return true;
-        }
-
-        if end_offset <= self.inner.tail_offset {
-            return self.inner.cache_ref.read_cached(self.inner.id, buf, offset) == buf.len();
-        }
-
-        let overlap_start = self.inner.tail_offset.max(offset);
-        let dst_start = (overlap_start - offset) as usize;
-        let src_start = (overlap_start - self.inner.tail_offset) as usize;
-        let copied = buf.len() - dst_start;
-        buf[dst_start..].copy_from_slice(&self.inner.tail.as_ref()[src_start..src_start + copied]);
-
-        if dst_start == 0 {
-            return true;
-        }
-
-        self.inner
-            .cache_ref
-            .read_cached(self.inner.id, &mut buf[..dst_start], offset)
-            == dst_start
+        self.view().try_read_sync(offset, buf)
     }
 
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        // SAFETY: read_into below initializes all `len` bytes.
-        let mut buf = unsafe { self.inner.cache_ref.pool().alloc_len(len) };
-        self.read_into(buf.as_mut(), offset).await?;
-        Ok(buf.into())
+        self.view().read_at(offset, len).await
     }
 
     /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
@@ -134,19 +115,7 @@ impl<B: Blob> Snapshot<B> {
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
-        let mut bufs = bufs.into();
-        if len == 0 {
-            bufs.truncate(0);
-            return Ok((bufs, 0));
-        }
-        let available = (self.inner.size.saturating_sub(offset) as usize).min(len);
-        if available == 0 {
-            return Err(Error::BlobInsufficientLength);
-        }
-        // SAFETY: read_into below fills all `available` bytes.
-        unsafe { bufs.set_len(available) };
-        self.read_into(bufs.as_mut(), offset).await?;
-        Ok((bufs, available))
+        self.view().read_up_to(offset, len, bufs).await
     }
 
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
@@ -162,89 +131,12 @@ impl<B: Blob> Snapshot<B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        super::validate_read_many_into(buf.len(), offsets, item_size, self.inner.size)?;
-        if offsets.is_empty() {
-            return Ok(0);
-        }
-
-        let mut cache_ranges = super::split_read_many(
-            buf,
-            offsets,
-            item_size,
-            self.inner.tail_offset,
-            self.inner.tail.as_ref(),
-        );
-        if cache_ranges.is_empty() {
-            return Ok(offsets.len());
-        }
-
-        self.inner
-            .cache_ref
-            .read_cached_many(self.inner.id, &mut cache_ranges);
-        let blob_reads = cache_ranges.len();
-        if cache_ranges.is_empty() {
-            return Ok(offsets.len());
-        }
-
-        let mut reads = cache_ranges
-            .iter_mut()
-            .map(|(item_buf, offset)| {
-                self.inner
-                    .cache_ref
-                    .read(&self.inner.blob, self.inner.id, item_buf, *offset)
-            })
-            .collect::<FuturesUnordered<_>>();
-        while let Some(result) = reads.next().await {
-            result?;
-        }
-
-        Ok(offsets.len() - blob_reads)
+        self.view().read_many_into(buf, offsets, item_size).await
     }
 
     /// Reads bytes starting at `offset` into `buf`.
     pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        let end_offset = offset
-            .checked_add(buf.len() as u64)
-            .ok_or(Error::OffsetOverflow)?;
-        if end_offset > self.inner.size {
-            return Err(Error::BlobInsufficientLength);
-        }
-
-        let remaining = if end_offset <= self.inner.tail_offset {
-            buf.len()
-        } else {
-            let overlap_start = self.inner.tail_offset.max(offset);
-            let dst_start = (overlap_start - offset) as usize;
-            let src_start = (overlap_start - self.inner.tail_offset) as usize;
-            let copied = buf.len() - dst_start;
-            buf[dst_start..]
-                .copy_from_slice(&self.inner.tail.as_ref()[src_start..src_start + copied]);
-            dst_start
-        };
-
-        if remaining == 0 {
-            return Ok(());
-        }
-
-        let cached = self
-            .inner
-            .cache_ref
-            .read_cached(self.inner.id, &mut buf[..remaining], offset);
-        if cached == remaining {
-            return Ok(());
-        }
-
-        let uncached_offset = offset + cached as u64;
-        let uncached_len = remaining - cached;
-        self.inner
-            .cache_ref
-            .read(
-                &self.inner.blob,
-                self.inner.id,
-                &mut buf[cached..cached + uncached_len],
-                uncached_offset,
-            )
-            .await
+        self.view().read_into(buf, offset).await
     }
 }
 

@@ -15,9 +15,8 @@
 //! any lock; they share the underlying [`Blob`] handle (which provides its own synchronization)
 //! and the page cache.
 
-use super::{read::PageReader, CacheRef, Replay, CHECKSUM_SIZE};
+use super::{read::PageReader, view::ReadView, CacheRef, Replay, CHECKSUM_SIZE};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
-use futures::stream::{FuturesUnordered, StreamExt};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -98,113 +97,38 @@ impl<B: Blob> Sealed<B> {
                 .map_or(0, |p| p.len() as u64)
     }
 
+    /// A borrowed read view over this sealed blob. Its tail is the in-memory partial last
+    /// page (which is also persisted on the blob).
+    fn view(&self) -> ReadView<'_, B> {
+        ReadView {
+            blob: &self.inner.blob,
+            cache_ref: &self.inner.cache_ref,
+            id: self.inner.id,
+            size: self.inner.size,
+            tail_offset: self.partial_offset(),
+            tail: self
+                .inner
+                .partial_page
+                .as_ref()
+                .map_or(&[][..], |p| p.as_ref()),
+        }
+    }
+
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        // Allocate a single contiguous buffer and fill it via read_into.
-        // SAFETY: read_into below initializes all `len` bytes.
-        let mut buf = unsafe { self.inner.cache_ref.pool().alloc_len(len) };
-        self.read_into(buf.as_mut(), offset).await?;
-        Ok(buf.into())
+        self.view().read_at(offset, len).await
     }
 
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
     /// `buf.len()` bytes were satisfied from either the page cache or the in-memory partial page.
     /// When `false` is returned, the contents of `buf` are unspecified.
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        // Reject out-of-bounds requests up front: the partial-page arithmetic below assumes
-        // `[offset, end_offset)` falls within the sealed view.
-        let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
-            return false;
-        };
-        if end_offset > self.inner.size {
-            return false;
-        }
-        if buf.is_empty() {
-            return true;
-        }
-
-        let partial_offset = self.partial_offset();
-        if end_offset <= partial_offset {
-            return self.inner.cache_ref.read_cached(self.inner.id, buf, offset) == buf.len();
-        }
-
-        let Some(partial) = self.inner.partial_page.as_ref() else {
-            return false;
-        };
-        if offset >= partial_offset {
-            let src_start = (offset - partial_offset) as usize;
-            buf.copy_from_slice(&partial.as_ref()[src_start..src_start + buf.len()]);
-            return true;
-        }
-
-        let prefix_len = (partial_offset - offset) as usize;
-        let suffix_len = buf.len() - prefix_len;
-        if self
-            .inner
-            .cache_ref
-            .read_cached(self.inner.id, &mut buf[..prefix_len], offset)
-            != prefix_len
-        {
-            return false;
-        }
-        buf[prefix_len..].copy_from_slice(&partial.as_ref()[..suffix_len]);
-        true
+        self.view().try_read_sync(offset, buf)
     }
 
     /// Reads bytes starting at `logical_offset` into `buf`.
     pub async fn read_into(&self, buf: &mut [u8], logical_offset: u64) -> Result<(), Error> {
-        let end_offset = logical_offset
-            .checked_add(buf.len() as u64)
-            .ok_or(Error::OffsetOverflow)?;
-        if end_offset > self.inner.size {
-            return Err(Error::BlobInsufficientLength);
-        }
-
-        let partial_offset = self.partial_offset();
-
-        // Copy any suffix from the in-memory partial page, leaving the prefix below
-        // `partial_offset` to be served from the page cache or blob.
-        let remaining = if end_offset <= partial_offset {
-            buf.len()
-        } else {
-            let overlap_start = partial_offset.max(logical_offset);
-            let dst_start = (overlap_start - logical_offset) as usize;
-            let src_start = (overlap_start - partial_offset) as usize;
-            let copied = buf.len() - dst_start;
-            let partial = self
-                .inner
-                .partial_page
-                .as_ref()
-                .expect("partial bytes exist when end_offset > partial_offset");
-            buf[dst_start..].copy_from_slice(&partial.as_ref()[src_start..src_start + copied]);
-            dst_start
-        };
-
-        if remaining == 0 {
-            return Ok(());
-        }
-
-        // Try the page cache first.
-        let cached =
-            self.inner
-                .cache_ref
-                .read_cached(self.inner.id, &mut buf[..remaining], logical_offset);
-        if cached == remaining {
-            return Ok(());
-        }
-
-        // Slow path: read from the underlying blob (via the cache).
-        let uncached_offset = logical_offset + cached as u64;
-        let uncached_len = remaining - cached;
-        self.inner
-            .cache_ref
-            .read(
-                &self.inner.blob,
-                self.inner.id,
-                &mut buf[cached..cached + uncached_len],
-                uncached_offset,
-            )
-            .await
+        self.view().read_into(buf, logical_offset).await
     }
 
     /// Reads up to `len` bytes starting at `logical_offset`, but only as many as are available
@@ -218,19 +142,7 @@ impl<B: Blob> Sealed<B> {
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
-        let mut bufs = bufs.into();
-        if len == 0 {
-            bufs.truncate(0);
-            return Ok((bufs, 0));
-        }
-        let available = (self.inner.size.saturating_sub(logical_offset) as usize).min(len);
-        if available == 0 {
-            return Err(Error::BlobInsufficientLength);
-        }
-        // SAFETY: read_into below fills all `available` bytes.
-        unsafe { bufs.set_len(available) };
-        self.read_into(bufs.as_mut(), logical_offset).await?;
-        Ok((bufs, available))
+        self.view().read_up_to(logical_offset, len, bufs).await
     }
 
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
@@ -246,47 +158,7 @@ impl<B: Blob> Sealed<B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        super::validate_read_many_into(buf.len(), offsets, item_size, self.inner.size)?;
-        if offsets.is_empty() {
-            return Ok(0);
-        }
-
-        // Copy items overlapping the in-memory partial page into place and collect the rest as
-        // (slice, offset) pairs for cache/blob reads.
-        let partial = self
-            .inner
-            .partial_page
-            .as_ref()
-            .map_or(&[][..], |p| p.as_ref());
-        let mut cache_ranges =
-            super::split_read_many(buf, offsets, item_size, self.partial_offset(), partial);
-        if cache_ranges.is_empty() {
-            return Ok(offsets.len());
-        }
-
-        // Fast path: try the page cache for all ranges in a single lock acquisition.
-        self.inner
-            .cache_ref
-            .read_cached_many(self.inner.id, &mut cache_ranges);
-        let blob_reads = cache_ranges.len();
-        if cache_ranges.is_empty() {
-            return Ok(offsets.len());
-        }
-
-        // Slow path: read remaining ranges from the underlying blob, concurrently.
-        let mut reads = cache_ranges
-            .iter_mut()
-            .map(|(item_buf, offset)| {
-                self.inner
-                    .cache_ref
-                    .read(&self.inner.blob, self.inner.id, item_buf, *offset)
-            })
-            .collect::<FuturesUnordered<_>>();
-        while let Some(result) = reads.next().await {
-            result?;
-        }
-
-        Ok(offsets.len() - blob_reads)
+        self.view().read_many_into(buf, offsets, item_size).await
     }
 
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
