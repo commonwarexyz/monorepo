@@ -140,7 +140,6 @@ use commonware_math::{
     synthetic::Synthetic,
 };
 use commonware_parallel::{Sequential, Strategy};
-use commonware_utils::ordered::Set;
 use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
@@ -347,208 +346,477 @@ impl<F: Ring> Circuit<F> {
     }
 }
 
-/// A rank-1 constraint system.
+/// Conversion from `zk::Circuit`s into bulletproofs circuits.
 ///
-/// The matrices encode constraints of the form `<A_i, z> * <B_i, z> = <C_i, z>`,
-/// where `z_0` is the constant `1`.
-pub struct R1cs<F> {
-    /// The left-side linear combinations.
-    pub a: SparseMatrix<F>,
-    /// The right-side linear combinations.
-    pub b: SparseMatrix<F>,
-    /// The output linear combinations.
-    pub c: SparseMatrix<F>,
-}
+/// The conversion linearizes: every circuit value is expressed as a linear
+/// combination of columns of the weight matrix. Additions and
+/// multiplications by constants combine linearly; each multiplication of two
+/// non-constant values becomes a multiplication gate, whose output wire is a
+/// new column. Each assertion `(l, r)` then becomes a matrix row enforcing
+/// `l - r = 0`.
+mod zkc {
+    use crate::zk::circuit as zk;
+    use commonware_math::algebra::{Field, Random, Ring};
+    use commonware_utils::ordered::Map;
+    use rand_core::CryptoRngCore;
+    use std::{borrow::Cow, collections::BTreeMap};
 
-impl<F> R1cs<F> {
-    /// Make sure that the matrices have the same shapes, by zero-padding.
-    pub fn normalize(&mut self) {
-        let width = self.width();
-        let height = self.height();
-        for m in [&mut self.a, &mut self.b, &mut self.c] {
-            m.pad(width, height);
-        }
+    /// A column of the bulletproofs weight matrix.
+    ///
+    /// The column layout is `1 | committed values | left wires | right wires
+    /// | output wires`. `Witness` is a provisional location for a witness
+    /// not yet pinned to a column; `location_to_col` resolves it through
+    /// `witness_locations`.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Location {
+        One,
+        Witness(usize),
+        Left(usize),
+        Right(usize),
+        Output(usize),
+        Committed(usize),
     }
 
-    /// The width of each matrix.
-    pub fn width(&self) -> usize {
-        self.a.width.max(self.b.width).max(self.c.width)
+    /// A circuit value, expressed as a linear combination of locations.
+    ///
+    /// `Location` is a single location with weight one, and `Constant` is a
+    /// multiple of the constant `1` column. `General` holds arbitrary
+    /// weighted sums, keyed by location so that duplicates merge.
+    #[derive(Clone)]
+    enum LinComb<F> {
+        Location(Location),
+        Constant(F),
+        General(Map<Location, F>),
     }
 
-    /// The height of each matrix.
-    pub fn height(&self) -> usize {
-        self.a.height.max(self.b.height).max(self.c.height)
-    }
-}
-
-fn r1cs_to_circuit_maybe_witness<F: Ring>(
-    mut r1cs: R1cs<F>,
-    committed_indices: &[usize],
-    witness: Option<(Vec<F>, Vec<F>)>,
-) -> (Circuit<F>, Option<Witness<F>>) {
-    // The R1CS circuit is of the form:
-    //
-    //   <A_ij, z_j> <B_ij, z_j> = <C_ij, z_j>
-    //
-    // with `z_0 = 1` (the Arkworks convention). Some of the remaining
-    // witness indices of `z` are to become our v vector.
-    //
-    // We set:
-    //
-    //   l_i = <A_ij, z_j>
-    //   r_i = <B_ij, z_j>
-    //   o_i = <C_ij, z_j>
-    //
-    // Then, the l_i * r_i = o_i part of bulletproofs will enforce this.
-    // Next, we need to enforce that they were constructed correctly.
-    // To do so, we use additional l_i wires for non-committed witness values.
-    // The corresponding r_i and o_i wires are not used anywhere else, so they
-    // do not need additional linear constraints.
-    //
-    // The bulletproof circuit reserves output position 0 for the constant
-    // `1` with the same meaning as Arkworks's `z_0`, so contributions from
-    // R1CS column 0 are routed straight to bulletproof column 0 rather
-    // than being placed in a free internal wire (which would let a
-    // malicious prover pick `z_0` freely and bypass any constraint that
-    // depends on the constant).
-    r1cs.normalize();
-    let (r1cs_width, r1cs_height) = (r1cs.width(), r1cs.height());
-    let committed_indices = Set::from_iter_dedup(committed_indices.iter().cloned());
-    assert!(
-        committed_indices.iter().next().is_none_or(|&i| i > 0),
-        "R1CS column 0 (the constant `1`) cannot be a committed value"
-    );
-    let v_len = committed_indices.len();
-    // The R1CS witness indices `1..r1cs_width` get partitioned into v
-    // (committed) and x (free internal-wire) slots. Index 0 is the
-    // constant `1` and is not represented as a witness wire.
-    let non_const_width = r1cs_width.saturating_sub(1);
-    let x_len = non_const_width - v_len;
-    // Mapping from R1CS column index `j > 0` into either a v slot or an
-    // x slot. Stored at `old_to_new[j - 1]`.
-    let old_to_new = {
-        let mut out = vec![(true, 0usize); non_const_width];
-        // What index the current v value is at.
-        let mut v_i = 0;
-        // What index the current x value is at.
-        let mut x_i = 0;
-        let mut committed_indices = committed_indices.iter().peekable();
-        for (j, out_j) in out.iter_mut().enumerate() {
-            let r1cs_index = j + 1;
-            let (in_v, counter) = if committed_indices.next_if(|&&k| k == r1cs_index).is_some() {
-                (true, &mut v_i)
-            } else {
-                (false, &mut x_i)
+    impl<F: Ring> LinComb<F> {
+        /// Multiply two combinations, if at least one of them is a constant.
+        ///
+        /// Returns `None` otherwise, in which case the product needs a
+        /// multiplication gate.
+        fn mul(&self, other: &Self) -> Option<Self> {
+            let (constant, other) = match (self, other) {
+                (Self::Constant(c), other) => (c.clone(), other),
+                (other, Self::Constant(c)) => (c.clone(), other),
+                _ => return None,
             };
-            *out_j = (in_v, *counter);
-            *counter += 1;
-        }
-        out
-    };
-    // The length of the l, r and o vectors.
-    let internal_len = x_len + r1cs.height();
-    let witness = witness.map(|(witness, blinding)| {
-        assert!(
-            witness.first().is_none_or(|w| w == &F::one()),
-            "R1CS witness slot 0 must be the constant 1"
-        );
-        let mut left = &r1cs.a * witness.as_slice();
-        let mut right = &r1cs.b * witness.as_slice();
-        let mut out = &r1cs.c * witness.as_slice();
-        let mut x = vec![F::zero(); x_len];
-        let mut values = vec![F::zero(); v_len];
-        // Skip the constant slot at index 0; it is implicit in the
-        // bulletproof circuit's output position 0.
-        for (i, w_i) in witness.into_iter().enumerate().skip(1) {
-            let (in_v, i_new) = old_to_new[i - 1];
-            let array = if in_v { &mut values } else { &mut x };
-            array[i_new] = w_i;
-        }
-        left.extend(x);
-        right.resize(left.len(), F::zero());
-        out.resize(left.len(), F::zero());
-        Witness::new(values, blinding, left, right, out)
-            .expect("should be able to construct witness")
-    });
-    // We'll build up the weights, row by row.
-    let mut weights = SparseMatrix::default();
-    weights.pad(1 + v_len + 3 * internal_len, 3 * r1cs.height());
-    let minus_one = -F::one();
-    // The non-committed witness values `x` are stored in the trailing slots
-    // of the LEFT wires region (positions `r1cs_height..r1cs_height + x_len`
-    // within that region). The right and out regions only carry the linear
-    // combinations of A, B, C with zeros padding the rest, so any lookup of a
-    // non-committed witness must go to the LEFT wires region regardless of
-    // which matrix (A/B/C) we are currently emitting weights for.
-    let x_col_base = 1 + v_len + r1cs_height;
-    for (row_start, col_start, m) in [
-        (0, 1 + v_len, r1cs.a),
-        (r1cs_height, 1 + v_len + internal_len, r1cs.b),
-        (2 * r1cs_height, 1 + v_len + 2 * internal_len, r1cs.c),
-    ] {
-        for ((i, j), m_ij) in m {
-            let col = if j == 0 {
-                // R1CS column 0 is the constant `1`, which lives at the
-                // bulletproof circuit's output position 0.
-                0
-            } else {
-                let (in_v, j_new) = old_to_new[j - 1];
-                if in_v {
-                    // In this case, we just have a v value, and those start at index 1.
-                    j_new + 1
-                } else {
-                    // Non-committed witness values live in `x`, which is stored
-                    // at the tail of the LEFT wires region.
-                    x_col_base + j_new
+            let out = match other {
+                Self::Location(location) => Self::General(
+                    Map::try_from([(*location, constant)])
+                        .expect("single entry cannot duplicate keys"),
+                ),
+                Self::Constant(other_constant) => Self::Constant(constant * other_constant),
+                Self::General(items) => {
+                    let mut items = items.clone();
+                    for w in items.values_mut() {
+                        *w = w.clone() * &constant;
+                    }
+                    Self::General(items)
                 }
             };
-            weights[(row_start + i, col)] = m_ij;
+            Some(out)
         }
-        // Now, add in the weights to force the left, right, resp. out wires
-        // to be equal to the linear combinations we've set up above.
-        for i in 0..r1cs_height {
-            weights[(row_start + i, col_start + i)] = minus_one.clone();
+
+        /// Add two linear combinations, merging the weights of duplicate
+        /// locations so the result stays bounded by the number of distinct
+        /// locations rather than the number of terms.
+        fn sum(&self, other: &Self) -> Self {
+            let mut terms: Vec<(Location, F)> = self
+                .iter()
+                .chain(other.iter())
+                .map(|(w, loc)| (loc, w.into_owned()))
+                .collect();
+            terms.sort_by_key(|&(loc, _)| loc);
+            let mut merged: Vec<(Location, F)> = Vec::with_capacity(terms.len());
+            for (loc, w) in terms {
+                match merged.last_mut() {
+                    Some((last, acc)) if *last == loc => *acc += &w,
+                    _ => merged.push((loc, w)),
+                }
+            }
+            // Merging adjacent duplicates above leaves every location unique.
+            Self::General(Map::try_from(merged).expect("merged locations should be unique"))
+        }
+
+        /// Iterate over the `(weight, location)` terms of this combination.
+        fn iter(&self) -> impl Iterator<Item = (Cow<'_, F>, Location)> {
+            let (single, general) = match self {
+                Self::Location(loc) => (Some((Cow::Owned(F::one()), *loc)), None),
+                Self::Constant(w) => (Some((Cow::Borrowed(w), Location::One)), None),
+                Self::General(items) => (None, Some(items.iter_pairs())),
+            };
+            single.into_iter().chain(
+                general
+                    .into_iter()
+                    .flatten()
+                    .map(|(loc, w)| (Cow::Borrowed(w), *loc)),
+            )
+        }
+
+        /// The witness index, if this combination is a single witness not
+        /// yet pinned to a column.
+        const fn witness(&self) -> Option<usize> {
+            match self {
+                Self::Location(Location::Witness(w)) => Some(*w),
+                _ => None,
+            }
         }
     }
-    let circuit = Circuit::new(v_len, weights).expect("circuit construction should succeed");
-    (circuit, witness)
+
+    /// State for converting a `zk::Circuit` into a bulletproofs circuit.
+    ///
+    /// `circuit` performs the verifier-side conversion, and
+    /// `circuit_and_witness` the prover-side one. Both run the same
+    /// conversion, so they produce the same circuit.
+    pub struct ZKCConverter<F> {
+        /// Scratch stack of indices waiting to be linearized.
+        linearize_queue: Vec<zk::CircuitIdx>,
+        /// The linear combination computed for each visited index.
+        linearize_cache: BTreeMap<zk::CircuitIdx, LinComb<F>>,
+        /// The assertions of the source circuit.
+        assertions: Vec<(zk::CircuitIdx, zk::CircuitIdx)>,
+        /// Assertions pinning a value to a specific location, used to bind
+        /// gate wires and committed values.
+        extra_assertions: Vec<(zk::CircuitIdx, Location)>,
+        /// The location assigned to each witness.
+        witness_locations: BTreeMap<usize, Location>,
+        /// The indices to commit, in caller order.
+        committed_indices: Vec<zk::CircuitIdx>,
+        /// The committed slot for each committed index (the first slot, if
+        /// the index is repeated).
+        committed_positions: BTreeMap<zk::CircuitIdx, usize>,
+        /// One entry per multiplication gate: the indices whose values feed
+        /// the left and right wires, and the index whose value is the
+        /// output wire. Padding gates holding leftover witnesses leave the
+        /// right wire, and then the output, unset.
+        internal_vars: Vec<(
+            zk::CircuitIdx,
+            Option<zk::CircuitIdx>,
+            Option<zk::CircuitIdx>,
+        )>,
+    }
+
+    impl<F: Field + Random> ZKCConverter<F> {
+        /// Create a converter committing the values at `committed_indices`,
+        /// in order.
+        pub fn new(committed_indices: Vec<zk::CircuitIdx>) -> Self {
+            let mut committed_positions = BTreeMap::new();
+            for (i, &idx) in committed_indices.iter().enumerate() {
+                // Duplicates keep the first position, so every occurrence of
+                // the index resolves to the same column, and the extra
+                // assertions constrain the remaining slots to match it.
+                committed_positions.entry(idx).or_insert(i);
+            }
+            Self {
+                linearize_queue: Vec::new(),
+                linearize_cache: BTreeMap::new(),
+                assertions: Vec::new(),
+                extra_assertions: Vec::new(),
+                witness_locations: BTreeMap::new(),
+                committed_indices,
+                committed_positions,
+                internal_vars: Default::default(),
+            }
+        }
+
+        /// Convert a circuit without an assignment (verifier mode).
+        pub fn circuit(mut self, zkc: zk::Circuit<F>) -> super::Circuit<F> {
+            self.populate(&zkc);
+            self.reckon_circuit()
+        }
+
+        /// Convert a circuit and its assignment (prover mode).
+        ///
+        /// Without a `blinding_rng`, the blinding factors are zero.
+        pub fn circuit_and_witness(
+            mut self,
+            blinding_rng: Option<&mut impl CryptoRngCore>,
+            zkc: zk::ValuedCircuit<F>,
+        ) -> (super::Circuit<F>, super::Witness<F>) {
+            self.populate(&zkc.circuit);
+            let blinding = blinding_rng.map_or_else(
+                || vec![F::zero(); self.committed_indices.len()],
+                |rng| {
+                    (0..self.committed_indices.len())
+                        .map(|_| F::random(&mut *rng))
+                        .collect::<Vec<_>>()
+                },
+            );
+            let values = self
+                .committed_indices
+                .iter()
+                .map(|&i| zkc[i].clone())
+                .collect::<Vec<_>>();
+            let mut left = Vec::with_capacity(self.internal_vars.len());
+            let mut right = Vec::with_capacity(self.internal_vars.len());
+            let mut out = Vec::with_capacity(self.internal_vars.len());
+            for &(l_i, r_i, o_i) in &self.internal_vars {
+                left.push(zkc[l_i].clone());
+                match (r_i, o_i) {
+                    (None, _) => {
+                        right.push(F::zero());
+                        out.push(F::zero());
+                    }
+                    (Some(r_i), None) => {
+                        right.push(zkc[r_i].clone());
+                        out.push(zkc[l_i].clone() * &zkc[r_i]);
+                    }
+                    (Some(r_i), Some(o_i)) => {
+                        right.push(zkc[r_i].clone());
+                        out.push(zkc[o_i].clone());
+                    }
+                }
+            }
+            let witness = super::Witness {
+                values,
+                blinding,
+                left,
+                right,
+                out,
+            };
+            (self.reckon_circuit(), witness)
+        }
+
+        /// Linearize every assertion and assign every witness a location.
+        fn populate(&mut self, zkc: &zk::Circuit<F>) {
+            for &(l, r) in &zkc.assertions {
+                self.assertions.push((l, r));
+                self.linearize(zkc, l);
+                self.linearize(zkc, r);
+            }
+            // Now, assign a non-witness location to any discovered witnesses.
+            {
+                let mut left = true;
+
+                for loc in self.witness_locations.values_mut() {
+                    let &mut Location::Witness(w) = loc else {
+                        continue;
+                    };
+                    if left {
+                        *loc = Location::Left(self.internal_vars.len());
+                        self.internal_vars
+                            .push((zk::CircuitIdx::Witness(w as u32), None, None));
+                        left = false;
+                    } else {
+                        let i = self.internal_vars.len() - 1;
+                        *loc = Location::Right(i);
+                        self.internal_vars[i].1 = Some(zk::CircuitIdx::Witness(w as u32));
+                        left = true;
+                    }
+                }
+            }
+            // Add extra assertions for each committed index, linearizing so
+            // that committed values not referenced by any assertion still
+            // resolve to a location.
+            let committed = self.committed_indices.clone();
+            for (i, c_pos) in committed.into_iter().enumerate() {
+                self.linearize(zkc, c_pos);
+                self.extra_assertions.push((c_pos, Location::Committed(i)));
+            }
+        }
+
+        /// Resolve a location to its column in the weight matrix.
+        fn location_to_col(&self, loc: Location) -> usize {
+            fn inner<F>(this: &ZKCConverter<F>, loc: Location, no_witness: bool) -> usize {
+                match loc {
+                    Location::One => 0,
+                    Location::Left(i) => 1 + this.committed_indices.len() + i,
+                    Location::Right(i) => {
+                        1 + this.committed_indices.len() + this.internal_vars.len() + i
+                    }
+                    Location::Output(i) => {
+                        1 + this.committed_indices.len() + 2 * this.internal_vars.len() + i
+                    }
+                    Location::Committed(i) => 1 + i,
+                    Location::Witness(i) => {
+                        if no_witness {
+                            unreachable!("unexpected witness location")
+                        } else {
+                            inner(this, this.witness_locations[&i], true)
+                        }
+                    }
+                }
+            }
+
+            inner(self, loc, false)
+        }
+
+        /// Build the bulletproofs circuit from the accumulated state.
+        ///
+        /// Each assertion contributes a row applying the left side's
+        /// combination positively and the right side's negatively, so the
+        /// row reads `l - r = 0`.
+        fn reckon_circuit(&self) -> super::Circuit<F> {
+            let mut weights = super::SparseMatrix::default();
+            for (row, (l, r)) in self
+                .assertions
+                .iter()
+                .map(|(l, r)| {
+                    (
+                        Cow::Borrowed(
+                            self.linearize_cache
+                                .get(l)
+                                .expect("linearize_cache_should_be_populated"),
+                        ),
+                        Cow::Borrowed(
+                            self.linearize_cache
+                                .get(r)
+                                .expect("linearize_cache should be populated"),
+                        ),
+                    )
+                })
+                .chain(self.extra_assertions.iter().map(|(cidx, loc)| {
+                    (
+                        Cow::Borrowed(
+                            self.linearize_cache
+                                .get(cidx)
+                                .expect("linearize_cache should be populated"),
+                        ),
+                        Cow::Owned(LinComb::Location(*loc)),
+                    )
+                }))
+                .enumerate()
+            {
+                for (w, loc) in l.iter() {
+                    weights[(row, self.location_to_col(loc))] += w.as_ref();
+                }
+                for (w, loc) in r.iter() {
+                    weights[(row, self.location_to_col(loc))] -= w.as_ref();
+                }
+            }
+            super::Circuit {
+                committed_vars: self.committed_indices.len(),
+                internal_vars: self.internal_vars.len(),
+                weights,
+            }
+        }
+
+        /// Assign `loc` to `witness` unless it already has a non-provisional
+        /// location, returning the location in effect.
+        fn assign_witness_location(&mut self, witness: usize, loc: Location) -> Location {
+            *self
+                .witness_locations
+                .entry(witness)
+                .and_modify(|current_loc| {
+                    if let Location::Witness(_) = *current_loc {
+                        *current_loc = loc;
+                    }
+                })
+                .or_insert(loc)
+        }
+
+        /// Compute and cache the linear combination for `i` and everything
+        /// it depends on.
+        ///
+        /// Uses an explicit work stack rather than recursion, so deep
+        /// circuits cannot overflow the call stack.
+        fn linearize(&mut self, zkc: &zk::Circuit<F>, i: zk::CircuitIdx) {
+            self.linearize_queue.clear();
+            self.linearize_queue.push(i);
+            while let Some(i) = self.linearize_queue.pop() {
+                if self.linearize_cache.contains_key(&i) {
+                    continue;
+                }
+                let comb = match i {
+                    zk::CircuitIdx::Constant(i) => {
+                        LinComb::Constant(zkc.constants[i as usize].clone())
+                    }
+                    this @ zk::CircuitIdx::Witness(i) => {
+                        let i_usize = i as usize;
+                        let w_loc = self
+                            .committed_positions
+                            .get(&this)
+                            .map_or(Location::Witness(i_usize), |&i| Location::Committed(i));
+                        let loc = self.assign_witness_location(i_usize, w_loc);
+                        LinComb::Location(loc)
+                    }
+                    this @ zk::CircuitIdx::Node(i) => {
+                        let this_node = &zkc.nodes[i as usize];
+                        let (l, r) = match *this_node {
+                            zk::CircuitNode::Add(l, r) => (l, r),
+                            zk::CircuitNode::Mul(l, r) => (l, r),
+                        };
+                        let (l_comb, r_comb) =
+                            match (self.linearize_cache.get(&l), self.linearize_cache.get(&r)) {
+                                (None, None) => {
+                                    self.linearize_queue.extend([this, r, l]);
+                                    continue;
+                                }
+                                (Some(_), None) => {
+                                    self.linearize_queue.extend([this, r]);
+                                    continue;
+                                }
+                                (None, Some(_)) => {
+                                    self.linearize_queue.extend([this, l]);
+                                    continue;
+                                }
+                                (Some(l_comb), Some(r_comb)) => (l_comb, r_comb),
+                            };
+                        match *this_node {
+                            zk::CircuitNode::Add(_, _) => l_comb.sum(r_comb),
+                            zk::CircuitNode::Mul(l, r) => {
+                                if let Some(out) = l_comb.mul(r_comb) {
+                                    out
+                                } else {
+                                    let i = self.internal_vars.len();
+                                    self.internal_vars.push((l, Some(r), Some(this)));
+                                    self.extra_assertions.push((l, Location::Left(i)));
+                                    self.extra_assertions.push((r, Location::Right(i)));
+
+                                    // Borrow checker shenanigans
+                                    let w_l = l_comb.witness();
+                                    let w_r = r_comb.witness();
+                                    if let Some(w) = w_l {
+                                        self.assign_witness_location(w, Location::Left(i));
+                                    }
+                                    if let Some(w) = w_r {
+                                        self.assign_witness_location(w, Location::Right(i));
+                                    }
+                                    LinComb::Location(Location::Output(i))
+                                }
+                            }
+                        }
+                    }
+                };
+                self.linearize_cache.insert(i, comb);
+            }
+        }
+    }
 }
 
-/// Convert an R1CS into a circuit, treating the witness positions named by
-/// `committed_indices` as committed values.
+/// Convert a ZK circuit into a bulletproofs circuit, treating the witness
+/// positions named by `committed_indices` as committed values.
+///
+/// Committed values keep the order of `committed_indices`. A duplicate index
+/// produces a separate commitment to the same value, constrained to match.
+/// Every index must name a witness allocated by the circuit; other indices
+/// are unsupported, and may panic or leave a commitment unconstrained.
 ///
 /// `committed_indices` must match what the prover passed to
-/// [`r1cs_to_circuit_and_witness`], otherwise the resulting [`Circuit`] will
+/// [`zkc_to_circuit_and_witness`], otherwise the resulting [`Circuit`] will
 /// not match the prover's and proofs against it will fail.
-pub fn r1cs_to_circuit<F: Ring>(r1cs: R1cs<F>, committed_indices: &[usize]) -> Circuit<F> {
-    r1cs_to_circuit_maybe_witness(r1cs, committed_indices, None).0
+pub fn zkc_to_circuit<F: Field + Random>(
+    zkc: crate::zk::circuit::Circuit<F>,
+    committed_indices: &[crate::zk::circuit::CircuitIdx],
+) -> Circuit<F> {
+    zkc::ZKCConverter::new(committed_indices.to_vec()).circuit(zkc)
 }
 
-/// Convert an R1CS and full Ark assignment into a circuit and witness.
+/// Convert a ZK circuit and witness assignment into a bulletproofs circuit and
+/// witness.
 ///
-/// `witness` must be the full Ark column-aligned assignment
-/// `[instance_assignment | witness_assignment]`. In particular, slot `0` is
-/// the constant `z_0 = 1`. The returned witness commits to the values at
-/// `committed_indices` (which are R1CS column indices in that full
-/// assignment space).
-pub fn r1cs_to_circuit_and_witness<F: Ring + Random>(
+/// `committed_indices` names the witness positions that should become
+/// bulletproofs committed values, in the order they should appear as
+/// committed values. A duplicate index produces a separate commitment to the
+/// same value, constrained to match. Every index must name a witness
+/// allocated by the circuit; other indices are unsupported, and may panic
+/// or leave a commitment unconstrained.
+pub fn zkc_to_circuit_and_witness<F: Field + Random>(
     blinding_rng: Option<&mut impl CryptoRngCore>,
-    r1cs: R1cs<F>,
-    witness: Vec<F>,
-    committed_indices: &[usize],
+    zkc: crate::zk::circuit::ValuedCircuit<F>,
+    committed_indices: &[crate::zk::circuit::CircuitIdx],
 ) -> (Circuit<F>, Witness<F>) {
-    let blinding = blinding_rng.map_or_else(
-        || vec![F::zero(); committed_indices.len()],
-        |rng| {
-            (0..committed_indices.len())
-                .map(|_| F::random(&mut *rng))
-                .collect::<Vec<_>>()
-        },
-    );
-    let (circuit, witness) =
-        r1cs_to_circuit_maybe_witness(r1cs, committed_indices, Some((witness, blinding)));
-    let witness = witness.expect("witness should be present because we passed witness");
-    (circuit, witness)
+    zkc::ZKCConverter::new(committed_indices.to_vec()).circuit_and_witness(blinding_rng, zkc)
 }
 
 /// Generators used by the circuit proof system.
@@ -1637,7 +1905,8 @@ pub mod fuzz {
         Circuit::new(2, weights).expect("quadratic circuit layout should be valid")
     }
 
-    struct Case {
+    /// A quadratic circuit paired with a witness that may or may not satisfy it.
+    pub struct Case {
         circuit: Circuit<F>,
         witness: Witness<F>,
     }
@@ -1703,15 +1972,18 @@ pub mod fuzz {
         }
     }
 
-    pub struct Plan {
-        case: Case,
+    pub enum Plan {
+        ProveAndVerify(Case),
+        ZkcConversion(crate::zk::circuit::fuzz::Plan),
     }
 
     impl<'a> Arbitrary<'a> for Plan {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-            Ok(Self {
-                case: Case::arbitrary(u)?,
-            })
+            match u.int_in_range(0..=1)? {
+                0 => Ok(Self::ProveAndVerify(Case::arbitrary(u)?)),
+                1 => Ok(Self::ZkcConversion(u.arbitrary()?)),
+                _ => unreachable!("plan variant out of range"),
+            }
         }
     }
 
@@ -1740,9 +2012,38 @@ pub mod fuzz {
         assert_eq!(verified, case.is_satisfied());
     }
 
+    /// Check that converting a ZK circuit to a bulletproofs circuit and
+    /// witness preserves satisfaction, committing a random subset of the
+    /// witnesses.
+    pub(super) fn assert_zkc_conversion_preserves_satisfaction(
+        plan: &crate::zk::circuit::fuzz::Plan,
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        let valued = plan.build();
+        let mut committed = Vec::new();
+        for i in 0..valued.circuit.witnesses {
+            if u.arbitrary()? {
+                committed.push(crate::zk::circuit::CircuitIdx::Witness(i));
+            }
+        }
+        let (circuit, witness) =
+            zkc_to_circuit_and_witness(Some(&mut test_rng()), valued, &committed);
+        assert_eq!(
+            witness.is_satisfied(&circuit),
+            plan.satisfied(),
+            "plan: {plan:?}"
+        );
+        Ok(())
+    }
+
     impl Plan {
-        pub fn run(self, _u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
-            assert_verify_matches_satisfaction(&self.case);
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::ProveAndVerify(case) => assert_verify_matches_satisfaction(&case),
+                Self::ZkcConversion(plan) => {
+                    assert_zkc_conversion_preserves_satisfaction(&plan, u)?
+                }
+            }
             Ok(())
         }
     }
@@ -1750,10 +2051,8 @@ pub mod fuzz {
 
 #[cfg(test)]
 mod test {
-    use super::{
-        fuzz, prove, r1cs_to_circuit, verify, Circuit, R1cs, Setup, SparseMatrix, Witness,
-    };
-    use crate::transcript::Transcript;
+    use super::{fuzz, prove, verify, Circuit, Setup, SparseMatrix, Witness};
+    use crate::{transcript::Transcript, zk::circuit as zk};
     use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;
     use commonware_math::{
@@ -1762,6 +2061,64 @@ mod test {
     };
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
+
+    #[test]
+    fn test_zkc_conversion_preserves_satisfaction_minifuzz() {
+        minifuzz::test(|u| {
+            let plan = u.arbitrary::<zk::fuzz::Plan>()?;
+            fuzz::assert_zkc_conversion_preserves_satisfaction(&plan, u)
+        });
+    }
+
+    #[test]
+    fn test_zkc_conversion_preserves_committed_order() {
+        let (valued, _) = zk::build_with_values(|ctx| {
+            let a = zk::Var::witness(ctx, |_| F::from(1u64));
+            let b = zk::Var::witness(ctx, |_| F::from(2u64));
+            let c = a * &b;
+            c.assert_eq(&zk::Var::constant(ctx, F::from(2u64)));
+            Vec::new()
+        });
+        let (circuit, witness) = super::zkc_to_circuit_and_witness(
+            Some(&mut test_rng()),
+            valued,
+            &[
+                zk::CircuitIdx::Witness(1),
+                zk::CircuitIdx::Witness(0),
+                zk::CircuitIdx::Witness(1),
+            ],
+        );
+        assert!(witness.is_satisfied(&circuit));
+        assert_eq!(
+            witness.values,
+            vec![F::from(2u64), F::from(1u64), F::from(2u64)]
+        );
+    }
+
+    #[test]
+    fn test_zkc_conversion_add_doubling_chain() {
+        // A shared Add chain (x = x + x, repeated) must convert in time and
+        // memory proportional to the chain length, not 2^length.
+        const DEPTH: usize = 64;
+        let mut expected = F::one();
+        for _ in 0..DEPTH {
+            expected = expected + &expected;
+        }
+        let (valued, _) = zk::build_with_values(|ctx| {
+            let mut x = zk::Var::witness(ctx, |_| F::one());
+            for _ in 0..DEPTH {
+                x = x.clone() + &x;
+            }
+            x.assert_eq(&zk::Var::constant(ctx, expected));
+            Vec::new()
+        });
+        let (circuit, witness) = super::zkc_to_circuit_and_witness(
+            Some(&mut test_rng()),
+            valued,
+            &[zk::CircuitIdx::Witness(0)],
+        );
+        assert!(witness.is_satisfied(&circuit));
+    }
 
     #[test]
     fn test_random_r1cs_minifuzz() {
@@ -1838,61 +2195,6 @@ mod test {
             u.arbitrary::<fuzz::Plan>()?.run(u)?;
             Ok(())
         });
-    }
-
-    /// Regression test for an R1CS-to-circuit conversion soundness bug:
-    /// `r1cs_to_circuit` did not preserve the constant column `z_0 = 1`
-    /// of the Arkworks-style R1CS witness. R1CS column 0 was being
-    /// routed to a free internal wire (`x[0]`) of the bulletproof
-    /// circuit instead of the circuit's hard-coded constant column
-    /// (output position 0), letting a malicious prover pick `z_0`
-    /// freely and trivially satisfy any constraint that depended on
-    /// the constant.
-    ///
-    /// Here we encode the R1CS constraint
-    ///
-    /// ```text
-    /// (z_0 + z_1) * z_0 = 4 * z_0
-    /// ```
-    ///
-    /// Under the standard `z_0 = 1` convention, the only satisfying
-    /// assignment has `z_1 = 3`. We treat `z_1` as a committed value,
-    /// build the verifier-side circuit, and confirm that a maliciously
-    /// hand-crafted witness corresponding to `z_0 = 0`, `z_1 = 0` is
-    /// rejected.
-    #[test]
-    fn r1cs_to_circuit_enforces_constant_column() {
-        // R1CS over F: (z_0 + z_1) * z_0 = 4 * z_0
-        let mut a = SparseMatrix::<F>::default();
-        a[(0, 0)] = F::one();
-        a[(0, 1)] = F::one();
-        let mut b = SparseMatrix::<F>::default();
-        b[(0, 0)] = F::one();
-        let mut c = SparseMatrix::<F>::default();
-        c[(0, 0)] = F::from(4u8);
-        let r1cs = R1cs { a, b, c };
-
-        // Treat z_1 (R1CS column 1) as the committed value.
-        let circuit = r1cs_to_circuit(r1cs, &[1usize]);
-
-        // Hand-craft a witness as a malicious prover would: commit to
-        // `v[0] = 0` (i.e. `z_1 = 0`) and pretend every internal wire
-        // is zero. Under the standard `z_0 = 1` convention this would
-        // violate the R1CS (the only honest solution is `z_1 = 3`).
-        let malicious = Witness::new(
-            vec![F::zero()], // v = [z_1] = [0]
-            vec![F::zero()], // blinding
-            vec![F::zero()], // left wires
-            vec![F::zero()], // right wires
-            vec![F::zero()], // out wires
-        )
-        .expect("witness lengths must match the circuit");
-
-        assert!(
-            !malicious.is_satisfied(&circuit),
-            "circuit derived from an R1CS that depends on the constant \
-             column must reject witnesses corresponding to z_0 != 1"
-        );
     }
 
     /// Regression test for an arity bug in `verify`: an over-long claim

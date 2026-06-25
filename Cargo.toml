@@ -90,12 +90,6 @@ suspicious_op_assign_impl = "allow"
 ahash = { version = "0.8.12", default-features = false }
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
-ark-ec = { version = "0.6.0", default-features = false }
-ark-ed-on-bls12-381-bandersnatch = { version = "0.6.0", default-features = false }
-ark-ff = { version = "0.6.0", default-features = false }
-ark-r1cs-std = { version = "0.6.0", default-features = false }
-ark-relations = { version = "0.6.0", default-features = false }
-ark-serialize = { version = "0.6.0", default-features = false }
 aws-config = "1.8.17"
 aws-lc-rs = "1.16.3"
 aws-sdk-ec2 = { version = "1.228.0", default-features = false, features = [
@@ -197,7 +191,7 @@ rstest = "0.26.1"
 serde = "1.0.218"
 serde_json = "1.0.122"
 serde_yaml = "0.9.34"
-sha2 = { version = "0.10.8", default-features = false }
+sha2 = { version = "0.11.0", default-features = false }
 syn = "2.0.0"
 sysinfo = "0.37.2"
 thiserror = { version = "2.0.12", default-features = false }

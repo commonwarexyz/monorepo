@@ -128,7 +128,7 @@ mod evrf;
 
 use crate::{
     bls12381::primitives::{
-        group::{Private, Scalar, Share, SmallScalar, G1},
+        group::{Private, Scalar, ScalarReadCfg, Share, SmallScalar, G1},
         sharing::{Mode, ModeVersion, Sharing},
         variant::MinPk,
     },
@@ -907,7 +907,11 @@ impl Read for Dealing {
         let poly = Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=*max_players), ()))?;
         let masked_shares = Read::read_cfg(
             buf,
-            &(RangeCfg::new(0..=max_players.get() as usize), (), ()),
+            &(
+                RangeCfg::new(0..=max_players.get() as usize),
+                (),
+                ScalarReadCfg::AllowZero,
+            ),
         )?;
         Ok(Self {
             nonce,
