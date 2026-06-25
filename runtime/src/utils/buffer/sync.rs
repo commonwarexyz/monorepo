@@ -21,11 +21,6 @@ fn observe(sync: Shared) -> Handle<()> {
     Handle::from_future(sync)
 }
 
-/// Returns whether a shared sync has already completed successfully.
-fn completed_successfully(sync: &Shared) -> bool {
-    matches!(sync.clone().now_or_never(), Some(Ok(())))
-}
-
 /// A blob wrapper that gates mutations behind any outstanding [`Blob::start_sync`].
 ///
 /// Reads pass through immediately. Writes, resizes, and sync operations first wait for the last
@@ -54,24 +49,12 @@ impl<B: Blob> Gated<B> {
     }
 
     async fn mutation_state(&self) -> Result<AsyncRwLockWriteGuard<'_, State>, Error> {
-        loop {
-            let state = self.state.write().await;
-            let State::InFlight(syncing) = &*state else {
-                return Ok(state);
-            };
-            let syncing = syncing.clone();
-            drop(state);
-
-            syncing.await?;
-
-            let mut state = self.state.write().await;
-            if matches!(
-                &*state,
-                State::InFlight(syncing) if completed_successfully(syncing)
-            ) {
-                *state = State::Clean;
-            }
+        let mut state = self.state.write().await;
+        if let State::InFlight(syncing) = &*state {
+            syncing.clone().await?;
+            *state = State::Clean;
         }
+        Ok(state)
     }
 }
 
@@ -128,7 +111,6 @@ impl<B: Blob> Blob for Gated<B> {
 ///
 /// Bytes still held only in a write buffer are not represented here. Once those bytes are flushed
 /// to the blob, callers update this state through the methods below.
-#[derive(Clone)]
 enum State {
     /// No issued mutation requires a sync.
     Clean,
@@ -178,7 +160,7 @@ impl State {
     ) -> Result<(), Error> {
         if self.is_dirty() {
             self.write_at(blob, offset, bufs).await?;
-            self.sync(blob).await.map(|_| ())
+            self.sync(blob).await
         } else {
             // Mark dirty before the write so that, if `write_at_sync` fails, a later sync does not
             // treat the drained buffer as durable.
@@ -197,21 +179,18 @@ impl State {
     }
 
     /// Ensures mutations represented by this state are durable.
-    ///
-    /// Returns `true` when this call issues or observes a sync, and `false` when the state was
-    /// already clean.
-    async fn sync<B: Blob>(&mut self, blob: &B) -> Result<bool, Error> {
+    async fn sync<B: Blob>(&mut self, blob: &B) -> Result<(), Error> {
         match self {
-            Self::Clean => Ok(false),
+            Self::Clean => Ok(()),
             Self::Dirty => {
                 blob.sync().await?;
                 *self = Self::Clean;
-                Ok(true)
+                Ok(())
             }
             Self::InFlight(syncing) => {
                 syncing.clone().await?;
                 *self = Self::Clean;
-                Ok(true)
+                Ok(())
             }
         }
     }
