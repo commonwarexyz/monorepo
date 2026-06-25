@@ -303,7 +303,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         }
 
         // Write the value to the blob
-        let blob = self.blobs.get(&section).unwrap();
+        let blob = self.blobs.get_mut(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
         blob.write_at(offset, record.encode_mut()).await?;
@@ -424,20 +424,20 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 
     /// Write all pending entries and sync all modified [Blob]s.
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 
-        // Hold the lock across the entire flush so a concurrent sync
-        // cannot return before durability is established.
         let mut pending = self.pending.lock().await;
         if pending.is_empty() {
             return Ok(());
         }
 
-        let mut futures = Vec::with_capacity(pending.len());
-        for section in pending.iter() {
-            futures.push(self.blobs.get(section).unwrap().sync());
-        }
+        let futures: Vec<_> = self
+            .blobs
+            .iter_mut()
+            .filter(|(section, _)| pending.contains(section))
+            .map(|(_, blob)| blob.sync())
+            .collect();
         try_join_all(futures).await?;
 
         // Clear pending sections.

@@ -1080,7 +1080,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
 
         // Get size from oversized
-        let oversized_size = self.oversized.size(self.current_section).await?;
+        let oversized_size = self.oversized.size(self.current_section)?;
 
         Ok(Checkpoint {
             epoch: stored_epoch,

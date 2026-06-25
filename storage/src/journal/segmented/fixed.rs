@@ -96,7 +96,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Repair any blobs with trailing bytes (incomplete items from crash)
         let sections: Vec<_> = manager.sections().collect();
         for section in sections {
-            let size = manager.size(section).await?;
+            let size = manager.size(section)?;
             if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
                 let valid_size = size - (size % Self::CHUNK_SIZE_U64);
                 warn!(
@@ -390,14 +390,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Returns the number of items in the given section.
-    pub async fn section_len(&self, section: u64) -> Result<u64, Error> {
-        let size = self.manager.size(section).await?;
+    pub fn section_len(&self, section: u64) -> Result<u64, Error> {
+        let size = self.manager.size(section)?;
         Ok(size / Self::CHUNK_SIZE_U64)
     }
 
     /// Returns the byte size of the given section.
-    pub async fn size(&self, section: u64) -> Result<u64, Error> {
-        self.manager.size(section).await
+    pub fn size(&self, section: u64) -> Result<u64, Error> {
+        self.manager.size(section)
     }
 
     /// Rewind the journal to a specific section and byte offset.
@@ -736,21 +736,21 @@ mod tests {
 
             // Verify all sections exist
             for section in 1u64..=3 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert!(size > 0, "section {section} should have data");
             }
 
             // Rewind to section 1 (should remove sections 2, 3)
-            let size = journal.size(1).await.expect("failed to get size");
+            let size = journal.size(1).expect("failed to get size");
             journal.rewind(1, size).await.expect("failed to rewind");
 
             // Verify section 1 still has data
-            let size = journal.size(1).await.expect("failed to get size");
+            let size = journal.size(1).expect("failed to get size");
             assert!(size > 0, "section 1 should still have data");
 
             // Verify sections 2, 3 are removed
             for section in 2u64..=3 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert_eq!(size, 0, "section {section} should be removed");
             }
 
@@ -779,17 +779,14 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
 
             // Rewinding the maximal section removes no sections above it and must not panic.
-            let size = journal.size(u64::MAX).await.expect("failed to get size");
+            let size = journal.size(u64::MAX).expect("failed to get size");
             journal
                 .rewind(u64::MAX, size)
                 .await
                 .expect("failed to rewind");
 
             // The section is intact and readable.
-            assert_eq!(
-                journal.size(u64::MAX).await.expect("failed to get size"),
-                size
-            );
+            assert_eq!(journal.size(u64::MAX).expect("failed to get size"), size);
             assert_eq!(journal.get(u64::MAX, 0).await.unwrap(), test_digest(0));
 
             journal.destroy().await.expect("failed to destroy");
@@ -815,18 +812,18 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
 
             // Rewind to section 5 (should remove sections 6-10)
-            let size = journal.size(5).await.expect("failed to get size");
+            let size = journal.size(5).expect("failed to get size");
             journal.rewind(5, size).await.expect("failed to rewind");
 
             // Verify sections 1-5 still have data
             for section in 1u64..=5 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert!(size > 0, "section {section} should still have data");
             }
 
             // Verify sections 6-10 are removed
             for section in 6u64..=10 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert_eq!(size, 0, "section {section} should be removed");
             }
 
@@ -872,7 +869,7 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
 
             // Rewind to section 2
-            let size = journal.size(2).await.expect("failed to get size");
+            let size = journal.size(2).expect("failed to get size");
             journal.rewind(2, size).await.expect("failed to rewind");
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
@@ -884,13 +881,13 @@ mod tests {
 
             // Verify sections 1-2 have data
             for section in 1u64..=2 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert!(size > 0, "section {section} should have data after restart");
             }
 
             // Verify sections 3-5 are gone
             for section in 3u64..=5 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert_eq!(size, 0, "section {section} should be gone after restart");
             }
 
@@ -1041,7 +1038,7 @@ mod tests {
                 .await
                 .expect("failed to init");
 
-            assert_eq!(journal.section_len(1).await.unwrap(), 0);
+            assert_eq!(journal.section_len(1).unwrap(), 0);
 
             for i in 0u64..5 {
                 journal
@@ -1050,8 +1047,8 @@ mod tests {
                     .expect("failed to append");
             }
 
-            assert_eq!(journal.section_len(1).await.unwrap(), 5);
-            assert_eq!(journal.section_len(2).await.unwrap(), 0);
+            assert_eq!(journal.section_len(1).unwrap(), 5);
+            assert_eq!(journal.section_len(2).unwrap(), 0);
 
             journal.destroy().await.expect("failed to destroy");
         });
@@ -1185,9 +1182,9 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
 
             // Verify section lengths
-            assert_eq!(journal.section_len(1).await.unwrap(), 1);
-            assert_eq!(journal.section_len(2).await.unwrap(), 0);
-            assert_eq!(journal.section_len(3).await.unwrap(), 1);
+            assert_eq!(journal.section_len(1).unwrap(), 1);
+            assert_eq!(journal.section_len(2).unwrap(), 0);
+            assert_eq!(journal.section_len(3).unwrap(), 1);
 
             // Drop and reopen to test replay
             drop(journal);
@@ -1292,11 +1289,11 @@ mod tests {
                 .expect("failed to re-init");
 
             // Verify section now has only 2 items
-            assert_eq!(journal.section_len(1).await.unwrap(), 2);
+            assert_eq!(journal.section_len(1).unwrap(), 2);
 
             // Verify size is the expected multiple of ITEM_SIZE (this would fail if we didn't trim
             // items and just relied on page-level checksum recovery).
-            assert_eq!(journal.size(1).await.unwrap(), 64);
+            assert_eq!(journal.size(1).unwrap(), 64);
 
             // Items 0 and 1 should still be readable
             let item0 = journal.get(1, 0).await.expect("failed to get item 0");
@@ -1458,7 +1455,7 @@ mod tests {
             let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
             journal.append(0, &test_digest(0)).await.unwrap();
-            assert_eq!(journal.section_len(0).await.unwrap(), 1);
+            assert_eq!(journal.section_len(0).unwrap(), 1);
 
             let mut buf = [];
             let (items, hits) = journal.get_many(0, &[], &mut buf).await.unwrap();
@@ -1479,7 +1476,7 @@ mod tests {
             for i in 0..5 {
                 journal.append(0, &test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.section_len(0).await.unwrap(), 5);
+            assert_eq!(journal.section_len(0).unwrap(), 5);
 
             // Read all 5 items in one call.
             let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
@@ -1508,7 +1505,7 @@ mod tests {
             for i in 0..10 {
                 journal.append(0, &test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.section_len(0).await.unwrap(), 10);
+            assert_eq!(journal.section_len(0).unwrap(), 10);
 
             let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
             let positions = [1, 4, 7, 9];
@@ -1551,7 +1548,7 @@ mod tests {
             for i in 0..8 {
                 journal.append(0, &test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.section_len(0).await.unwrap(), 8);
+            assert_eq!(journal.section_len(0).unwrap(), 8);
             journal.sync_all().await.unwrap();
 
             let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;

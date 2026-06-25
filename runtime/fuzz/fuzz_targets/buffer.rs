@@ -220,7 +220,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 FuzzOperation::WriteAt { data, offset } => {
-                    if let Some(ref writer) = write_buffer {
+                    if let Some(ref mut writer) = write_buffer {
                         let data = if data.len() > MAX_SIZE {
                             &data[..MAX_SIZE]
                         } else {
@@ -234,13 +234,13 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 FuzzOperation::WriteResize { new_size } => {
-                    if let Some(ref writer) = write_buffer {
+                    if let Some(ref mut writer) = write_buffer {
                         let _ = writer.resize(new_size as u64).await;
                     }
                 }
 
                 FuzzOperation::WriteSync => {
-                    if let Some(ref writer) = write_buffer {
+                    if let Some(ref mut writer) = write_buffer {
                         let _ = writer.sync().await;
                     }
                 }
@@ -316,7 +316,7 @@ fn fuzz(input: FuzzInput) {
 
                 FuzzOperation::WriteSize => {
                     if let Some(ref writer) = write_buffer {
-                        let _ = writer.size().await;
+                        let _ = writer.size();
                     }
                 }
 
