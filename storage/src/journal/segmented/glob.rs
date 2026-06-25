@@ -216,11 +216,6 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         self.manager.remove_section(section).await
     }
 
-    /// Close all blobs (syncs first).
-    pub async fn close(&mut self) -> Result<(), Error> {
-        self.sync_all().await
-    }
-
     /// Destroy all blobs.
     pub async fn destroy(self) -> Result<(), Error> {
         self.manager.destroy().await
