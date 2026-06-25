@@ -533,7 +533,7 @@ mod tests {
                     .await
                     .expect("Failed to start second sync");
                 second_started_clone.fetch_add(1, Ordering::Relaxed);
-                second
+                second.await.expect("second sync handle should complete");
             });
 
             reschedule().await;
@@ -553,7 +553,6 @@ mod tests {
             while second_started.load(Ordering::Relaxed) != 1 {
                 reschedule().await;
             }
-            let second = starter.await.expect("second start_sync should return");
             assert_eq!(
                 pending.lock().len(),
                 2,
@@ -561,7 +560,9 @@ mod tests {
             );
 
             release_pending_syncs(&pending);
-            second.await.expect("second sync handle should complete");
+            starter
+                .await
+                .expect("second start_sync task should complete");
         });
     }
 

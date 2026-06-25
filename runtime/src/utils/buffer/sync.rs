@@ -3,45 +3,26 @@
 use crate::{Blob, Error, Handle, IoBufs, IoBufsMut};
 use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
 use futures::{
-    future::{join_all, BoxFuture, Shared as FuturesShared},
+    future::{BoxFuture, Shared as FuturesShared},
     FutureExt as _,
 };
 use std::{future::Future, sync::Arc};
 
 /// A cloneable observer for an issued sync.
-pub type Shared = FuturesShared<BoxFuture<'static, Result<(), Error>>>;
+type Shared = FuturesShared<BoxFuture<'static, Result<(), Error>>>;
 
 /// Converts a sync future into a shared completion.
-pub fn share(fut: impl Future<Output = Result<(), Error>> + Send + 'static) -> Shared {
+fn share(fut: impl Future<Output = Result<(), Error>> + Send + 'static) -> Shared {
     fut.boxed().shared()
 }
 
-/// Converts a sync handle into a shared completion.
-pub fn share_handle(handle: Handle<()>) -> Shared {
-    handle.boxed().shared()
-}
-
 /// Returns a handle that observes a shared sync completion.
-pub fn observe(sync: Shared) -> Handle<()> {
+fn observe(sync: Shared) -> Handle<()> {
     Handle::from_future(sync)
 }
 
-/// Returns a handle that observes all shared sync completions.
-pub fn observe_all(syncs: impl IntoIterator<Item = Shared>) -> Handle<()> {
-    let syncs = syncs.into_iter().collect();
-    Handle::from_future(wait_all(syncs))
-}
-
-/// Waits for all shared sync completions.
-pub async fn wait_all(syncs: Vec<Shared>) -> Result<(), Error> {
-    for result in join_all(syncs).await {
-        result?;
-    }
-    Ok(())
-}
-
 /// Returns whether a shared sync has already completed successfully.
-pub fn completed_successfully(sync: &Shared) -> bool {
+fn completed_successfully(sync: &Shared) -> bool {
     matches!(sync.clone().now_or_never(), Some(Ok(())))
 }
 
@@ -61,7 +42,7 @@ impl<B: Blob> Gated<B> {
         Self {
             inner,
             state: Arc::new(AsyncRwLock::new(if dirty {
-                State::dirty()
+                State::Dirty
             } else {
                 State::Clean
             })),
@@ -148,7 +129,7 @@ impl<B: Blob> Blob for Gated<B> {
 /// Bytes still held only in a write buffer are not represented here. Once those bytes are flushed
 /// to the blob, callers update this state through the methods below.
 #[derive(Clone)]
-pub(crate) enum State {
+enum State {
     /// No issued mutation requires a sync.
     Clean,
 
@@ -160,23 +141,18 @@ pub(crate) enum State {
 }
 
 impl State {
-    /// Returns a state that requires a full blob sync.
-    pub(crate) const fn dirty() -> Self {
-        Self::Dirty
-    }
-
     /// Returns whether a full sync still needs to be issued.
-    pub(crate) const fn is_dirty(&self) -> bool {
+    const fn is_dirty(&self) -> bool {
         matches!(self, Self::Dirty)
     }
 
     /// Records that an issued mutation must be covered by a future full sync.
-    pub(crate) fn mark_dirty(&mut self) {
+    fn mark_dirty(&mut self) {
         *self = Self::Dirty;
     }
 
     /// Writes bytes to `blob` and records that they need a future full sync.
-    pub(crate) async fn write_at<B: Blob>(
+    async fn write_at<B: Blob>(
         &mut self,
         blob: &B,
         offset: u64,
@@ -189,10 +165,12 @@ impl State {
 
     /// Writes bytes to `blob` and makes them durable.
     ///
-    /// Uses [`Blob::write_at_sync`] when no earlier mutation requires a new full sync. Any
-    /// in-flight sync for earlier plain mutations is observed before returning. Otherwise, writes
-    /// the bytes and then syncs the blob.
-    pub(crate) async fn write_at_sync<B: Blob>(
+    /// Uses [`Blob::write_at_sync`] when no earlier mutation requires a new full sync. Otherwise,
+    /// writes the bytes and then syncs the blob.
+    ///
+    /// [`Gated`] only calls this after [`Gated::mutation_state`] has drained any in-flight sync
+    /// under the held write guard, so the state here is only ever `Clean` or `Dirty`.
+    async fn write_at_sync<B: Blob>(
         &mut self,
         blob: &B,
         offset: u64,
@@ -202,43 +180,27 @@ impl State {
             self.write_at(blob, offset, bufs).await?;
             self.sync(blob).await.map(|_| ())
         } else {
-            // If `write_at_sync` fails, a later sync must not treat the drained
-            // buffer as durable.
-            let previous = self.prepare_range_sync();
+            // Mark dirty before the write so that, if `write_at_sync` fails, a later sync does not
+            // treat the drained buffer as durable.
+            *self = Self::Dirty;
             blob.write_at_sync(offset, bufs).await?;
-            self.restore(previous);
-            self.observe_in_flight().await
+            *self = Self::Clean;
+            Ok(())
         }
     }
 
     /// Resizes `blob` and records that the resize needs a future full sync.
-    pub(crate) async fn resize<B: Blob>(&mut self, blob: &B, len: u64) -> Result<(), Error> {
+    async fn resize<B: Blob>(&mut self, blob: &B, len: u64) -> Result<(), Error> {
         blob.resize(len).await?;
         self.mark_dirty();
         Ok(())
-    }
-
-    /// Marks the blob dirty while a range sync is in progress.
-    ///
-    /// If [`Blob::write_at_sync`] fails, this conservative state remains in place so a later sync
-    /// cannot report success without a full durability barrier.
-    pub(crate) const fn prepare_range_sync(&mut self) -> Self {
-        std::mem::replace(self, Self::Dirty)
-    }
-
-    /// Restores the state saved before a successful range sync.
-    ///
-    /// If the range sync fails, callers should leave the conservative dirty state installed by
-    /// [`Self::prepare_range_sync`].
-    pub(crate) fn restore(&mut self, previous: Self) {
-        *self = previous;
     }
 
     /// Ensures mutations represented by this state are durable.
     ///
     /// Returns `true` when this call issues or observes a sync, and `false` when the state was
     /// already clean.
-    pub(crate) async fn sync<B: Blob>(&mut self, blob: &B) -> Result<bool, Error> {
+    async fn sync<B: Blob>(&mut self, blob: &B) -> Result<bool, Error> {
         match self {
             Self::Clean => Ok(false),
             Self::Dirty => {
@@ -254,20 +216,10 @@ impl State {
         }
     }
 
-    /// Observes any in-flight sync without clearing it early if this observer is dropped.
-    pub(crate) async fn observe_in_flight(&mut self) -> Result<(), Error> {
-        let Self::InFlight(syncing) = self else {
-            return Ok(());
-        };
-        syncing.clone().await?;
-        *self = Self::Clean;
-        Ok(())
-    }
-
     /// Starts a full blob sync or returns the in-flight sync that already covers this state.
     ///
     /// Returns `None` when no issued mutation requires a sync.
-    pub(crate) async fn start<B: Blob>(&mut self, blob: &B) -> Option<Shared> {
+    async fn start<B: Blob>(&mut self, blob: &B) -> Option<Shared> {
         match self {
             Self::Clean => None,
             Self::Dirty => {
@@ -277,5 +229,216 @@ impl State {
             }
             Self::InFlight(syncing) => Some(syncing.clone()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Gated;
+    use crate::{
+        buffer::tests::ControlledSyncBlob, deterministic, Blob as _, Error, Runner as _,
+        Spawner as _, Supervisor as _,
+    };
+    use commonware_macros::test_traced;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn new_gated(dirty: bool) -> (ControlledSyncBlob, Gated<ControlledSyncBlob>) {
+        let blob = ControlledSyncBlob::new();
+        let gated = Gated::new(blob.clone(), dirty);
+        (blob, gated)
+    }
+
+    #[test_traced]
+    fn test_gated_clean_start_sync_and_sync_are_noops() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let (blob, gated) = new_gated(false);
+
+            // With no issued mutation, start_sync resolves immediately and issues nothing.
+            gated.start_sync().await.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 0);
+            assert_eq!(blob.syncs(), 0);
+
+            // sync on a clean blob is also a no-op.
+            gated.sync().await.unwrap();
+            assert_eq!(blob.syncs(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_gated_write_then_sync_issues_full_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let (blob, gated) = new_gated(false);
+
+            gated.write_at(0, b"ab").await.unwrap();
+            assert_eq!(blob.writes(), 1);
+
+            gated.sync().await.unwrap();
+            assert_eq!(blob.syncs(), 1);
+
+            // The blob is clean again, so a second sync does nothing.
+            gated.sync().await.unwrap();
+            assert_eq!(blob.syncs(), 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_gated_write_at_sync_uses_fast_path_when_clean() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let (blob, gated) = new_gated(false);
+
+            // A clean blob uses the durable single-write fast path (no separate full sync).
+            gated.write_at_sync(0, b"ab").await.unwrap();
+            assert_eq!(blob.writes(), 1);
+            assert_eq!(blob.syncs(), 0);
+
+            // The state is clean afterward, so a follow-up sync is a no-op.
+            gated.sync().await.unwrap();
+            assert_eq!(blob.syncs(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_gated_write_at_sync_falls_back_to_full_sync_when_dirty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let (blob, gated) = new_gated(false);
+
+            // An earlier plain write makes the blob dirty, so write_at_sync must write and then
+            // issue a full sync to cover the earlier mutation.
+            gated.write_at(0, b"a").await.unwrap();
+            gated.write_at_sync(1, b"b").await.unwrap();
+            assert_eq!(blob.writes(), 2);
+            assert_eq!(blob.syncs(), 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_gated_start_sync_gates_later_write() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, gated) = new_gated(false);
+
+            gated.write_at(0, b"a").await.unwrap();
+            let handle = gated.start_sync().await;
+            assert_eq!(blob.pending_syncs(), 1);
+
+            let done = Arc::new(AtomicUsize::new(0));
+            let done_clone = done.clone();
+            let gated_clone = gated.clone();
+            let waiter = context.child("writer").spawn(|_| async move {
+                gated_clone.write_at(1, b"b".to_vec()).await.unwrap();
+                done_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            crate::utils::reschedule().await;
+            assert_eq!(done.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                blob.writes(),
+                1,
+                "a write issued after start_sync must wait for the in-flight sync"
+            );
+
+            blob.release_next_sync();
+            handle.await.unwrap();
+            while done.load(Ordering::Relaxed) != 1 {
+                crate::utils::reschedule().await;
+            }
+            waiter.await.unwrap();
+            assert_eq!(blob.writes(), 2);
+            assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_gated_concurrent_start_sync_shares_one_underlying_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let (blob, gated) = new_gated(false);
+
+            gated.write_at(0, b"a").await.unwrap();
+            let first = gated.start_sync().await;
+            // A second start_sync with no intervening write reuses the in-flight sync rather than
+            // issuing a new one.
+            let second = gated.start_sync().await;
+            assert_eq!(blob.pending_syncs(), 1);
+
+            blob.release_next_sync();
+            first.await.unwrap();
+            second.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_gated_sync_observes_in_flight_without_reissuing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, gated) = new_gated(false);
+
+            gated.write_at(0, b"a").await.unwrap();
+            let handle = gated.start_sync().await;
+            assert_eq!(blob.pending_syncs(), 1);
+
+            let done = Arc::new(AtomicUsize::new(0));
+            let done_clone = done.clone();
+            let gated_clone = gated.clone();
+            let waiter = context.child("sync").spawn(|_| async move {
+                gated_clone.sync().await.unwrap();
+                done_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            crate::utils::reschedule().await;
+            assert_eq!(done.load(Ordering::Relaxed), 0);
+            assert_eq!(blob.pending_syncs(), 1);
+
+            blob.release_next_sync();
+            handle.await.unwrap();
+            while done.load(Ordering::Relaxed) != 1 {
+                crate::utils::reschedule().await;
+            }
+            waiter.await.unwrap();
+            // sync observed the in-flight start_sync rather than issuing its own blob sync.
+            assert_eq!(blob.syncs(), 0);
+            assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_gated_in_flight_error_propagates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let (blob, gated) = new_gated(false);
+
+            gated.write_at(0, b"a").await.unwrap();
+            let first = gated.start_sync().await;
+            let second = gated.start_sync().await;
+            assert_eq!(blob.pending_syncs(), 1);
+
+            // Failing the in-flight sync surfaces the error to every observer, including a later
+            // mutation and a later sync (the failed state is conservatively retained).
+            blob.fail_next_sync();
+            assert!(matches!(first.await, Err(Error::Closed)));
+            assert!(matches!(second.await, Err(Error::Closed)));
+            assert!(matches!(gated.write_at(1, b"b").await, Err(Error::Closed)));
+            assert!(matches!(gated.sync().await, Err(Error::Closed)));
+        });
+    }
+
+    #[test_traced]
+    fn test_gated_resize_marks_dirty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let (blob, gated) = new_gated(false);
+
+            gated.resize(8).await.unwrap();
+            gated.sync().await.unwrap();
+            assert_eq!(blob.syncs(), 1);
+        });
     }
 }

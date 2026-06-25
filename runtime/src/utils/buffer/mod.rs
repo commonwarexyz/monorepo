@@ -2,7 +2,7 @@
 
 pub mod paged;
 mod read;
-pub mod sync;
+mod sync;
 mod tip;
 mod write;
 
@@ -270,27 +270,39 @@ mod tests {
     #[derive(Default)]
     struct ControlledSyncState {
         data: Vec<u8>,
+        writes: usize,
+        syncs: usize,
         pending_syncs: VecDeque<oneshot::Sender<()>>,
     }
 
     /// Blob whose `start_sync` handles complete only when the test releases them.
+    ///
+    /// Shared by the buffer wrapper tests here and the [paged::Append] tests.
     #[derive(Clone)]
-    struct ControlledSyncBlob {
+    pub struct ControlledSyncBlob {
         state: Arc<Mutex<ControlledSyncState>>,
     }
 
     impl ControlledSyncBlob {
-        fn new() -> Self {
+        pub fn new() -> Self {
             Self {
                 state: Arc::new(Mutex::new(ControlledSyncState::default())),
             }
         }
 
-        fn pending_syncs(&self) -> usize {
+        pub fn writes(&self) -> usize {
+            self.state.lock().writes
+        }
+
+        pub fn syncs(&self) -> usize {
+            self.state.lock().syncs
+        }
+
+        pub fn pending_syncs(&self) -> usize {
             self.state.lock().pending_syncs.len()
         }
 
-        fn release_next_sync(&self) {
+        pub fn release_next_sync(&self) {
             let sender = self
                 .state
                 .lock()
@@ -300,7 +312,7 @@ mod tests {
             let _ = sender.send(());
         }
 
-        fn fail_next_sync(&self) {
+        pub fn fail_next_sync(&self) {
             self.state
                 .lock()
                 .pending_syncs
@@ -344,7 +356,9 @@ mod tests {
 
         async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
             let buf = bufs.into().coalesce();
-            Self::write(&mut self.state.lock().data, offset, buf.as_ref())
+            let mut state = self.state.lock();
+            state.writes += 1;
+            Self::write(&mut state.data, offset, buf.as_ref())
         }
 
         async fn write_at_sync(
@@ -352,7 +366,10 @@ mod tests {
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
         ) -> Result<(), Error> {
-            self.write_at(offset, bufs).await
+            let buf = bufs.into().coalesce();
+            let mut state = self.state.lock();
+            state.writes += 1;
+            Self::write(&mut state.data, offset, buf.as_ref())
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -362,6 +379,7 @@ mod tests {
         }
 
         async fn sync(&self) -> Result<(), Error> {
+            self.state.lock().syncs += 1;
             Ok(())
         }
 
@@ -1659,45 +1677,9 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_write_start_sync_observes_in_flight_sync_without_new_writes() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let blob = ControlledSyncBlob::new();
-            let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
-
-            writer.write_at(0, b"abc").await.unwrap();
-            let first = writer.start_sync().await.unwrap();
-            assert_eq!(blob.pending_syncs(), 1);
-
-            let observed = Arc::new(AtomicUsize::new(0));
-            let completed = Arc::new(AtomicUsize::new(0));
-            let observed_clone = observed.clone();
-            let completed_clone = completed.clone();
-            let second_writer = writer.clone();
-            let waiter = context.child("second_start_sync").spawn(|_| async move {
-                let second = second_writer.start_sync().await.unwrap();
-                observed_clone.fetch_add(1, Ordering::Relaxed);
-                second.await.unwrap();
-                completed_clone.fetch_add(1, Ordering::Relaxed);
-            });
-
-            while observed.load(Ordering::Relaxed) != 1 {
-                crate::utils::reschedule().await;
-            }
-            assert_eq!(completed.load(Ordering::Relaxed), 0);
-            assert_eq!(blob.pending_syncs(), 1);
-
-            blob.release_next_sync();
-            first.await.unwrap();
-            while completed.load(Ordering::Relaxed) != 1 {
-                crate::utils::reschedule().await;
-            }
-            waiter.await.unwrap();
-            assert_eq!(blob.pending_syncs(), 0);
-        });
-    }
-
+    // The core start_sync gating, shared-observer, and error-propagation behavior is unit-tested
+    // directly on `Gated` in `super::sync`. This test covers the Write-specific wiring: a buffered
+    // write after `start_sync`, then a `sync` that must drain the buffer through the in-flight gate.
     #[test_traced]
     fn test_write_sync_after_buffered_write_observes_in_flight_sync() {
         let executor = deterministic::Runner::default();
@@ -1729,26 +1711,6 @@ mod tests {
                 crate::utils::reschedule().await;
             }
             waiter.await.unwrap();
-            assert_eq!(blob.pending_syncs(), 0);
-        });
-    }
-
-    #[test_traced]
-    fn test_write_start_sync_returns_in_flight_sync_errors() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let blob = ControlledSyncBlob::new();
-            let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
-
-            writer.write_at(0, b"abc").await.unwrap();
-            let first = writer.start_sync().await.unwrap();
-            let second = writer.start_sync().await.unwrap();
-            assert_eq!(blob.pending_syncs(), 1);
-
-            blob.fail_next_sync();
-            assert!(matches!(first.await, Err(Error::Closed)));
-            assert!(matches!(second.await, Err(Error::Closed)));
-            assert!(matches!(writer.sync().await, Err(Error::Closed)));
             assert_eq!(blob.pending_syncs(), 0);
         });
     }

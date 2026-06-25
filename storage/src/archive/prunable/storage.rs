@@ -10,7 +10,6 @@ use crate::{
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    buffer::sync::{self, Shared},
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
 };
@@ -110,7 +109,6 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     oversized: Oversized<E, Record<K>, V>,
 
     pending: BTreeSet<u64>,
-    syncing: BTreeMap<u64, Vec<Shared>>,
 
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -221,7 +219,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             items_per_section: cfg.items_per_section.get(),
             oversized,
             pending: BTreeSet::new(),
-            syncing: BTreeMap::new(),
             oldest_allowed: None,
             indices,
             extra_indices,
@@ -382,7 +379,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             };
             self.pending.remove(&next);
         }
-        self.syncing.retain(|section, _| *section >= min);
 
         // Remove all indices that are less than min
         loop {
@@ -407,38 +403,11 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     /// Drain the set of sections with unsynced writes, recording them in the sync metric. The caller
-    /// is responsible for syncing the returned sections (via the synchronous or overlapping path).
+    /// is responsible for syncing the returned sections.
     fn take_pending(&mut self) -> BTreeSet<u64> {
         let pending = std::mem::take(&mut self.pending);
         self.syncs.inc_by(pending.len() as u64);
         pending
-    }
-
-    /// Remove in-flight syncs that have already completed successfully.
-    fn prune_completed_syncs(&mut self) {
-        self.syncing.retain(|_, syncs| {
-            syncs.retain(|sync| !sync::completed_successfully(sync));
-            !syncs.is_empty()
-        });
-    }
-
-    /// Return observers for syncs that still matter to the archive.
-    fn in_flight_syncs(&mut self) -> Vec<Shared> {
-        self.prune_completed_syncs();
-        self.syncing.values().flatten().cloned().collect()
-    }
-
-    /// Start syncing pending sections and record their observers for later sync calls.
-    async fn start_pending_syncs(&mut self, pending: BTreeSet<u64>) -> Result<Vec<Shared>, Error> {
-        let syncs = pending.iter().map(|s| self.oversized.start_sync(*s));
-        let handles = try_join_all(syncs).await?;
-        let mut observers = Vec::with_capacity(handles.len());
-        for (section, handle) in pending.into_iter().zip(handles) {
-            let sync = sync::share_handle(handle);
-            self.syncing.entry(section).or_default().push(sync.clone());
-            observers.push(sync);
-        }
-        Ok(observers)
     }
 }
 
@@ -468,19 +437,20 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
-        let mut observers = self.in_flight_syncs();
-        let pending = self.take_pending();
-        observers.extend(self.start_pending_syncs(pending).await?);
-        Ok(sync::observe_all(observers))
+        // Start an overlapping sync for each pending section but leave `pending` populated: the
+        // per-blob `Gated` wrapper already makes a later `sync`/`start_sync` wait for (or coalesce
+        // with) this in-flight sync, so a section is only counted in the `syncs` metric and removed
+        // from `pending` once a blocking `sync` drains it. A section made durable here and never
+        // rewritten is at worst re-synced once as a no-op (a `Gated::sync` on clean state).
+        let syncs = self.pending.iter().map(|s| self.oversized.start_sync(*s));
+        let handles = try_join_all(syncs).await?;
+        Ok(Handle::join(handles))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        let in_flight = self.in_flight_syncs();
+        // `Gated::sync` waits for any in-flight `start_sync` covering a section, so we just sync each
+        // pending section directly.
         let pending = self.take_pending();
-        sync::wait_all(in_flight)
-            .await
-            .map_err(crate::journal::Error::Runtime)?;
-        self.prune_completed_syncs();
         let syncs = pending.iter().map(|s| self.oversized.sync(*s));
         try_join_all(syncs).await?;
         Ok(())
