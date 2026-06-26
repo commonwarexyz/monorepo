@@ -1471,8 +1471,10 @@ mod tests {
         // Any starting position other than 0 should fail to verify.
         assert!(!proof.verify_range_inclusion(&mut hasher, empty_range, Location::new(1), &root));
 
-        // Invalid root should fail to verify.
-        let td = test_digest(0);
+        // Invalid root should fail to verify. Use a nonzero byte: `test_digest(0)` hashes the
+        // single byte `0x00`, which is exactly the empty-tree root (`hash(varint(leaves=0))`), so it
+        // would not actually be an invalid root.
+        let td = test_digest(1);
         assert!(!proof.verify_range_inclusion(&mut hasher, empty_range, Location::new(0), &td));
 
         // Non-empty elements list should fail to verify.

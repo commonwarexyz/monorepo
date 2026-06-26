@@ -1107,7 +1107,9 @@ mod tests {
         let mut reference = Mem::<F, D>::new();
         let full = {
             let mut batch = reference.new_batch();
-            for leaf in [b"a".as_slice(), b"b", b"c"] {
+            // Encode each element exactly as the `mem` chain did (`&[u8; 1]`, not `&[u8]`): a slice
+            // would carry a codec length prefix and hash to a different leaf than the byte arrays.
+            for leaf in [b"a", b"b", b"c"] {
                 batch = batch.add(&mut hasher, leaf);
             }
             batch.merkleize(&reference, &mut hasher)

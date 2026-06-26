@@ -585,7 +585,10 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
             || hasher.clone(),
             |h, &(loc, chunk)| {
                 let pos = Position::try_from(loc).unwrap();
-                (loc, h.leaf_digest(pos, chunk.as_ref()))
+                // Hash the chunk as a fixed-size array, matching the `batch.add` path above.
+                // Passing `chunk.as_ref()` (a `&[u8]`) would prepend a codec length prefix and
+                // yield a different leaf digest than the one produced when the chunk was first added.
+                (loc, h.leaf_digest(pos, chunk))
             },
         );
         batch = batch.update_leaf_batched(&dirty)?;
