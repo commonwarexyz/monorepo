@@ -902,6 +902,7 @@ where
         join_all(
             produces
                 .into_iter()
+                .filter(|(_, response)| !response.is_closed()) // Ignore closed senders
                 .map(|(key, response)| self.handle_produce(key, response, buffer)),
         )
         .await;
