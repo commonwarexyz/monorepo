@@ -10,17 +10,13 @@
 //! let mut hasher = Sha256::new();
 //!
 //! // Update the hasher with some messages
-//! hasher.update(b"hello,");
-//! hasher.update(b"world!");
-//!
-//! // Finalize the hasher to get the digest
-//! let digest = hasher.finalize();
+//! let digest = hasher.update(b"hello,").update(b"world!").finalize();
 //!
 //! // Print the digest
 //! println!("digest: {:?}", digest);
 //! ```
 
-use crate::{Hasher, MAX_CODEC_PREIMAGE};
+use crate::{Hasher, PendingHasher, MAX_CODEC_PREIMAGE};
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use bytes::{Buf, BufMut};
@@ -57,10 +53,8 @@ const INITIAL_STATE: [u32; 8] = [
 /// SHA-256 hasher.
 #[derive(Debug)]
 pub struct Sha256 {
-    /// Streaming state backing [`Hasher::update`], [`Hasher::finalize`], and [`Hasher::reset`].
+    /// Streaming state backing [`Hasher::update`] and [`Hasher::reset`].
     hasher: ISha256,
-    /// Reusable buffer for the fixed (non-streaming) hashing path. Reusing it across calls avoids
-    /// re-zeroing a fresh buffer on every short hash.
     scratch: [u8; SCRATCH_LEN],
 }
 
@@ -88,33 +82,73 @@ impl Sha256 {
     }
 }
 
-impl Hasher for Sha256 {
-    type Digest = Digest;
+/// Pending SHA-256 computation.
+#[must_use]
+pub struct Pending<'a> {
+    hasher: &'a mut Sha256,
+    finalized: bool,
+}
 
-    fn update(&mut self, message: &[u8]) -> &mut Self {
-        self.hasher.update(message);
+impl Pending<'_> {
+    /// Append message to the pending hash computation.
+    pub fn update(self, message: &[u8]) -> Self {
+        self.hasher.hasher.update(message);
         self
     }
 
-    fn finalize(&mut self) -> Self::Digest {
-        let finalized = self.hasher.finalize_reset();
+    /// Hash all recorded data and reset the underlying hasher to the initial state.
+    pub fn finalize(mut self) -> Digest {
+        self.finalized = true;
+        let finalized = self.hasher.hasher.finalize_reset();
         let array: [u8; DIGEST_LENGTH] = finalized.into();
-        Self::Digest::from(array)
+        Digest::from(array)
+    }
+}
+
+impl PendingHasher for Pending<'_> {
+    type Digest = Digest;
+
+    fn update(self, message: &[u8]) -> Self {
+        Self::update(self, message)
+    }
+
+    fn finalize(self) -> Self::Digest {
+        Self::finalize(self)
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        if !self.finalized {
+            self.hasher.hasher.reset();
+        }
+    }
+}
+
+impl Hasher for Sha256 {
+    type Digest = Digest;
+    type Pending<'a> = Pending<'a>;
+
+    fn update(&mut self, message: &[u8]) -> Self::Pending<'_> {
+        self.hasher.update(message);
+        Pending {
+            hasher: self,
+            finalized: false,
+        }
     }
 
     fn reset(&mut self) -> &mut Self {
-        self.hasher = ISha256::new();
+        self.hasher.reset();
         self
     }
 
     #[inline]
-    fn hash_codec<E: Encode>(&mut self, value: E) -> Self::Digest {
+    fn hash_encoded<E: Encode>(&mut self, value: E) -> Self::Digest {
         let len = value.encode_size();
         if len > MAX_CODEC_PREIMAGE {
             let encoded = value.encode();
-            let mut hasher = ISha256::new();
-            hasher.update(encoded.as_ref());
-            let array: [u8; DIGEST_LENGTH] = hasher.finalize().into();
+            self.hasher.update(encoded.as_ref());
+            let array: [u8; DIGEST_LENGTH] = self.hasher.finalize_reset().into();
             return Digest(array);
         }
 
@@ -252,12 +286,10 @@ mod tests {
     fn test_sha256() {
         let msg = b"hello world";
         let mut hasher = Sha256::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
         let hash = Sha256::hash(msg);
@@ -273,8 +305,7 @@ mod tests {
     fn test_codec() {
         let msg = b"hello world";
         let mut hasher = Sha256::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
         let encoded = digest.encode();
         assert_eq!(encoded.len(), DIGEST_LENGTH);
         assert_eq!(encoded, digest.as_ref());
@@ -284,10 +315,15 @@ mod tests {
 
     fn standard_hash<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Digest {
         let mut hasher = Sha256::new();
+        let mut parts = parts.into_iter();
+        let Some(first) = parts.next() else {
+            return hasher.update(b"").finalize();
+        };
+        let mut pending = hasher.update(first);
         for part in parts {
-            hasher.update(part);
+            pending = pending.update(part);
         }
-        hasher.finalize()
+        pending.finalize()
     }
 
     fn standard_codec_hash<E: Encode + ?Sized>(value: &E) -> Digest {
@@ -295,13 +331,14 @@ mod tests {
         standard_hash([encoded.as_ref()])
     }
 
-    fn assert_codec_match<E: Encode>(hasher: &mut Sha256, value: E) {
+    fn assert_codec_match<E: Encode>(value: E) {
         let len = value.encode_size();
         let expected = standard_codec_hash(&value);
+        let mut hasher = Sha256::new();
         assert_eq!(
-            hasher.hash_codec(value),
+            hasher.hash_encoded(value),
             expected,
-            "hash_codec mismatch for {len} encoded bytes",
+            "hash_encoded mismatch for {len} encoded bytes",
         );
     }
 
@@ -310,55 +347,63 @@ mod tests {
         let left = Sha256::hash(b"left");
         let right = Sha256::hash(b"right");
         let mut hasher = Sha256::new();
-        assert_codec_match(&mut hasher, (7u32, left));
-        assert_codec_match(&mut hasher, (9u64, left));
-        assert_codec_match(&mut hasher, (9u64, b"payload".as_slice()));
-        assert_codec_match(&mut hasher, (11u64, left, right));
-        assert_codec_match(&mut hasher, (13u64, 17u64, left));
-        assert_codec_match(&mut hasher, ());
-        assert_codec_match(&mut hasher, [b'x']);
+        assert_codec_match((7u32, left));
+        assert_codec_match((9u64, left));
+        assert_codec_match((9u64, b"payload".as_slice()));
+        assert_codec_match((11u64, left, right));
+        assert_codec_match((13u64, 17u64, left));
+        assert_codec_match(());
+        assert_codec_match([b'x']);
         for len in [
             0usize, 1, 54, 55, 56, 63, 64, 71, 72, 118, 119, 120, 200, 1000,
         ] {
             let blob = vec![0xABu8; len];
-            assert_codec_match(&mut hasher, blob.as_slice());
-            assert_codec_match(&mut hasher, blob);
+            assert_codec_match(blob.as_slice());
+            assert_codec_match(blob);
         }
-        hasher.update(b"streamed");
-        let _ = hasher.hash_codec((left, right));
-        let _ = hasher.hash_codec((b"unrelated".as_slice(), [0xCD; 200]));
-        assert_eq!(hasher.finalize(), standard_hash([b"streamed".as_slice()]));
+        let pending = hasher.update(b"streamed");
+        drop(pending);
+        assert_eq!(
+            hasher.hash_encoded((left, right)),
+            standard_codec_hash(&(left, right))
+        );
+        let large = (b"unrelated".as_slice(), [0xCDu8; 200]);
+        assert_eq!(hasher.hash_encoded(large), standard_codec_hash(&large));
+        assert_eq!(
+            hasher.update(b"after").finalize(),
+            standard_hash([b"after".as_slice()])
+        );
     }
 
     #[test]
-    fn test_hash_codec_matches_standard_sha256() {
+    fn test_hash_encoded_matches_standard_sha256() {
         let left = Sha256::hash(b"left");
         let right = Sha256::hash(b"right");
         let mut hasher = Sha256::new();
 
-        // Each `hash_codec` call must hash exactly the codec encoding of its value.
+        // Each `hash_encoded` call must hash exactly the encoded representation of its value.
         assert_eq!(
-            hasher.hash_codec((left, right)),
+            hasher.hash_encoded((left, right)),
             standard_codec_hash(&(left, right))
         );
         assert_eq!(
-            hasher.hash_codec((7u32, left)),
+            hasher.hash_encoded((7u32, left)),
             standard_codec_hash(&(7u32, left))
         );
         assert_eq!(
-            hasher.hash_codec((9u64, left)),
+            hasher.hash_encoded((9u64, left)),
             standard_codec_hash(&(9u64, left))
         );
         assert_eq!(
-            hasher.hash_codec((11u64, left, right)),
+            hasher.hash_encoded((11u64, left, right)),
             standard_codec_hash(&(11u64, left, right)),
         );
         assert_eq!(
-            hasher.hash_codec((13u64, 17u64, left)),
+            hasher.hash_encoded((13u64, 17u64, left)),
             standard_codec_hash(&(13u64, 17u64, left)),
         );
         assert_eq!(
-            hasher.hash_codec((9u64, b"payload".as_slice())),
+            hasher.hash_encoded((9u64, b"payload".as_slice())),
             standard_codec_hash(&(9u64, b"payload".as_slice())),
         );
     }

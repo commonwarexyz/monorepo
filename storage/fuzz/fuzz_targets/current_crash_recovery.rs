@@ -302,7 +302,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             .await
             .expect("recovery must succeed");
 
-            let hasher = qmdb::hasher::<Sha256>();
+            let mut hasher = qmdb::hasher::<Sha256>();
 
             // Verify all committed KV pairs survived the crash and are provable.
             let root = db.root();
@@ -318,11 +318,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 );
 
                 let proof = db
-                    .key_value_proof(&hasher, k.clone())
+                    .key_value_proof(&mut hasher, k.clone())
                     .await
                     .expect("proof generation should not fail for committed key");
                 assert!(
-                    Db::<F>::verify_key_value_proof(&hasher, k, v, &proof, &root),
+                    Db::<F>::verify_key_value_proof(&mut hasher, k, v, &proof, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
@@ -333,11 +333,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             for i in floor..size {
                 let loc = Location::<F>::new(i);
                 let (proof, ops, chunks) = db
-                    .range_proof(&hasher, loc, NZU64!(4))
+                    .range_proof(&mut hasher, loc, NZU64!(4))
                     .await
                     .expect("range proof should not fail after recovery");
                 assert!(
-                    Db::<F>::verify_range_proof(&hasher, &proof, loc, &ops, &chunks, &root),
+                    Db::<F>::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }

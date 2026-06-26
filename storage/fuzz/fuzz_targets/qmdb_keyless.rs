@@ -222,7 +222,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
+        let mut hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
         let cfg = test_config(suffix, &context, strategy.clone());
         let mut db: Db<F, S> = Db::init(context.child("storage"), cfg)
             .await
@@ -427,7 +427,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
                                 verify_proof(
-                                    &hasher,
+                                    &mut hasher,
                                     &proof,
                                     start_loc,
                                     &ops,
@@ -466,7 +466,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                             .await {
                             assert!(
                                 verify_proof(
-                                    &hasher,
+                                    &mut hasher,
                                     &proof,
                                     start_loc,
                                     &ops,

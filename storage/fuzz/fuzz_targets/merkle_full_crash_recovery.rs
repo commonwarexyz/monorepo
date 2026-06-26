@@ -117,7 +117,7 @@ struct ExpectedBounds {
 
 async fn run_operations<F: MerkleFamily>(
     merkle: &mut Merkle<F>,
-    hasher: &StandardHasher<Sha256>,
+    hasher: &mut StandardHasher<Sha256>,
     operations: &[MerkleOperation],
 ) -> ExpectedBounds {
     let mut min_size = 0u64;
@@ -237,10 +237,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let partition_suffix = partition_suffix.clone();
         let operations = operations.clone();
         async move {
-            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+            let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let mut merkle = Merkle::<F>::init(
                 ctx.child("merkle"),
-                &hasher,
+                &mut hasher,
                 merkle_config(
                     &partition_suffix,
                     &ctx,
@@ -260,7 +260,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 ..Default::default()
             };
 
-            run_operations(&mut merkle, &hasher, &operations).await
+            run_operations(&mut merkle, &mut hasher, &operations).await
         }
     });
 
@@ -269,10 +269,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     runner.start(|ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let merkle = Merkle::<F>::init(
             ctx.child("recovered"),
-            &hasher,
+            &mut hasher,
             merkle_config(
                 &partition_suffix,
                 &ctx,
@@ -329,8 +329,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
         // Verify we can add new data after recovery
         let test_data = [0xABu8; DATA_SIZE];
-        let batch = merkle.new_batch().add(&hasher, &test_data);
-        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = merkle.new_batch().add(&mut hasher, &test_data);
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &mut hasher));
         merkle.apply_batch(&batch).unwrap();
         merkle.destroy().await.expect("should be able to destroy");
     });

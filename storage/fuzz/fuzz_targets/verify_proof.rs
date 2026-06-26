@@ -43,7 +43,7 @@ impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
-    let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
+    let mut hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
 
     let digests: Vec<Digest> = input
         .digests
@@ -72,7 +72,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
     }
 
     let root = Digest::from(input.root);
-    let _ = verify_multi_proof(&hasher, &proof, operations.as_slice(), &root);
+    let _ = verify_multi_proof(&mut hasher, &proof, operations.as_slice(), &root);
 }
 
 fuzz_target!(|data: &[u8]| {

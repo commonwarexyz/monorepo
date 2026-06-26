@@ -94,17 +94,17 @@ fn historical_root<F: MerkleFamily>(
     leaves: &[Vec<u8>],
     requested_leaves: Location<F>,
 ) -> <Sha256 as commonware_cryptography::Hasher>::Digest {
-    let hasher = Standard::<Sha256>::new(ForwardFold);
+    let mut hasher = Standard::<Sha256>::new(ForwardFold);
     let mut mem = Mem::<F, _>::new();
     let batch = {
         let mut batch = mem.new_batch();
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
-            batch = batch.add(&hasher, element);
+            batch = batch.add(&mut hasher, element.as_slice());
         }
-        batch.merkleize(&mem, &hasher)
+        batch.merkleize(&mem, &mut hasher)
     };
     mem.apply_batch(&batch).unwrap();
-    mem.root(&hasher, 0).unwrap()
+    mem.root(&mut hasher, 0).unwrap()
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
@@ -117,10 +117,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let operations = input.operations.clone();
         async move {
             let mut leaves = Vec::new();
-            let hasher = Standard::<Sha256>::new(ForwardFold);
+            let mut hasher = Standard::<Sha256>::new(ForwardFold);
             let mut merkle = Merkle::<F, _, _>::init(
                 context.child("storage"),
-                &hasher,
+                &mut hasher,
                 test_config(suffix, &context),
             )
             .await
@@ -147,7 +147,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let batch = merkle.new_batch();
                         let loc = batch.leaves();
                         let batch = merkle.with_mem(|mem| {
-                            batch.add(&hasher, limited_data).merkleize(mem, &hasher)
+                            batch
+                                .add(&mut hasher, limited_data)
+                                .merkleize(mem, &mut hasher)
                         });
                         merkle.apply_batch(&batch).unwrap();
                         leaves.push(limited_data.to_vec());
@@ -179,11 +181,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             let mut locations = Vec::with_capacity(items.len());
                             for item in &items {
                                 locations.push(batch.leaves());
-                                batch = batch.add(&hasher, item);
+                                batch = batch.add(&mut hasher, *item);
                             }
                             (
                                 locations,
-                                merkle.with_mem(|mem| batch.merkleize(mem, &hasher)),
+                                merkle.with_mem(|mem| batch.merkleize(mem, &mut hasher)),
                             )
                         };
                         merkle.apply_batch(&batch).unwrap();
@@ -209,10 +211,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             if bounds.contains(&location) {
                                 let element = leaves.get(location.as_u64() as usize).unwrap();
 
-                                if let Ok(proof) = merkle.proof(&hasher, location, 0).await {
-                                    let root = merkle.root(&hasher, 0).unwrap();
+                                if let Ok(proof) = merkle.proof(&mut hasher, location, 0).await {
+                                    let root = merkle.root(&mut hasher, 0).unwrap();
                                     assert!(proof.verify_element_inclusion(
-                                        &hasher, element, location, &root
+                                        &mut hasher,
+                                        element.as_slice(),
+                                        location,
+                                        &root
                                     ));
                                 }
                             }
@@ -231,11 +236,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 && merkle.bounds().contains(&range.start)
                             {
                                 if let Ok(proof) =
-                                    merkle.range_proof(&hasher, range.clone(), 0).await
+                                    merkle.range_proof(&mut hasher, range.clone(), 0).await
                                 {
-                                    let root = merkle.root(&hasher, 0).unwrap();
+                                    let root = merkle.root(&mut hasher, 0).unwrap();
                                     assert!(proof.verify_range_inclusion(
-                                        &hasher,
+                                        &mut hasher,
                                         &leaves[range.to_usize_range()],
                                         Location::<F>::new(start_loc),
                                         &root
@@ -259,13 +264,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let expected_root = historical_root::<F>(&leaves, requested_leaves);
 
                         let result = merkle
-                            .historical_range_proof(&hasher, requested_leaves, range.clone(), 0)
+                            .historical_range_proof(&mut hasher, requested_leaves, range.clone(), 0)
                             .await;
                         match result {
                             Ok(historical_proof) => {
-                                let verify_hasher = Standard::<Sha256>::new(ForwardFold);
+                                let mut verify_hasher = Standard::<Sha256>::new(ForwardFold);
                                 assert!(historical_proof.verify_range_inclusion(
-                                    &verify_hasher,
+                                    &mut verify_hasher,
                                     &leaves[range.to_usize_range()],
                                     range.start,
                                     &expected_root
@@ -303,7 +308,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     }
 
                     Operation::GetRoot => {
-                        let _ = merkle.root(&hasher, 0);
+                        let _ = merkle.root(&mut hasher, 0);
                     }
 
                     Operation::GetSize => {
@@ -332,7 +337,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         drop(merkle);
                         merkle = Merkle::<F, _, _>::init(
                             context.child("merkle").with_attribute("instance", restarts),
-                            &hasher,
+                            &mut hasher,
                             test_config(suffix, &context),
                         )
                         .await

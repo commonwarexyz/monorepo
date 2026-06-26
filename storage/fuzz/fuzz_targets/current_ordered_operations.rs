@@ -135,7 +135,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     let initial_writes = data.initial_writes;
     let operations = data.operations.clone();
     runner.start(|context| async move {
-        let hasher = qmdb::hasher::<Sha256>();
+        let mut hasher = qmdb::hasher::<Sha256>();
         let page_cache = CacheRef::from_pooler(
             &context,
             PAGE_SIZE,
@@ -291,13 +291,13 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     let oldest_loc = db.sync_boundary();
                     if start_loc >= oldest_loc {
                         let (proof, ops, chunks) = db
-                            .range_proof(&hasher, start_loc, *max_ops)
+                            .range_proof(&mut hasher, start_loc, *max_ops)
                             .await
                             .expect("Range proof should not fail");
 
                         assert!(
                             Db::<F>::verify_range_proof(
-                                &hasher,
+                                &mut hasher,
                                 &proof,
                                 start_loc,
                                 &ops,
@@ -332,7 +332,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     let root = db.root();
 
                     if let Ok((range_proof, ops, chunks)) = db
-                        .range_proof(&hasher, start_loc, *max_ops)
+                        .range_proof(&mut hasher, start_loc, *max_ops)
                         .await {
                         // Try to verify the proof when providing bad proof digests.
                         let bad_digests = bad_digests.iter().map(|d| Digest::from(*d)).collect();
@@ -340,7 +340,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             let mut bad_digest_proof = range_proof.clone();
                             bad_digest_proof.proof.digests = bad_digests;
                             assert!(!Db::<F>::verify_range_proof(
-                                &hasher,
+                                &mut hasher,
                                 &bad_digest_proof,
                                 start_loc,
                                 &ops,
@@ -355,7 +355,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                                 let mut bad_pending_proof = range_proof.clone();
                                 bad_pending_proof.pending_chunk_digest = bad_pending;
                                 assert!(!Db::<F>::verify_range_proof(
-                                    &hasher,
+                                    &mut hasher,
                                     &bad_pending_proof,
                                     start_loc,
                                     &ops,
@@ -370,7 +370,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             let mut bad_partial_proof = range_proof.clone();
                             bad_partial_proof.partial_chunk_digest = bad_partial_digest;
                             assert!(!Db::<F>::verify_range_proof(
-                                &hasher,
+                                &mut hasher,
                                 &bad_partial_proof,
                                 start_loc,
                                 &ops,
@@ -389,7 +389,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         }).collect();
                         if chunks != bad_chunks {
                             assert!(!Db::<F>::verify_range_proof(
-                                &hasher,
+                                &mut hasher,
                                 &range_proof,
                                 start_loc,
                                 &ops,
@@ -411,11 +411,11 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     committed_op_count = db.bounds().await.end;
                     let current_root = db.root();
 
-                    match db.key_value_proof(&hasher, k.clone()).await {
+                    match db.key_value_proof(&mut hasher, k.clone()).await {
                         Ok(proof) => {
                             let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
                             let verification_result = Db::<F>::verify_key_value_proof(
-                                &hasher,
+                                &mut hasher,
                                 k,
                                 value,
                                 &proof,
@@ -442,10 +442,10 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     committed_op_count = db.bounds().await.end;
                     let current_root = db.root();
 
-                    match db.exclusion_proof(&hasher, &k).await {
+                    match db.exclusion_proof(&mut hasher, &k).await {
                         Ok(proof) => {
                             let verification_result = Db::<F>::verify_exclusion_proof(
-                                &hasher,
+                                &mut hasher,
                                 &k,
                                 &proof,
                                 &current_root,

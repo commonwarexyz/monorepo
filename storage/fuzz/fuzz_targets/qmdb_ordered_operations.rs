@@ -107,7 +107,7 @@ async fn commit_pending<F: MerkleFamily>(
 }
 
 fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
-    let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
+    let mut hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
     let runner = deterministic::Runner::default();
 
     runner.start(|context| {
@@ -204,7 +204,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
 
                             assert!(
                                 verify_proof(
-                                    &hasher,
+                                    &mut hasher,
                                     &proof,
                                     adjusted_start,
                                     &log,
@@ -235,7 +235,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 .proof(adjusted_start, *max_ops)
                                 .await {
                                     let _ = verify_proof(
-                                        &hasher,
+                                        &mut hasher,
                                         &proof,
                                         adjusted_start,
                                         &res.1,

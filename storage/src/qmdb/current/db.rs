@@ -1063,10 +1063,7 @@ pub(super) async fn compute_grafted_leaves<
             if chunk == zero_chunk {
                 (chunk_idx, chunk_ops_digest)
             } else {
-                (
-                    chunk_idx,
-                    hasher.hash_codec((chunk, chunk_ops_digest)),
-                )
+                (chunk_idx, hasher.hash_encoded((chunk, chunk_ops_digest)))
             }
         },
     ))

@@ -100,8 +100,7 @@ mod tests {
             let mut c_hasher = Sha256::new();
             let mut batch = mmr.new_batch();
             for i in 0u64..NUM_ELEMENTS {
-                c_hasher.update(&i.to_be_bytes());
-                let element = c_hasher.finalize();
+                let element = c_hasher.update(&i.to_be_bytes()).finalize();
                 batch = batch.add(&mut hasher, &element);
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
@@ -115,8 +114,7 @@ mod tests {
                 let batch = {
                     let mut batch = reference_mmr.new_batch();
                     for j in 0..i {
-                        c_hasher.update(&j.to_be_bytes());
-                        let element = c_hasher.finalize();
+                        let element = c_hasher.update(&j.to_be_bytes()).finalize();
                         batch = batch.add(&mut hasher, &element);
                     }
                     batch.merkleize(&reference_mmr, &mut hasher)
@@ -136,8 +134,7 @@ mod tests {
             {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..NUM_ELEMENTS {
-                    c_hasher.update(&i.to_be_bytes());
-                    let element = c_hasher.finalize();
+                    let element = c_hasher.update(&i.to_be_bytes()).finalize();
                     batch = batch.add(&mut hasher, &element);
                     if i == 101 {
                         // We can't sync mid-batch, so apply the first part,
@@ -150,8 +147,7 @@ mod tests {
                 mmr.sync().await.unwrap();
                 let mut batch = mmr.new_batch();
                 for i in 102u64..NUM_ELEMENTS {
-                    c_hasher.update(&i.to_be_bytes());
-                    let element = c_hasher.finalize();
+                    let element = c_hasher.update(&i.to_be_bytes()).finalize();
                     batch = batch.add(&mut hasher, &element);
                 }
                 let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
@@ -175,8 +171,7 @@ mod tests {
             {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..102 {
-                    c_hasher.update(&i.to_be_bytes());
-                    let element = c_hasher.finalize();
+                    let element = c_hasher.update(&i.to_be_bytes()).finalize();
                     batch = batch.add(&mut hasher, &element);
                 }
                 let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
@@ -184,8 +179,7 @@ mod tests {
                 mmr.sync().await.unwrap();
                 let mut batch = mmr.new_batch();
                 for i in 102u64..NUM_ELEMENTS {
-                    c_hasher.update(&i.to_be_bytes());
-                    let element = c_hasher.finalize();
+                    let element = c_hasher.update(&i.to_be_bytes()).finalize();
                     batch = batch.add(&mut hasher, &element);
                 }
                 let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));

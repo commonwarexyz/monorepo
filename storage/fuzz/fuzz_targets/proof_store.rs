@@ -58,7 +58,7 @@ impl<'a, F: MerkleFamily> Arbitrary<'a> for FuzzInput<F> {
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
-    let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
+    let mut hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
     let proof = Proof::<F, Digest> {
         leaves: input.proof_leaves,
         inactive_peaks: input.inactive_peaks,
@@ -73,15 +73,15 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
     let root = Digest::from(input.root);
     let range = Location::<F>::new(input.range.start)..Location::<F>::new(input.range.end);
 
-    let Ok(proof_store) = ProofStore::new(&hasher, &proof, &input.elements, start_loc, &root)
+    let Ok(proof_store) = ProofStore::new(&mut hasher, &proof, &input.elements, start_loc, &root)
     else {
         return;
     };
 
-    if let Ok(proof) = proof_store.range_proof(&hasher, range) {
-        let _ = proof.verify_range_inclusion(&hasher, &input.elements, start_loc, &root);
+    if let Ok(proof) = proof_store.range_proof(&mut hasher, range) {
+        let _ = proof.verify_range_inclusion(&mut hasher, &input.elements, start_loc, &root);
         let _ = proof.verify_range_inclusion_and_extract_digests(
-            &hasher,
+            &mut hasher,
             &input.elements,
             start_loc,
             &root,
@@ -102,7 +102,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
 
     if let Ok(proof) = proof_store.multi_proof(&locations, &peaks) {
         let _ = proof.verify_multi_inclusion(
-            &hasher,
+            &mut hasher,
             &locations
                 .iter()
                 .map(|loc| (loc.encode(), *loc))
@@ -111,7 +111,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
         );
 
         let _ = proof.verify_range_inclusion_and_extract_digests(
-            &hasher,
+            &mut hasher,
             &input.elements,
             start_loc,
             &root,

@@ -13,7 +13,7 @@ use commonware_cryptography::{Digest, Hasher as CHasher};
 pub trait Hasher<F: Family>: Clone + Send + Sync {
     type Digest: Digest;
 
-    /// Hash a codec value into a single digest.
+    /// Hash an encodable value into a single digest.
     ///
     /// The value is encoded with [`Encode`] and those exact bytes are hashed.
     fn hash<E: Encode>(&mut self, value: E) -> Self::Digest;
@@ -46,7 +46,7 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         self.hash((pos, EncodeRef::new(element)))
     }
 
-    /// Compute the digest of a codec value.
+    /// Compute the digest of an encodable value.
     fn digest<E: Encode>(&mut self, value: E) -> Self::Digest {
         self.hash(value)
     }
@@ -167,12 +167,12 @@ impl<H: CHasher> Standard<H> {
         self.bagging
     }
 
-    /// Hash a codec value into a single digest.
+    /// Hash an encodable value into a single digest.
     pub fn hash<E: Encode>(&mut self, value: E) -> H::Digest {
-        self.hasher.hash_codec(value)
+        self.hasher.hash_encoded(value)
     }
 
-    /// Compute the digest of a codec value.
+    /// Compute the digest of an encodable value.
     pub fn digest<E: Encode>(&mut self, value: E) -> H::Digest {
         self.hash(value)
     }
@@ -196,12 +196,12 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
-        self.hasher.hash_codec((pos, left, right))
+        self.hasher.hash_encoded((pos, left, right))
     }
 
     #[inline]
     fn leaf_digest<E: Encode>(&mut self, pos: Position<F>, element: E) -> Self::Digest {
-        self.hasher.hash_codec((pos, element))
+        self.hasher.hash_encoded((pos, element))
     }
 
     #[inline]
@@ -210,12 +210,12 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
         pos: Position<F>,
         element: &E,
     ) -> Self::Digest {
-        self.hasher.hash_codec((pos, EncodeRef::new(element)))
+        self.hasher.hash_encoded((pos, EncodeRef::new(element)))
     }
 
     #[inline]
     fn fold(&mut self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
-        self.hasher.hash_codec((acc, peak))
+        self.hasher.hash_encoded((acc, peak))
     }
 }
 
@@ -368,7 +368,7 @@ mod tests {
             .expect("zero inactive peaks is always valid");
         assert_ne!(
             empty_out,
-            test_digest::<H>(0),
+            H::Digest::EMPTY,
             "root of empty MMR should be non-zero"
         );
         // Empty root is deterministic.
