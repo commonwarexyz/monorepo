@@ -194,15 +194,15 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
-        H::hash_u64_with_pair(*pos, left, right)
+        self.hasher.hash_u64_with_pair_mut(*pos, left, right)
     }
 
     fn leaf_digest(&mut self, pos: Position<F>, element: &[u8]) -> Self::Digest {
-        H::hash_u64_with_bytes(*pos, element)
+        self.hasher.hash_u64_with_bytes_mut(*pos, element)
     }
 
     fn fold(&mut self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
-        H::hash_pair(acc, peak)
+        self.hasher.hash_pair_mut(acc, peak)
     }
 
     fn root_with_folded_peaks<'a>(
@@ -221,13 +221,13 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
         let mut acc = *first;
         for _ in 0..inactive_peaks_to_fold.saturating_sub(1) {
             let peak = peak_digests.next()?;
-            acc = H::hash_pair(&acc, peak);
+            acc = self.hasher.hash_pair_mut(&acc, peak);
         }
 
         let folded_peaks = match self.root_bagging() {
             Bagging::ForwardFold => {
                 for peak in peak_digests {
-                    acc = H::hash_pair(&acc, peak);
+                    acc = self.hasher.hash_pair_mut(&acc, peak);
                 }
                 acc
             }
@@ -239,16 +239,19 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
 
                 let mut acc = *active_peaks.last().unwrap();
                 for peak in active_peaks.iter().rev().skip(1) {
-                    acc = H::hash_pair(peak, &acc);
+                    acc = self.hasher.hash_pair_mut(peak, &acc);
                 }
                 acc
             }
         };
 
         if committed_inactive_peaks == 0 {
-            Some(H::hash_u64_with_digest(*leaves, &folded_peaks))
+            Some(
+                self.hasher
+                    .hash_u64_with_digest_mut(*leaves, &folded_peaks),
+            )
         } else {
-            Some(H::hash_u64_u64_with_digest(
+            Some(self.hasher.hash_u64_u64_with_digest_mut(
                 *leaves,
                 committed_inactive_peaks as u64,
                 &folded_peaks,

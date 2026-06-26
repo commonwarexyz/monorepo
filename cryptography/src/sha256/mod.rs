@@ -267,7 +267,11 @@ impl Hasher for Sha256 {
         self.blocks[0][..8].copy_from_slice(&first.to_be_bytes());
         self.blocks[0][8..16].copy_from_slice(&second.to_be_bytes());
         self.blocks[0][16..16 + DIGEST_LENGTH].copy_from_slice(digest.as_ref());
-        finish_padding(&mut self.blocks[0], 16 + DIGEST_LENGTH, 16 + DIGEST_LENGTH);
+        finish_padding(
+            &mut self.blocks[0],
+            16 + DIGEST_LENGTH,
+            16 + DIGEST_LENGTH,
+        );
         finalize_one_block_ref(&self.blocks[0])
     }
 }
@@ -535,6 +539,12 @@ mod tests {
         );
 
         let mut hasher = Sha256::new();
+        hasher.update(b"left");
+        hasher.update(b"right");
+        assert_eq!(
+            hasher.finalize(),
+            standard_hash([b"left".as_slice(), b"right".as_slice()])
+        );
         assert_eq!(
             hasher.hash_parts_mut([b"left".as_slice(), b"right".as_slice()]),
             standard_hash([b"left".as_slice(), b"right".as_slice()])

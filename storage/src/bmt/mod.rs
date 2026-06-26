@@ -92,7 +92,8 @@ impl<H: Hasher> Builder<H> {
     /// When added, the leaf is hashed with its position.
     pub fn add(&mut self, leaf: &H::Digest) -> u32 {
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
-        self.leaves.push(H::hash_u32_with_digest(position, leaf));
+        self.leaves
+            .push(self.hasher.hash_u32_with_digest_mut(position, leaf));
         position
     }
 
@@ -152,10 +153,10 @@ impl<D: Digest> Tree<D> {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
             let mut chunks = current_level.chunks_exact(2);
             for chunk in &mut chunks {
-                next_level.push(H::hash_pair(&chunk[0], &chunk[1]));
+                next_level.push(hasher.hash_pair_mut(&chunk[0], &chunk[1]));
             }
             if let [last] = chunks.remainder() {
-                next_level.push(H::hash_pair(last, last));
+                next_level.push(hasher.hash_pair_mut(last, last));
             }
 
             // Add the computed level to the tree
@@ -166,7 +167,7 @@ impl<D: Digest> Tree<D> {
         // Compute the finalized root: H(leaf_count || tree_root)
         // This binds the root to the tree size, preventing malleability attacks.
         let tree_root = levels.last().first();
-        let root = H::hash_u32_with_digest(leaf_count, tree_root);
+        let root = hasher.hash_u32_with_digest_mut(leaf_count, tree_root);
 
         Self {
             empty,
@@ -543,7 +544,7 @@ impl<D: Digest> Proof<D> {
         if elements.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
-                let empty_tree_root = hasher.finalize();
+                let empty_tree_root = hasher.hash_parts_mut(core::iter::empty());
                 let finalized = hasher.hash_u32_with_digest_mut(0, &empty_tree_root);
                 if finalized == *root {
                     return Ok(());
