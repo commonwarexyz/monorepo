@@ -15,7 +15,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{simplex::types::Activity, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
-    Hasher,
+    Hasher, PendingHasher,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Metrics, Sink, Spawner, Stream};
@@ -109,8 +109,7 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
                     };
 
                     // Hash the message
-                    self.hasher.update(&block.encode());
-                    let digest = self.hasher.finalize();
+                    let digest = self.hasher.update(&block.encode()).finalize();
                     info!(?block, payload = ?digest, "proposed");
 
                     // Publish to indexer

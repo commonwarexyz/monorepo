@@ -318,14 +318,16 @@ pub async fn hash_file(path: &Path) -> Result<String, Error> {
         let buffer_size = file_size.min(MAX_HASH_BUFFER_SIZE);
         let mut hasher = Sha256::new();
         let mut buffer = vec![0u8; buffer_size];
+        // Prime an empty `Pending` so the streaming chunks can be folded into it.
+        let mut pending = hasher.update(&[]);
         loop {
             let bytes_read = file.read(&mut buffer)?;
             if bytes_read == 0 {
                 break;
             }
-            hasher.update(&buffer[..bytes_read]);
+            pending = pending.update(&buffer[..bytes_read]);
         }
-        Ok(hasher.finalize().to_string())
+        Ok(pending.finalize().to_string())
     })
     .await
     .map_err(|e| Error::Io(std::io::Error::other(e)))?

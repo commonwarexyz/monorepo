@@ -40,10 +40,10 @@ impl Committable for Request {
 impl Digestible for Request {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        let mut hasher = Sha256::new();
-        hasher.update(&self.id.to_be_bytes());
-        hasher.update(&self.data.to_be_bytes());
-        hasher.finalize()
+        Sha256::new()
+            .update(&self.id.to_be_bytes())
+            .update(&self.data.to_be_bytes())
+            .finalize()
     }
 }
 
@@ -87,9 +87,9 @@ impl Digestible for Response {
     type Digest = <Sha256 as Hasher>::Digest;
 
     fn digest(&self) -> Self::Digest {
-        let mut hasher = Sha256::new();
-        hasher.update(&self.id.to_be_bytes());
-        hasher.update(&self.result.to_be_bytes());
-        hasher.finalize()
+        Sha256::new()
+            .update(&self.id.to_be_bytes())
+            .update(&self.result.to_be_bytes())
+            .finalize()
     }
 }

@@ -32,7 +32,8 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey, Sha256,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PendingHasher, PublicKey,
+    Sha256,
 };
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
@@ -123,11 +124,8 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
 
         if let Some(seed) = &self.seed {
             let mut hasher = H::new();
-            permutation.sort_by_key(|&index| {
-                hasher.update(seed);
-                hasher.update(&index.get().encode());
-                hasher.finalize()
-            });
+            permutation
+                .sort_by_key(|&index| hasher.update(seed).update(&index.get().encode()).finalize());
         }
 
         RoundRobinElector {

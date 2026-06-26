@@ -807,13 +807,24 @@ mod tests {
                 assert!(mb1.broadcast(Recipients::All, m2.clone()).accepted());
                 assert!(mb1.broadcast(Recipients::All, m3.clone()).accepted());
 
-                let mut hasher = Sha256::default();
+                let mut contents = Vec::new();
                 for msg in [&m1, &m2, &m3] {
                     if let Some(value) = mb1.get(msg.digest()).await {
-                        hasher.update(&value.content);
+                        contents.push(value.content);
                     }
                 }
-                hasher.finalize()
+                let mut hasher = Sha256::default();
+                let mut iter = contents.iter();
+                match iter.next() {
+                    Some(first) => {
+                        let mut pending = hasher.update(first);
+                        for content in iter {
+                            pending = pending.update(content);
+                        }
+                        pending.finalize()
+                    }
+                    None => hasher.update(&[]).finalize(),
+                }
             })
         };
 

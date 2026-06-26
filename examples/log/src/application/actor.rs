@@ -4,7 +4,7 @@ use super::{
     Config, Scheme,
 };
 use commonware_actor::mailbox::{self, Receiver};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Hasher, PendingHasher};
 use commonware_formatting::hex;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use rand::Rng;
@@ -53,8 +53,7 @@ impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
                     self.context.fill(&mut msg[..]);
 
                     // Hash the message
-                    self.hasher.update(&msg);
-                    let digest = self.hasher.finalize();
+                    let digest = self.hasher.update(&msg).finalize();
                     info!(msg = hex(&msg), payload = ?digest, "proposed");
 
                     // Send digest to consensus

@@ -3,7 +3,7 @@
 //! participants are active at a given view.
 
 use crate::Scheme;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Hasher, PendingHasher};
 use std::num::NonZeroUsize;
 
 mod actor;
@@ -19,8 +19,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub fn genesis<H: Hasher>() -> H::Digest {
     // Use the digest of the genesis message as the initial payload.
     let mut hasher = H::default();
-    hasher.update(GENESIS);
-    hasher.finalize()
+    hasher.update(GENESIS).finalize()
 }
 
 /// Configuration for the application.

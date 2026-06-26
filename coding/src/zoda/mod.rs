@@ -119,7 +119,7 @@ use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     transcript::{Summary, Transcript},
-    Digest, Hasher,
+    Digest, Hasher, PendingHasher,
 };
 use commonware_math::{
     fields::goldilocks::F,
@@ -182,10 +182,15 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
 
 fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
     let mut h = H::new();
-    for x in row {
-        h.update(&x.to_le_bytes());
+    let mut iter = row.iter();
+    let Some(first) = iter.next() else {
+        return h.update(&[]).finalize();
+    };
+    let mut pending = h.update(&first.to_le_bytes());
+    for x in iter {
+        pending = pending.update(&x.to_le_bytes());
     }
-    h.finalize()
+    pending.finalize()
 }
 
 mod topology;

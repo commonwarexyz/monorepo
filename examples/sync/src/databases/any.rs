@@ -62,17 +62,12 @@ where
         let mut hasher = <Hasher as CryptoHasher>::new();
         let mut operations = Vec::new();
         for i in 0..count {
-            let key = {
-                hasher.update(&i.to_be_bytes());
-                hasher.update(&seed.to_be_bytes());
-                hasher.finalize()
-            };
+            let key = hasher
+                .update(&i.to_be_bytes())
+                .update(&seed.to_be_bytes())
+                .finalize();
 
-            let value = {
-                hasher.update(&key);
-                hasher.update(b"value");
-                hasher.finalize()
-            };
+            let value = hasher.update(&key).update(b"value").finalize();
 
             operations.push(Operation::Update(Update(key, value)));
 

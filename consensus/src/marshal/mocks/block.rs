@@ -1,7 +1,7 @@
 use crate::types::Height;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Error, Read, ReadExt, Write};
-use commonware_cryptography::{Digest, Digestible, Hasher};
+use commonware_cryptography::{Digest, Digestible, Hasher, PendingHasher};
 use std::fmt::Debug;
 
 /// A mock block type for testing that stores consensus context.
@@ -33,11 +33,12 @@ impl<D: Digest, C: Codec> Block<D, C> {
         timestamp: u64,
     ) -> D {
         let mut hasher = H::new();
-        hasher.update(parent);
-        hasher.update(&height.get().to_be_bytes());
-        hasher.update(&context.encode());
-        hasher.update(&timestamp.to_be_bytes());
-        hasher.finalize()
+        hasher
+            .update(parent)
+            .update(&height.get().to_be_bytes())
+            .update(&context.encode())
+            .update(&timestamp.to_be_bytes())
+            .finalize()
     }
 
     pub fn new<H: Hasher<Digest = D>>(

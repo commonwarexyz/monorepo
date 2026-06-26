@@ -194,7 +194,7 @@ async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration 
 async fn seed_imm_db(db: &mut ImmDb, keys: u64, counter: &mut u64, rng: &mut StdRng) {
     let mut batch = db.new_batch();
     for _ in 0..keys {
-        let key = Sha256::new().hash_encoded(counter);
+        let key = Sha256::new().hash_encoded(*counter);
         *counter += 1;
         batch = batch.set(key, make_fixed_value(rng));
     }
