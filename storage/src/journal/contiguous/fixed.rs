@@ -95,7 +95,7 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::{
-    blobs::{Blob, Blobs, Partition, Writable},
+    blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
 };
 use crate::{
@@ -105,10 +105,10 @@ use crate::{
     },
     Context,
 };
-use commonware_codec::{CodecFixedShared, DecodeExt as _};
+use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Writer},
-    IoBuf,
+    Blob as RBlob, Buf, IoBuf,
 };
 use futures::{stream, Stream, StreamExt as _};
 use std::{
@@ -137,15 +137,13 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
     Ok(pruning_boundary.max(start))
 }
 
-async fn replay_via_read_limit<'a, C>(
-    journal: &'a C,
+fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
+    blobs: &Blobs<'a, B>,
+    bounds: Range<u64>,
+    items_per_blob: NonZeroU64,
     buffer: NonZeroUsize,
     start_pos: u64,
-) -> Result<impl Stream<Item = Result<(u64, C::Item), Error>> + Send + 'a, Error>
-where
-    C: super::Contiguous + 'a,
-{
-    let bounds = journal.bounds();
+) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + use<'a, B, A>, Error> {
     if start_pos > bounds.end {
         return Err(Error::ItemOutOfRange(start_pos));
     }
@@ -153,19 +151,105 @@ where
         return Err(Error::ItemPruned(start_pos));
     }
 
-    Ok(stream::unfold(start_pos, move |pos| async move {
-        if pos == bounds.end {
+    let mut states = Vec::new();
+    if start_pos < bounds.end {
+        let items_per_blob = items_per_blob.get();
+        let start_blob = start_pos / items_per_blob;
+        let end_blob = (bounds.end - 1) / items_per_blob;
+        let items_per_batch = (buffer.get() / A::SIZE).max(1);
+
+        for blob in start_blob..=end_blob {
+            let blob_first = first_in_blob(bounds.start, blob, items_per_blob)?;
+            let first_pos = if blob == start_blob {
+                start_pos
+            } else {
+                blob_first
+            };
+            let next_blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
+            let blob_end = next_blob
+                .checked_mul(items_per_blob)
+                .ok_or(Error::OffsetOverflow)?
+                .min(bounds.end);
+            let offset = (first_pos - blob_first)
+                .checked_mul(A::SIZE as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            let blob = blobs
+                .get(blob)
+                .expect("positions in bounds map to a retained blob");
+
+            states.push(FixedReplayState::<B, A> {
+                replay: blob.replay_from(offset, buffer)?,
+                pos: first_pos,
+                end_pos: blob_end,
+                items_per_batch,
+                _marker: PhantomData,
+            });
+        }
+    }
+
+    Ok(stream::iter(states).flat_map(|state| {
+        stream::unfold(state, FixedReplayState::next_batch).flat_map(stream::iter)
+    }))
+}
+
+struct FixedReplayState<'a, B: RBlob, A> {
+    replay: BlobReplay<'a, B>,
+    pos: u64,
+    end_pos: u64,
+    items_per_batch: usize,
+    _marker: PhantomData<A>,
+}
+
+impl<B: RBlob, A: CodecFixedShared> FixedReplayState<'_, B, A> {
+    async fn next_batch(mut self) -> Option<(Vec<Result<(u64, A), Error>>, Self)> {
+        if self.pos == self.end_pos {
             return None;
         }
-        match journal.read_limit(pos, buffer).await {
-            Ok((items, next)) => {
-                let batch = (pos..next).zip(items).map(Ok).collect::<Vec<_>>();
-                Some((stream::iter(batch), next))
+
+        let mut batch = Vec::new();
+        match self.replay.ensure(A::SIZE).await {
+            Ok(true) => {}
+            Ok(false) => {
+                batch.push(Err(Error::Corruption(format!(
+                    "blob ended before position {}",
+                    self.pos
+                ))));
+                self.pos = self.end_pos;
+                return Some((batch, self));
             }
-            Err(err) => Some((stream::iter(vec![Err(err)]), bounds.end)),
+            Err(err) => {
+                batch.push(Err(err));
+                self.pos = self.end_pos;
+                return Some((batch, self));
+            }
         }
-    })
-    .flatten())
+
+        let available = (self.replay.remaining() / A::SIZE) as u64;
+        let remaining = self.end_pos - self.pos;
+        let count = available
+            .min(self.items_per_batch as u64)
+            .min(remaining) as usize;
+        let Some(next_pos) = self.pos.checked_add(count as u64) else {
+            batch.push(Err(Error::OffsetOverflow));
+            self.pos = self.end_pos;
+            return Some((batch, self));
+        };
+        batch.reserve(count);
+
+        let base = self.pos;
+        for i in 0..count {
+            match A::read(&mut self.replay) {
+                Ok(item) => batch.push(Ok((base + i as u64, item))),
+                Err(err) => {
+                    batch.push(Err(Error::Codec(err)));
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+            }
+        }
+        self.pos = next_pos;
+        Some((batch, self))
+    }
 }
 
 /// How a blob's on-disk item count compares to its logical capacity.
@@ -1201,7 +1285,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        replay_via_read_limit(self, buffer, start_pos).await
+        replay_stream(&self.blobs, self.bounds.clone(), self.items_per_blob, buffer, start_pos)
     }
 }
 
@@ -1237,7 +1321,8 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        replay_via_read_limit(self, buffer, start_pos).await
+        let blobs = self.blobs.reader();
+        replay_stream(&blobs, self.bounds.clone(), self.items_per_blob, buffer, start_pos)
     }
 }
 
