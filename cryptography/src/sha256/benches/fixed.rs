@@ -1,3 +1,5 @@
+use bytes::BufMut;
+use commonware_codec::Write;
 use commonware_cryptography::{Hasher as _, Sha256};
 use criterion::{criterion_group, Criterion};
 use std::hint::black_box;
@@ -12,17 +14,40 @@ fn bench_fixed(c: &mut Criterion) {
         b.iter(|| black_box(hasher.hash_pair(black_box(&left), black_box(&right))));
     });
 
-    c.bench_function(&format!("{}/shape=u32_digest", module_path!()), |b| {
-        b.iter(|| black_box(hasher.hash_u32_with_digest(black_box(7), black_box(&left))));
+    // Same 64-byte preimage as `shape=pair`, but routed through the generic (runtime-length)
+    // `hash_parts` path so its overhead can be compared against the constant-length fast paths.
+    c.bench_function(&format!("{}/shape=pair_parts", module_path!()), |b| {
+        b.iter(|| {
+            black_box(hasher.hash_parts([black_box(&left).as_ref(), black_box(&right).as_ref()]))
+        });
     });
 
+    c.bench_function(&format!("{}/shape=u32_digest", module_path!()), |b| {
+        b.iter(|| {
+            black_box(hasher.hash_codec(|buf| {
+                black_box(7u32).write(buf);
+                black_box(&left).write(buf);
+            }))
+        });
+    });
+
+    // Fixed prefix followed by a raw, variable-length suffix (the Merkle leaf shape).
     c.bench_function(&format!("{}/shape=u64_bytes32", module_path!()), |b| {
-        b.iter(|| black_box(hasher.hash_u64_with_bytes(black_box(7), black_box(bytes.as_slice()))));
+        b.iter(|| {
+            black_box(hasher.hash_codec(|buf| {
+                black_box(7u64).write(buf);
+                buf.put_slice(black_box(bytes.as_slice()));
+            }))
+        });
     });
 
     c.bench_function(&format!("{}/shape=u64_pair", module_path!()), |b| {
         b.iter(|| {
-            black_box(hasher.hash_u64_with_pair(black_box(7), black_box(&left), black_box(&right)))
+            black_box(hasher.hash_codec(|buf| {
+                black_box(7u64).write(buf);
+                black_box(&left).write(buf);
+                black_box(&right).write(buf);
+            }))
         });
     });
 }

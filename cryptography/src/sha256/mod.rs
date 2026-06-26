@@ -35,8 +35,7 @@ use core::{
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
-use sha2::block_api::compress256;
-use sha2::{Digest as _, Sha256 as ISha256};
+use sha2::{block_api::compress256, Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
@@ -44,23 +43,35 @@ pub type CoreSha256 = ISha256;
 
 const DIGEST_LENGTH: usize = 32;
 const BLOCK_LENGTH: usize = 64;
+
+/// Number of scratch blocks used by the fixed (non-streaming) hashing path.
+const SCRATCH_BLOCKS: usize = 2;
+
+/// Largest message length whose SHA-256 padding still fits within [`SCRATCH_BLOCKS`] compression
+/// blocks. Padding appends a `0x80` byte and an 8-byte big-endian length, so the fixed path can
+/// absorb at most `SCRATCH_BLOCKS * BLOCK_LENGTH - 9` message bytes before it must fall back to the
+/// streaming hasher.
+const FIXED_CAPACITY: usize = SCRATCH_BLOCKS * BLOCK_LENGTH - 9;
+
 const INITIAL_STATE: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-    0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 /// SHA-256 hasher.
 #[derive(Debug)]
 pub struct Sha256 {
+    /// Streaming state backing [`Hasher::update`], [`Hasher::finalize`], and [`Hasher::reset`].
     hasher: ISha256,
-    blocks: [[u8; BLOCK_LENGTH]; 2],
+    /// Reusable buffer for the fixed (non-streaming) hashing path. Reusing it across calls avoids
+    /// re-zeroing a fresh buffer on every short hash.
+    scratch: [u8; SCRATCH_BLOCKS * BLOCK_LENGTH],
 }
 
 impl Default for Sha256 {
     fn default() -> Self {
         Self {
             hasher: ISha256::new(),
-            blocks: [[0u8; BLOCK_LENGTH]; 2],
+            scratch: [0u8; SCRATCH_BLOCKS * BLOCK_LENGTH],
         }
     }
 }
@@ -101,153 +112,72 @@ impl Hasher for Sha256 {
 
     #[inline]
     fn hash_parts<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
-        self.reset();
-        for part in parts {
-            self.update(part);
+        let mut parts = parts.into_iter();
+        let mut len = 0;
+        while let Some(part) = parts.next() {
+            let end = len + part.len();
+            if end > FIXED_CAPACITY {
+                // The preimage is too long for the fixed path: stream the prefix buffered so far,
+                // this part, and the remaining parts through the standard hasher.
+                let mut hasher = ISha256::new();
+                hasher.update(&self.scratch[..len]);
+                hasher.update(part);
+                for part in parts {
+                    hasher.update(part);
+                }
+                let array: [u8; DIGEST_LENGTH] = hasher.finalize().into();
+                return Digest(array);
+            }
+            self.scratch[len..end].copy_from_slice(part);
+            len = end;
         }
-        self.finalize()
+        finalize_fixed(&mut self.scratch, len)
     }
 
     #[inline]
     fn hash_pair(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
-        self.blocks[0][..DIGEST_LENGTH].copy_from_slice(left.as_ref());
-        self.blocks[0][DIGEST_LENGTH..].copy_from_slice(right.as_ref());
-        finish_padding(&mut self.blocks[1], 0, 2 * DIGEST_LENGTH);
-        finalize_two_blocks_ref(&self.blocks)
+        self.scratch[..DIGEST_LENGTH].copy_from_slice(left.as_ref());
+        self.scratch[DIGEST_LENGTH..2 * DIGEST_LENGTH].copy_from_slice(right.as_ref());
+        finalize_fixed(&mut self.scratch, 2 * DIGEST_LENGTH)
     }
 
     #[inline]
-    fn hash_u32_with_digest(&mut self, prefix: u32, digest: &Self::Digest) -> Self::Digest {
-        let prefix = prefix.to_be_bytes();
-        self.blocks[0][..prefix.len()].copy_from_slice(&prefix);
-        self.blocks[0][prefix.len()..prefix.len() + DIGEST_LENGTH].copy_from_slice(digest.as_ref());
-        finish_padding(
-            &mut self.blocks[0],
-            prefix.len() + DIGEST_LENGTH,
-            prefix.len() + DIGEST_LENGTH,
-        );
-        finalize_one_block_ref(&self.blocks[0])
-    }
-
-    #[inline]
-    fn hash_u32_with_bytes(&mut self, prefix: u32, bytes: &[u8]) -> Self::Digest {
-        let prefix = prefix.to_be_bytes();
-        let message_len = prefix.len() + bytes.len();
-        if message_len > 55 {
-            return hash_prefix_bytes(&prefix, bytes);
-        }
-        self.blocks[0][..prefix.len()].copy_from_slice(&prefix);
-        self.blocks[0][prefix.len()..message_len].copy_from_slice(bytes);
-        finish_padding(&mut self.blocks[0], message_len, message_len);
-        finalize_one_block_ref(&self.blocks[0])
-    }
-
-    #[inline]
-    fn hash_u64_with_digest(&mut self, prefix: u64, digest: &Self::Digest) -> Self::Digest {
-        let prefix = prefix.to_be_bytes();
-        self.blocks[0][..prefix.len()].copy_from_slice(&prefix);
-        self.blocks[0][prefix.len()..prefix.len() + DIGEST_LENGTH].copy_from_slice(digest.as_ref());
-        finish_padding(
-            &mut self.blocks[0],
-            prefix.len() + DIGEST_LENGTH,
-            prefix.len() + DIGEST_LENGTH,
-        );
-        finalize_one_block_ref(&self.blocks[0])
-    }
-
-    #[inline]
-    fn hash_u64_with_bytes(&mut self, prefix: u64, bytes: &[u8]) -> Self::Digest {
-        let prefix = prefix.to_be_bytes();
-        let message_len = prefix.len() + bytes.len();
-        if message_len > 55 {
-            return hash_prefix_bytes(&prefix, bytes);
-        }
-        self.blocks[0][..prefix.len()].copy_from_slice(&prefix);
-        self.blocks[0][prefix.len()..message_len].copy_from_slice(bytes);
-        finish_padding(&mut self.blocks[0], message_len, message_len);
-        finalize_one_block_ref(&self.blocks[0])
-    }
-
-    #[inline]
-    fn hash_u64_with_pair(
-        &mut self,
-        prefix: u64,
-        left: &Self::Digest,
-        right: &Self::Digest,
-    ) -> Self::Digest {
-        let prefix = prefix.to_be_bytes();
-        self.blocks[0][..prefix.len()].copy_from_slice(&prefix);
-        self.blocks[0][prefix.len()..prefix.len() + DIGEST_LENGTH].copy_from_slice(left.as_ref());
-        self.blocks[0][prefix.len() + DIGEST_LENGTH..]
-            .copy_from_slice(&right.as_ref()[..24]);
-        self.blocks[1][..8].copy_from_slice(&right.as_ref()[24..]);
-        finish_padding(
-            &mut self.blocks[1],
-            8,
-            prefix.len() + 2 * DIGEST_LENGTH,
-        );
-        finalize_two_blocks_ref(&self.blocks)
-    }
-
-    #[inline]
-    fn hash_u64_u64_with_digest(
-        &mut self,
-        first: u64,
-        second: u64,
-        digest: &Self::Digest,
-    ) -> Self::Digest {
-        self.blocks[0][..8].copy_from_slice(&first.to_be_bytes());
-        self.blocks[0][8..16].copy_from_slice(&second.to_be_bytes());
-        self.blocks[0][16..16 + DIGEST_LENGTH].copy_from_slice(digest.as_ref());
-        finish_padding(
-            &mut self.blocks[0],
-            16 + DIGEST_LENGTH,
-            16 + DIGEST_LENGTH,
-        );
-        finalize_one_block_ref(&self.blocks[0])
+    fn hash_codec(&mut self, write: impl FnOnce(&mut &mut [u8])) -> Self::Digest {
+        // Write directly into the scratch (capped at the two-block fast path; an over-long preimage
+        // panics in the cursor). For fixed-size writes `len` folds to a compile-time constant, so
+        // `finalize_fixed` const-folds at the call site, matching hand-unrolled per-shape hashing.
+        let mut tail: &mut [u8] = &mut self.scratch[..FIXED_CAPACITY];
+        write(&mut tail);
+        let len = FIXED_CAPACITY - tail.len();
+        finalize_fixed(&mut self.scratch, len)
     }
 }
 
+/// Append SHA-256 padding to the `message_len` message bytes already written at the start of
+/// `scratch`, then compress the resulting one or two blocks into a digest.
+///
+/// The padding (a `0x80` byte, zero fill, and the 64-bit big-endian bit length) fully overwrites
+/// every byte of the compressed blocks past `message_len`, so stale data left in `scratch` by a
+/// previous call cannot leak into the result.
 #[inline]
-fn finalize_one_block(mut block: [u8; BLOCK_LENGTH], message_len: usize) -> Digest {
-    debug_assert!(message_len <= 55);
-    finish_padding(&mut block, message_len, message_len);
-    finalize_one_block_ref(&block)
-}
+fn finalize_fixed(scratch: &mut [u8; SCRATCH_BLOCKS * BLOCK_LENGTH], message_len: usize) -> Digest {
+    // SAFETY: the only callers (`hash_parts`, `hash_pair`) never build a preimage longer than
+    // `FIXED_CAPACITY` (longer inputs take the streaming fallback). Surfacing this invariant lets
+    // the compiler prove every padding write below is in-bounds and drop the panic paths, which is
+    // what makes the fixed path competitive with hand-unrolled per-shape hashing. In debug builds
+    // this still panics if the invariant is ever violated.
+    unsafe { core::hint::assert_unchecked(message_len <= FIXED_CAPACITY) };
+    // Smallest number of blocks holding the message plus its 9 mandatory padding bytes (the `0x80`
+    // terminator and the 8-byte length field).
+    let blocks = (message_len + 9).div_ceil(BLOCK_LENGTH);
+    let used = blocks * BLOCK_LENGTH;
+    scratch[message_len] = 0x80;
+    scratch[message_len + 1..used - 8].fill(0);
+    scratch[used - 8..used].copy_from_slice(&((message_len as u64) * 8).to_be_bytes());
 
-#[inline]
-fn hash_prefix_bytes(prefix: &[u8], bytes: &[u8]) -> Digest {
-    let message_len = prefix.len() + bytes.len();
-    if message_len <= 55 {
-        let mut block = [0u8; BLOCK_LENGTH];
-        block[..prefix.len()].copy_from_slice(prefix);
-        block[prefix.len()..message_len].copy_from_slice(bytes);
-        return finalize_one_block(block, message_len);
-    }
-    Sha256::new().hash_parts([prefix, bytes])
-}
-
-#[inline]
-fn finalize_one_block_ref(block: &[u8; BLOCK_LENGTH]) -> Digest {
     let mut state = INITIAL_STATE;
-    compress256(&mut state, core::slice::from_ref(block));
+    compress256(&mut state, scratch[..used].as_chunks::<BLOCK_LENGTH>().0);
     digest_from_state(state)
-}
-
-#[inline]
-fn finalize_two_blocks_ref(blocks: &[[u8; BLOCK_LENGTH]; 2]) -> Digest {
-    let mut state = INITIAL_STATE;
-    compress256(&mut state, blocks);
-    digest_from_state(state)
-}
-
-#[inline]
-fn finish_padding(block: &mut [u8; BLOCK_LENGTH], offset: usize, message_len: usize) {
-    block[offset] = 0x80;
-    if offset + 1 < 56 {
-        block[offset + 1..56].fill(0);
-    }
-    block[56..].copy_from_slice(&((message_len as u64) * 8).to_be_bytes());
 }
 
 #[inline]
@@ -353,21 +283,15 @@ mod tests {
     #[test]
     fn test_sha256() {
         let msg = b"hello world";
-
-        // Generate initial hash
         let mut hasher = Sha256::new();
         hasher.update(msg);
         let digest = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
-
-        // Reuse hasher
         hasher.update(msg);
         let digest = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
-
-        // Test simple hasher
         let hash = Sha256::hash(msg);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
@@ -383,11 +307,9 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(msg);
         let digest = hasher.finalize();
-
         let encoded = digest.encode();
         assert_eq!(encoded.len(), DIGEST_LENGTH);
         assert_eq!(encoded, digest.as_ref());
-
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);
     }
@@ -400,80 +322,112 @@ mod tests {
         hasher.finalize()
     }
 
+    fn assert_parts_match(hasher: &mut Sha256, parts: &[&[u8]]) {
+        let total: usize = parts.iter().map(|p| p.len()).sum();
+        assert_eq!(
+            hasher.hash_parts(parts.iter().copied()),
+            standard_hash(parts.iter().copied()),
+            "hash_parts mismatch for {} parts totalling {total} bytes",
+            parts.len(),
+        );
+    }
+
     #[test]
     fn test_fixed_hashes_match_standard_sha256() {
         let left = Sha256::hash(b"left");
         let right = Sha256::hash(b"right");
-        let payload = b"payload";
-        let long_payload = [42u8; 64];
-
-        // Reuse a single hasher across every call to ensure the scratchpad is
-        // fully overwritten between operations (no stale-data corruption).
         let mut hasher = Sha256::new();
-
-        // Standard incremental path.
-        hasher.update(b"left");
-        hasher.update(b"right");
-        assert_eq!(
-            hasher.finalize(),
-            standard_hash([b"left".as_slice(), b"right".as_slice()])
-        );
-
-        assert_eq!(
-            hasher.hash_parts([b"left".as_slice(), b"right".as_slice()]),
-            standard_hash([b"left".as_slice(), b"right".as_slice()])
-        );
         assert_eq!(
             hasher.hash_pair(&left, &right),
-            standard_hash([left.as_ref(), right.as_ref()])
+            standard_hash([left.as_ref(), right.as_ref()]),
+        );
+        assert_parts_match(&mut hasher, &[&7u32.to_be_bytes(), left.as_ref()]);
+        assert_parts_match(&mut hasher, &[&9u64.to_be_bytes(), left.as_ref()]);
+        assert_parts_match(&mut hasher, &[&9u64.to_be_bytes(), b"payload"]);
+        assert_parts_match(
+            &mut hasher,
+            &[&11u64.to_be_bytes(), left.as_ref(), right.as_ref()],
+        );
+        assert_parts_match(
+            &mut hasher,
+            &[&13u64.to_be_bytes(), &17u64.to_be_bytes(), left.as_ref()],
+        );
+        assert_parts_match(&mut hasher, &[]);
+        assert_parts_match(&mut hasher, &[b"x"]);
+        for len in [
+            0usize, 1, 54, 55, 56, 63, 64, 71, 72, 118, 119, 120, 200, 1000,
+        ] {
+            let blob = vec![0xABu8; len];
+            assert_parts_match(&mut hasher, &[blob.as_slice()]);
+            let split = len.min(3);
+            assert_parts_match(&mut hasher, &[&blob[..split], &blob[split..]]);
+        }
+        hasher.update(b"streamed");
+        let _ = hasher.hash_pair(&left, &right);
+        let _ = hasher.hash_parts([b"unrelated".as_slice(), [0xCD; 200].as_slice()]);
+        assert_eq!(hasher.finalize(), standard_hash([b"streamed".as_slice()]));
+    }
+
+    #[test]
+    fn test_hash_codec_matches_standard_sha256() {
+        let left = Sha256::hash(b"left");
+        let right = Sha256::hash(b"right");
+        let mut hasher = Sha256::new();
+
+        // Each `hash_codec` closure must hash the same bytes as the equivalent `hash_parts` over the
+        // big-endian encodings, across every fixed shape used in the storage crates.
+        assert_eq!(
+            hasher.hash_codec(|b| {
+                left.write(b);
+                right.write(b);
+            }),
+            standard_hash([left.as_ref(), right.as_ref()]),
         );
         assert_eq!(
-            hasher.hash_u32_with_digest(7, &left),
-            standard_hash([7u32.to_be_bytes().as_slice(), left.as_ref()])
+            hasher.hash_codec(|b| {
+                7u32.write(b);
+                left.write(b);
+            }),
+            standard_hash([7u32.to_be_bytes().as_slice(), left.as_ref()]),
         );
         assert_eq!(
-            hasher.hash_u32_with_bytes(7, left.as_ref()),
-            standard_hash([7u32.to_be_bytes().as_slice(), left.as_ref()])
+            hasher.hash_codec(|b| {
+                9u64.write(b);
+                left.write(b);
+            }),
+            standard_hash([9u64.to_be_bytes().as_slice(), left.as_ref()]),
         );
         assert_eq!(
-            hasher.hash_u32_with_bytes(7, payload),
-            standard_hash([7u32.to_be_bytes().as_slice(), payload])
-        );
-        assert_eq!(
-            hasher.hash_u32_with_bytes(7, &long_payload),
-            standard_hash([7u32.to_be_bytes().as_slice(), long_payload.as_slice()])
-        );
-        assert_eq!(
-            hasher.hash_u64_with_digest(9, &left),
-            standard_hash([9u64.to_be_bytes().as_slice(), left.as_ref()])
-        );
-        assert_eq!(
-            hasher.hash_u64_with_bytes(9, left.as_ref()),
-            standard_hash([9u64.to_be_bytes().as_slice(), left.as_ref()])
-        );
-        assert_eq!(
-            hasher.hash_u64_with_bytes(9, payload),
-            standard_hash([9u64.to_be_bytes().as_slice(), payload])
-        );
-        assert_eq!(
-            hasher.hash_u64_with_bytes(9, &long_payload),
-            standard_hash([9u64.to_be_bytes().as_slice(), long_payload.as_slice()])
-        );
-        assert_eq!(
-            hasher.hash_u64_with_pair(11, &left, &right),
+            hasher.hash_codec(|b| {
+                11u64.write(b);
+                left.write(b);
+                right.write(b);
+            }),
             standard_hash([
                 11u64.to_be_bytes().as_slice(),
                 left.as_ref(),
-                right.as_ref()
-            ])
+                right.as_ref(),
+            ]),
         );
         assert_eq!(
-            hasher.hash_u64_u64_with_digest(13, 17, &left),
+            hasher.hash_codec(|b| {
+                13u64.write(b);
+                17u64.write(b);
+                left.write(b);
+            }),
             standard_hash([
                 13u64.to_be_bytes().as_slice(),
                 17u64.to_be_bytes().as_slice(),
-                left.as_ref()
-            ])
+                left.as_ref(),
+            ]),
+        );
+        // Fixed prefix followed by a raw, variable-length suffix (the Merkle leaf shape).
+        assert_eq!(
+            hasher.hash_codec(|b| {
+                9u64.write(b);
+                b.put_slice(b"payload");
+            }),
+            standard_hash([9u64.to_be_bytes().as_slice(), b"payload".as_slice()]),
         );
     }
 

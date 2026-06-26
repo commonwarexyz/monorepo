@@ -275,75 +275,65 @@ commonware_macros::stability_scope!(BETA {
             Self::new().update(message).finalize()
         }
 
-        /// Hash an arbitrary sequence of byte slices into a single digest.
+        /// Hash the concatenation of a sequence of byte slices into a single digest.
+        ///
+        /// The parts are hashed back-to-back with no separators between them. This is a one-shot
+        /// helper that hashes only `parts`; it does not incorporate data previously supplied to
+        /// [`Hasher::update`]. Callers that need a fixed-shape preimage (e.g. a length prefix
+        /// followed by a digest) encode the pieces themselves and pass them as parts, for example
+        /// `hasher.hash_parts([index.to_be_bytes().as_slice(), digest.as_ref()])`.
+        ///
+        /// Implementations are encouraged to specialize this for short, fixed-size preimages (the
+        /// common case in Merkle trees) to avoid per-call streaming overhead.
         #[inline]
         fn hash_parts<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
-            self.reset();
+            let mut hasher = Self::new();
             for part in parts {
-                self.update(part);
+                hasher.update(part);
             }
-            self.finalize()
+            hasher.finalize()
         }
 
-        /// Hash `left || right`.
+        /// Hash the concatenation `left || right` of two digests.
+        ///
+        /// This is the hot path for Merkle-family structures and is equivalent to
+        /// `self.hash_parts([left.as_ref(), right.as_ref()])`.
         #[inline]
         fn hash_pair(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
             self.hash_parts([left.as_ref(), right.as_ref()])
         }
 
-        /// Hash `prefix || digest`, where `prefix` is encoded as big-endian `u32`.
+        /// Hash a short, fixed-shape preimage written directly into a scratch buffer.
+        ///
+        /// `write` receives a byte cursor and writes the preimage into it (e.g. a big-endian
+        /// position followed by one or more digests, or a position followed by raw element bytes).
+        /// Implementations hand `write` a reusable buffer and compress it in place, avoiding the
+        /// per-call overhead of [`Hasher::hash_parts`]. The cursor is a `&mut [u8]` (a
+        /// [`bytes::BufMut`]): write fixed-size codec values with [`commonware_codec::Write::write`]
+        /// (e.g. a `u64` writes 8 big-endian bytes, a digest writes its raw bytes) and raw bytes
+        /// with [`bytes::BufMut::put_slice`]. The bytes hashed are exactly those written, so this
+        /// produces the same digest as feeding the same bytes to [`Hasher::hash_parts`].
+        ///
+        /// The preimage must be short: writing panics if it exceeds [`MAX_CODEC_PREIMAGE`] bytes.
+        /// Longer or dynamically-counted preimages should use [`Hasher::hash_parts`].
+        ///
+        /// Example: `hasher.hash_codec(|b| { index.write(b); left.write(b); right.write(b); })`.
         #[inline]
-        fn hash_u32_with_digest(&mut self, prefix: u32, digest: &Self::Digest) -> Self::Digest {
-            let prefix = prefix.to_be_bytes();
-            self.hash_parts([prefix.as_slice(), digest.as_ref()])
-        }
-
-        /// Hash `prefix || bytes`, where `prefix` is encoded as big-endian `u32`.
-        #[inline]
-        fn hash_u32_with_bytes(&mut self, prefix: u32, bytes: &[u8]) -> Self::Digest {
-            let prefix = prefix.to_be_bytes();
-            self.hash_parts([prefix.as_slice(), bytes])
-        }
-
-        /// Hash `prefix || digest`, where `prefix` is encoded as big-endian `u64`.
-        #[inline]
-        fn hash_u64_with_digest(&mut self, prefix: u64, digest: &Self::Digest) -> Self::Digest {
-            let prefix = prefix.to_be_bytes();
-            self.hash_parts([prefix.as_slice(), digest.as_ref()])
-        }
-
-        /// Hash `prefix || bytes`, where `prefix` is encoded as big-endian `u64`.
-        #[inline]
-        fn hash_u64_with_bytes(&mut self, prefix: u64, bytes: &[u8]) -> Self::Digest {
-            let prefix = prefix.to_be_bytes();
-            self.hash_parts([prefix.as_slice(), bytes])
-        }
-
-        /// Hash `prefix || left || right`, where `prefix` is encoded as big-endian `u64`.
-        #[inline]
-        fn hash_u64_with_pair(
-            &mut self,
-            prefix: u64,
-            left: &Self::Digest,
-            right: &Self::Digest,
-        ) -> Self::Digest {
-            let prefix = prefix.to_be_bytes();
-            self.hash_parts([prefix.as_slice(), left.as_ref(), right.as_ref()])
-        }
-
-        /// Hash `first || second || digest`, where both prefixes are big-endian `u64`.
-        #[inline]
-        fn hash_u64_u64_with_digest(
-            &mut self,
-            first: u64,
-            second: u64,
-            digest: &Self::Digest,
-        ) -> Self::Digest {
-            let first = first.to_be_bytes();
-            let second = second.to_be_bytes();
-            self.hash_parts([first.as_slice(), second.as_slice(), digest.as_ref()])
+        fn hash_codec(&mut self, write: impl FnOnce(&mut &mut [u8])) -> Self::Digest {
+            // Generic fallback: write into a stack buffer and hash it as a single part.
+            // Implementations should override this to write directly into their own scratch.
+            let mut buf = [0u8; MAX_CODEC_PREIMAGE];
+            let mut tail: &mut [u8] = &mut buf;
+            write(&mut tail);
+            let len = MAX_CODEC_PREIMAGE - tail.len();
+            self.hash_parts([&buf[..len]])
         }
     }
+
+    /// The largest preimage [`Hasher::hash_codec`] supports. Two 64-byte blocks are plenty for every
+    /// fixed-shape Merkle preimage in the library; longer or dynamically-counted preimages use
+    /// [`Hasher::hash_parts`].
+    const MAX_CODEC_PREIMAGE: usize = 128;
 });
 
 #[cfg(test)]

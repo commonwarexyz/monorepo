@@ -2,6 +2,8 @@
 
 use crate::merkle::{Bagging, Error, Family, Location, Position};
 use alloc::vec::Vec;
+use bytes::BufMut;
+use commonware_codec::Write;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// A trait for computing the various digests of a Merkle-family structure.
@@ -188,75 +190,38 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
         Self::root_bagging(self)
     }
 
+    // The node and leaf digests are the hot path for tree construction, so they write their
+    // preimage straight into the hasher's scratch via `hash_codec` (the position is written as a
+    // fixed 8-byte big-endian `u64`, matching the storage format; `Position`'s own codec encoding is
+    // a varint and must not be used here). The `#[inline]` ensures they fold into the merkleize
+    // loop. The trait defaults (via `self.hash`) produce identical bytes but take the slower path.
+    #[inline]
     fn node_digest(
         &mut self,
         pos: Position<F>,
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
-        self.hasher.hash_u64_with_pair(*pos, left, right)
+        let pos = *pos;
+        self.hasher.hash_codec(|buf| {
+            pos.write(buf);
+            left.write(buf);
+            right.write(buf);
+        })
     }
 
+    #[inline]
     fn leaf_digest(&mut self, pos: Position<F>, element: &[u8]) -> Self::Digest {
-        self.hasher.hash_u64_with_bytes(*pos, element)
+        let pos = *pos;
+        self.hasher.hash_codec(|buf| {
+            pos.write(buf);
+            buf.put_slice(element);
+        })
     }
 
+    #[inline]
     fn fold(&mut self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
         self.hasher.hash_pair(acc, peak)
-    }
-
-    fn root_with_folded_peaks<'a>(
-        &mut self,
-        leaves: Location<F>,
-        inactive_peaks_to_fold: usize,
-        committed_inactive_peaks: usize,
-        peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
-    ) -> Option<Self::Digest> {
-        let mut peak_digests = peak_digests.into_iter();
-        let Some(first) = peak_digests.next() else {
-            return (inactive_peaks_to_fold == 0 && committed_inactive_peaks == 0)
-                .then(|| self.digest(&(*leaves).to_be_bytes()));
-        };
-
-        let mut acc = *first;
-        for _ in 0..inactive_peaks_to_fold.saturating_sub(1) {
-            let peak = peak_digests.next()?;
-            acc = self.hasher.hash_pair(&acc, peak);
-        }
-
-        let folded_peaks = match self.root_bagging() {
-            Bagging::ForwardFold => {
-                for peak in peak_digests {
-                    acc = self.hasher.hash_pair(&acc, peak);
-                }
-                acc
-            }
-            Bagging::BackwardFold => {
-                let (lower, upper) = peak_digests.size_hint();
-                let mut active_peaks = Vec::with_capacity(1 + upper.unwrap_or(lower));
-                active_peaks.push(acc);
-                active_peaks.extend(peak_digests.copied());
-
-                let mut acc = *active_peaks.last().unwrap();
-                for peak in active_peaks.iter().rev().skip(1) {
-                    acc = self.hasher.hash_pair(peak, &acc);
-                }
-                acc
-            }
-        };
-
-        if committed_inactive_peaks == 0 {
-            Some(
-                self.hasher
-                    .hash_u64_with_digest(*leaves, &folded_peaks),
-            )
-        } else {
-            Some(self.hasher.hash_u64_u64_with_digest(
-                *leaves,
-                committed_inactive_peaks as u64,
-                &folded_peaks,
-            ))
-        }
     }
 }
 

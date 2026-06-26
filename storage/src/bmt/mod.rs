@@ -92,8 +92,10 @@ impl<H: Hasher> Builder<H> {
     /// When added, the leaf is hashed with its position.
     pub fn add(&mut self, leaf: &H::Digest) -> u32 {
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
-        self.leaves
-            .push(self.hasher.hash_u32_with_digest(position, leaf));
+        self.leaves.push(self.hasher.hash_codec(|b| {
+            position.write(b);
+            leaf.write(b);
+        }));
         position
     }
 
@@ -167,7 +169,10 @@ impl<D: Digest> Tree<D> {
         // Compute the finalized root: H(leaf_count || tree_root)
         // This binds the root to the tree size, preventing malleability attacks.
         let tree_root = levels.last().first();
-        let root = hasher.hash_u32_with_digest(leaf_count, tree_root);
+        let root = hasher.hash_codec(|b| {
+            leaf_count.write(b);
+            tree_root.write(b);
+        });
 
         Self {
             empty,
@@ -479,7 +484,10 @@ impl<D: Digest> Proof<D> {
         }
 
         // Compute the position-hashed leaf
-        let mut computed = hasher.hash_u32_with_digest(position, leaf);
+        let mut computed = hasher.hash_codec(|b| {
+            position.write(b);
+            leaf.write(b);
+        });
 
         // Track level size to handle odd-sized levels
         let mut level_size = self.leaf_count as usize;
@@ -517,7 +525,10 @@ impl<D: Digest> Proof<D> {
 
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
-        let finalized = hasher.hash_u32_with_digest(self.leaf_count, &computed);
+        let finalized = hasher.hash_codec(|b| {
+            self.leaf_count.write(b);
+            computed.write(b);
+        });
 
         if finalized == *root {
             Ok(())
@@ -545,7 +556,10 @@ impl<D: Digest> Proof<D> {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
                 let empty_tree_root = hasher.hash_parts(core::iter::empty());
-                let finalized = hasher.hash_u32_with_digest(0, &empty_tree_root);
+                let finalized = hasher.hash_codec(|b| {
+                    0u32.write(b);
+                    empty_tree_root.write(b);
+                });
                 if finalized == *root {
                     return Ok(());
                 } else {
@@ -561,7 +575,13 @@ impl<D: Digest> Proof<D> {
             if *position >= self.leaf_count {
                 return Err(Error::InvalidPosition(*position));
             }
-            sorted.push((*position, hasher.hash_u32_with_digest(*position, leaf)));
+            sorted.push((
+                *position,
+                hasher.hash_codec(|b| {
+                    position.write(b);
+                    leaf.write(b);
+                }),
+            ));
         }
         sorted.sort_unstable_by_key(|(pos, _)| *pos);
 
@@ -634,7 +654,10 @@ impl<D: Digest> Proof<D> {
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
         let tree_root = current[0].1;
-        let finalized = hasher.hash_u32_with_digest(self.leaf_count, &tree_root);
+        let finalized = hasher.hash_codec(|b| {
+            self.leaf_count.write(b);
+            tree_root.write(b);
+        });
 
         if finalized == *root {
             Ok(())
