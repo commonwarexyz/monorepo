@@ -243,6 +243,22 @@ impl IoBuf {
                 }),
         }
     }
+
+    /// Convert this buffer into [`IoBufMut`], allocating from `pool` if needed.
+    ///
+    /// This is zero-copy when `self` has exclusive ownership of the backing
+    /// storage. If the buffer is shared, this allocates a new buffer from
+    /// `pool` and copies the readable bytes into it.
+    pub fn into_mut_with_pool(self, pool: &BufferPool) -> IoBufMut {
+        match self.try_into_mut() {
+            Ok(buf) => buf,
+            Err(buf) => {
+                let mut result = pool.alloc(buf.len());
+                result.put_slice(buf.as_ref());
+                result
+            }
+        }
+    }
 }
 
 impl AsRef<[u8]> for IoBuf {
@@ -3892,6 +3908,30 @@ mod tests {
         let bytes_out: Bytes = pooled.into();
         assert_eq!(vec_out, b"xyz");
         assert_eq!(bytes_out.as_ref(), b"xyz");
+    }
+
+    #[test]
+    fn test_iobuf_into_mut_with_pool() {
+        let pool = test_pool();
+
+        // Unique buffers recover mutability without copying.
+        let mut unique = pool.alloc(4);
+        unique.put_slice(b"data");
+        let unique_ptr = unique.as_mut_ptr();
+        let mut recovered = unique.freeze().into_mut_with_pool(&pool);
+        assert_eq!(recovered.as_ref(), b"data");
+        assert_eq!(recovered.as_mut_ptr(), unique_ptr);
+
+        // Shared buffers allocate from the pool and copy readable bytes.
+        let mut shared = pool.alloc(4);
+        shared.put_slice(b"copy");
+        let shared = shared.freeze();
+        let shared_ptr = shared.as_ptr();
+        let _clone = shared.clone();
+        let mut copied = shared.into_mut_with_pool(&pool);
+        assert_eq!(copied.as_ref(), b"copy");
+        assert_ne!(copied.as_mut_ptr() as *const u8, shared_ptr);
+        assert!(copied.is_pooled());
     }
 
     #[test]

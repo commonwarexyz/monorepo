@@ -41,7 +41,7 @@ commonware-storage = { path = ".", features = ["std", "test-utils"] }
 criterion.workspace = true
 governor.workspace = true
 paste.workspace = true
-rand.workspace = true
+rand = { workspace = true, features = ["small_rng"] }
 rstest.workspace = true
 tracing-subscriber.workspace = true
 

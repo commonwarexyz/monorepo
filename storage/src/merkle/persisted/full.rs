@@ -21,11 +21,12 @@ use crate::{
         Error, Family, Location, Position, Proof, Readable,
     },
     metadata::{Config as MConfig, Metadata},
+    Context,
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::{
     range::NonEmptyRange,
     sequence::prefixed_u64::U64,
@@ -142,7 +143,7 @@ pub struct SyncConfig<F: Family, D: Digest, S: Strategy> {
 }
 
 /// A Merkle structure backed by a fixed-item-length journal.
-pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> {
+pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// Lock-protected mutable state.
     pub(crate) inner: RwLock<Inner<F, D>>,
 
@@ -168,7 +169,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the pruning boundary (as a leaf index) in the metadata.
 pub(crate) const PRUNED_TO_PREFIX: u8 = 1;
 
-impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F, E, D, S> {
+impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return the total number of nodes in the structure, irrespective of any pruning. The next
     /// added element's position will have this value.
     pub fn size(&self) -> Position<F> {
@@ -905,9 +906,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 /// be tighter than the journal's prune boundary reported by [`Merkle::bounds`]). This means
 /// batch operations like `update_leaf` will correctly reject leaves that have been synced out of
 /// memory with [`Error::ElementPruned`].
-impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Readable
-    for Merkle<F, E, D, S>
-{
+impl<F: Family, E: Context, D: Digest, S: Strategy> Readable for Merkle<F, E, D, S> {
     type Family = F;
     type Digest = D;
     type Error = Error<F>;
@@ -925,8 +924,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Readable
     }
 }
 
-impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest, S: Strategy>
-    crate::merkle::storage::Storage<F> for Merkle<F, E, D, S>
+impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Storage<F>
+    for Merkle<F, E, D, S>
 {
     type Digest = D;
 
@@ -939,7 +938,7 @@ impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest, S: Strategy>
     }
 }
 
-impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F, E, D, S> {
+impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return an inclusion proof for the element at the location `loc` against a historical
     /// state with `leaves` leaves.
     ///

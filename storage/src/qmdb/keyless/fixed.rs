@@ -14,10 +14,10 @@ use crate::{
         operation::Committable,
         Error, ROOT_BAGGING,
     },
+    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Keyless operation for fixed-size values.
 pub type Operation<F, V> = BaseOperation<F, FixedEncoding<V>>;
@@ -38,9 +38,7 @@ pub type Config<S> = super::Config<JournalConfig, S>;
 /// Configuration for a fixed-size [keyless](super) compact db.
 pub type CompactConfig<S> = super::CompactConfig<(), S>;
 
-impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strategy>
-    Db<F, E, V, H, S>
-{
+impl<F: Family, E: Context, V: FixedValue, H: Hasher, S: Strategy> Db<F, E, V, H, S> {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<S>) -> Result<Self, Error<F>> {
@@ -56,9 +54,7 @@ impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strat
     }
 }
 
-impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strategy>
-    CompactDb<F, E, V, H, S>
-{
+impl<F: Family, E: Context, V: FixedValue, H: Hasher, S: Strategy> CompactDb<F, E, V, H, S> {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
         let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
@@ -77,7 +73,8 @@ mod test {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner as _,
+        Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};

@@ -13,7 +13,6 @@ use crate::stateful::db::{
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     index::{
         ordered::Index as OrderedIdx, unordered::Index as UnorderedIdx, Ordered as OrderedIndex,
@@ -39,6 +38,7 @@ use commonware_storage::{
         Error,
     },
     translator::Translator,
+    Context as StorageContext,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
@@ -51,7 +51,7 @@ type CurrentDbHandle<F, E, C, I, H, U, const N: usize, S> =
 pub struct CurrentUnmerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -69,7 +69,7 @@ impl<F, E, C, I, H, K, V, const N: usize, S>
     CurrentUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
@@ -112,7 +112,7 @@ where
 pub struct CurrentMerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -127,7 +127,7 @@ where
 impl<F, E, C, I, H, U, const N: usize, S> Deref for CurrentUnmerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -145,7 +145,7 @@ where
 impl<F, E, C, I, H, U, const N: usize, S> Deref for CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -165,7 +165,7 @@ impl<F, E, C, I, H, K, V, const N: usize, S>
     CurrentUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
@@ -206,7 +206,7 @@ where
 impl<F, E, C, I, H, U, const N: usize, S> CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
@@ -234,7 +234,7 @@ impl<F, E, C, I, H, K, V, const N: usize, S> UnmerkleizedTrait
     for CurrentUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
@@ -261,7 +261,7 @@ impl<F, E, C, I, H, K, V, const N: usize, S> UnmerkleizedTrait
     for CurrentUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
@@ -288,7 +288,7 @@ impl<F, E, C, I, H, U, const N: usize, S> MerkleizedTrait
     for CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
@@ -327,7 +327,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -421,7 +421,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -513,7 +513,6 @@ mod open {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
-    use commonware_runtime::{Clock, Metrics, Storage};
     use commonware_storage::{
         merkle::Graftable,
         qmdb::{
@@ -527,6 +526,7 @@ mod open {
             },
             Error,
         },
+        Context as StorageContext,
     };
     use commonware_utils::Array;
 
@@ -544,7 +544,7 @@ mod open {
     ) -> Result<Db<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
-        E: Storage + Clock + Metrics,
+        E: StorageContext,
         K: Array,
         V: VariableValue + 'static,
         H: Hasher,
@@ -561,7 +561,7 @@ mod open {
     ) -> Result<OrderedVariableDb<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
-        E: Storage + Clock + Metrics,
+        E: StorageContext,
         K: commonware_storage::qmdb::operation::Key,
         V: VariableValue + 'static,
         H: Hasher,
@@ -587,7 +587,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key + Array,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -686,7 +686,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -785,7 +785,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -840,7 +840,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -895,7 +895,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key + Array,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -951,7 +951,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,

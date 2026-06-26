@@ -676,15 +676,13 @@ mod tests {
                 "{buffer}",
             );
 
-            // Sync again - should write only diff from the second blob
-            //
-            // 8 byte for version + 4 bytes for checksum
+            // Sync again - both blobs already contain the latest state
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
-            assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 1"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 21949"),
+                buffer.contains("runtime_storage_write_bytes_total 21937"),
                 "{buffer}",
             );
 
@@ -695,9 +693,9 @@ mod tests {
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 3"), "{buffer}");
-            assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 1"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 32752"),
+                buffer.contains("runtime_storage_write_bytes_total 32740"),
                 "{buffer}"
             );
 
@@ -705,9 +703,9 @@ mod tests {
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 4"), "{buffer}");
-            assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 1"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 43555"),
+                buffer.contains("runtime_storage_write_bytes_total 43543"),
                 "{buffer}"
             );
 
@@ -718,9 +716,9 @@ mod tests {
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 4"), "{buffer}");
-            assert!(buffer.contains("sync_overwrites_total 3"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 43668"),
+                buffer.contains("runtime_storage_write_bytes_total 43656"),
                 "{buffer}"
             );
 
@@ -747,24 +745,24 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Sync again with no changes - will rewrite because key_order_changed is recent
-            // (on startup, key_order_changed is set to next_version)
+            // Sync again with no changes. This still rewrites because only one blob
+            // has the new key order.
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 2"));
             assert!(buffer.contains("sync_overwrites_total 0"));
 
-            // Sync again - now key order is stable, should do overwrite
+            // Sync again - both blobs already contain the latest state
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 2"));
-            assert!(buffer.contains("sync_overwrites_total 1"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
 
-            // Sync again - should continue doing overwrites
+            // Sync again - should remain a no-op
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 2"));
-            assert!(buffer.contains("sync_overwrites_total 2"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
 
             metadata.destroy().await.unwrap();
         });

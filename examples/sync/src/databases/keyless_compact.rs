@@ -2,7 +2,7 @@
 
 use crate::{Hasher, Key, Value};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, BufferPooler};
 use commonware_storage::{
     journal::contiguous::variable,
     merkle::mmr,
@@ -11,6 +11,7 @@ use commonware_storage::{
         keyless::fixed::{self, CompactConfig},
         sync::compact,
     },
+    Context as StorageContext,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use tracing::error;
@@ -39,7 +40,7 @@ pub fn create_config(context: &impl BufferPooler) -> CompactConfig<Sequential> {
 
 impl<E> super::ExampleDatabase for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -93,7 +94,7 @@ where
 
 impl<E> super::CompactSyncable for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
 {
     async fn target(&self) -> compact::Target<Self::Family, Key> {
         Self::target(self)

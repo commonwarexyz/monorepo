@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(super) mod partition_sync_fault {
     use commonware_runtime::{
-        deterministic, telemetry::metrics, Blob, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics,
-        Name, Storage, Supervisor,
+        deterministic, telemetry::metrics, Blob, BufferPool, BufferPooler, Clock, Error, Handle,
+        IoBufs, IoBufsMut, Metrics, Name, Storage, Supervisor,
     };
     use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
     use std::{
@@ -74,6 +74,16 @@ pub(super) mod partition_sync_fault {
 
         fn encode(&self) -> String {
             self.inner.encode()
+        }
+    }
+
+    impl BufferPooler for Context {
+        fn network_buffer_pool(&self) -> &BufferPool {
+            self.inner.network_buffer_pool()
+        }
+
+        fn storage_buffer_pool(&self) -> &BufferPool {
+            self.inner.storage_buffer_pool()
         }
     }
 
