@@ -4,7 +4,7 @@
 //! the preferred recovery point for replaying data to rebuild offset entries.
 
 use super::{
-    blobs::{Blob, Blobs, Partition, Writable},
+    blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     fixed,
     metrics::VariableMetrics as Metrics,
     Contiguous, Many, Mutable,
@@ -152,99 +152,6 @@ struct BlobScan {
     valid_size: u64,
     /// Whether undecodable trailing bytes follow `valid_size`.
     torn: bool,
-}
-
-/// Sequential read buffer over a journal blob's read-only view.
-struct BlobReplay<'a, B: RBlob> {
-    blob: Blob<'a, B>,
-    offset: u64,
-    buffer_size: NonZeroUsize,
-    buf: Vec<u8>,
-    cursor: usize,
-    exhausted: bool,
-}
-
-impl<'a, B: RBlob> BlobReplay<'a, B> {
-    fn new(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Self {
-        Self {
-            blob,
-            offset,
-            buffer_size,
-            buf: Vec::with_capacity(buffer_size.get()),
-            cursor: 0,
-            exhausted: false,
-        }
-    }
-
-    const fn is_exhausted(&self) -> bool {
-        self.exhausted
-    }
-
-    async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
-        while self.remaining() < n && !self.exhausted {
-            self.compact();
-
-            let blob_size = self.blob.size();
-            let remaining = blob_size.saturating_sub(self.offset);
-            if remaining == 0 {
-                self.exhausted = true;
-                break;
-            }
-
-            let needed = n.saturating_sub(self.remaining());
-            let read_len = self
-                .buffer_size
-                .get()
-                .max(needed)
-                .min(usize::try_from(remaining).unwrap_or(usize::MAX));
-            let (buf, read) = self
-                .blob
-                .read_up_to(self.offset, read_len, IoBufMut::with_capacity(read_len))
-                .await?;
-            self.offset = self
-                .offset
-                .checked_add(read as u64)
-                .ok_or(Error::OffsetOverflow)?;
-            self.buf.extend_from_slice(&buf.chunk()[..read]);
-            if self.offset == blob_size {
-                self.exhausted = true;
-            }
-        }
-
-        Ok(self.remaining() >= n)
-    }
-
-    fn compact(&mut self) {
-        match self.cursor {
-            0 => {}
-            cursor if cursor == self.buf.len() => {
-                self.buf.clear();
-                self.cursor = 0;
-            }
-            cursor => {
-                self.buf.drain(..cursor);
-                self.cursor = 0;
-            }
-        }
-    }
-}
-
-impl<B: RBlob> Buf for BlobReplay<'_, B> {
-    fn remaining(&self) -> usize {
-        self.buf.len() - self.cursor
-    }
-
-    fn chunk(&self) -> &[u8] {
-        &self.buf[self.cursor..]
-    }
-
-    fn advance(&mut self, cnt: usize) {
-        self.cursor = self
-            .cursor
-            .checked_add(cnt)
-            .expect("advance overflowed replay cursor");
-        assert!(self.cursor <= self.buf.len(), "advanced past replay buffer");
-    }
 }
 
 /// State for sequentially replaying variable-size frames from one data blob.
@@ -928,7 +835,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
 
                 states.push(DataReplayState::<E::Blob, V> {
                     blob,
-                    replay: BlobReplay::new(blob_handle, offset, buffer),
+                    replay: blob_handle.replay_from(offset, buffer)?,
                     pos: first_pos,
                     end_pos,
                     offset,
