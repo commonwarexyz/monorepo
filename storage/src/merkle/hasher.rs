@@ -2,7 +2,6 @@
 
 use crate::merkle::{Bagging, Error, Family, Location, Position};
 use alloc::vec::Vec;
-use bytes::BufMut;
 use commonware_codec::Write;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
@@ -190,11 +189,13 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
         Self::root_bagging(self)
     }
 
-    // The node and leaf digests are the hot path for tree construction, so they write their
-    // preimage straight into the hasher's scratch via `hash_codec` (the position is written as a
-    // fixed 8-byte big-endian `u64`, matching the storage format; `Position`'s own codec encoding is
-    // a varint and must not be used here). The `#[inline]` ensures they fold into the merkleize
-    // loop. The trait defaults (via `self.hash`) produce identical bytes but take the slower path.
+    // `node_digest` is the hot path for tree construction and has a fixed-size preimage (an 8-byte
+    // position plus two digests), so it writes straight into the hasher's scratch via `hash_codec`.
+    // The position is written as a fixed 8-byte big-endian `u64` matching the storage format;
+    // `Position`'s own codec encoding is a varint and must not be used here. `leaf_digest` takes an
+    // arbitrary-length element, so it uses `hash_parts`, which keeps the same scratch fast path for
+    // short preimages but streams longer ones instead of overrunning the scratch. `#[inline]` folds
+    // both into the merkleize loop; the trait defaults produce identical bytes via the slower path.
     #[inline]
     fn node_digest(
         &mut self,
@@ -212,16 +213,16 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
 
     #[inline]
     fn leaf_digest(&mut self, pos: Position<F>, element: &[u8]) -> Self::Digest {
-        let pos = *pos;
-        self.hasher.hash_codec(|buf| {
-            pos.write(buf);
-            buf.put_slice(element);
-        })
+        self.hasher
+            .hash_parts([(*pos).to_be_bytes().as_slice(), element])
     }
 
     #[inline]
     fn fold(&mut self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
-        self.hasher.hash_pair(acc, peak)
+        self.hasher.hash_codec(|buf| {
+            acc.write(buf);
+            peak.write(buf);
+        })
     }
 }
 
@@ -313,6 +314,17 @@ mod tests {
 
         out2 = mmr_hasher.leaf_digest(Position::new(0), &digest2);
         assert_ne!(out, out2, "hash should change with different input digest");
+
+        // A leaf element far longer than the fixed-hash scratch must stream to the correct digest
+        // rather than overrun the scratch.
+        let big = [0xABu8; 200];
+        let pos = Position::new(2);
+        let out_big = mmr_hasher.leaf_digest(pos, &big);
+        let expected_big = mmr_hasher.hash([(*pos).to_be_bytes().as_slice(), big.as_slice()]);
+        assert_eq!(
+            out_big, expected_big,
+            "large leaf elements must stream to the same digest"
+        );
     }
 
     fn test_node_digest<H: CHasher>() {

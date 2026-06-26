@@ -294,15 +294,6 @@ commonware_macros::stability_scope!(BETA {
             hasher.finalize()
         }
 
-        /// Hash the concatenation `left || right` of two digests.
-        ///
-        /// This is the hot path for Merkle-family structures and is equivalent to
-        /// `self.hash_parts([left.as_ref(), right.as_ref()])`.
-        #[inline]
-        fn hash_pair(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
-            self.hash_parts([left.as_ref(), right.as_ref()])
-        }
-
         /// Hash a short, fixed-shape preimage written directly into a scratch buffer.
         ///
         /// `write` receives a byte cursor and writes the preimage into it (e.g. a big-endian
@@ -330,10 +321,14 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
-    /// The largest preimage [`Hasher::hash_codec`] supports. Two 64-byte blocks are plenty for every
-    /// fixed-shape Merkle preimage in the library; longer or dynamically-counted preimages use
+    /// The largest preimage [`Hasher::hash_codec`] accepts, in bytes. Writing more panics.
+    ///
+    /// Sized to the SHA-256 fast path: two 64-byte compression blocks hold 128 bytes, and reserving
+    /// the 9 mandatory padding bytes (a `0x80` terminator and an 8-byte length) leaves 119 for the
+    /// preimage. That covers every fixed-shape Merkle preimage in the library (the largest is an
+    /// 8-byte position followed by two 32-byte digests). Longer or dynamically-counted preimages use
     /// [`Hasher::hash_parts`].
-    const MAX_CODEC_PREIMAGE: usize = 128;
+    pub(crate) const MAX_CODEC_PREIMAGE: usize = 2 * 64 - 9;
 });
 
 #[cfg(test)]

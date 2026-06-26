@@ -10,12 +10,18 @@ fn bench_fixed(c: &mut Criterion) {
     let bytes = [7u8; 32];
     let mut hasher = Sha256::default();
 
-    c.bench_function(&format!("{}/shape=pair", module_path!()), |b| {
-        b.iter(|| black_box(hasher.hash_pair(black_box(&left), black_box(&right))));
+    // A two-digest preimage (the fold / internal-node shape) through the fixed `hash_codec` path.
+    c.bench_function(&format!("{}/shape=pair_codec", module_path!()), |b| {
+        b.iter(|| {
+            black_box(hasher.hash_codec(|buf| {
+                black_box(&left).write(buf);
+                black_box(&right).write(buf);
+            }))
+        });
     });
 
-    // Same 64-byte preimage as `shape=pair`, but routed through the generic (runtime-length)
-    // `hash_parts` path so its overhead can be compared against the constant-length fast paths.
+    // The same two-digest preimage through the generic (runtime-length) `hash_parts` path, to
+    // compare its overhead against the fixed path.
     c.bench_function(&format!("{}/shape=pair_parts", module_path!()), |b| {
         b.iter(|| {
             black_box(hasher.hash_parts([black_box(&left).as_ref(), black_box(&right).as_ref()]))

@@ -653,7 +653,6 @@ where
 
     let mut hasher = qmdb::hasher::<H>();
     let new_leaves = compute_grafted_leaves::<F, H, S, N>(
-        &hasher,
         &ops_tree_adapter,
         chunks_to_update,
         &current_db.strategy,

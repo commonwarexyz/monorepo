@@ -1050,7 +1050,6 @@ pub(super) async fn compute_grafted_leaves<
     S: Strategy,
     const N: usize,
 >(
-    _hasher: &StandardHasher<H>,
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     strategy: &S,
@@ -1072,16 +1071,18 @@ pub(super) async fn compute_grafted_leaves<
 
     // Compute the grafted leaf digest for each chunk. For all-zero chunks, the
     // grafted leaf equals the chunk_ops_digest directly (zero-chunk identity).
+    // Each worker gets a fresh hasher (just a cheap stack-zeroed scratch).
     let zero_chunk = [0u8; N];
-    Ok(strategy.map_collect_vec(
+    Ok(strategy.map_init_collect_vec(
         inputs,
-        |(chunk_idx, chunk_ops_digest, chunk)| {
+        H::new,
+        |hasher, (chunk_idx, chunk_ops_digest, chunk)| {
             if chunk == zero_chunk {
                 (chunk_idx, chunk_ops_digest)
             } else {
                 (
                     chunk_idx,
-                    H::new().hash_parts([chunk.as_slice(), chunk_ops_digest.as_ref()]),
+                    hasher.hash_parts([chunk.as_slice(), chunk_ops_digest.as_ref()]),
                 )
             }
         },
@@ -1129,7 +1130,6 @@ pub(super) async fn build_grafted_tree<
     // sits at index `graftable_chunks` and is excluded; its digest is hashed directly into
     // the canonical root.
     let leaves = compute_grafted_leaves::<F, H, S, N>(
-        hasher,
         ops_tree,
         (pruned_chunks..graftable_chunks).map(|chunk_idx| (chunk_idx, bitmap.get_chunk(chunk_idx))),
         strategy,

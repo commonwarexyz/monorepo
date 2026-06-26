@@ -155,10 +155,16 @@ impl<D: Digest> Tree<D> {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
             let mut chunks = current_level.chunks_exact(2);
             for chunk in &mut chunks {
-                next_level.push(hasher.hash_pair(&chunk[0], &chunk[1]));
+                next_level.push(hasher.hash_codec(|b| {
+                    chunk[0].write(b);
+                    chunk[1].write(b);
+                }));
             }
             if let [last] = chunks.remainder() {
-                next_level.push(hasher.hash_pair(last, last));
+                next_level.push(hasher.hash_codec(|b| {
+                    last.write(b);
+                    last.write(b);
+                }));
             }
 
             // Add the computed level to the tree
@@ -511,7 +517,10 @@ impl<D: Digest> Proof<D> {
                 (sibling, &computed)
             };
 
-            computed = hasher.hash_pair(left_node, right_node);
+            computed = hasher.hash_codec(|b| {
+                left_node.write(b);
+                right_node.write(b);
+            });
 
             // Move up the tree
             position /= 2;
@@ -631,7 +640,10 @@ impl<D: Digest> Proof<D> {
                     (left, right)
                 };
 
-                next_level.push((parent_pos, hasher.hash_pair(&left, &right)));
+                next_level.push((parent_pos, hasher.hash_codec(|b| {
+                    left.write(b);
+                    right.write(b);
+                })));
 
                 idx += 1;
             }

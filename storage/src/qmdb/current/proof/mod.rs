@@ -943,7 +943,6 @@ mod tests {
             })
             .collect();
         let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &hasher,
             &ops,
             chunk_inputs,
             &Sequential,
@@ -1043,7 +1042,6 @@ mod tests {
             })
             .collect();
         let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &hasher,
             &ops,
             chunk_inputs,
             &Sequential,
@@ -1152,7 +1150,6 @@ mod tests {
             })
             .collect();
         let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &hasher,
             &ops,
             chunk_inputs,
             &Sequential,
@@ -1254,7 +1251,6 @@ mod tests {
             })
             .collect();
         let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &hasher,
             &ops,
             chunk_inputs,
             &Sequential,
@@ -1349,7 +1345,6 @@ mod tests {
             })
             .collect();
         let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &hasher,
             &ops,
             chunk_inputs,
             &Sequential,
@@ -1737,7 +1732,6 @@ mod tests {
             })
             .collect();
         let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &hasher,
             &ops,
             chunk_inputs,
             &Sequential,
@@ -1877,7 +1871,6 @@ mod tests {
                 })
                 .collect();
             let leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-                &hasher,
                 &ops,
                 chunk_inputs,
                 &Sequential,
@@ -2088,7 +2081,6 @@ mod tests {
         let ops_root_post = ops_post.root(&mut hasher, 0).unwrap();
         // After transition chunk 0 has a single h=G ancestor; build the grafted tree.
         let leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &hasher,
             &ops_post,
             core::iter::once((
                 0usize,
@@ -2176,7 +2168,6 @@ mod tests {
             })
             .collect();
         let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &hasher,
             &ops,
             chunk_inputs,
             &Sequential,

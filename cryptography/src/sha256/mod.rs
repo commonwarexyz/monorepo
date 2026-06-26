@@ -20,7 +20,7 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-use crate::Hasher;
+use crate::{Hasher, MAX_CODEC_PREIMAGE};
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use bytes::{Buf, BufMut};
@@ -44,14 +44,11 @@ pub type CoreSha256 = ISha256;
 const DIGEST_LENGTH: usize = 32;
 const BLOCK_LENGTH: usize = 64;
 
-/// Number of scratch blocks used by the fixed (non-streaming) hashing path.
-const SCRATCH_BLOCKS: usize = 2;
-
-/// Largest message length whose SHA-256 padding still fits within [`SCRATCH_BLOCKS`] compression
-/// blocks. Padding appends a `0x80` byte and an 8-byte big-endian length, so the fixed path can
-/// absorb at most `SCRATCH_BLOCKS * BLOCK_LENGTH - 9` message bytes before it must fall back to the
-/// streaming hasher.
-const FIXED_CAPACITY: usize = SCRATCH_BLOCKS * BLOCK_LENGTH - 9;
+/// Bytes of scratch backing the fixed (non-streaming) hashing path: enough whole compression blocks
+/// to hold the largest supported preimage ([`MAX_CODEC_PREIMAGE`]) plus its 9 mandatory padding
+/// bytes (a `0x80` terminator and an 8-byte length). Inputs longer than [`MAX_CODEC_PREIMAGE`] fall
+/// back to the streaming hasher.
+const SCRATCH_LEN: usize = (MAX_CODEC_PREIMAGE + 9).div_ceil(BLOCK_LENGTH) * BLOCK_LENGTH;
 
 const INITIAL_STATE: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
@@ -64,14 +61,14 @@ pub struct Sha256 {
     hasher: ISha256,
     /// Reusable buffer for the fixed (non-streaming) hashing path. Reusing it across calls avoids
     /// re-zeroing a fresh buffer on every short hash.
-    scratch: [u8; SCRATCH_BLOCKS * BLOCK_LENGTH],
+    scratch: [u8; SCRATCH_LEN],
 }
 
 impl Default for Sha256 {
     fn default() -> Self {
         Self {
             hasher: ISha256::new(),
-            scratch: [0u8; SCRATCH_BLOCKS * BLOCK_LENGTH],
+            scratch: [0u8; SCRATCH_LEN],
         }
     }
 }
@@ -116,7 +113,7 @@ impl Hasher for Sha256 {
         let mut len = 0;
         while let Some(part) = parts.next() {
             let end = len + part.len();
-            if end > FIXED_CAPACITY {
+            if end > MAX_CODEC_PREIMAGE {
                 // The preimage is too long for the fixed path: stream the prefix buffered so far,
                 // this part, and the remaining parts through the standard hasher.
                 let mut hasher = ISha256::new();
@@ -135,20 +132,13 @@ impl Hasher for Sha256 {
     }
 
     #[inline]
-    fn hash_pair(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
-        self.scratch[..DIGEST_LENGTH].copy_from_slice(left.as_ref());
-        self.scratch[DIGEST_LENGTH..2 * DIGEST_LENGTH].copy_from_slice(right.as_ref());
-        finalize_fixed(&mut self.scratch, 2 * DIGEST_LENGTH)
-    }
-
-    #[inline]
     fn hash_codec(&mut self, write: impl FnOnce(&mut &mut [u8])) -> Self::Digest {
         // Write directly into the scratch (capped at the two-block fast path; an over-long preimage
         // panics in the cursor). For fixed-size writes `len` folds to a compile-time constant, so
         // `finalize_fixed` const-folds at the call site, matching hand-unrolled per-shape hashing.
-        let mut tail: &mut [u8] = &mut self.scratch[..FIXED_CAPACITY];
+        let mut tail: &mut [u8] = &mut self.scratch[..MAX_CODEC_PREIMAGE];
         write(&mut tail);
-        let len = FIXED_CAPACITY - tail.len();
+        let len = MAX_CODEC_PREIMAGE - tail.len();
         finalize_fixed(&mut self.scratch, len)
     }
 }
@@ -160,13 +150,14 @@ impl Hasher for Sha256 {
 /// every byte of the compressed blocks past `message_len`, so stale data left in `scratch` by a
 /// previous call cannot leak into the result.
 #[inline]
-fn finalize_fixed(scratch: &mut [u8; SCRATCH_BLOCKS * BLOCK_LENGTH], message_len: usize) -> Digest {
-    // SAFETY: the only callers (`hash_parts`, `hash_pair`) never build a preimage longer than
-    // `FIXED_CAPACITY` (longer inputs take the streaming fallback). Surfacing this invariant lets
-    // the compiler prove every padding write below is in-bounds and drop the panic paths, which is
-    // what makes the fixed path competitive with hand-unrolled per-shape hashing. In debug builds
-    // this still panics if the invariant is ever violated.
-    unsafe { core::hint::assert_unchecked(message_len <= FIXED_CAPACITY) };
+fn finalize_fixed(scratch: &mut [u8; SCRATCH_LEN], message_len: usize) -> Digest {
+    // SAFETY: both callers (`hash_parts`, `hash_codec`) cap the preimage at `MAX_CODEC_PREIMAGE`
+    // (`hash_parts` takes the streaming fallback for longer inputs; `hash_codec` hands `write` a
+    // cursor of exactly that length). Surfacing this invariant lets the compiler
+    // prove every padding write below is in-bounds and drop the panic paths, which is what makes the
+    // fixed path competitive with hand-unrolled per-shape hashing. In debug builds this still panics
+    // if the invariant is ever violated.
+    unsafe { core::hint::assert_unchecked(message_len <= MAX_CODEC_PREIMAGE) };
     // Smallest number of blocks holding the message plus its 9 mandatory padding bytes (the `0x80`
     // terminator and the 8-byte length field).
     let blocks = (message_len + 9).div_ceil(BLOCK_LENGTH);
@@ -337,10 +328,6 @@ mod tests {
         let left = Sha256::hash(b"left");
         let right = Sha256::hash(b"right");
         let mut hasher = Sha256::new();
-        assert_eq!(
-            hasher.hash_pair(&left, &right),
-            standard_hash([left.as_ref(), right.as_ref()]),
-        );
         assert_parts_match(&mut hasher, &[&7u32.to_be_bytes(), left.as_ref()]);
         assert_parts_match(&mut hasher, &[&9u64.to_be_bytes(), left.as_ref()]);
         assert_parts_match(&mut hasher, &[&9u64.to_be_bytes(), b"payload"]);
@@ -363,7 +350,10 @@ mod tests {
             assert_parts_match(&mut hasher, &[&blob[..split], &blob[split..]]);
         }
         hasher.update(b"streamed");
-        let _ = hasher.hash_pair(&left, &right);
+        let _ = hasher.hash_codec(|b| {
+            left.write(b);
+            right.write(b);
+        });
         let _ = hasher.hash_parts([b"unrelated".as_slice(), [0xCD; 200].as_slice()]);
         assert_eq!(hasher.finalize(), standard_hash([b"streamed".as_slice()]));
     }
