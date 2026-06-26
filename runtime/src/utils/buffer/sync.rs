@@ -48,12 +48,14 @@ impl<B: Blob> Gated<B> {
         self.inner.clone()
     }
 
+    /// Wait for any outstanding sync without recording a new mutation.
+    pub(crate) async fn drain_in_flight(&self) -> Result<(), Error> {
+        self.state.write().await.drain_in_flight().await
+    }
+
     async fn lock_for_mutation(&self) -> Result<AsyncRwLockWriteGuard<'_, State>, Error> {
         let mut state = self.state.write().await;
-        if let State::InFlight(syncing) = &*state {
-            syncing.clone().await?;
-            *state = State::Clean;
-        }
+        state.drain_in_flight().await?;
         Ok(state)
     }
 }
@@ -131,6 +133,15 @@ impl State {
     /// Records that an issued mutation must be covered by a future full sync.
     fn mark_dirty(&mut self) {
         *self = Self::Dirty;
+    }
+
+    /// Waits for the current in-flight sync and marks this state clean.
+    async fn drain_in_flight(&mut self) -> Result<(), Error> {
+        if let Self::InFlight(syncing) = self {
+            syncing.clone().await?;
+            *self = Self::Clean;
+        }
+        Ok(())
     }
 
     /// Writes bytes to `blob` and records that they need a future full sync.
