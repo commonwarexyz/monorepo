@@ -93,7 +93,7 @@ impl<H: Hasher> Builder<H> {
     pub fn add(&mut self, leaf: &H::Digest) -> u32 {
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
         self.leaves
-            .push(self.hasher.hash_u32_with_digest_mut(position, leaf));
+            .push(self.hasher.hash_u32_with_digest(position, leaf));
         position
     }
 
@@ -153,10 +153,10 @@ impl<D: Digest> Tree<D> {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
             let mut chunks = current_level.chunks_exact(2);
             for chunk in &mut chunks {
-                next_level.push(hasher.hash_pair_mut(&chunk[0], &chunk[1]));
+                next_level.push(hasher.hash_pair(&chunk[0], &chunk[1]));
             }
             if let [last] = chunks.remainder() {
-                next_level.push(hasher.hash_pair_mut(last, last));
+                next_level.push(hasher.hash_pair(last, last));
             }
 
             // Add the computed level to the tree
@@ -167,7 +167,7 @@ impl<D: Digest> Tree<D> {
         // Compute the finalized root: H(leaf_count || tree_root)
         // This binds the root to the tree size, preventing malleability attacks.
         let tree_root = levels.last().first();
-        let root = hasher.hash_u32_with_digest_mut(leaf_count, tree_root);
+        let root = hasher.hash_u32_with_digest(leaf_count, tree_root);
 
         Self {
             empty,
@@ -479,7 +479,7 @@ impl<D: Digest> Proof<D> {
         }
 
         // Compute the position-hashed leaf
-        let mut computed = hasher.hash_u32_with_digest_mut(position, leaf);
+        let mut computed = hasher.hash_u32_with_digest(position, leaf);
 
         // Track level size to handle odd-sized levels
         let mut level_size = self.leaf_count as usize;
@@ -503,7 +503,7 @@ impl<D: Digest> Proof<D> {
                 (sibling, &computed)
             };
 
-            computed = hasher.hash_pair_mut(left_node, right_node);
+            computed = hasher.hash_pair(left_node, right_node);
 
             // Move up the tree
             position /= 2;
@@ -517,7 +517,7 @@ impl<D: Digest> Proof<D> {
 
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
-        let finalized = hasher.hash_u32_with_digest_mut(self.leaf_count, &computed);
+        let finalized = hasher.hash_u32_with_digest(self.leaf_count, &computed);
 
         if finalized == *root {
             Ok(())
@@ -544,8 +544,8 @@ impl<D: Digest> Proof<D> {
         if elements.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
-                let empty_tree_root = hasher.hash_parts_mut(core::iter::empty());
-                let finalized = hasher.hash_u32_with_digest_mut(0, &empty_tree_root);
+                let empty_tree_root = hasher.hash_parts(core::iter::empty());
+                let finalized = hasher.hash_u32_with_digest(0, &empty_tree_root);
                 if finalized == *root {
                     return Ok(());
                 } else {
@@ -561,7 +561,7 @@ impl<D: Digest> Proof<D> {
             if *position >= self.leaf_count {
                 return Err(Error::InvalidPosition(*position));
             }
-            sorted.push((*position, hasher.hash_u32_with_digest_mut(*position, leaf)));
+            sorted.push((*position, hasher.hash_u32_with_digest(*position, leaf)));
         }
         sorted.sort_unstable_by_key(|(pos, _)| *pos);
 
@@ -611,7 +611,7 @@ impl<D: Digest> Proof<D> {
                     (left, right)
                 };
 
-                next_level.push((parent_pos, hasher.hash_pair_mut(&left, &right)));
+                next_level.push((parent_pos, hasher.hash_pair(&left, &right)));
 
                 idx += 1;
             }
@@ -634,7 +634,7 @@ impl<D: Digest> Proof<D> {
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
         let tree_root = current[0].1;
-        let finalized = hasher.hash_u32_with_digest_mut(self.leaf_count, &tree_root);
+        let finalized = hasher.hash_u32_with_digest(self.leaf_count, &tree_root);
 
         if finalized == *root {
             Ok(())

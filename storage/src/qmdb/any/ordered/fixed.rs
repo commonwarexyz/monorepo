@@ -148,7 +148,7 @@ pub(crate) mod test {
         translator::{OneCap, TwoCap},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -1066,6 +1066,7 @@ pub(crate) mod test {
     fn test_ordered_any_fixed_db_span_maintenance_under_collisions() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            #[boxed]
             async fn insert_random<T: Translator>(
                 mut db: Db<mmr::Family, Context, Digest, i32, Sha256, T, Sequential>,
                 rng: &mut StdRng,

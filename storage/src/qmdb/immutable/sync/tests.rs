@@ -925,6 +925,7 @@ pub(crate) mod harnesses {
         variable_apply_ops_with_floor::<F>(db, ops, metadata, floor).await
     }
 
+    #[boxed]
     async fn variable_apply_ops_with_floor<F: Family>(
         mut db: VariableDb<F>,
         ops: Vec<Operation<F, sha256::Digest, sha256::Digest>>,

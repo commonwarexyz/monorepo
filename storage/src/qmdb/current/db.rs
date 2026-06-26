@@ -1081,7 +1081,7 @@ pub(super) async fn compute_grafted_leaves<
             } else {
                 (
                     chunk_idx,
-                    H::hash_parts([chunk.as_slice(), chunk_ops_digest.as_ref()]),
+                    H::new().hash_parts([chunk.as_slice(), chunk_ops_digest.as_ref()]),
                 )
             }
         },
