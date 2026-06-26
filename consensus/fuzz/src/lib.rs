@@ -1312,6 +1312,9 @@ fn twins_resolver_view<P: simplex::Simplex>(
 /// shape (absolute view vs prefix-trailing count) differ; both are keyed on
 /// `role`. Invariants and liveness always run over honest reporters only.
 fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_coverage: bool) {
+    if state_coverage {
+        state_cov::reset();
+    }
     input.partition = Partition::Connected;
     input.configuration = N4F1C3;
 
