@@ -18,6 +18,7 @@ use commonware_storage::{
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
+    futures::Pool as FuturesPool,
     sync::TracedAsyncRwLock,
 };
 use futures::future;
@@ -109,6 +110,7 @@ where
     state: State<DB>,
     metrics: ResolverMetrics,
     pending: PendingSubs<F, DB>,
+    tasks: FuturesPool<()>,
 }
 
 impl<E, P, D, B, F, DB> Actor<E, P, D, B, F, DB>
@@ -138,6 +140,7 @@ where
             state,
             metrics,
             pending: BTreeMap::new(),
+            tasks: FuturesPool::default(),
         };
         (actor, mailbox)
     }
@@ -191,11 +194,13 @@ where
                 };
             },
             on_stopped => {
+                self.tasks.cancel_all();
                 return;
             },
             _ = &mut resolver_task => {
                 return;
             },
+            _ = self.tasks.next_completed() => {},
             Some(message) = mailbox_message else continue => {
                 match self.handle_mailbox_message(message) {
                     MailboxAction::None => {}
@@ -329,7 +334,7 @@ where
         }
 
         let metrics = self.metrics.clone();
-        self.context.child("approve").spawn(move |_| async move {
+        self.tasks.push(async move {
             let mut peer_valid = true;
             for approval in approvals {
                 match approval.await {
@@ -352,7 +357,11 @@ where
     }
 
     /// Serve a peer's request by querying the local database.
-    fn handle_produce(&self, key: handler::Request<F>, response: oneshot::Sender<bytes::Bytes>) {
+    fn handle_produce(
+        &mut self,
+        key: handler::Request<F>,
+        response: oneshot::Sender<bytes::Bytes>,
+    ) {
         let State::HasDb(database) = &self.state else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
@@ -364,7 +373,7 @@ where
         }
         let database = database.clone();
 
-        self.context.child("serve").spawn(move |_| async move {
+        self.tasks.push(async move {
             let (_cancel_tx, cancel_rx) = oneshot::channel();
             let result = database
                 .get_operations(
@@ -543,7 +552,7 @@ mod tests {
     #[test]
     fn produce_denied_before_attach() {
         deterministic::Runner::default().start(|context| async move {
-            let (actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
 
             let (response_tx, response_rx) = oneshot::channel();
             actor.handle_produce(test_request_at(Location::new(1)), response_tx);
@@ -561,6 +570,7 @@ mod tests {
 
             let (response_tx, response_rx) = oneshot::channel();
             actor.handle_produce(test_request_at(op_count), response_tx);
+            actor.tasks.next_completed().await;
 
             let payload = response_rx
                 .await
@@ -620,9 +630,10 @@ mod tests {
                 .insert(request.clone(), vec![sub1_tx, sub2_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
+            actor.handle_deliver(request, encoded_fetch_payload(), ack_tx);
             futures::join!(
                 async {
-                    actor.handle_deliver(request, encoded_fetch_payload(), ack_tx);
+                    actor.tasks.next_completed().await;
                 },
                 async {
                     let fetch = sub1_rx.await.unwrap().unwrap();
@@ -659,9 +670,10 @@ mod tests {
                 .insert(request.clone(), vec![sub1_tx, sub2_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
+            actor.handle_deliver(request, encoded_fetch_payload(), ack_tx);
             futures::join!(
                 async {
-                    actor.handle_deliver(request, encoded_fetch_payload(), ack_tx);
+                    actor.tasks.next_completed().await;
                 },
                 async {
                     let fetch = sub1_rx.await.unwrap().unwrap();
