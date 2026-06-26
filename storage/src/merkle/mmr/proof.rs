@@ -41,7 +41,12 @@ mod tests {
             .range_proof(&mut hasher, Location::new(0)..mmr.leaves(), 0)
             .unwrap();
         let mut node_digests = proof
-            .verify_range_inclusion_and_extract_digests(&mut hasher, &elements, Location::new(0), &root)
+            .verify_range_inclusion_and_extract_digests(
+                &mut hasher,
+                &elements,
+                Location::new(0),
+                &root,
+            )
             .unwrap();
         assert_eq!(node_digests.len() as u64, mmr.size());
         node_digests.sort_by_key(|(pos, _)| *pos);
@@ -323,7 +328,13 @@ mod tests {
 
         // Correct pinned nodes must verify.
         assert!(
-            proof.verify_proof_and_pinned_nodes(&mut hasher, &elements[1..], start_loc, &pinned, &root),
+            proof.verify_proof_and_pinned_nodes(
+                &mut hasher,
+                &elements[1..],
+                start_loc,
+                &pinned,
+                &root
+            ),
             "valid pinned nodes should verify"
         );
 
@@ -355,7 +366,13 @@ mod tests {
 
         // Empty pinned nodes must fail (start_loc > 0 requires at least one).
         assert!(
-            !proof.verify_proof_and_pinned_nodes(&mut hasher, &elements[1..], start_loc, &[], &root),
+            !proof.verify_proof_and_pinned_nodes(
+                &mut hasher,
+                &elements[1..],
+                start_loc,
+                &[],
+                &root
+            ),
             "missing pinned nodes should fail"
         );
     }
@@ -387,7 +404,13 @@ mod tests {
         assert_eq!(pinned.len(), 1, "should have one fold-prefix peak");
 
         assert!(
-            proof.verify_proof_and_pinned_nodes(&mut hasher, &elements[8..], start_loc, &pinned, &root),
+            proof.verify_proof_and_pinned_nodes(
+                &mut hasher,
+                &elements[8..],
+                start_loc,
+                &pinned,
+                &root
+            ),
             "valid fold-prefix pinned nodes should verify"
         );
 

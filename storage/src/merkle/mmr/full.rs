@@ -66,13 +66,9 @@ mod tests {
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root(&mut hasher, 0).unwrap();
 
-            let mmr = Mmr::init(
-                context.child("storage"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mmr = Mmr::init(context.child("storage"), &mut hasher, test_config(&context))
+                .await
+                .unwrap();
 
             let mut batch = mmr.new_batch();
             for i in 0u64..NUM_ELEMENTS {
@@ -215,13 +211,9 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
             // Build base full MMR with 10 elements.
-            let mmr = Mmr::init(
-                context.child("storage"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mmr = Mmr::init(context.child("storage"), &mut hasher, test_config(&context))
+                .await
+                .unwrap();
 
             let mut batch = mmr.new_batch();
             for i in 0u64..10 {

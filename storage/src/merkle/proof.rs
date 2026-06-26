@@ -1154,7 +1154,11 @@ mod tests {
         mem
     }
 
-    fn build_inactive_prefix<F: Family>(hasher: &mut H, n: u64, inactive_peaks: usize) -> Mem<F, D> {
+    fn build_inactive_prefix<F: Family>(
+        hasher: &mut H,
+        n: u64,
+        inactive_peaks: usize,
+    ) -> Mem<F, D> {
         let mut mem = Mem::new();
         let batch = {
             let mut batch = mem.new_batch();
@@ -1254,7 +1258,12 @@ mod tests {
             let mut tampered_boundary = proof.clone();
             tampered_boundary.inactive_peaks = if inactive_peaks == 0 { 1 } else { 0 };
             assert!(
-                !tampered_boundary.verify_range_inclusion(&mut hasher, &elements, range.start, &root),
+                !tampered_boundary.verify_range_inclusion(
+                    &mut hasher,
+                    &elements,
+                    range.start,
+                    &root
+                ),
                 "inactive_peaks mutation should fail for ({bagging:?}, {inactive_peaks})",
             );
 
@@ -1262,8 +1271,12 @@ mod tests {
                 let mut tampered_digest = proof.clone();
                 tampered_digest.digests[0].0[0] ^= 1;
                 assert!(
-                    !tampered_digest
-                        .verify_range_inclusion(&mut hasher, &elements, range.start, &root,),
+                    !tampered_digest.verify_range_inclusion(
+                        &mut hasher,
+                        &elements,
+                        range.start,
+                        &root,
+                    ),
                     "digest mutation should fail for ({bagging:?}, {inactive_peaks})",
                 );
             }
@@ -1614,7 +1627,12 @@ mod tests {
         for _i in 0..range_proof.digests.len() {
             invalid_proof.digests.remove(0);
             assert!(
-                !invalid_proof.verify_range_inclusion(&mut hasher, valid_elements, range.start, &root),
+                !invalid_proof.verify_range_inclusion(
+                    &mut hasher,
+                    valid_elements,
+                    range.start,
+                    &root
+                ),
                 "range proof with removed elements should fail"
             );
         }
@@ -1652,7 +1670,12 @@ mod tests {
             let mut invalid_proof = range_proof.clone();
             invalid_proof.digests[i] = test_digest(0);
             assert!(
-                !invalid_proof.verify_range_inclusion(&mut hasher, valid_elements, range.start, &root),
+                !invalid_proof.verify_range_inclusion(
+                    &mut hasher,
+                    valid_elements,
+                    range.start,
+                    &root
+                ),
                 "mangled range proof should fail verification"
             );
         }
@@ -1661,7 +1684,12 @@ mod tests {
             let mut invalid_proof = range_proof.clone();
             invalid_proof.digests.insert(i, test_digest(0));
             assert!(
-                !invalid_proof.verify_range_inclusion(&mut hasher, valid_elements, range.start, &root),
+                !invalid_proof.verify_range_inclusion(
+                    &mut hasher,
+                    valid_elements,
+                    range.start,
+                    &root
+                ),
                 "mangled range proof should fail verification. inserted element at: {i}",
             );
         }
@@ -2266,7 +2294,12 @@ mod tests {
         let proof = Proof::<F, D>::default();
 
         // Empty proof should verify against the empty root.
-        assert!(proof.verify_range_inclusion(&mut hasher, &[] as &[&[u8]], Location::new(0), &root));
+        assert!(proof.verify_range_inclusion(
+            &mut hasher,
+            &[] as &[&[u8]],
+            Location::new(0),
+            &root
+        ));
 
         let mut inactive_proof = proof.clone();
         inactive_proof.inactive_peaks = 1;
@@ -2283,7 +2316,12 @@ mod tests {
         ));
 
         // Non-zero start_loc with empty elements should fail.
-        assert!(!proof.verify_range_inclusion(&mut hasher, &[] as &[&[u8]], Location::new(1), &root));
+        assert!(!proof.verify_range_inclusion(
+            &mut hasher,
+            &[] as &[&[u8]],
+            Location::new(1),
+            &root
+        ));
     }
 
     fn every_element_contributes_to_root<F: Family>() {
@@ -2310,7 +2348,12 @@ mod tests {
                 let mut tampered = elements.clone();
                 tampered[flip_idx][0] ^= 0xFF;
                 assert!(
-                    !proof.verify_range_inclusion(&mut hasher, &tampered, Location::new(start), &root),
+                    !proof.verify_range_inclusion(
+                        &mut hasher,
+                        &tampered,
+                        Location::new(start),
+                        &root
+                    ),
                     "n={n}: tampered element at index {flip_idx} should not verify"
                 );
             }

@@ -45,7 +45,11 @@ mod tests {
             .collect();
 
         let proof = mmb
-            .range_proof(&mut hasher, Location::new(start)..Location::new(start + 1), 0)
+            .range_proof(
+                &mut hasher,
+                Location::new(start)..Location::new(start + 1),
+                0,
+            )
             .unwrap();
 
         assert!(proof.verify_proof_and_pinned_nodes(

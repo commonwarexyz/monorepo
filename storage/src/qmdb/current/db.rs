@@ -234,11 +234,11 @@ where
     /// or above the grafting height, returns the grafted node. For positions below the grafting
     /// height, the ops tree is used.
     fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
-        grafting::Storage::new(
+        grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
-            qmdb::hasher::<H>(),
+            qmdb::ROOT_BAGGING,
         )
     }
 
@@ -649,11 +649,11 @@ where
             &self.strategy,
         )
         .await?;
-        let storage = grafting::Storage::new(
+        let storage = grafting::Storage::<F, H, _, _>::new(
             &grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
-            qmdb::hasher::<H>(),
+            qmdb::ROOT_BAGGING,
         );
         let partial_chunk = partial_chunk(self.any.bitmap.as_ref());
         let ops_root = self.any.root();
@@ -1138,7 +1138,8 @@ pub(super) async fn build_grafted_tree<
     .await?;
 
     // Build the base grafted tree: either from pruned components or empty.
-    let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<H>(), grafting_height);
+    let mut grafted_hasher =
+        grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<H>(), grafting_height);
     let mut grafted_tree = if pruned_chunks > 0 {
         let grafted_pruning_boundary = Location::<F>::new(pruned_chunks as u64);
         Mem::from_components(Vec::new(), grafted_pruning_boundary, pinned_nodes.to_vec())
@@ -1291,7 +1292,13 @@ mod tests {
         let partial_digest = Sha256::hash(b"partial");
 
         let without = combine_roots(&mut hasher, &ops, &grafted, None, None);
-        let with = combine_roots(&mut hasher, &ops, &grafted, None, Some((5, &partial_digest)));
+        let with = combine_roots(
+            &mut hasher,
+            &ops,
+            &grafted,
+            None,
+            Some((5, &partial_digest)),
+        );
         assert_ne!(without, with);
     }
 
@@ -1316,7 +1323,13 @@ mod tests {
         let partial_digest = Sha256::hash(b"partial");
 
         let only_pending = combine_roots(&mut hasher, &ops, &grafted, Some(&pending_digest), None);
-        let only_partial = combine_roots(&mut hasher, &ops, &grafted, None, Some((5, &partial_digest)));
+        let only_partial = combine_roots(
+            &mut hasher,
+            &ops,
+            &grafted,
+            None,
+            Some((5, &partial_digest)),
+        );
         let both = combine_roots(
             &mut hasher,
             &ops,
@@ -1367,7 +1380,13 @@ mod tests {
 
         // Partial only.
         assert_eq!(
-            combine_roots(&mut hasher, &ops, &grafted, None, Some((next_bit, &partial))),
+            combine_roots(
+                &mut hasher,
+                &ops,
+                &grafted,
+                None,
+                Some((next_bit, &partial))
+            ),
             hasher.hash([
                 ops.as_ref(),
                 grafted.as_ref(),

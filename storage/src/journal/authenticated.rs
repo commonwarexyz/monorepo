@@ -447,10 +447,7 @@ where
 
         // Append item to the journal, then update the Merkle structure state.
         let loc = self.journal.append(item).await?;
-        let unmerkleized_batch = self
-            .merkle
-            .new_batch()
-            .add(&mut self.hasher, &encoded_item);
+        let unmerkleized_batch = self.merkle.new_batch().add(&mut self.hasher, &encoded_item);
         let batch = self
             .merkle
             .with_mem(|mem| unmerkleized_batch.merkleize(mem, &mut self.hasher));
@@ -710,7 +707,8 @@ macro_rules! impl_journal_new {
                 journal.rewind_to(rewind_predicate).await?;
 
                 let mut hasher = StandardHasher::<H>::new(bagging);
-                let mut merkle = Merkle::init(context.child("merkle"), &mut hasher, merkle_cfg).await?;
+                let mut merkle =
+                    Merkle::init(context.child("merkle"), &mut hasher, merkle_cfg).await?;
                 Self::align(&mut merkle, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
                 journal.sync().await?;
@@ -1059,7 +1057,8 @@ mod tests {
 
     /// Verify that align() correctly handles empty Merkle and journal components.
     async fn test_align_with_empty_mmr_and_journal_inner<F: Family + PartialEq>(context: Context) {
-        let (mut merkle, journal, mut hasher) = create_components::<F>(context, "align-empty").await;
+        let (mut merkle, journal, mut hasher) =
+            create_components::<F>(context, "align-empty").await;
 
         TestJournal::<F>::align(&mut merkle, &journal, &mut hasher, APPLY_BATCH_SIZE)
             .await
@@ -1130,7 +1129,8 @@ mod tests {
 
     /// Verify that align() replays journal operations when journal is ahead of Merkle.
     async fn test_align_when_journal_ahead_inner<F: Family + PartialEq>(context: Context) {
-        let (mut merkle, journal, mut hasher) = create_components::<F>(context, "journal-ahead").await;
+        let (mut merkle, journal, mut hasher) =
+            create_components::<F>(context, "journal-ahead").await;
 
         // Add 20 operations to journal only
         for i in 0..20 {

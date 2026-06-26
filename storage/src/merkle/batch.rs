@@ -708,12 +708,7 @@ mod tests {
             let element = hasher.digest(&55u64.to_be_bytes());
             let proof = applied.proof(&mut hasher, loc, 0).unwrap();
             let root = batch_root(&applied, &merkleized, &mut hasher);
-            assert!(proof.verify_element_inclusion(
-                &mut hasher,
-                &element,
-                loc,
-                &root
-            ));
+            assert!(proof.verify_element_inclusion(&mut hasher, &element, loc, &root));
         });
     }
 
@@ -796,12 +791,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 let proof = applied.proof(&mut hasher, loc, 0).unwrap();
                 let root = batch_root(&applied, &mb, &mut hasher);
-                assert!(proof.verify_element_inclusion(
-                    &mut hasher,
-                    &element,
-                    loc,
-                    &root
-                ));
+                assert!(proof.verify_element_inclusion(&mut hasher, &element, loc, &root));
             }
         });
     }
@@ -902,24 +892,14 @@ mod tests {
             let element = hasher.digest(&55u64.to_be_bytes());
             let proof = applied.proof(&mut hasher, loc, 0).unwrap();
             let root = batch_root(&applied, &m, &mut hasher);
-            assert!(proof.verify_element_inclusion(
-                &mut hasher,
-                &element,
-                loc,
-                &root
-            ));
+            assert!(proof.verify_element_inclusion(&mut hasher, &element, loc, &root));
             let range = Location::<F>::new(50)..Location::new(55);
             let rp = applied.range_proof(&mut hasher, range.clone(), 0).unwrap();
             let elements: Vec<D> = (50u64..55)
                 .map(|i| hasher.digest(&i.to_be_bytes()))
                 .collect();
             let root = batch_root(&applied, &m, &mut hasher);
-            assert!(rp.verify_range_inclusion(
-                &mut hasher,
-                &elements,
-                range.start,
-                &root
-            ));
+            assert!(rp.verify_range_inclusion(&mut hasher, &elements, range.start, &root));
         });
     }
 

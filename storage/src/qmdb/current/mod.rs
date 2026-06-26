@@ -456,11 +456,11 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(
+    let storage = grafting::Storage::<F, H, _, _>::new(
         &grafted_tree,
         grafting::height::<N>(),
         &any.log.merkle,
-        qmdb::hasher::<H>(),
+        qmdb::ROOT_BAGGING,
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.root();
@@ -1452,7 +1452,10 @@ pub mod tests {
             let kvp = db.key_value_proof(&mut hasher, b.clone()).await.unwrap();
             let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
             assert!(!ForgedExclusionDb::verify_exclusion_proof(
-                &mut hasher, &c, &forged, &root
+                &mut hasher,
+                &c,
+                &forged,
+                &root
             ));
 
             db.destroy().await.unwrap();

@@ -692,8 +692,12 @@ where
         batch: &grafted_batch,
         mem: &current_db.grafted_tree,
     };
-    let grafted_storage =
-        grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, qmdb::hasher::<H>());
+    let grafted_storage = grafting::Storage::<F, H, _, _>::new(
+        &layered,
+        grafting_height,
+        &ops_tree_adapter,
+        qmdb::ROOT_BAGGING,
+    );
     // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
     // index `new_complete_chunks` (the chunk currently being filled with bits) -- distinct
     // from `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can

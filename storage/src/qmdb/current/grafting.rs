@@ -368,13 +368,13 @@ impl<
         grafted_tree: &'a G,
         grafting_height: u32,
         ops_tree: &'a S,
-        hasher: merkle::hasher::Standard<H>,
+        bagging: merkle::Bagging,
     ) -> Self {
         Self {
             grafted_tree,
             grafting_height,
             ops_tree,
-            bagging: hasher.root_bagging(),
+            bagging,
             _phantom: PhantomData,
         }
     }
@@ -580,7 +580,10 @@ mod tests {
 
         let mut standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
         let expected_no_combine = <StandardHasher<Sha256> as HasherTrait<mmr::Family>>::node_digest(
-            &mut standard, pos_at_g, &left, &right,
+            &mut standard,
+            pos_at_g,
+            &left,
+            &right,
         );
 
         let mut v = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 0, ForwardFold);
@@ -593,7 +596,8 @@ mod tests {
         );
 
         // Sanity: with graftable_chunks=1 the chunk IS combined, so the digest differs.
-        let mut v_graftable = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 1, ForwardFold);
+        let mut v_graftable =
+            Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 1, ForwardFold);
         let got_graftable =
             <Verifier<'_, mmr::Family, Sha256> as HasherTrait<mmr::Family>>::node_digest(
                 &mut v_graftable,
@@ -868,11 +872,11 @@ mod tests {
             let ops_root = ops_mmr.root(&mut hasher, 0).unwrap();
 
             {
-                let combined = Storage::new(
+                let combined = Storage::<mmr::Family, Sha256, _, _>::new(
                     &grafted,
                     GRAFTING_HEIGHT,
                     &ops_mmr,
-                    StandardHasher::<Sha256>::new(hasher.root_bagging()),
+                    hasher.root_bagging(),
                 );
                 assert_eq!(combined.size().await, ops_mmr.size());
 
@@ -953,7 +957,12 @@ mod tests {
                     assert!(proof.verify_element_inclusion(&mut verifier, &b4, loc, &grafted_root));
 
                     // Wrong leaf element.
-                    assert!(!proof.verify_element_inclusion(&mut verifier, &b3, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(
+                        &mut verifier,
+                        &b3,
+                        loc,
+                        &grafted_root
+                    ));
 
                     // Wrong root.
                     assert!(!proof.verify_element_inclusion(&mut verifier, &b4, loc, &ops_root));
@@ -974,7 +983,12 @@ mod tests {
                         ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
-                    assert!(!proof.verify_element_inclusion(&mut verifier, &b4, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(
+                        &mut verifier,
+                        &b4,
+                        loc,
+                        &grafted_root
+                    ));
 
                     // Wrong chunk index in the verifier.
                     let mut verifier = Verifier::<mmr::Family, Sha256>::new(
@@ -984,7 +998,12 @@ mod tests {
                         ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
-                    assert!(!proof.verify_element_inclusion(&mut verifier, &b4, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(
+                        &mut verifier,
+                        &b4,
+                        loc,
+                        &grafted_root
+                    ));
                 }
 
                 // Verify range proofs.
@@ -1040,11 +1059,11 @@ mod tests {
 
             ops_mmr.apply_batch(&batch).unwrap();
 
-            let combined = Storage::new(
+            let combined = Storage::<mmr::Family, Sha256, _, _>::new(
                 &grafted,
                 GRAFTING_HEIGHT,
                 &ops_mmr,
-                StandardHasher::<Sha256>::new(hasher.root_bagging()),
+                hasher.root_bagging(),
             );
             assert_eq!(combined.size().await, ops_mmr.size());
 

@@ -182,7 +182,9 @@ pub mod test {
 
             // Requesting a range proof at location 0 (in the pruned range) should return
             // OperationPruned, not panic.
-            let result = db.range_proof(&mut hasher, Location::new(0), NZU64!(1)).await;
+            let result = db
+                .range_proof(&mut hasher, Location::new(0), NZU64!(1))
+                .await;
             assert!(
                 matches!(result, Err(Error::OperationPruned(_))),
                 "expected OperationPruned, got {result:?}"

@@ -960,8 +960,12 @@ mod tests {
         };
         grafted.apply_batch(&merkleized).unwrap();
 
-        let storage =
-            grafting::Storage::new(&grafted, grafting_height, &ops, qmdb::hasher::<Sha256>());
+        let storage = grafting::Storage::<F, Sha256, _, _>::new(
+            &grafted,
+            grafting_height,
+            &ops,
+            qmdb::ROOT_BAGGING,
+        );
         let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
         let root = db::compute_db_root::<F, Sha256, _, _, N>(
             &mut hasher,
@@ -1062,8 +1066,12 @@ mod tests {
         };
         grafted.apply_batch(&merkleized).unwrap();
 
-        let storage =
-            grafting::Storage::new(&grafted, grafting_height, &ops, qmdb::hasher::<Sha256>());
+        let storage = grafting::Storage::<F, Sha256, _, _>::new(
+            &grafted,
+            grafting_height,
+            &ops,
+            qmdb::ROOT_BAGGING,
+        );
         let partial = {
             let (chunk, next_bit) = status.last_chunk();
             Some((*chunk, next_bit))
@@ -1173,8 +1181,12 @@ mod tests {
         };
         grafted.apply_batch(&merkleized).unwrap();
 
-        let storage =
-            grafting::Storage::new(&grafted, grafting_height, &ops, qmdb::hasher::<Sha256>());
+        let storage = grafting::Storage::<F, Sha256, _, _>::new(
+            &grafted,
+            grafting_height,
+            &ops,
+            qmdb::ROOT_BAGGING,
+        );
         let partial = {
             let (chunk, next_bit) = status.last_chunk();
             Some((*chunk, next_bit))
@@ -1265,7 +1277,8 @@ mod tests {
         .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<Sha256>(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<Sha256>(), grafting_height);
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -1276,7 +1289,12 @@ mod tests {
         };
         grafted.apply_batch(&merkleized).unwrap();
 
-        let storage = grafting::Storage::new(&grafted, grafting_height, &ops, qmdb::hasher::<Sha256>());
+        let storage = grafting::Storage::<F, Sha256, _, _>::new(
+            &grafted,
+            grafting_height,
+            &ops,
+            qmdb::ROOT_BAGGING,
+        );
         let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
         let root = db::compute_db_root::<F, Sha256, _, _, N>(
             &mut hasher,
@@ -1360,7 +1378,8 @@ mod tests {
         .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<Sha256>(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<Sha256>(), grafting_height);
         let mut grafted = Mem::<F, sha256::Digest>::new();
         if !leaf_digests.is_empty() {
             let merkleized = {
@@ -1373,7 +1392,12 @@ mod tests {
             grafted.apply_batch(&merkleized).unwrap();
         }
 
-        let storage = grafting::Storage::new(&grafted, grafting_height, &ops, qmdb::hasher::<Sha256>());
+        let storage = grafting::Storage::<F, Sha256, _, _>::new(
+            &grafted,
+            grafting_height,
+            &ops,
+            qmdb::ROOT_BAGGING,
+        );
         let root = db::compute_db_root::<F, Sha256, _, _, N>(
             &mut hasher,
             &status,
@@ -1419,9 +1443,15 @@ mod tests {
         let (mut hasher, proof, operations, chunks, root, ops) =
             current_range_proof_fixture::<F, N>(18, start..end).await;
 
-        let extracted =
-            verify_proof_and_extract_digests(&mut hasher, &proof, start, &operations, &chunks, &root)
-                .unwrap();
+        let extracted = verify_proof_and_extract_digests(
+            &mut hasher,
+            &proof,
+            start,
+            &operations,
+            &chunks,
+            &root,
+        )
+        .unwrap();
         assert!(!extracted.is_empty());
 
         // The extractor should return the authenticated digest for every proven leaf.
@@ -1485,9 +1515,15 @@ mod tests {
         let (mut hasher, proof, operations, chunks, root, _ops) =
             current_range_proof_fixture::<F, N>(6, start..end).await;
 
-        let extracted =
-            verify_proof_and_extract_digests(&mut hasher, &proof, start, &operations, &chunks, &root)
-                .unwrap();
+        let extracted = verify_proof_and_extract_digests(
+            &mut hasher,
+            &proof,
+            start,
+            &operations,
+            &chunks,
+            &root,
+        )
+        .unwrap();
 
         assert!(!extracted.is_empty());
     }
@@ -1748,7 +1784,8 @@ mod tests {
         .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<Sha256>(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<Sha256>(), grafting_height);
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -1759,7 +1796,12 @@ mod tests {
         };
         grafted.apply_batch(&merkleized).unwrap();
 
-        let storage = grafting::Storage::new(&grafted, grafting_height, &ops, qmdb::hasher::<Sha256>());
+        let storage = grafting::Storage::<F, Sha256, _, _>::new(
+            &grafted,
+            grafting_height,
+            &ops,
+            qmdb::ROOT_BAGGING,
+        );
         let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
         let root = db::compute_db_root::<F, Sha256, _, _, N>(
             &mut hasher,
@@ -1899,7 +1941,12 @@ mod tests {
                 };
                 grafted.apply_batch(&merkleized).unwrap();
             }
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, qmdb::hasher::<Sha256>());
+            let storage = grafting::Storage::<F, Sha256, _, _>::new(
+                &grafted,
+                grafting_height,
+                &ops,
+                qmdb::ROOT_BAGGING,
+            );
 
             let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
             let canonical_root = db::compute_db_root::<F, Sha256, _, _, N>(
@@ -2067,8 +2114,12 @@ mod tests {
         let ops_pre = build_test_mem(&mut hasher, mmb::mem::Mmb::new(), pre_state_leaves);
         let ops_root_pre = ops_pre.root(&mut hasher, 0).unwrap();
         let grafted_pre = Mem::<F, sha256::Digest>::new();
-        let storage_pre =
-            grafting::Storage::new(&grafted_pre, grafting_height, &ops_pre, qmdb::hasher::<Sha256>());
+        let storage_pre = grafting::Storage::<F, Sha256, _, _>::new(
+            &grafted_pre,
+            grafting_height,
+            &ops_pre,
+            qmdb::ROOT_BAGGING,
+        );
         let canonical_pre = db::compute_db_root::<F, Sha256, _, _, N>(
             &mut hasher,
             &status_pre,
@@ -2105,15 +2156,20 @@ mod tests {
             1,
             "post-state must have 1 graftable chunk"
         );
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<Sha256>(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<Sha256>(), grafting_height);
         let mut grafted_post = Mem::<F, sha256::Digest>::new();
         let merkleized = grafted_post
             .new_batch()
             .add_leaf_digest(leaf_digests[0].1)
             .merkleize(&grafted_post, &mut grafted_hasher);
         grafted_post.apply_batch(&merkleized).unwrap();
-        let storage_post =
-            grafting::Storage::new(&grafted_post, grafting_height, &ops_post, qmdb::hasher::<Sha256>());
+        let storage_post = grafting::Storage::<F, Sha256, _, _>::new(
+            &grafted_post,
+            grafting_height,
+            &ops_post,
+            qmdb::ROOT_BAGGING,
+        );
 
         let canonical_post = db::compute_db_root::<F, Sha256, _, _, N>(
             &mut hasher,
@@ -2187,7 +2243,8 @@ mod tests {
         .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<Sha256>(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<Sha256>(), grafting_height);
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -2198,7 +2255,12 @@ mod tests {
         };
         grafted.apply_batch(&merkleized).unwrap();
 
-        let storage = grafting::Storage::new(&grafted, grafting_height, &ops, qmdb::hasher::<Sha256>());
+        let storage = grafting::Storage::<F, Sha256, _, _>::new(
+            &grafted,
+            grafting_height,
+            &ops,
+            qmdb::ROOT_BAGGING,
+        );
         let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
         let root = db::compute_db_root::<F, Sha256, _, _, N>(
             &mut hasher,

@@ -758,7 +758,12 @@ mod tests {
                 .proof(&mut hasher, Location::new(i), 0)
                 .unwrap_or_else(|e| panic!("loc={i}: {e:?}"));
             assert!(
-                proof.verify_element_inclusion(&mut hasher, &i.to_be_bytes(), Location::new(i), &root),
+                proof.verify_element_inclusion(
+                    &mut hasher,
+                    &i.to_be_bytes(),
+                    Location::new(i),
+                    &root
+                ),
                 "loc={i}: proof should verify"
             );
         }
@@ -875,12 +880,7 @@ mod tests {
         let proof = mem.proof(&mut hasher, Location::new(5), 0).unwrap();
         let root = plain_root(&mem, &mut hasher);
         assert!(
-            proof.verify_element_inclusion(
-                &mut hasher,
-                b"updated-5",
-                Location::new(5),
-                &root
-            ),
+            proof.verify_element_inclusion(&mut hasher, b"updated-5", Location::new(5), &root),
             "updated leaf should verify with new data"
         );
 
@@ -899,12 +899,7 @@ mod tests {
             let p = mem.proof(&mut hasher, Location::new(i), 0).unwrap();
             let root = plain_root(&mem, &mut hasher);
             assert!(
-                p.verify_element_inclusion(
-                    &mut hasher,
-                    &i.to_be_bytes(),
-                    Location::new(i),
-                    &root
-                ),
+                p.verify_element_inclusion(&mut hasher, &i.to_be_bytes(), Location::new(i), &root),
                 "leaf {i} should still verify with original data"
             );
         }
@@ -925,7 +920,9 @@ mod tests {
             };
             mem.apply_batch(&batch).unwrap();
 
-            let proof = mem.proof(&mut hasher, Location::new(update_loc), 0).unwrap();
+            let proof = mem
+                .proof(&mut hasher, Location::new(update_loc), 0)
+                .unwrap();
             let root = plain_root(&mem, &mut hasher);
             assert!(
                 proof.verify_element_inclusion(
@@ -959,7 +956,9 @@ mod tests {
                 Err(Error::ElementPruned(_))
             ));
             let batch = mem.new_batch();
-            assert!(batch.update_leaf(&mut hasher, Location::new(5), b"x").is_ok());
+            assert!(batch
+                .update_leaf(&mut hasher, Location::new(5), b"x")
+                .is_ok());
         }
     }
 
@@ -982,12 +981,7 @@ mod tests {
 
         let proof = mem.proof(&mut hasher, Location::new(3), 0).unwrap();
         let root = plain_root(&mem, &mut hasher);
-        assert!(proof.verify_element_inclusion(
-            &mut hasher,
-            b"updated-3",
-            Location::new(3),
-            &root
-        ));
+        assert!(proof.verify_element_inclusion(&mut hasher, b"updated-3", Location::new(3), &root));
 
         let proof = mem.proof(&mut hasher, Location::new(8), 0).unwrap();
         let root = plain_root(&mem, &mut hasher);
@@ -1038,12 +1032,7 @@ mod tests {
         let proof = mem.proof(&mut hasher, Location::new(0), 0).unwrap();
         let root = plain_root(&mem, &mut hasher);
         assert!(
-            proof.verify_element_inclusion(
-                &mut hasher,
-                b"updated-0",
-                Location::new(0),
-                &root
-            ),
+            proof.verify_element_inclusion(&mut hasher, b"updated-0", Location::new(0), &root),
             "updated leaf should verify"
         );
     }
@@ -1094,9 +1083,18 @@ mod tests {
         let mut mem = Mem::<F, D>::new();
 
         // Chain: Mem -> A -> B -> C
-        let a = mem.new_batch().add(&mut hasher, b"a").merkleize(&mem, &mut hasher);
-        let b = a.new_batch().add(&mut hasher, b"b").merkleize(&mem, &mut hasher);
-        let c = b.new_batch().add(&mut hasher, b"c").merkleize(&mem, &mut hasher);
+        let a = mem
+            .new_batch()
+            .add(&mut hasher, b"a")
+            .merkleize(&mem, &mut hasher);
+        let b = a
+            .new_batch()
+            .add(&mut hasher, b"b")
+            .merkleize(&mem, &mut hasher);
+        let c = b
+            .new_batch()
+            .add(&mut hasher, b"c")
+            .merkleize(&mem, &mut hasher);
 
         // Apply A, then apply C directly (skipping B's apply_batch).
         // C's ancestor batches carry [A.data, B.data]. A is already committed
@@ -1125,10 +1123,19 @@ mod tests {
         let mut hasher: H = Standard::new(ForwardFold);
         let mut mem = Mem::<F, D>::new();
 
-        let a = mem.new_batch().add(&mut hasher, b"a").merkleize(&mem, &mut hasher);
-        let b = a.new_batch().add(&mut hasher, b"b").merkleize(&mem, &mut hasher);
+        let a = mem
+            .new_batch()
+            .add(&mut hasher, b"a")
+            .merkleize(&mem, &mut hasher);
+        let b = a
+            .new_batch()
+            .add(&mut hasher, b"b")
+            .merkleize(&mem, &mut hasher);
         drop(a); // A dropped before C is merkleized, so its data is lost
-        let c = b.new_batch().add(&mut hasher, b"c").merkleize(&mem, &mut hasher);
+        let c = b
+            .new_batch()
+            .add(&mut hasher, b"c")
+            .merkleize(&mem, &mut hasher);
 
         let result = mem.apply_batch(&c);
         assert!(
