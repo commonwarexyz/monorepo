@@ -69,16 +69,16 @@ pub trait Contiguous: Send + Sync {
         None
     }
 
-    /// Return the end position for a byte-budgeted batch starting at `start_pos`.
+    /// Read a byte-budgeted batch starting at `start_pos`.
     ///
-    /// If `start_pos < bounds().end`, the implementation must advance by at least one position,
-    /// even when the first item exceeds `budget`. `budget` is a byte
+    /// If `start_pos < bounds().end`, the implementation must return at least one item and advance
+    /// to the next unread position, even when the first item exceeds `budget`. `budget` is a byte
     /// budget, not an item count.
     fn read_limit(
         &self,
         start_pos: u64,
         budget: NonZeroUsize,
-    ) -> impl Future<Output = Result<u64, Error>> + Send;
+    ) -> impl Future<Output = Result<(Vec<Self::Item>, u64), Error>> + Send;
 
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
@@ -103,14 +103,9 @@ pub trait Contiguous: Send + Sync {
                 if pos == bounds.end {
                     return None;
                 }
-                let next = match self.read_limit(pos, buffer).await {
-                    Ok(next) => next,
-                    Err(err) => return Some((stream::iter(vec![Err(err)]), bounds.end)),
-                };
-                let positions: Vec<_> = (pos..next).collect();
-                match self.read_many(&positions).await {
-                    Ok(items) => {
-                        let batch = positions.into_iter().zip(items).map(Ok).collect::<Vec<_>>();
+                match self.read_limit(pos, buffer).await {
+                    Ok((items, next)) => {
+                        let batch = (pos..next).zip(items).map(Ok).collect::<Vec<_>>();
                         Some((stream::iter(batch), next))
                     }
                     Err(err) => Some((stream::iter(vec![Err(err)]), bounds.end)),

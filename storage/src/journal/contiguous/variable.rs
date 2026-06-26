@@ -633,18 +633,15 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         Some(item)
     }
 
-    /// Select the end of a byte-budgeted consecutive range.
+    /// Select a byte-budgeted range and read it through the existing batch path.
     async fn read_limit(
         &self,
         start_pos: u64,
         budget: NonZeroUsize,
-    ) -> Result<u64, Error> {
+    ) -> Result<(Vec<V>, u64), Error> {
         let bounds = self.bounds();
-        if start_pos > bounds.end {
-            return Err(Error::ItemOutOfRange(start_pos));
-        }
         if start_pos == bounds.end {
-            return Ok(start_pos);
+            return Ok((Vec::new(), start_pos));
         }
         self.validate_readable(start_pos)?;
 
@@ -676,7 +673,9 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
             offset = if same_blob { next_offset } else { 0 };
         }
 
-        Ok(pos)
+        let positions: Vec<_> = (start_pos..pos).collect();
+        let items = self.read_many(&positions).await?;
+        Ok((items, pos))
     }
 }
 
@@ -1752,7 +1751,7 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         &self,
         start_pos: u64,
         budget: NonZeroUsize,
-    ) -> Result<u64, Error> {
+    ) -> Result<(Vec<V>, u64), Error> {
         self.reader().read_limit(start_pos, budget).await
     }
 }
@@ -2415,20 +2414,18 @@ mod tests {
             }
 
             let reader = journal.snapshot().await.unwrap();
-            let next = reader
+            let (items, next) = reader
                 .read_limit(1, NZUsize!(10))
                 .await
                 .expect("read limit should cross blob boundary");
             assert_eq!(next, 3);
-            let items = reader.read_many(&(1..next).collect::<Vec<_>>()).await.unwrap();
             assert_eq!(items, vec![item(1), item(2)]);
 
-            let next = reader
+            let (items, next) = reader
                 .read_limit(3, NZUsize!(1))
                 .await
                 .expect("read limit should return at least one item");
             assert_eq!(next, 4);
-            let items = reader.read_many(&(3..next).collect::<Vec<_>>()).await.unwrap();
             assert_eq!(items, vec![item(3)]);
 
             journal.destroy().await.unwrap();

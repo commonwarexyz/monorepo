@@ -758,7 +758,7 @@ where
         &self,
         start_pos: u64,
         budget: NonZeroUsize,
-    ) -> Result<u64, JournalError> {
+    ) -> Result<(Vec<C::Item>, u64), JournalError> {
         self.journal.read_limit(start_pos, budget).await
     }
 }
