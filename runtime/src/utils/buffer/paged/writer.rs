@@ -1129,9 +1129,7 @@ impl<B: Blob> Writer<B> {
         let partial_page = if self.buffer.is_empty() {
             None
         } else {
-            let mut copy = self.cache_ref.pool().alloc(self.buffer.len());
-            copy.put_slice(self.buffer.as_ref());
-            Some(copy.freeze())
+            Some(self.buffer.slice(..))
         };
         super::Sealed::new(
             self.blob.clone(),
@@ -1392,8 +1390,9 @@ mod tests {
         });
     }
 
-    #[test_traced("DEBUG")]
-    fn test_read_many_into_rejects_invalid_offsets() {
+    #[test]
+    #[should_panic(expected = "read_many_into requires buf.len() == offsets.len() * item_size")]
+    fn test_read_many_into_panics_on_invalid_buffer_len() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
@@ -1407,25 +1406,71 @@ mod tests {
 
             let offsets = [0u64, 4];
             let mut buf = vec![0u8; 7];
-            let err = append
+            append
                 .read_many_into(&mut buf, &offsets, NZUsize!(4))
                 .await
-                .unwrap_err();
-            assert!(matches!(err, Error::InvalidInput(_)));
+                .unwrap();
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "read_many_into offsets must be sorted and non-overlapping")]
+    fn test_read_many_into_panics_on_unsorted_offsets() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..16).collect();
+            append.append(&data).await.unwrap();
 
             let mut buf = vec![0u8; 8];
-            let err = append
+            append
                 .read_many_into(&mut buf, &[8, 4], NZUsize!(4))
                 .await
-                .unwrap_err();
-            assert!(matches!(err, Error::InvalidInput(_)));
+                .unwrap();
+        });
+    }
 
-            let err = append
+    #[test]
+    #[should_panic(expected = "read_many_into offsets must be sorted and non-overlapping")]
+    fn test_read_many_into_panics_on_overlapping_offsets() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..16).collect();
+            append.append(&data).await.unwrap();
+
+            let mut buf = vec![0u8; 8];
+            append
                 .read_many_into(&mut buf, &[2, 4], NZUsize!(4))
                 .await
-                .unwrap_err();
-            assert!(matches!(err, Error::InvalidInput(_)));
+                .unwrap();
+        });
+    }
 
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_rejects_offset_overflow() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..16).collect();
+            append.append(&data).await.unwrap();
+
+            let mut buf = vec![0u8; 8];
             let err = append
                 .read_many_into(&mut buf, &[u64::MAX - 1, 4], NZUsize!(4))
                 .await
@@ -3588,7 +3633,7 @@ mod tests {
                 (page_size + 5) as u64,
                 (page_size * 3 + 2) as u64,
             ];
-            // Cover page-aligned, boundary-crossing, and copied-tail reads in one batch.
+            // Cover page-aligned, boundary-crossing, and snapshot-tail reads in one batch.
             let mut batch = vec![0u8; offsets.len() * item_size];
             snapshot
                 .read_many_into(&mut batch, &offsets, NZUsize!(item_size))
@@ -3608,7 +3653,7 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_try_read_sync_prefers_copied_tail() {
+    fn test_snapshot_try_read_sync_prefers_snapshot_tail() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -3629,7 +3674,7 @@ mod tests {
             let snapshot = append.snapshot().await.unwrap();
 
             let poison = vec![0xBB; page_size];
-            // If the snapshot consulted the page cache for its copied tail, this would leak in.
+            // If the snapshot consulted the page cache for its tail, this would leak in.
             assert_eq!(
                 append.cache_ref.cache(append.id, &poison, page_size as u64),
                 0

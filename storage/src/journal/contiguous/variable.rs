@@ -1025,11 +1025,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.mark_dirty_from(position_to_blob(self.bounds.end, items_per_blob));
         let mut written = 0;
         while written < items_count {
-            let pos_in_blob = self.bounds.end % items_per_blob;
-            // Take the min in u64: casting `remaining_space` first would truncate on 32-bit
-            // targets, where an exact multiple of 2^32 yields a zero batch that never advances.
-            let remaining_space = items_per_blob - pos_in_blob;
-            let batch_count = remaining_space.min((items_count - written) as u64) as usize;
+            let batch_count = super::batch_count_to_blob_boundary(
+                self.bounds.end,
+                items_count - written,
+                items_per_blob,
+            );
             let batch_start = item_starts[written];
             let batch_end = item_starts
                 .get(written + batch_count)
@@ -1065,9 +1065,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             self.bounds.end += batch_count as u64;
             written += batch_count;
 
+            // Seal the just-filled tail and open the next blob as the new tail. This does not
+            // fsync the old blob; dirty tracking still covers it until commit/sync.
             if self.bounds.end.is_multiple_of(items_per_blob) {
-                // Seal the just-filled tail and open the next blob as the new tail. This does
-                // NOT fsync the old blob -- dirty tracking still covers it until commit/sync.
                 self.blobs.seal_tail().await?;
             }
         }

@@ -361,7 +361,7 @@ mod tests {
                 .expect("unable to append voter journal artifact");
         }
         journal
-            .sync(&[view.get()])
+            .sync(view.get())
             .await
             .expect("unable to sync voter journal");
     }

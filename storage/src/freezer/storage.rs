@@ -695,7 +695,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                     .await?;
 
                 // Sync oversized
-                oversized.sync(&[checkpoint.section]).await?;
+                oversized.sync(checkpoint.section).await?;
 
                 // Resize table if needed
                 let expected_table_len = Self::table_offset(checkpoint.table_size);
@@ -1059,9 +1059,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     // TODO:(<https://github.com/commonwarexyz/monorepo/issues/2910>): Make this non &mut.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
         // Sync all modified sections for oversized journal
-        self.oversized
-            .sync(&self.modified_sections.iter().copied().collect::<Vec<_>>())
-            .await?;
+        self.oversized.sync(&self.modified_sections).await?;
         self.modified_sections.clear();
 
         // Start a resize (if needed)

@@ -610,7 +610,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Ensures the given `sections` are synced to the underlying store.
     ///
     /// If the `section` does not exist, no error will be returned.
-    pub async fn sync(&mut self, sections: &[u64]) -> Result<(), Error> {
+    pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
         self.manager.sync(sections).await
     }
 
@@ -702,10 +702,7 @@ mod tests {
             assert!(buffer.contains("first_tracked 1"));
 
             // Drop and re-open the journal to simulate a restart
-            journal
-                .sync(&[index])
-                .await
-                .expect("Failed to sync journal");
+            journal.sync(index).await.expect("Failed to sync journal");
             drop(journal);
             let mut journal = Journal::<_, i32>::init(context.child("second"), cfg)
                 .await
@@ -764,7 +761,7 @@ mod tests {
                     .append(*index, data)
                     .await
                     .expect("Failed to append data");
-                journal.sync(&[*index]).await.expect("Failed to sync blob");
+                journal.sync(*index).await.expect("Failed to sync blob");
             }
 
             // Check metrics
@@ -835,7 +832,7 @@ mod tests {
                     .append(index, &index)
                     .await
                     .expect("Failed to append data");
-                journal.sync(&[index]).await.expect("Failed to sync blob");
+                journal.sync(index).await.expect("Failed to sync blob");
             }
 
             // Add one item out-of-order
@@ -844,7 +841,7 @@ mod tests {
                 .append(2u64, &data)
                 .await
                 .expect("Failed to append data");
-            journal.sync(&[2u64]).await.expect("Failed to sync blob");
+            journal.sync(2u64).await.expect("Failed to sync blob");
 
             // Prune blobs with indices less than 3
             journal.prune(3).await.expect("Failed to prune blobs");
@@ -928,7 +925,7 @@ mod tests {
                     .append(section, &(section as i32))
                     .await
                     .expect("Failed to append data");
-                journal.sync(&[section]).await.expect("Failed to sync");
+                journal.sync(section).await.expect("Failed to sync");
             }
 
             // Prune sections < 3
@@ -972,7 +969,7 @@ mod tests {
             }
 
             // Test sync on pruned section
-            match journal.sync(&[2]).await {
+            match journal.sync(2).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
@@ -982,7 +979,7 @@ mod tests {
             assert!(journal.get(4, 0).await.is_ok());
             assert!(journal.get(5, 0).await.is_ok());
             assert!(journal.size(3).is_ok());
-            assert!(journal.sync(&[4]).await.is_ok());
+            assert!(journal.sync(4).await.is_ok());
 
             // Append to section at threshold should work
             journal
@@ -1033,7 +1030,7 @@ mod tests {
                         .append(section, &(section as i32))
                         .await
                         .expect("Failed to append data");
-                    journal.sync(&[section]).await.expect("Failed to sync");
+                    journal.sync(section).await.expect("Failed to sync");
                 }
 
                 journal.prune(3).await.expect("Failed to prune");
@@ -1182,10 +1179,7 @@ mod tests {
                 .append_raw(section, IoBuf::copy_from_slice(&[0xFF, 0xFF]))
                 .await
                 .expect("Failed to append trailing bytes");
-            journal
-                .sync(&[section])
-                .await
-                .expect("Failed to sync journal");
+            journal.sync(section).await.expect("Failed to sync journal");
             drop(journal);
 
             let mut journal = Journal::init(context.child("second"), cfg)
@@ -1437,7 +1431,7 @@ mod tests {
                     .append(*index, data)
                     .await
                     .expect("Failed to append data");
-                journal.sync(&[*index]).await.expect("Failed to sync blob");
+                journal.sync(*index).await.expect("Failed to sync blob");
             }
 
             // Sync all sections and drop the journal
@@ -1516,7 +1510,7 @@ mod tests {
 
             // Append a new item to truncated partition
             let (_offset, _) = journal.append(2, &5).await.expect("Failed to append data");
-            journal.sync(&[2]).await.expect("Failed to sync blob");
+            journal.sync(2).await.expect("Failed to sync blob");
 
             // Get the new item (offset is 0 since blob was truncated)
             let item = journal.get(2, 0).await.expect("Failed to get item");
@@ -1586,7 +1580,7 @@ mod tests {
                     .append(*index, data)
                     .await
                     .expect("Failed to append data");
-                journal.sync(&[*index]).await.expect("Failed to sync blob");
+                journal.sync(*index).await.expect("Failed to sync blob");
             }
 
             // Sync all sections and drop the journal
@@ -1787,7 +1781,7 @@ mod tests {
                 assert_eq!(size, 1, "u8 should encode to 1 byte");
                 offsets.push(offset);
             }
-            journal.sync(&[1]).await.expect("Failed to sync");
+            journal.sync(1).await.expect("Failed to sync");
 
             // Read each item back via random access
             for (i, &offset) in offsets.iter().enumerate() {
@@ -1902,7 +1896,7 @@ mod tests {
             let mut sizes = Vec::new();
             for i in 0..5 {
                 journal.append(1, &i).await.unwrap();
-                journal.sync(&[1]).await.unwrap();
+                journal.sync(1).await.unwrap();
                 sizes.push(journal.size(1).unwrap());
             }
 
@@ -2103,7 +2097,7 @@ mod tests {
             for i in 0..5i32 {
                 journal.append(1, &i).await.unwrap();
             }
-            journal.sync(&[1]).await.unwrap();
+            journal.sync(1).await.unwrap();
             let valid_logical_size = journal.size(1).unwrap();
             drop(journal);
 
@@ -2190,7 +2184,7 @@ mod tests {
                 .await
                 .expect("Failed to append large item");
             assert_eq!(size as usize, LARGE_SIZE);
-            journal.sync(&[1]).await.expect("Failed to sync");
+            journal.sync(1).await.expect("Failed to sync");
 
             // Read the item back via random access
             let retrieved: LargeItem = journal
@@ -2278,7 +2272,7 @@ mod tests {
             assert_eq!(retrieved, second);
 
             // Everything survives a sync and reopen.
-            journal.sync(&[1]).await.expect("Failed to sync");
+            journal.sync(1).await.expect("Failed to sync");
             drop(journal);
             let mut journal = Journal::<_, LargeItem>::init(context.child("second"), cfg.clone())
                 .await
@@ -2452,7 +2446,7 @@ mod tests {
             // Create section 2 but don't append anything - just sync to create the blob
             // Actually, we need to append something and then rewind to make it empty
             journal.append(2, &200i32).await.expect("Failed to append");
-            journal.sync(&[2]).await.expect("Failed to sync");
+            journal.sync(2).await.expect("Failed to sync");
             journal
                 .rewind_section(2, 0)
                 .await
@@ -2551,7 +2545,7 @@ mod tests {
                 .await
                 .expect("Failed to append exact item");
             assert_eq!(size as usize, ITEM_SIZE);
-            journal.sync(&[1]).await.expect("Failed to sync");
+            journal.sync(1).await.expect("Failed to sync");
 
             // Read the item back via random access
             let retrieved: ExactItem = journal
@@ -2628,7 +2622,7 @@ mod tests {
             let (offset2, _) = journal.append(1, &item2).await.expect("Failed to append");
             let (offset3, _) = journal.append(1, &item3).await.expect("Failed to append");
 
-            journal.sync(&[1]).await.expect("Failed to sync");
+            journal.sync(1).await.expect("Failed to sync");
 
             // Read items back via random access
             let retrieved1: [u8; 128] = journal.get(1, offset1).await.expect("Failed to get");
@@ -2693,7 +2687,7 @@ mod tests {
                         .await
                         .expect("Failed to append");
                 }
-                journal.sync(&[section]).await.expect("Failed to sync");
+                journal.sync(section).await.expect("Failed to sync");
             }
 
             // Verify we have data
@@ -2718,10 +2712,7 @@ mod tests {
                     .await
                     .expect("Failed to append after clear");
             }
-            journal
-                .sync(&[10])
-                .await
-                .expect("Failed to sync after clear");
+            journal.sync(10).await.expect("Failed to sync after clear");
 
             // New data should be readable
             assert_eq!(journal.get(10, 0).await.unwrap(), 0);

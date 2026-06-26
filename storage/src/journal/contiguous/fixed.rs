@@ -649,14 +649,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Self::init_with_checkpoint(context, cfg, checkpoint).await
     }
 
-    /// Convert a global position to (blob, position_in_blob).
-    #[inline]
-    const fn position_to_blob(&self, position: u64) -> (u64, u64) {
-        let blob = position / self.items_per_blob.get();
-        let pos_in_blob = position % self.items_per_blob.get();
-        (blob, pos_in_blob)
-    }
-
     /// Make dirty blobs durable.
     async fn flush_dirty_blobs(&mut self) -> Result<(), Error> {
         let Some(start_blob) = self.dirty_from_blob else {
@@ -817,11 +809,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.mark_dirty_from(first_dirty_blob);
         let mut written = 0;
         while written < items_count {
-            let (_, pos_in_blob) = self.position_to_blob(self.bounds.end);
-            // Take the min in u64: casting `remaining_space` first would truncate on 32-bit
-            // targets, where an exact multiple of 2^32 yields a zero batch that never advances.
-            let remaining_space = self.items_per_blob.get() - pos_in_blob;
-            let batch_count = remaining_space.min((items_count - written) as u64) as usize;
+            let batch_count = super::batch_count_to_blob_boundary(
+                self.bounds.end,
+                items_count - written,
+                self.items_per_blob.get(),
+            );
             let start = written * A::SIZE;
             let end = start + batch_count * A::SIZE;
             // Overflow checked above.
@@ -835,9 +827,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             self.bounds.end = new_size;
             written += batch_count;
 
+            // Seal the just-filled tail and open the next blob as the new tail. This does not
+            // fsync the old blob; dirty tracking still covers it until commit/sync.
             if new_size.is_multiple_of(self.items_per_blob.get()) {
-                // Seal the just-filled tail and open the next blob as the new tail. This does
-                // NOT fsync the old blob -- dirty tracking still covers it until commit/sync.
                 self.blobs.seal_tail().await?;
             }
         }

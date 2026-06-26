@@ -584,6 +584,28 @@ mod tests {
         });
     }
 
+    #[test]
+    #[should_panic(expected = "read_many_into offsets must be sorted and non-overlapping")]
+    fn test_sealed_read_many_into_panics_on_unsorted_offsets() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany_bad").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            append.append(&[7; 32]).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            let mut out = vec![0u8; 8];
+            sealed
+                .read_many_into(&mut out, &[8, 4], NZUsize!(4))
+                .await
+                .unwrap();
+        });
+    }
+
     /// `Sealed::read_many_into` validates all caller-provided offsets before reading.
     #[test_traced("DEBUG")]
     fn test_sealed_read_many_into_rejects_invalid_offsets() {
@@ -599,12 +621,6 @@ mod tests {
             let sealed = append.seal().await.unwrap();
 
             let mut out = vec![0u8; 8];
-            let err = sealed
-                .read_many_into(&mut out, &[8, 4], NZUsize!(4))
-                .await
-                .unwrap_err();
-            assert!(matches!(err, Error::InvalidInput(_)));
-
             let err = sealed
                 .read_many_into(&mut out, &[u64::MAX - 1, 8], NZUsize!(4))
                 .await

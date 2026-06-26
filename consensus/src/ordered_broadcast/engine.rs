@@ -1101,10 +1101,7 @@ impl<
             .expect("journal does not exist");
 
         // Sync journal
-        journal
-            .sync(&[section])
-            .await
-            .expect("unable to sync journal");
+        journal.sync(section).await.expect("unable to sync journal");
 
         // Prune journal, ignoring errors
         let _ = journal.prune(section).await;

@@ -433,9 +433,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.syncs.inc_by(self.pending.len() as u64);
 
         // Sync oversized journal (handles both index and values)
-        self.oversized
-            .sync(&self.pending.iter().copied().collect::<Vec<_>>())
-            .await?;
+        self.oversized.sync(&self.pending).await?;
 
         self.pending.clear();
         Ok(())

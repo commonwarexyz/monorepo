@@ -216,8 +216,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     }
 
     /// Sync the given `sections` to storage.
-    pub async fn sync(&mut self, sections: &[u64]) -> Result<(), Error> {
-        for &section in sections {
+    pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
+        let sections = sections.sections().collect::<Vec<_>>();
+        for &section in &sections {
             self.prune_guard(section)?;
         }
         let futures: Vec<_> = self

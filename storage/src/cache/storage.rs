@@ -273,9 +273,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     /// Sync all pending writes.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc_by(self.pending.len() as u64);
-        self.journal
-            .sync(&self.pending.iter().copied().collect::<Vec<_>>())
-            .await?;
+        self.journal.sync(&self.pending).await?;
         self.pending.clear();
         Ok(())
     }

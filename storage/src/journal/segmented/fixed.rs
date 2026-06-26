@@ -108,7 +108,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 manager.rewind_section(section, valid_size).await?;
                 // Startup repair is exceptional; make it durable immediately so callers do not
                 // need to track repaired sections separately.
-                manager.sync(&[section]).await?;
+                manager.sync(section).await?;
             }
         }
 
@@ -360,7 +360,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Sync the given `sections` to storage.
-    pub async fn sync(&mut self, sections: &[u64]) -> Result<(), Error> {
+    pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
         self.manager.sync(sections).await
     }
 
@@ -1167,7 +1167,7 @@ mod tests {
                 .append(2, &test_digest(200))
                 .await
                 .expect("failed to append");
-            journal.sync(&[2]).await.expect("failed to sync");
+            journal.sync(2).await.expect("failed to sync");
             journal
                 .rewind_section(2, 0)
                 .await
@@ -1336,7 +1336,7 @@ mod tests {
                         .await
                         .expect("Failed to append");
                 }
-                journal.sync(&[section]).await.expect("Failed to sync");
+                journal.sync(section).await.expect("Failed to sync");
             }
 
             // Verify we have data
@@ -1361,10 +1361,7 @@ mod tests {
                     .await
                     .expect("Failed to append after clear");
             }
-            journal
-                .sync(&[10])
-                .await
-                .expect("Failed to sync after clear");
+            journal.sync(10).await.expect("Failed to sync after clear");
 
             // New data should be readable
             assert_eq!(journal.get(10, 0).await.unwrap(), test_digest(0));
@@ -1412,7 +1409,7 @@ mod tests {
 
             journal.append(0, &test_digest(0)).await.unwrap();
             journal.append(0, &test_digest(1)).await.unwrap();
-            journal.sync(&[0]).await.unwrap();
+            journal.sync(0).await.unwrap();
 
             assert!(journal.last(0).await.unwrap().is_some());
 

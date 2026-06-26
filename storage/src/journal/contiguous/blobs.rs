@@ -271,7 +271,7 @@ impl<E: Context> Writable<E> {
     ///
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
     pub(super) async fn prune(&mut self, min_blob: u64) -> Result<(), Error> {
-        debug_assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
+        assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
         let prev_oldest_blob_index = self.oldest_blob_index;
         self.sealed = self.sealed[drop_count..].to_vec().into();
@@ -293,7 +293,7 @@ impl<E: Context> Writable<E> {
     ///
     pub(super) async fn rewind_tail(&mut self, byte_offset: u64) -> Result<(), Error> {
         let current_bytes = self.tail.size();
-        debug_assert!(byte_offset <= current_bytes);
+        assert!(byte_offset <= current_bytes);
         if byte_offset < current_bytes {
             self.tail
                 .resize(byte_offset)

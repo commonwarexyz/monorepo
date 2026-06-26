@@ -360,7 +360,7 @@ where
             .await
             .expect("should be able to write to msgs");
         self.msgs
-            .sync(&[section])
+            .sync(section)
             .await
             .expect("should be able to sync msgs");
 
@@ -386,7 +386,7 @@ where
             .await
             .expect("should be able to write to msgs");
         self.msgs
-            .sync(&[section])
+            .sync(section)
             .await
             .expect("should be able to sync msgs");
 
@@ -410,7 +410,7 @@ where
             .await
             .expect("should be able to write to msgs");
         self.msgs
-            .sync(&[section])
+            .sync(section)
             .await
             .expect("should be able to sync msgs");
 
