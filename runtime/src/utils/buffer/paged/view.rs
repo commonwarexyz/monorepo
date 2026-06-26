@@ -163,6 +163,10 @@ impl<B: Blob> View<'_, B> {
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
         super::validate_read_many_into(buf.len(), offsets, item_size, self.size)?;
+        if offsets.is_empty() {
+            return Ok(0);
+        }
+
         let mut cache_ranges =
             super::split_read_many(buf, offsets, item_size, self.tail_offset, self.tail);
         if cache_ranges.is_empty() {
