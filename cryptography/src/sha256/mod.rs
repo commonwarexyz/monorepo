@@ -118,8 +118,6 @@ impl Hasher for Sha256 {
             return Digest(array);
         }
 
-        // Write directly into the scratch. For fixed-size values `len` folds to a compile-time
-        // constant, so `finalize_fixed` const-folds at the call site.
         let mut tail: &mut [u8] = &mut self.scratch[..len];
         value.write(&mut tail);
         assert_eq!(tail.len(), 0, "encode_size() did not match write()");
@@ -135,22 +133,18 @@ impl Hasher for Sha256 {
 /// previous call cannot leak into the result.
 #[inline]
 fn finalize_fixed(scratch: &mut [u8; SCRATCH_LEN], message_len: usize) -> Digest {
-    // SAFETY: `hash_codec` uses the streaming fallback for values larger than
-    // `MAX_CODEC_PREIMAGE`. Surfacing this invariant lets the compiler prove every padding write
-    // below is in-bounds and drop the panic paths, which is what makes the fixed path competitive
-    // with hand-unrolled per-shape hashing. In debug builds this still panics if the invariant is
-    // ever violated.
-    unsafe { core::hint::assert_unchecked(message_len <= MAX_CODEC_PREIMAGE) };
-    // Smallest number of blocks holding the message plus its 9 mandatory padding bytes (the `0x80`
-    // terminator and the 8-byte length field).
-    let blocks = (message_len + 9).div_ceil(BLOCK_LENGTH);
-    let used = blocks * BLOCK_LENGTH;
+    let bit_len = ((message_len as u64) * 8).to_be_bytes();
     scratch[message_len] = 0x80;
-    scratch[message_len + 1..used - 8].fill(0);
-    scratch[used - 8..used].copy_from_slice(&((message_len as u64) * 8).to_be_bytes());
-
     let mut state = INITIAL_STATE;
-    compress256(&mut state, scratch[..used].as_chunks::<BLOCK_LENGTH>().0);
+    if message_len < 56 {
+        scratch[message_len + 1..56].fill(0);
+        scratch[56..64].copy_from_slice(&bit_len);
+        compress256(&mut state, scratch[..64].as_chunks::<BLOCK_LENGTH>().0);
+    } else {
+        scratch[message_len + 1..120].fill(0);
+        scratch[120..128].copy_from_slice(&bit_len);
+        compress256(&mut state, scratch[..128].as_chunks::<BLOCK_LENGTH>().0);
+    }
     digest_from_state(state)
 }
 
