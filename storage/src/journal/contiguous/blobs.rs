@@ -3,20 +3,12 @@
 use crate::{journal::Error, Context};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Sealed, Snapshot as PagedSnapshot, Writer},
+    buffer::paged::{CacheRef, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
     Blob as RBlob, Error as RError, IoBuf, IoBufMut, IoBufs,
 };
 use futures::future::try_join_all;
-use std::{
-    collections::BTreeMap,
-    num::NonZeroUsize,
-    ops::Range,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
+use std::{collections::BTreeMap, num::NonZeroUsize, ops::Range, sync::Arc};
 use tracing::debug;
 
 /// Metrics for a journal's blobs.
@@ -151,9 +143,6 @@ pub(super) struct Writable<E: Context> {
 
     /// Sealed historical blobs, ascending and contiguous from `oldest_blob_index`.
     sealed: Arc<[Sealed<E::Blob>]>,
-
-    /// Number of live [`Snapshot`]s. Gates in-place truncation during rewind.
-    snapshots: Arc<AtomicUsize>,
 }
 
 impl<E: Context> Writable<E> {
@@ -216,7 +205,6 @@ impl<E: Context> Writable<E> {
             oldest_blob_index,
             tail,
             sealed: sealed.into(),
-            snapshots: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -235,23 +223,13 @@ impl<E: Context> Writable<E> {
         &mut self.tail
     }
 
-    /// Whether any [`Snapshot`] is alive. A new one can't be created while the
-    /// caller holds `&mut self`, so this only accounts for snapshots taken earlier. The Acquire
-    /// load pairs with the Release in [`Snapshot`]'s drop, so `false` means their reads are done.
-    pub(super) fn snapshots_alive(&self) -> bool {
-        self.snapshots.load(Ordering::Acquire) != 0
-    }
-
-    /// Capture an owned [`Snapshot`] of the current blobs. The snapshot counts itself in
-    /// `snapshots` until dropped, gating in-place truncation during rewind.
-    pub(super) fn to_snapshot(&self) -> Snapshot<E::Blob> {
-        self.snapshots.fetch_add(1, Ordering::Relaxed);
-        Snapshot {
+    /// Capture an owned [`Snapshot`] of the current blobs.
+    pub(super) async fn snapshot(&mut self) -> Result<Snapshot<E::Blob>, Error> {
+        Ok(Snapshot {
             oldest_blob_index: self.oldest_blob_index,
             sealed: self.sealed.clone(),
-            tail: self.tail.snapshot(),
-            snapshots: self.snapshots.clone(),
-        }
+            tail: self.tail.snapshot().await.map_err(Error::Runtime)?,
+        })
     }
 
     /// Seal the tail (no fsync) and open the next blob as the new tail.
@@ -304,17 +282,10 @@ impl<E: Context> Writable<E> {
     ///
     /// - `byte_offset <= tail size`
     ///
-    /// # Errors
-    /// Returns [Error::BlobInUse] if there are live [`Snapshot`]s: the tail is shared mutable
-    /// state, so truncating it could tear a live snapshot's reads of bytes a later append reuses.
     pub(super) async fn rewind_tail(&mut self, byte_offset: u64) -> Result<(), Error> {
         let current_bytes = self.tail.size();
         debug_assert!(byte_offset <= current_bytes);
         if byte_offset < current_bytes {
-            // Refuse the in-place truncation while any snapshot is live.
-            if self.snapshots_alive() {
-                return Err(Error::BlobInUse(self.tail_blob_index()));
-            }
             self.tail
                 .resize(byte_offset)
                 .await
@@ -329,9 +300,6 @@ impl<E: Context> Writable<E> {
     /// # Invariants
     ///
     /// - `blob < tail_blob_index`
-    ///
-    /// # Errors
-    /// Returns [Error::BlobInUse] if there are live [`Snapshot`]s.
     pub(super) async fn rewind_into_sealed(
         &mut self,
         blob: u64,
@@ -342,11 +310,6 @@ impl<E: Context> Writable<E> {
             .map(|idx| idx as usize)
             .filter(|&idx| idx < self.sealed.len())
             .ok_or_else(|| Error::Corruption(format!("rewind target blob {blob} not retained")))?;
-
-        // Refuse the in-place truncation while any snapshot is live.
-        if self.snapshots_alive() {
-            return Err(Error::BlobInUse(blob));
-        }
 
         // Sync the target before destructive work so a crash recovers a size no shorter than
         // the rewind target.
@@ -426,7 +389,6 @@ impl<E: Context> Writable<E> {
 /// A read handle for one blob.
 pub(super) enum Blob<'a, B: RBlob> {
     Sealed(&'a Sealed<B>),
-    Snapshot(&'a PagedSnapshot<B>),
     Tail(&'a Writer<B>),
 }
 
@@ -434,7 +396,6 @@ impl<B: RBlob> Blob<'_, B> {
     pub(super) async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         match self {
             Self::Sealed(s) => s.read_at(offset, len).await.map_err(Error::Runtime),
-            Self::Snapshot(s) => s.read_at(offset, len).await.map_err(Error::Runtime),
             Self::Tail(t) => t.read_at(offset, len).await.map_err(Error::Runtime),
         }
     }
@@ -448,13 +409,6 @@ impl<B: RBlob> Blob<'_, B> {
     ) -> Result<(IoBuf, usize), Error> {
         match self {
             Self::Sealed(s) => {
-                let (buf, available) = s
-                    .read_up_to(offset, len, IoBufMut::with_capacity(len))
-                    .await
-                    .map_err(Error::Runtime)?;
-                Ok((buf.freeze(), available))
-            }
-            Self::Snapshot(s) => {
                 let (buf, available) = s
                     .read_up_to(offset, len, IoBufMut::with_capacity(len))
                     .await
@@ -475,7 +429,6 @@ impl<B: RBlob> Blob<'_, B> {
     pub(super) fn size(&self) -> u64 {
         match self {
             Self::Sealed(s) => s.size(),
-            Self::Snapshot(s) => s.size(),
             Self::Tail(t) => t.size(),
         }
     }
@@ -491,10 +444,6 @@ impl<B: RBlob> Blob<'_, B> {
                 .read_many_into(buf, offsets, item_size)
                 .await
                 .map_err(Error::Runtime),
-            Self::Snapshot(s) => s
-                .read_many_into(buf, offsets, item_size)
-                .await
-                .map_err(Error::Runtime),
             Self::Tail(t) => t
                 .read_many_into(buf, offsets, item_size)
                 .await
@@ -505,17 +454,15 @@ impl<B: RBlob> Blob<'_, B> {
     pub(super) fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
         match self {
             Self::Sealed(s) => s.try_read_sync(offset, buf),
-            Self::Snapshot(s) => s.try_read_sync(offset, buf),
             Self::Tail(t) => t.try_read_sync(offset, buf),
         }
     }
 }
 
-/// An owned copy of the journal's blob handles, captured by [`Writable::to_snapshot`]. Later
+/// An owned copy of the journal's blob handles, captured by [`Writable::snapshot`]. Later
 /// appends, seals, and prunes are invisible to it: it serves reads from the handles retained at
-/// capture, so even pruned blobs stay readable. A rewind would mutate the tail (shared with the
-/// writer) or a sealed blob in place, so it counts itself in `snapshots` for its lifetime and
-/// rewind refuses ([Error::BlobInUse]) while the count is nonzero.
+/// capture, so even pruned blobs stay readable. If the journal later rewinds or truncates into
+/// this snapshot's range, subsequent reads from that range may observe unspecified contents.
 pub(super) struct Snapshot<B: RBlob> {
     /// Index of the first blob in [Self::sealed].
     pub(super) oldest_blob_index: u64,
@@ -523,19 +470,8 @@ pub(super) struct Snapshot<B: RBlob> {
     /// Sealed historical blobs, ascending and contiguous from `oldest_blob_index`.
     pub(super) sealed: Arc<[Sealed<B>]>,
 
-    /// Owned snapshot of the tail.
-    pub(super) tail: PagedSnapshot<B>,
-
-    /// The journal's live-reader count, shared with [`Writable`]. Incremented at capture and
-    /// decremented on drop; a nonzero count blocks in-place truncation of the tail and of
-    /// sealed blobs during rewind.
-    snapshots: Arc<AtomicUsize>,
-}
-
-impl<B: RBlob> Drop for Snapshot<B> {
-    fn drop(&mut self) {
-        self.snapshots.fetch_sub(1, Ordering::Release);
-    }
+    /// Owned sealed view of the tail.
+    pub(super) tail: Sealed<B>,
 }
 
 /// Resolves a blob index to a blob within a frozen `bounds`, over either a [`Snapshot`] or the
@@ -551,7 +487,7 @@ pub(super) enum Blobs<'a, E: Context> {
     },
 }
 
-impl<E: Context> Blobs<'_, E> {
+impl<'a, E: Context> Blobs<'a, E> {
     /// Validate a position to be read: must lie within `bounds`.
     pub(super) fn validate_readable(&self, pos: u64) -> Result<(), Error> {
         let bounds = self.bounds();
@@ -577,7 +513,7 @@ impl<E: Context> Blobs<'_, E> {
         let sealed = self.sealed();
         if blob == oldest + sealed.len() as u64 {
             return Some(match self {
-                Self::Snapshot { snapshot, .. } => Blob::Snapshot(&snapshot.tail),
+                Self::Snapshot { snapshot, .. } => Blob::Sealed(&snapshot.tail),
                 Self::Writable { writable, .. } => Blob::Tail(&writable.tail),
             });
         }
@@ -594,24 +530,11 @@ impl<E: Context> Blobs<'_, E> {
         }
     }
 
-    /// Index of the newest blob (the tail).
-    pub(super) fn tail_blob_index(&self) -> u64 {
-        self.oldest_blob_index() + self.sealed().len() as u64
-    }
-
     /// Sealed historical blobs, ascending and contiguous from [`Self::oldest_blob_index`].
     pub(super) fn sealed(&self) -> &[Sealed<E::Blob>] {
         match self {
             Self::Snapshot { snapshot, .. } => &snapshot.sealed,
             Self::Writable { writable, .. } => &writable.sealed,
-        }
-    }
-
-    /// An owned read handle for the tail blob (a paged snapshot, so it outlives this view).
-    pub(super) fn tail_reader(&self) -> PagedSnapshot<E::Blob> {
-        match self {
-            Self::Snapshot { snapshot, .. } => snapshot.tail.clone(),
-            Self::Writable { writable, .. } => writable.tail.snapshot(),
         }
     }
 }
@@ -669,14 +592,10 @@ mod tests {
             assert_insufficient_length(Blob::Tail(&tail).read_up_to(size, 1).await);
             assert_eq!(Blob::Tail(&tail).read_up_to(size, 0).await.unwrap().1, 0);
 
-            let snapshot = tail.snapshot();
-            assert_insufficient_length(Blob::Snapshot(&snapshot).read_up_to(size, 1).await);
+            let snapshot = tail.snapshot().await.unwrap();
+            assert_insufficient_length(Blob::Sealed(&snapshot).read_up_to(size, 1).await);
             assert_eq!(
-                Blob::Snapshot(&snapshot)
-                    .read_up_to(size, 0)
-                    .await
-                    .unwrap()
-                    .1,
+                Blob::Sealed(&snapshot).read_up_to(size, 0).await.unwrap().1,
                 0
             );
             drop(snapshot);

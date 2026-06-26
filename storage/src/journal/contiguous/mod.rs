@@ -5,7 +5,7 @@
 //! [variable]-size item journals are supported.
 
 use super::Error;
-use futures::Stream;
+use futures::{stream, Stream, StreamExt as _};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
@@ -13,7 +13,6 @@ mod blobs;
 mod checkpoint;
 pub mod fixed;
 mod metrics;
-mod replay;
 pub mod variable;
 
 #[cfg(test)]
@@ -25,7 +24,7 @@ mod tests;
 /// position starting from 0.
 pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
-    type Item;
+    type Item: Send;
 
     /// Returns [start, end) with a guaranteed stable pruning boundary.
     fn bounds(&self) -> Range<u64>;
@@ -63,13 +62,43 @@ pub trait Contiguous: Send + Sync {
     }
 
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
+    ///
+    /// `buffer` controls how many logical positions are read per chunk.
     fn replay(
         &self,
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
-    > + Send;
+    > + Send {
+        async move {
+            let bounds = self.bounds();
+            if start_pos > bounds.end {
+                return Err(Error::ItemOutOfRange(start_pos));
+            }
+            if start_pos < bounds.start {
+                return Err(Error::ItemPruned(start_pos));
+            }
+
+            let items_per_batch = buffer.get() as u64;
+            Ok(stream::unfold(start_pos, move |pos| async move {
+                if pos == bounds.end {
+                    return None;
+                }
+                let end = pos.saturating_add(items_per_batch).min(bounds.end);
+                let positions: Vec<_> = (pos..end).collect();
+                let result = self
+                    .read_many(&positions)
+                    .await
+                    .map(|items| positions.into_iter().zip(items));
+                match result {
+                    Ok(items) => Some((stream::iter(items.map(Ok).collect::<Vec<_>>()), end)),
+                    Err(err) => Some((stream::iter(vec![Err(err)]), bounds.end)),
+                }
+            })
+            .flatten())
+        }
+    }
 }
 
 /// Items to append via [`Mutable::append_many`].

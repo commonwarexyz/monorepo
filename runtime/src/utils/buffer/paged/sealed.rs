@@ -392,7 +392,7 @@ mod tests {
             writer.append(b"hello world").await.unwrap();
 
             // A snapshot captures the buffered bytes as an owned, frozen read handle.
-            let reader = writer.snapshot();
+            let reader = writer.snapshot().await.unwrap();
             let reader_clone = reader.clone();
             assert_eq!(reader.size(), 11);
 
@@ -429,7 +429,7 @@ mod tests {
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
             writer.append(&data).await.unwrap();
 
-            let reader = writer.snapshot();
+            let reader = writer.snapshot().await.unwrap();
             let sealed = writer.seal().await.unwrap();
             assert_eq!(reader.size(), total as u64);
 

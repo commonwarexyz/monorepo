@@ -46,13 +46,7 @@ use crate::{
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
 use futures::stream::{FuturesUnordered, StreamExt};
-use std::{
-    num::{NonZeroU16, NonZeroUsize},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
+use std::num::{NonZeroU16, NonZeroUsize};
 use tracing::warn;
 
 /// Indicates which CRC slot in a page record must not be overwritten.
@@ -126,9 +120,6 @@ pub struct Writer<B: Blob> {
     /// The write buffer containing any logical bytes following the last full page boundary in the
     /// underlying blob.
     buffer: Buffer,
-
-    /// Live snapshot count. Nonzero blocks rewinds because snapshots share the blob-backed prefix.
-    snapshots: Arc<AtomicUsize>,
 }
 
 impl<B: Blob> Writer<B> {
@@ -230,13 +221,7 @@ impl<B: Blob> Writer<B> {
             id: cache_ref.next_id(),
             cache_ref,
             buffer,
-            snapshots: Arc::new(AtomicUsize::new(0)),
         })
-    }
-
-    /// Whether any [`super::Snapshot`] captured from this writer is alive.
-    fn snapshots_alive(&self) -> bool {
-        self.snapshots.load(Ordering::Acquire) != 0
     }
 
     /// Scans backwards from the end of the blob, stopping when it finds a valid page.
@@ -1077,34 +1062,18 @@ impl<B: Blob> Writer<B> {
         Ok(Replay::new(reader))
     }
 
-    /// Capture an owned, immutable [`super::Snapshot`] of the current contents without consuming
-    /// the writer or flushing.
+    /// Flush buffered data and capture an immutable [`super::Sealed`] view without consuming the
+    /// writer.
     ///
-    /// Copies the unflushed write buffer (at most `write_buffer` bytes), so prefer reusing a
-    /// snapshot over creating one per read.
-    pub fn snapshot(&self) -> super::Snapshot<B> {
-        let size = self.buffer.size();
-        let tail = if self.buffer.is_empty() {
-            IoBuf::default()
-        } else {
-            let mut copy = self.cache_ref.pool().alloc(self.buffer.len());
-            copy.put_slice(self.buffer.as_ref());
-            copy.freeze()
-        };
-        debug_assert_eq!(
-            self.buffer.offset,
-            self.current_page * self.cache_ref.page_size(),
-            "snapshot tail offset must be page-aligned"
-        );
-        super::Snapshot::new(
-            self.blob.clone(),
-            size,
-            self.buffer.offset,
-            tail,
-            self.cache_ref.clone(),
-            self.id,
-            self.snapshots.clone(),
-        )
+    /// This writes buffered bytes to the blob layout but does not make them durable. Call
+    /// [`Self::sync`] or [`super::Sealed::sync`] if the returned handle's bytes must survive a
+    /// crash.
+    ///
+    /// If this writer later rewinds or truncates into the returned handle's range, reads from that
+    /// handle may observe unspecified contents.
+    pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
+        self.flush_internal(true, false).await?;
+        Ok(self.sealed_handle())
     }
 
     /// Flushes buffered data and makes all pending mutations durable.
@@ -1147,10 +1116,6 @@ impl<B: Blob> Writer<B> {
             zeros.put_bytes(0, zeros_needed);
             self.append_owned(zeros.freeze()).await?;
             return Ok(());
-        }
-
-        if self.snapshots_alive() {
-            return Err(Error::BlobInUse);
         }
 
         self.shrink(size).await
@@ -1265,19 +1230,8 @@ impl<B: Blob> Writer<B> {
         self.id
     }
 
-    /// Consume the write handle and return an immutable [`super::Sealed`] handle for the same
-    /// blob.
-    ///
-    /// Buffered bytes (full and partial pages) are written to the underlying blob, but the blob is
-    /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
-    /// [`super::Sealed::sync`].
-    pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
-        // Flush all buffered data (including the partial page) to the blob without an fsync. This
-        // mirrors the pre-flush done by [`Self::replay`].
-        self.flush_internal(true, false).await?;
-
-        // After flush, the buffer holds at most the partial-page logical bytes and
-        // `partial_page_state` reflects the on-disk state of that page.
+    /// Construct an immutable read handle for the current blob state.
+    fn sealed_handle(&self) -> super::Sealed<B> {
         let logical_page_size = self.cache_ref.page_size();
         let full_pages = self.current_page;
         assert_eq!(
@@ -1285,8 +1239,6 @@ impl<B: Blob> Writer<B> {
             Some(self.buffer.offset),
             "flushed page count is inconsistent with the buffer offset"
         );
-        // Copy the partial page into a precisely-sized allocation so the sealed handle does not
-        // keep the (much larger) write buffer alive.
         let partial_page = if self.buffer.is_empty() {
             None
         } else {
@@ -1294,16 +1246,23 @@ impl<B: Blob> Writer<B> {
             copy.put_slice(self.buffer.as_ref());
             Some(copy.freeze())
         };
-        let size = self.buffer.size();
-        let blob = self.blob.clone();
-
-        Ok(super::Sealed::new(
-            blob,
-            size,
+        super::Sealed::new(
+            self.blob.clone(),
+            self.buffer.size(),
             partial_page,
             self.cache_ref.clone(),
             self.id,
-        ))
+        )
+    }
+
+    /// Consume the write handle and return an immutable [`super::Sealed`] handle for the same
+    /// blob.
+    ///
+    /// Buffered bytes (full and partial pages) are written to the underlying blob, but the blob is
+    /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
+    /// [`super::Sealed::sync`].
+    pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
+        self.snapshot().await
     }
 }
 
@@ -3679,7 +3638,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resize_shrink_rejected_while_snapshot_alive() {
+    fn test_resize_shrink_allowed_while_snapshot_alive() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -3696,30 +3655,22 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            let snapshot = append.snapshot();
+            let snapshot = append.snapshot().await.unwrap();
             let snapshot_clone = snapshot.clone();
             let snapshot_size = snapshot.size();
+
+            let read = snapshot.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
 
             // Growing appends after the snapshot's frozen range, so it cannot invalidate it.
             append.resize(snapshot_size + 3).await.unwrap();
             assert_eq!(append.size(), snapshot_size + 3);
 
-            // Shrinking could let later appends reuse bytes still visible to the snapshot.
-            let err = append.resize(snapshot_size - 1).await.unwrap_err();
-            assert!(matches!(err, crate::Error::BlobInUse));
-            assert_eq!(append.size(), snapshot_size + 3);
-
-            let read = snapshot.read_at(0, data.len()).await.unwrap().coalesce();
-            assert_eq!(read.as_ref(), data.as_slice());
-
-            drop(snapshot);
-            let err = append.resize(snapshot_size - 1).await.unwrap_err();
-            assert!(matches!(err, crate::Error::BlobInUse));
-
-            // Every snapshot clone must be gone before the writer can shrink in place.
-            drop(snapshot_clone);
+            // Shrinking while old handles exist is allowed. Those handles remain memory-safe, but
+            // future reads from ranges reused by the writer are unspecified.
             append.resize(snapshot_size - 1).await.unwrap();
             assert_eq!(append.size(), snapshot_size - 1);
+            assert_eq!(snapshot_clone.size(), snapshot_size);
         });
     }
 
@@ -3743,7 +3694,7 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            let snapshot = append.snapshot();
+            let snapshot = append.snapshot().await.unwrap();
             let offsets = [
                 0,
                 (page_size - item_size) as u64,
@@ -3788,7 +3739,7 @@ mod tests {
 
             let tail = b"oldtail";
             append.append(tail).await.unwrap();
-            let snapshot = append.snapshot();
+            let snapshot = append.snapshot().await.unwrap();
 
             let poison = vec![0xBB; page_size];
             // If the snapshot consulted the page cache for its copied tail, this would leak in.
