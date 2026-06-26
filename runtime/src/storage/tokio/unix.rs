@@ -35,7 +35,7 @@ impl Blob {
 
     fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
         file.sync_all()
-            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e))
+            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))
     }
 
     fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -202,7 +202,9 @@ impl crate::Blob for Blob {
             .await
             .map_err(|e| e.into())
             .and_then(|r| r)
-            .map_err(|e| Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e))?;
+            .map_err(|e| {
+                Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into())
+            })?;
         Ok(())
     }
 
@@ -212,7 +214,13 @@ impl crate::Blob for Blob {
         let name = self.name.clone();
         task::spawn_blocking(move || Self::sync_inner(&file, &partition, &name))
             .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e.into()))?
+            .map_err(|e| {
+                Error::BlobSyncFailed(
+                    self.partition.clone(),
+                    hex(&self.name),
+                    std::io::Error::other(e).into(),
+                )
+            })?
     }
 
     async fn start_sync(&self) -> Handle<()> {

@@ -164,7 +164,9 @@ pub(super) mod partition_sync_fault {
 
         async fn sync(&self) -> Result<(), Error> {
             if self.partition == self.fail_partition {
-                return Err(Error::Io(IoError::other("injected partition sync fault")));
+                return Err(Error::Io(
+                    IoError::other("injected partition sync fault").into(),
+                ));
             }
             self.inner.sync().await
         }

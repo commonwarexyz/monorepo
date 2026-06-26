@@ -11,7 +11,7 @@ use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Metrics, Storage,
+    Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
 };
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
@@ -108,6 +108,7 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     /// Combined index + value storage with crash recovery.
     oversized: Oversized<E, Record<K>, V>,
 
+    /// Sections with writes not yet covered by an issued sync.
     pending: BTreeSet<u64>,
 
     /// Oldest allowed section to read from. Updated when `prune` is called.
@@ -401,6 +402,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
     }
+
+    /// Drain the set of sections with unsynced writes, recording them in the sync metric. The caller
+    /// is responsible for syncing the returned sections.
+    fn take_pending(&mut self) -> BTreeSet<u64> {
+        let pending = std::mem::take(&mut self.pending);
+        self.syncs.inc_by(pending.len() as u64);
+        pending
+    }
 }
 
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
@@ -428,16 +437,19 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         }
     }
 
+    async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+        let pending = self.take_pending();
+        let handles = try_join_all(pending.iter().map(|s| self.oversized.start_sync(*s))).await?;
+        if handles.is_empty() {
+            return Ok(Handle::ready(Ok(())));
+        }
+
+        Ok(Handle::join(handles))
+    }
+
     async fn sync(&mut self) -> Result<(), Error> {
-        // Collect pending sections and update metrics
-        let pending: Vec<u64> = self.pending.iter().copied().collect();
-        self.syncs.inc_by(pending.len() as u64);
-
-        // Sync oversized journal (handles both index and values)
-        let syncs: Vec<_> = pending.iter().map(|s| self.oversized.sync(*s)).collect();
-        try_join_all(syncs).await?;
-
-        self.pending.clear();
+        let pending = self.take_pending();
+        try_join_all(pending.iter().map(|s| self.oversized.sync(*s))).await?;
         Ok(())
     }
 

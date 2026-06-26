@@ -11,11 +11,18 @@ use commonware_runtime::{
         Write,
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Blob, BufferPool, Error as RError, Metrics, Storage,
+    Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
 };
-use futures::future::try_join_all;
+use commonware_utils::sync::Mutex;
+use futures::{
+    future::{try_join_all, BoxFuture, Shared},
+    FutureExt as _,
+};
 use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
 use tracing::debug;
+
+/// A cloneable observer for an issued section sync.
+type SyncObserver = Shared<BoxFuture<'static, Result<(), RError>>>;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Clone + Send + Sync {
@@ -24,6 +31,9 @@ pub trait SectionBuffer: Clone + Send + Sync {
 
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), RError>> + Send;
+
+    /// Start syncing all pending data.
+    fn start_sync(&self) -> impl Future<Output = Result<Handle<()>, RError>> + Send;
 
     /// Resize the logical size of the buffer.
     fn resize(&self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
@@ -38,6 +48,10 @@ impl<B: Blob> SectionBuffer for Append<B> {
         Self::sync(self).await
     }
 
+    async fn start_sync(&self) -> Result<Handle<()>, RError> {
+        Self::start_sync(self).await
+    }
+
     async fn resize(&self, len: u64) -> Result<(), RError> {
         Self::resize(self, len).await
     }
@@ -50,6 +64,10 @@ impl<B: Blob> SectionBuffer for Write<B> {
 
     async fn sync(&self) -> Result<(), RError> {
         Self::sync(self).await
+    }
+
+    async fn start_sync(&self) -> Result<Handle<()>, RError> {
+        Self::start_sync(self).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), RError> {
@@ -133,6 +151,9 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     /// One blob per section.
     pub(crate) blobs: BTreeMap<u64, F::Buffer>,
 
+    /// In-flight syncs keyed by section.
+    syncing: Mutex<BTreeMap<u64, Vec<SyncObserver>>>,
+
     /// A section number before which all sections have been pruned during
     /// the current execution. Not persisted across restarts.
     oldest_retained_section: u64,
@@ -178,6 +199,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             partition: cfg.partition,
             factory: cfg.factory,
             blobs,
+            syncing: Mutex::new(BTreeMap::new()),
             oldest_retained_section: 0,
             tracked,
             synced,
@@ -225,6 +247,22 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
+    /// Start syncing the given section to storage.
+    pub async fn start_sync(&self, section: u64) -> Result<Handle<()>, Error> {
+        self.prune_guard(section)?;
+        if let Some(blob) = self.blobs.get(&section) {
+            self.synced.inc();
+            let syncing = blob.start_sync().await.map_err(Error::Runtime)?.boxed().shared();
+            self.syncing
+                .lock()
+                .entry(section)
+                .or_default()
+                .push(syncing.clone());
+            return Ok(Handle::from_future(syncing));
+        }
+        Ok(Handle::ready(Ok(())))
+    }
+
     /// Sync all sections to storage.
     pub async fn sync_all(&self) -> Result<(), Error> {
         let futures: Vec<_> = self.blobs.values().map(|blob| blob.sync()).collect();
@@ -233,8 +271,41 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
+    fn retain_in_flight_syncs(&self) {
+        self.syncing.lock().retain(|_, syncs| {
+            syncs.retain(|sync| sync.clone().now_or_never().is_none());
+            !syncs.is_empty()
+        });
+    }
+
+    fn take_syncs_matching(&self, f: impl Fn(u64) -> bool) -> Vec<SyncObserver> {
+        self.retain_in_flight_syncs();
+        let mut syncing = self.syncing.lock();
+        let sections = syncing
+            .keys()
+            .copied()
+            .filter(|section| f(*section))
+            .collect::<Vec<_>>();
+        let mut observers = Vec::new();
+        for section in sections {
+            if let Some(mut syncs) = syncing.remove(&section) {
+                observers.append(&mut syncs);
+            }
+        }
+        observers
+    }
+
+    async fn wait_for_syncs_matching(&self, f: impl Fn(u64) -> bool) -> Result<(), Error> {
+        for sync in self.take_syncs_matching(f) {
+            sync.await?;
+        }
+        Ok(())
+    }
+
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
+        self.wait_for_syncs_matching(|section| section < min).await?;
+
         // Prune any blobs that are smaller than the minimum
         let mut pruned = false;
         while let Some((&section, _)) = self.blobs.first_key_value() {
@@ -299,6 +370,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Remove a specific section. Returns true if the section existed and was removed.
     pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
         self.prune_guard(section)?;
+        self.wait_for_syncs_matching(|sync_section| sync_section == section)
+            .await?;
 
         if let Some(blob) = self.blobs.remove(&section) {
             let size = blob.size().await;
@@ -316,6 +389,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
+        self.wait_for_syncs_matching(|_| true).await?;
+
         for (section, blob) in self.blobs.into_iter() {
             let size = blob.size().await;
             drop(blob);
@@ -337,6 +412,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     ///
     /// Unlike `destroy`, this keeps the manager alive so it can be reused.
     pub async fn clear(&mut self) -> Result<(), Error> {
+        self.wait_for_syncs_matching(|_| true).await?;
+
         let blobs = take(&mut self.blobs);
         for (section, blob) in blobs {
             let size = blob.size().await;
@@ -354,6 +431,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Rewind by removing all sections after `section` and resizing the target section.
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
+        self.wait_for_syncs_matching(|sync_section| sync_section >= section)
+            .await?;
 
         // Remove sections in descending order (newest first) to maintain a contiguous record
         // if a crash occurs during rewind. Section `u64::MAX` has no successor, so there are
@@ -394,6 +473,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Resize only the given section without affecting other sections.
     pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
+        self.wait_for_syncs_matching(|sync_section| sync_section == section)
+            .await?;
 
         // Get the blob at the given section
         if let Some(blob) = self.blobs.get(&section) {

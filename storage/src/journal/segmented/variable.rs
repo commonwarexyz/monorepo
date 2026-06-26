@@ -88,7 +88,7 @@ use commonware_codec::{
 };
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef, Replay},
-    Blob, Buf, IoBuf, IoBufMut, Metrics, Storage,
+    Blob, Buf, Handle, IoBuf, IoBufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
@@ -829,6 +829,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// If the `section` does not exist, no error will be returned.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
         self.manager.sync(section).await
+    }
+
+    /// Starts syncing all data in a given `section`.
+    pub async fn start_sync(&self, section: u64) -> Result<Handle<()>, Error> {
+        self.manager.start_sync(section).await
     }
 
     /// Syncs all open sections.

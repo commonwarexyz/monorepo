@@ -46,7 +46,7 @@ use super::{
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{BufferPooler, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Handle, Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
 use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
@@ -345,6 +345,16 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             .map(|_| ())
     }
 
+    /// Start syncing both journals for given section.
+    pub async fn start_sync(&self, section: u64) -> Result<Handle<()>, Error> {
+        let (index, values) = try_join(
+            self.index.start_sync(section),
+            self.values.start_sync(section),
+        )
+        .await?;
+        Ok(Handle::join([index, values]))
+    }
+
     /// Sync all sections.
     pub async fn sync_all(&self) -> Result<(), Error> {
         try_join(self.index.sync_all(), self.values.sync_all())
@@ -459,10 +469,19 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler, Runner,
-        Supervisor as _,
+        buffer::paged::CacheRef, deterministic, reschedule,
+        telemetry::metrics::{Metric, Registered},
+        Blob, Buf, BufMut, BufferPool, BufferPooler, Error as RError, Handle, IoBufs, IoBufsMut,
+        Metrics, Name, Runner, Spawner as _, Storage, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16};
+    use std::{
+        mem,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
 
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
@@ -541,6 +560,158 @@ mod tests {
     /// Simple test value type with unit config.
     type TestValue = [u8; 16];
 
+    type SyncSender = oneshot::Sender<Result<(), RError>>;
+    type PendingSyncs = Arc<Mutex<Vec<SyncSender>>>;
+
+    #[derive(Clone)]
+    struct DelayedSyncContext<E> {
+        inner: E,
+        pending: PendingSyncs,
+    }
+
+    fn delayed_sync_context<E>(inner: E) -> (DelayedSyncContext<E>, PendingSyncs) {
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        (
+            DelayedSyncContext {
+                inner,
+                pending: pending.clone(),
+            },
+            pending,
+        )
+    }
+
+    impl<E: commonware_runtime::Supervisor> commonware_runtime::Supervisor for DelayedSyncContext<E> {
+        fn name(&self) -> Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            Self {
+                inner: self.inner.child(label),
+                pending: self.pending.clone(),
+            }
+        }
+
+        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            Self {
+                inner: self.inner.with_attribute(key, value),
+                pending: self.pending,
+            }
+        }
+    }
+
+    impl<E: Metrics> Metrics for DelayedSyncContext<E> {
+        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> Registered<M> {
+            self.inner.register(name, help, metric)
+        }
+
+        fn encode(&self) -> String {
+            self.inner.encode()
+        }
+    }
+
+    impl<E: BufferPooler> BufferPooler for DelayedSyncContext<E> {
+        fn network_buffer_pool(&self) -> &BufferPool {
+            self.inner.network_buffer_pool()
+        }
+
+        fn storage_buffer_pool(&self) -> &BufferPool {
+            self.inner.storage_buffer_pool()
+        }
+    }
+
+    impl<E: Storage> Storage for DelayedSyncContext<E> {
+        type Blob = DelayedSyncBlob<E::Blob>;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: std::ops::RangeInclusive<u16>,
+        ) -> Result<(Self::Blob, u64, u16), RError> {
+            let (inner, len, version) =
+                self.inner.open_versioned(partition, name, versions).await?;
+            Ok((
+                DelayedSyncBlob {
+                    inner,
+                    pending: self.pending.clone(),
+                },
+                len,
+                version,
+            ))
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RError> {
+            self.inner.remove(partition, name).await
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RError> {
+            self.inner.scan(partition).await
+        }
+    }
+
+    #[derive(Clone)]
+    struct DelayedSyncBlob<B> {
+        inner: B,
+        pending: PendingSyncs,
+    }
+
+    impl<B: Blob> Blob for DelayedSyncBlob<B> {
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, RError> {
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, RError> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), RError> {
+            self.inner.write_at(offset, bufs).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), RError> {
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), RError> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), RError> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            let (sender, receiver) = oneshot::channel();
+            self.pending.lock().push(sender);
+            Handle::from_receiver(receiver)
+        }
+    }
+
+    fn release_pending_syncs(pending: &PendingSyncs) {
+        for sender in mem::take(&mut *pending.lock()) {
+            let _ = sender.send(Ok(()));
+        }
+    }
+
     #[test_traced]
     fn test_oversized_append_and_get() {
         let executor = deterministic::Runner::default();
@@ -571,6 +742,104 @@ mod tests {
             assert_eq!(retrieved_value, value);
 
             oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_append_after_start_sync_can_continue_before_sync_completes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, pending) = delayed_sync_context(context);
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to init");
+
+            oversized
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("Failed to append");
+            let handle = oversized
+                .start_sync(1)
+                .await
+                .expect("Failed to start sync");
+            assert_eq!(
+                pending.lock().len(),
+                2,
+                "oversized start_sync should start index and value syncs"
+            );
+
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let writer = context.inner.child("append").spawn(|_| async move {
+                oversized
+                    .append(1, TestEntry::new(2, 0, 0), &[2; 16])
+                    .await
+                    .expect("append should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            while completed.load(Ordering::Relaxed) != 1 {
+                reschedule().await;
+            }
+            assert_eq!(
+                pending.lock().len(),
+                2,
+                "append should not wait for or issue another sync"
+            );
+
+            release_pending_syncs(&pending);
+            handle.await.expect("sync handle should complete");
+            writer.await.expect("append task should complete");
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_after_start_sync_waits_for_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, pending) = delayed_sync_context(context);
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to init");
+
+            oversized
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("Failed to append");
+            let handle = oversized
+                .start_sync(1)
+                .await
+                .expect("Failed to start sync");
+            assert_eq!(
+                pending.lock().len(),
+                2,
+                "oversized start_sync should start index and value syncs"
+            );
+
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let pruner = context.inner.child("prune").spawn(|_| async move {
+                oversized.prune(2).await.expect("prune should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "prune should wait for the in-flight start_sync handle"
+            );
+
+            release_pending_syncs(&pending);
+            handle.await.expect("sync handle should complete");
+            while completed.load(Ordering::Relaxed) != 1 {
+                reschedule().await;
+            }
+            pruner.await.expect("prune task should complete");
         });
     }
 

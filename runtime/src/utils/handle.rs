@@ -8,7 +8,7 @@ use commonware_utils::{
     sync::{Mutex, Once},
 };
 use futures::{
-    future::{select, Either},
+    future::{join_all, select, Either},
     pin_mut,
     stream::{AbortHandle, Abortable, Aborted},
     FutureExt as _,
@@ -212,6 +212,23 @@ where
             } => Some(Aborter::new(abort_handle.clone(), metric.clone())),
             HandleState::Completion { .. } => None,
         }
+    }
+}
+
+impl Handle<()> {
+    /// Combines several completion handles into one that resolves when all of them resolve,
+    /// yielding the first [`Err`] (in iteration order) or `Ok(())` if all succeed. An empty
+    /// iterator resolves immediately to `Ok(())`.
+    ///
+    /// This only observes the handles; an early error does not abort the others' underlying work.
+    pub fn join(handles: impl IntoIterator<Item = Self>) -> Self {
+        let handles: Vec<_> = handles.into_iter().collect();
+        Self::from_future(async move {
+            for result in join_all(handles).await {
+                result?;
+            }
+            Ok(())
+        })
     }
 }
 

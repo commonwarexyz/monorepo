@@ -1,74 +1,18 @@
-use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBufs};
+use super::{sync::Gated, tip::Buffer};
+use crate::{Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs};
 use commonware_utils::sync::AsyncRwLock;
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// Shared writer state.
+///
+/// [Write] reaches into these fields directly; durability bookkeeping and the in-flight sync gate
+/// live in the wrapped [Gated] blob.
 struct State<B: Blob> {
     /// The underlying blob to write to.
-    blob: B,
+    blob: Gated<B>,
 
     /// Buffered bytes at the logical tip of the blob.
     buffer: Buffer,
-
-    /// Whether a prior plain mutation must be persisted with [`Blob::sync`].
-    ///
-    /// [`State::write_at_sync`] uses [`Blob::write_at_sync`] only when this is
-    /// false, otherwise it must use [`Blob::sync`] to cover earlier unsynced
-    /// mutations.
-    needs_sync: bool,
-}
-
-impl<B: Blob> State<B> {
-    /// Read bytes from the underlying blob.
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        Ok(self.blob.read_at(offset, len).await?.freeze())
-    }
-
-    /// Write bytes to the underlying blob and mark them as needing sync.
-    async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.blob.write_at(offset, bufs).await?;
-        self.needs_sync = true;
-        Ok(())
-    }
-
-    /// Write bytes to the underlying blob and make them durable.
-    ///
-    /// Uses [`Blob::write_at_sync`] when there are no earlier unsynced
-    /// mutations. Otherwise, writes the bytes and then syncs the blob.
-    async fn write_at_sync(
-        &mut self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        if self.needs_sync {
-            self.write_at(offset, bufs).await?;
-            self.sync().await
-        } else {
-            // If `write_at_sync` fails, a later sync must not treat the drained
-            // buffer as durable.
-            self.needs_sync = true;
-            self.blob.write_at_sync(offset, bufs).await?;
-            self.needs_sync = false;
-            Ok(())
-        }
-    }
-
-    /// Resize the underlying blob and mark the resize as needing sync.
-    async fn resize(&mut self, len: u64) -> Result<(), Error> {
-        self.blob.resize(len).await?;
-        self.needs_sync = true;
-        Ok(())
-    }
-
-    /// Sync the underlying blob if there are unsynced mutations.
-    async fn sync(&mut self) -> Result<(), Error> {
-        if !self.needs_sync {
-            return Ok(());
-        }
-        self.blob.sync().await?;
-        self.needs_sync = false;
-        Ok(())
-    }
 }
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
@@ -134,9 +78,8 @@ impl<B: Blob> Write<B> {
     pub fn new(blob: B, size: u64, capacity: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             state: Arc::new(AsyncRwLock::new(State {
-                blob,
+                blob: Gated::new(blob, true),
                 buffer: Buffer::new(size, capacity.get(), pool),
-                needs_sync: true, // ensure pending writes on the wrapped blob are synced
             })),
         }
     }
@@ -190,7 +133,7 @@ impl<B: Blob> Write<B> {
 
         // Entirely in blob.
         if end_offset <= buffer.offset {
-            return state.read_at(offset, len).await;
+            return Ok(state.blob.read_at(offset, len).await?.freeze());
         }
 
         // Overlaps blob and buffered tip.
@@ -198,7 +141,7 @@ impl<B: Blob> Write<B> {
         let tip_len = len - blob_len;
         let tip = buffer.slice(..tip_len);
 
-        let mut blob = state.read_at(offset, blob_len).await?;
+        let mut blob = state.blob.read_at(offset, blob_len).await?.freeze();
         blob.append(tip);
         Ok(blob)
     }
@@ -239,7 +182,7 @@ impl<B: Blob> Write<B> {
             let chunk_end = current_offset + chunk_len as u64;
             if state.buffer.offset < chunk_end {
                 if let Some((old_buf, old_offset)) = state.buffer.take() {
-                    state.write_at(old_offset, old_buf).await?;
+                    state.blob.write_at(old_offset, old_buf).await?;
                     if state.buffer.merge(chunk, current_offset) {
                         bufs.advance(chunk_len);
                         current_offset += chunk_len as u64;
@@ -253,7 +196,7 @@ impl<B: Blob> Write<B> {
             // once when the buffer is flushed above, then again when we write the chunk
             // below. Removing this inefficiency may not be worth the additional complexity.
             let direct = bufs.split_to(chunk_len);
-            state.write_at(current_offset, direct).await?;
+            state.blob.write_at(current_offset, direct).await?;
             current_offset += chunk_len as u64;
 
             // Maintain the "buffer at tip" invariant by advancing offset to the end of this
@@ -276,11 +219,11 @@ impl<B: Blob> Write<B> {
         //
         // This can only happen if the new size is greater than the current size.
         if let Some((buf, offset)) = state.buffer.resize(len) {
-            state.write_at(offset, buf).await?;
+            state.blob.write_at(offset, buf).await?;
         }
 
         // Resize the underlying blob.
-        state.resize(len).await?;
+        state.blob.resize(len).await?;
 
         Ok(())
     }
@@ -289,9 +232,23 @@ impl<B: Blob> Write<B> {
     pub async fn sync(&self) -> Result<(), Error> {
         let mut state = self.state.write().await;
         if let Some((buf, offset)) = state.buffer.take() {
-            return state.write_at_sync(offset, buf).await;
+            return state.blob.write_at_sync(offset, buf).await;
         }
 
-        state.sync().await
+        state.blob.sync().await
+    }
+
+    /// Flush buffered bytes and start durably syncing mutations tracked by this writer.
+    ///
+    /// The returned [`Handle`] is the durability signal: the caller must await it to observe
+    /// completion. A later [`Self::start_sync`] or [`Self::sync`] without intervening writes observes
+    /// the same in-flight sync.
+    pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
+        let mut state = self.state.write().await;
+        if let Some((buf, offset)) = state.buffer.take() {
+            state.blob.write_at(offset, buf).await?;
+        }
+
+        Ok(state.blob.start_sync().await)
     }
 }
