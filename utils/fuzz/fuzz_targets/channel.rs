@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_utils::{
     channel::{
         fallible::{AsyncFallibleExt, FallibleExt},
@@ -13,10 +13,12 @@ use commonware_utils::{
 use futures::{executor::block_on, stream::FusedStream, SinkExt};
 use libfuzzer_sys::fuzz_target;
 
-const BUFFER_SIZE: usize = 1000;
+const BUFFER_SIZE: usize = 2;
+const MIN_OPERATIONS: usize = 4;
+const MAX_OPERATIONS: usize = 64;
 
-#[derive(Arbitrary, Debug)]
-enum FuzzInput {
+#[derive(Debug)]
+enum Operation {
     SendReceive {
         batch: Option<u32>,
         data: Vec<u8>,
@@ -50,9 +52,66 @@ enum FuzzInput {
     },
 }
 
-fn fuzz(input: FuzzInput) {
-    match input {
-        FuzzInput::SendReceive { batch, data } => {
+// Every arm is an independent scenario, so select the variant with one byte:
+// the derived u32 selector collapses short, empty-corpus inputs onto variant 0,
+// leaving the later arms unreached.
+impl<'a> Arbitrary<'a> for Operation {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(match u.int_in_range(0u8..=6)? {
+            0 => Operation::SendReceive {
+                batch: u.arbitrary()?,
+                data: u.arbitrary()?,
+            },
+            1 => Operation::MultipleSends {
+                batches: u.arbitrary()?,
+                data: u.arbitrary()?,
+            },
+            2 => Operation::CloneGuard {
+                batch: u.arbitrary()?,
+                data: u.arbitrary()?,
+                num_clones: u.arbitrary()?,
+            },
+            3 => Operation::TrySend {
+                batch: u.arbitrary()?,
+                data: u.arbitrary()?,
+            },
+            4 => Operation::Ring {
+                capacity: u.arbitrary()?,
+                items: u.arbitrary()?,
+                drop_senders_early: u.arbitrary()?,
+            },
+            5 => Operation::Reserve {
+                first: u.arbitrary()?,
+                second: u.arbitrary()?,
+            },
+            _ => Operation::Fallible {
+                msg: u.arbitrary()?,
+                bounded: u.arbitrary()?,
+                disconnect: u.arbitrary()?,
+            },
+        })
+    }
+}
+
+#[derive(Debug)]
+struct FuzzInput {
+    operations: Vec<Operation>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_operations = u.int_in_range(MIN_OPERATIONS..=MAX_OPERATIONS)?;
+        let mut operations = Vec::with_capacity(num_operations);
+        for _ in 0..num_operations {
+            operations.push(Operation::arbitrary(u)?);
+        }
+        Ok(FuzzInput { operations })
+    }
+}
+
+fn fuzz(op: Operation) {
+    match op {
+        Operation::SendReceive { batch, data } => {
             block_on(async {
                 let (sender, mut receiver) = tracked::bounded::<Vec<u8>, u32>(10);
 
@@ -73,7 +132,7 @@ fn fuzz(input: FuzzInput) {
             });
         }
 
-        FuzzInput::MultipleSends { batches, data } => {
+        Operation::MultipleSends { batches, data } => {
             block_on(async {
                 let (sender, mut receiver) = tracked::bounded::<Vec<u8>, u32>(BUFFER_SIZE);
                 let mut in_flight = 0usize;
@@ -104,7 +163,7 @@ fn fuzz(input: FuzzInput) {
             });
         }
 
-        FuzzInput::CloneGuard {
+        Operation::CloneGuard {
             batch,
             data,
             num_clones,
@@ -131,7 +190,7 @@ fn fuzz(input: FuzzInput) {
             });
         }
 
-        FuzzInput::TrySend { batch, data } => {
+        Operation::TrySend { batch, data } => {
             block_on(async {
                 let (sender, mut receiver) = tracked::bounded::<String, u32>(5);
 
@@ -146,7 +205,7 @@ fn fuzz(input: FuzzInput) {
             });
         }
 
-        FuzzInput::Ring {
+        Operation::Ring {
             capacity,
             items,
             drop_senders_early,
@@ -199,7 +258,7 @@ fn fuzz(input: FuzzInput) {
             });
         }
 
-        FuzzInput::Reserve { first, second } => {
+        Operation::Reserve { first, second } => {
             block_on(async {
                 let (sender, mut receiver) = mpsc::channel::<u32>(1);
 
@@ -219,7 +278,7 @@ fn fuzz(input: FuzzInput) {
             });
         }
 
-        FuzzInput::Fallible {
+        Operation::Fallible {
             msg,
             bounded,
             disconnect,
@@ -254,5 +313,7 @@ fn fuzz(input: FuzzInput) {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
+    for op in input.operations {
+        fuzz(op);
+    }
 });
