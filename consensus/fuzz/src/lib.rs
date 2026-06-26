@@ -20,6 +20,7 @@ pub mod simplex;
 #[cfg(feature = "mocks")]
 pub mod simplex_certificate_mock;
 pub mod simplex_node;
+pub mod state_cov;
 pub mod strategy;
 pub mod types;
 pub mod utils;
@@ -1025,7 +1026,10 @@ fn messaging_faults(
     }
 }
 
-fn run<P: simplex::Simplex>(mut input: FuzzInput) {
+fn run<P: simplex::Simplex>(mut input: FuzzInput, state_coverage: bool) {
+    if state_coverage {
+        state_cov::reset();
+    }
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -1129,6 +1133,11 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(config.faults as usize, &reporter_only);
+            if state_coverage {
+                let reporter_states =
+                    state_cov::encode_reporter_states(&reporter_only, config.n as usize);
+                state_cov::observe(&reporter_states);
+            }
             let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);
         }
@@ -1929,11 +1938,11 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
 
     let raw_bytes = input.raw_bytes.clone();
     let run_result = match M::MODE {
-        Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
+        Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, false))),
         Mode::FaultyMessaging => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_faulty_messaging::<P>(input)
         })),
-        Mode::FaultyNet => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
+        Mode::FaultyNet => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, false))),
         Mode::TwinsMutator => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twins_mutator::<P>(input)
         })),
@@ -1960,6 +1969,23 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
             // in this arm.
             panic::resume_unwind(payload);
         }
+    }
+}
+
+/// Honest harness with protocol-state coverage feedback.
+///
+/// Runs the standard honest path (identical to [`Mode::Standard`]), then projects
+/// the per-replica reporter state to a feature vector and folds it into the
+/// custom SanitizerCoverage table (see [`state_cov`]). libFuzzer retains inputs
+/// that reach a new protocol state even when they light no new code edge.
+pub fn fuzz_state_cov<P: simplex::Simplex>(input: FuzzInput) {
+    print_fuzz_input(Mode::Standard, &input);
+
+    let raw_bytes = input.raw_bytes.clone();
+    let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, true)));
+    if let Err(payload) = run_result {
+        println!("Panicked with raw_bytes: {:?}", raw_bytes);
+        panic::resume_unwind(payload);
     }
 }
 

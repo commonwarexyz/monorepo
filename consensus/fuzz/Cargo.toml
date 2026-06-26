@@ -17,6 +17,10 @@ mocks = [
 [package.metadata]
 cargo-fuzz = true
 
+# `cargo fuzz` sets `--cfg fuzzing`; declare it so non-fuzz builds don't warn.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
@@ -38,6 +42,7 @@ futures.workspace = true
 libfuzzer-sys.workspace = true
 rand.workspace = true
 rand_core.workspace = true
+sancov.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
@@ -328,6 +333,20 @@ bench = false
 [[bin]]
 name = "simplex_cert_mock_byzzfuzz"
 path = "fuzz_targets/simplex_cert_mock_byzzfuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_id_state_cov"
+path = "fuzz_targets/simplex_id_state_cov.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_state_cov"
+path = "fuzz_targets/simplex_cert_mock_state_cov.rs"
 test = false
 doc = false
 bench = false

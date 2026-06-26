@@ -353,7 +353,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     }
 }
 
-fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
+pub(crate) fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
     certificate: &S::Certificate,
     max_participants: usize,
 ) -> Option<usize> {
