@@ -632,6 +632,52 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         self.metrics.items_read.inc();
         Some(item)
     }
+
+    /// Select the end of a byte-budgeted consecutive range.
+    async fn read_limit(
+        &self,
+        start_pos: u64,
+        budget: NonZeroUsize,
+    ) -> Result<u64, Error> {
+        let bounds = self.bounds();
+        if start_pos > bounds.end {
+            return Err(Error::ItemOutOfRange(start_pos));
+        }
+        if start_pos == bounds.end {
+            return Ok(start_pos);
+        }
+        self.validate_readable(start_pos)?;
+
+        let byte_budget = budget.get() as u64;
+        let items_per_blob = self.items_per_blob.get();
+        let mut pos = start_pos;
+        let mut consumed = 0u64;
+        let mut offset = self.offsets.read(pos).await?;
+
+        while pos < bounds.end {
+            let blob_index = position_to_blob(pos, items_per_blob);
+            let next_pos = pos.checked_add(1).ok_or(Error::OffsetOverflow)?;
+            let same_blob =
+                next_pos < bounds.end && position_to_blob(next_pos, items_per_blob) == blob_index;
+            let next_offset = if same_blob {
+                self.offsets.read(next_pos).await?
+            } else {
+                self.data
+                    .get(blob_index)
+                    .expect("position in bounds maps to a retained blob")
+                    .size()
+            };
+            let item_len = next_offset.checked_sub(offset).ok_or(Error::OffsetOverflow)?;
+            consumed = consumed.checked_add(item_len).ok_or(Error::OffsetOverflow)?;
+            pos = next_pos;
+            if consumed >= byte_budget {
+                break;
+            }
+            offset = if same_blob { next_offset } else { 0 };
+        }
+
+        Ok(pos)
+    }
 }
 
 impl<E: Context, V: CodecShared> Journal<E, V> {
@@ -1701,6 +1747,14 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
     fn try_read_sync(&self, position: u64) -> Option<V> {
         self.reader().try_read_sync(position)
     }
+
+    async fn read_limit(
+        &self,
+        start_pos: u64,
+        budget: NonZeroUsize,
+    ) -> Result<u64, Error> {
+        self.reader().read_limit(start_pos, budget).await
+    }
 }
 
 impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
@@ -2334,6 +2388,48 @@ mod tests {
                     Err(crate::journal::Error::ItemOutOfRange(41))
                 ));
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_limit_uses_byte_limit() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "variable-read-limit".into(),
+                items_per_section: NZU64!(2),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, FixedBytes<4>>::init(context.child("storage"), cfg)
+                .await
+                .unwrap();
+            let item = |value| FixedBytes::new([value; 4]);
+
+            for i in 0u8..5 {
+                journal.append(&item(i)).await.unwrap();
+            }
+
+            let reader = journal.snapshot().await.unwrap();
+            let next = reader
+                .read_limit(1, NZUsize!(10))
+                .await
+                .expect("read limit should cross blob boundary");
+            assert_eq!(next, 3);
+            let items = reader.read_many(&(1..next).collect::<Vec<_>>()).await.unwrap();
+            assert_eq!(items, vec![item(1), item(2)]);
+
+            let next = reader
+                .read_limit(3, NZUsize!(1))
+                .await
+                .expect("read limit should return at least one item");
+            assert_eq!(next, 4);
+            let items = reader.read_many(&(3..next).collect::<Vec<_>>()).await.unwrap();
+            assert_eq!(items, vec![item(3)]);
 
             journal.destroy().await.unwrap();
         });

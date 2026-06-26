@@ -69,9 +69,20 @@ pub trait Contiguous: Send + Sync {
         None
     }
 
+    /// Return the end position for a byte-budgeted batch starting at `start_pos`.
+    ///
+    /// If `start_pos < bounds().end`, the implementation must advance by at least one position,
+    /// even when the first item exceeds `budget`. `budget` is a byte
+    /// budget, not an item count.
+    fn read_limit(
+        &self,
+        start_pos: u64,
+        budget: NonZeroUsize,
+    ) -> impl Future<Output = Result<u64, Error>> + Send;
+
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
-    /// `buffer` controls how many logical positions are read per chunk.
+    /// `buffer` controls the replay byte budget for each chunk.
     fn replay(
         &self,
         buffer: NonZeroUsize,
@@ -88,19 +99,20 @@ pub trait Contiguous: Send + Sync {
                 return Err(Error::ItemPruned(start_pos));
             }
 
-            let items_per_batch = buffer.get() as u64;
             Ok(stream::unfold(start_pos, move |pos| async move {
                 if pos == bounds.end {
                     return None;
                 }
-                let end = pos.saturating_add(items_per_batch).min(bounds.end);
-                let positions: Vec<_> = (pos..end).collect();
-                let result = self
-                    .read_many(&positions)
-                    .await
-                    .map(|items| positions.into_iter().zip(items));
-                match result {
-                    Ok(items) => Some((stream::iter(items.map(Ok).collect::<Vec<_>>()), end)),
+                let next = match self.read_limit(pos, buffer).await {
+                    Ok(next) => next,
+                    Err(err) => return Some((stream::iter(vec![Err(err)]), bounds.end)),
+                };
+                let positions: Vec<_> = (pos..next).collect();
+                match self.read_many(&positions).await {
+                    Ok(items) => {
+                        let batch = positions.into_iter().zip(items).map(Ok).collect::<Vec<_>>();
+                        Some((stream::iter(batch), next))
+                    }
                     Err(err) => Some((stream::iter(vec![Err(err)]), bounds.end)),
                 }
             })
