@@ -132,7 +132,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
             || self.hasher.clone(),
             |hasher, (i, item)| {
                 let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                hasher.leaf_digest_ref(pos, item)
+                hasher.leaf_digest(pos, item)
             },
         );
 
@@ -446,10 +446,7 @@ where
     pub async fn append(&mut self, item: &C::Item) -> Result<Location<F>, Error<F>> {
         // Append item to the journal, then update the Merkle structure state.
         let loc = self.journal.append(item).await?;
-        let unmerkleized_batch = self
-            .merkle
-            .new_batch()
-            .add_ref(&mut self.hasher, item);
+        let unmerkleized_batch = self.merkle.new_batch().add_ref(&mut self.hasher, item);
         let batch = self
             .merkle
             .with_mem(|mem| unmerkleized_batch.merkleize(mem, &mut self.hasher));
@@ -1080,8 +1077,7 @@ mod tests {
 
     /// Verify that align() pops Merkle elements when Merkle is ahead of the journal.
     async fn test_align_when_mmr_ahead_inner<F: Family + PartialEq>(context: Context) {
-        let (mut merkle, journal, mut hasher) =
-            create_components::<F>(context, "mmr-ahead").await;
+        let (mut merkle, journal, mut hasher) = create_components::<F>(context, "mmr-ahead").await;
 
         // Add 20 operations to both Merkle and journal
         {

@@ -196,13 +196,21 @@ pub mod tests {
             // Proof should be verifiable against current root.
             let root = db.root();
             assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher, k, v1, &proof, &root
+                &mut hasher,
+                k,
+                v1,
+                &proof,
+                &root
             ));
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher, k, v2, &proof, &root,
+                &mut hasher,
+                k,
+                v2,
+                &proof,
+                &root,
             ));
 
             // Update the key to a new value (v2), which inactivates the previous operation.
@@ -217,24 +225,38 @@ pub mod tests {
 
             // New value should not be verifiable against the old proof.
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher, k, v2, &proof, &root,
+                &mut hasher,
+                k,
+                v2,
+                &proof,
+                &root,
             ));
 
             // But the new value should verify against a new proof.
             let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
             assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher, k, v2, &proof, &root,
+                &mut hasher,
+                k,
+                v2,
+                &proof,
+                &root,
             ));
 
             // Old value will not verify against new proof.
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &mut hasher, k, v1, &proof, &root,
+                &mut hasher,
+                k,
+                v1,
+                &proof,
+                &root,
             ));
 
             // Create a proof of the now-inactive update operation assigning v1 to k against the
             // current root.
-            let (range_proof, _, chunks) =
-                db.range_proof(&mut hasher, op_loc, NZU64!(1)).await.unwrap();
+            let (range_proof, _, chunks) = db
+                .range_proof(&mut hasher, op_loc, NZU64!(1))
+                .await
+                .unwrap();
             let proof_inactive = db::KeyValueProof {
                 loc: op_loc,
                 chunk: chunks[0],
@@ -359,11 +381,18 @@ pub mod tests {
 
             for loc in *start_loc..*end_loc {
                 let loc = Location::<F>::new(loc);
-                let (proof, ops, chunks) =
-                    db.range_proof(&mut hasher, loc, NZU64!(max_ops)).await.unwrap();
+                let (proof, ops, chunks) = db
+                    .range_proof(&mut hasher, loc, NZU64!(max_ops))
+                    .await
+                    .unwrap();
                 assert!(
                     TestDb::<F, C, V>::verify_range_proof(
-                        &mut hasher, &proof, loc, &ops, &chunks, &root
+                        &mut hasher,
+                        &proof,
+                        loc,
+                        &ops,
+                        &chunks,
+                        &root
                     ),
                     "failed to verify range at start_loc {start_loc}",
                 );
@@ -433,19 +462,31 @@ pub mod tests {
                 let proof = db.key_value_proof(&mut hasher, key).await.unwrap();
                 // Proof should validate against the current value and correct root.
                 assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                    &mut hasher, key, value, &proof, &root
+                    &mut hasher,
+                    key,
+                    value,
+                    &proof,
+                    &root
                 ));
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
                 let wrong_val = Sha256::hash(&[0xFF]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    &mut hasher, key, wrong_val, &proof, &root
+                    &mut hasher,
+                    key,
+                    wrong_val,
+                    &proof,
+                    &root
                 ));
                 // Proof should fail against the wrong key.
                 let wrong_key = Sha256::hash(&[0xEE]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    &mut hasher, wrong_key, value, &proof, &root
+                    &mut hasher,
+                    wrong_key,
+                    value,
+                    &proof,
+                    &root
                 ));
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::hash(&[0xDD]);
@@ -505,7 +546,13 @@ pub mod tests {
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !TestDb::<F, C, V>::verify_key_value_proof(&mut hasher, k, old_val, &proof, &root,),
+                    !TestDb::<F, C, V>::verify_key_value_proof(
+                        &mut hasher,
+                        k,
+                        old_val,
+                        &proof,
+                        &root,
+                    ),
                     "proof of update {i} verified when it should not have"
                 );
                 old_val = v;

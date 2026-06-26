@@ -572,7 +572,7 @@ pub async fn gen_random_kv<F, M>(
     {
         let mut batch = db.new_batch();
         for i in 0u64..num_elements {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::new().hash_encoded(i);
             batch = batch.write(k, Some(make_value(&mut rng)));
         }
         let merkleized = batch.merkleize(db, None).await.unwrap();
@@ -583,7 +583,7 @@ pub async fn gen_random_kv<F, M>(
     {
         let mut batch = db.new_batch();
         for _ in 0u64..num_operations {
-            let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+            let rand_key = Sha256::new().hash_encoded(rng.next_u64() % num_elements);
             if rng.next_u32() % DELETE_FREQUENCY == 0 {
                 batch = batch.write(rand_key, None);
                 continue;
@@ -604,7 +604,7 @@ pub async fn gen_random_kv<F, M>(
 
 /// Generate a fixed-size digest value.
 pub fn make_fixed_value(rng: &mut StdRng) -> Digest {
-    Sha256::hash(&rng.next_u32().to_be_bytes())
+    Sha256::new().hash_encoded(rng.next_u32())
 }
 
 /// Pre-populate the database with `num_keys` unique keys, then commit.
@@ -615,7 +615,7 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.new_batch();
     for i in 0u64..num_keys {
-        let k = Sha256::hash(&i.to_be_bytes());
+        let k = Sha256::new().hash_encoded(i);
         batch = batch.write(k, Some(make_fixed_value(&mut rng)));
     }
     let merkleized = batch.merkleize(db, None).await.unwrap();
@@ -636,7 +636,7 @@ where
 {
     for _ in 0..num_updates {
         let idx = rng.next_u64() % num_keys;
-        let k = Sha256::hash(&idx.to_be_bytes());
+        let k = Sha256::new().hash_encoded(idx);
         batch = batch.write(k, Some(make_fixed_value(rng)));
     }
     batch

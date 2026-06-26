@@ -274,7 +274,7 @@ pub(crate) mod test {
         >;
 
         fn key(i: u64) -> Digest {
-            Sha256::hash(&i.to_be_bytes())
+            Sha256::new().hash_encoded(i)
         }
         fn val(i: u64) -> Digest {
             Sha256::hash(&i.to_le_bytes())
@@ -393,7 +393,7 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_ordered_fixed_caching_survives_ancestor_commit() {
         fn key(i: u64) -> Digest {
-            Sha256::hash(&i.to_be_bytes())
+            Sha256::new().hash_encoded(i)
         }
         fn val(i: u64) -> Digest {
             Sha256::hash(&i.to_le_bytes())
@@ -598,8 +598,8 @@ pub(crate) mod test {
             {
                 let mut batch = db.new_batch();
                 for i in 0u64..ELEMENTS {
-                    let k = Sha256::hash(&i.to_be_bytes());
-                    let v = Sha256::hash(&(i * 1000).to_be_bytes());
+                    let k = Sha256::new().hash_encoded(i);
+                    let v = Sha256::new().hash_encoded(i * 1000);
                     batch = batch.write(k, Some(v));
                     map.insert(k, v);
                 }
@@ -609,8 +609,8 @@ pub(crate) mod test {
                     if i % 3 != 0 {
                         continue;
                     }
-                    let k = Sha256::hash(&i.to_be_bytes());
-                    let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                    let k = Sha256::new().hash_encoded(i);
+                    let v = Sha256::new().hash_encoded((i + 1) * 10000);
                     batch = batch.write(k, Some(v));
                     map.insert(k, v);
                 }
@@ -620,7 +620,7 @@ pub(crate) mod test {
                     if i % 7 != 1 {
                         continue;
                     }
-                    let k = Sha256::hash(&i.to_be_bytes());
+                    let k = Sha256::new().hash_encoded(i);
                     batch = batch.write(k, None);
                     map.remove(&k);
                 }
@@ -646,7 +646,7 @@ pub(crate) mod test {
 
             // Confirm the db's state matches that of the separate map we computed independently.
             for i in 0u64..1000 {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::new().hash_encoded(i);
                 if let Some(map_value) = map.get(&k) {
                     let Some(db_value) = db.get(&k).await.unwrap() else {
                         panic!("key not found in db: {k}");
@@ -692,8 +692,8 @@ pub(crate) mod test {
             {
                 let mut batch = db.new_batch();
                 for i in 0u64..ELEMENTS {
-                    let k = Sha256::hash(&i.to_be_bytes());
-                    let v = Sha256::hash(&(i * 1000).to_be_bytes());
+                    let k = Sha256::new().hash_encoded(i);
+                    let v = Sha256::new().hash_encoded(i * 1000);
                     batch = batch.write(k, Some(v));
                 }
                 let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -714,8 +714,8 @@ pub(crate) mod test {
             fn write_unapplied_batch(db: &mut AnyTest) {
                 let mut batch = db.new_batch();
                 for i in 0u64..ELEMENTS {
-                    let k = Sha256::hash(&i.to_be_bytes());
-                    let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                    let k = Sha256::new().hash_encoded(i);
+                    let v = Sha256::new().hash_encoded((i + 1) * 10000);
                     batch = batch.write(k, Some(v));
                 }
                 // Don't merkleize/apply -- simulates uncommitted writes
@@ -752,8 +752,8 @@ pub(crate) mod test {
             {
                 let mut batch = db.new_batch();
                 for i in 0u64..ELEMENTS {
-                    let k = Sha256::hash(&i.to_be_bytes());
-                    let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                    let k = Sha256::new().hash_encoded(i);
+                    let v = Sha256::new().hash_encoded((i + 1) * 10000);
                     batch = batch.write(k, Some(v));
                 }
                 let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -787,8 +787,8 @@ pub(crate) mod test {
             fn write_unapplied_batch(db: &mut AnyTest) {
                 let mut batch = db.new_batch();
                 for i in 0u64..1000 {
-                    let k = Sha256::hash(&i.to_be_bytes());
-                    let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                    let k = Sha256::new().hash_encoded(i);
+                    let v = Sha256::new().hash_encoded((i + 1) * 10000);
                     batch = batch.write(k, Some(v));
                 }
                 // Don't merkleize/apply -- simulates uncommitted writes
@@ -824,8 +824,8 @@ pub(crate) mod test {
             {
                 let mut batch = db.new_batch();
                 for i in 0u64..1000 {
-                    let k = Sha256::hash(&i.to_be_bytes());
-                    let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                    let k = Sha256::new().hash_encoded(i);
+                    let v = Sha256::new().hash_encoded((i + 1) * 10000);
                     batch = batch.write(k, Some(v));
                 }
                 let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -849,12 +849,12 @@ pub(crate) mod test {
             let mut map = HashMap::<Digest, Digest>::default();
             const ELEMENTS: u64 = 10;
             // insert & apply multiple batches to ensure repeated inactivity floor raising.
-            let metadata = Sha256::hash(&42u64.to_be_bytes());
+            let metadata = Sha256::new().hash_encoded(42u64);
             for j in 0u64..ELEMENTS {
                 let mut batch = db.new_batch();
                 for i in 0u64..ELEMENTS {
-                    let k = Sha256::hash(&(j * 1000 + i).to_be_bytes());
-                    let v = Sha256::hash(&(i * 1000).to_be_bytes());
+                    let k = Sha256::new().hash_encoded(j * 1000 + i);
+                    let v = Sha256::new().hash_encoded(i * 1000);
                     batch = batch.write(k, Some(v));
                     map.insert(k, v);
                 }
@@ -863,7 +863,7 @@ pub(crate) mod test {
                 db.commit().await.unwrap();
             }
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-            let k = Sha256::hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_be_bytes());
+            let k = Sha256::new().hash_encoded((ELEMENTS - 1) * 1000 + (ELEMENTS - 1));
 
             // Do one last delete operation which will be above the inactivity
             // floor, to make sure it gets replayed on restart.
@@ -1429,11 +1429,11 @@ pub(crate) mod test {
     }
 
     fn key(i: u64) -> Digest {
-        Sha256::hash(&i.to_be_bytes())
+        Sha256::new().hash_encoded(i)
     }
 
     fn val(i: u64) -> Digest {
-        Sha256::hash(&(i + 10000).to_be_bytes())
+        Sha256::new().hash_encoded(i + 10000)
     }
 
     /// Helper: commit a batch of key-value writes and return the applied range (generic).
@@ -1628,9 +1628,9 @@ pub(crate) mod test {
         let mut db = open_db_generic::<F>(db_context.child("db")).await;
 
         const UPDATES: u64 = 100;
-        let k = Sha256::hash(&UPDATES.to_be_bytes());
+        let k = Sha256::new().hash_encoded(UPDATES);
         for i in 0u64..UPDATES {
-            let v = Sha256::hash(&(i * 1000).to_be_bytes());
+            let v = Sha256::new().hash_encoded(i * 1000);
             let merkleized = db
                 .new_batch()
                 .write(k, Some(v))

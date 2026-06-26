@@ -74,11 +74,7 @@ impl<F: Graftable, D: Digest> OpsRootWitness<F, D> {
     ///
     /// See the [Canonical root structure](self#canonical-root-structure) section in the module
     /// documentation for the full layout.
-    pub fn root<H: CHasher<Digest = D>>(
-        &self,
-        hasher: &mut StandardHasher<H>,
-        ops_root: &D,
-    ) -> D {
+    pub fn root<H: CHasher<Digest = D>>(&self, hasher: &mut StandardHasher<H>, ops_root: &D) -> D {
         let partial = self.partial_chunk.as_ref().map(|(nb, d)| (*nb, d));
         combine_roots(
             hasher,
@@ -941,16 +937,14 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -987,7 +981,7 @@ mod tests {
         .await
         .unwrap();
 
-        let element = hasher.digest((*loc).to_be_bytes());
+        let element = hasher.digest(loc);
         assert!(proof.verify(
             &mut hasher,
             loc,
@@ -1040,16 +1034,14 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -1088,7 +1080,7 @@ mod tests {
         .await
         .unwrap();
 
-        let element = hasher.digest((*loc).to_be_bytes());
+        let element = hasher.digest(loc);
         let chunk_idx = (*loc / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
         assert!(proof.verify(
             &mut hasher,
@@ -1148,16 +1140,14 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -1199,7 +1189,7 @@ mod tests {
         .unwrap();
 
         let elements = (*start_loc..leaf_count)
-            .map(|idx| hasher.digest(idx.to_be_bytes()))
+            .map(|idx| hasher.digest(Location::<F>::new(idx)))
             .collect::<Vec<_>>();
         let start_chunk_idx = (*start_loc / chunk_bits) as usize;
         let end_chunk_idx = complete_chunks as usize;
@@ -1249,16 +1239,14 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -1295,7 +1283,7 @@ mod tests {
         .await
         .unwrap();
 
-        let element = hasher.digest((*loc).to_be_bytes());
+        let element = hasher.digest(loc);
         let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
 
         // Tamper with the proof by injecting a fake partial chunk digest
@@ -1343,16 +1331,14 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
         let mut grafted = Mem::<F, sha256::Digest>::new();
         if !leaf_digests.is_empty() {
             let merkleized = {
@@ -1389,7 +1375,7 @@ mod tests {
         .await
         .unwrap();
         let operations = (*range.start..*range.end)
-            .map(|i| hasher.digest(i.to_be_bytes()))
+            .map(|i| hasher.digest(Location::<F>::new(i)))
             .collect::<Vec<_>>();
 
         // Provide every bitmap chunk touched by the proven operation range.
@@ -1411,9 +1397,15 @@ mod tests {
         let (mut hasher, proof, operations, chunks, root, ops) =
             current_range_proof_fixture::<F, N>(18, start..end).await;
 
-        let extracted =
-            verify_proof_and_extract_digests(&mut hasher, &proof, start, &operations, &chunks, &root)
-                .unwrap();
+        let extracted = verify_proof_and_extract_digests(
+            &mut hasher,
+            &proof,
+            start,
+            &operations,
+            &chunks,
+            &root,
+        )
+        .unwrap();
         assert!(!extracted.is_empty());
 
         // The extractor should return the authenticated digest for every proven leaf.
@@ -1477,9 +1469,15 @@ mod tests {
         let (mut hasher, proof, operations, chunks, root, _ops) =
             current_range_proof_fixture::<F, N>(6, start..end).await;
 
-        let extracted =
-            verify_proof_and_extract_digests(&mut hasher, &proof, start, &operations, &chunks, &root)
-                .unwrap();
+        let extracted = verify_proof_and_extract_digests(
+            &mut hasher,
+            &proof,
+            start,
+            &operations,
+            &chunks,
+            &root,
+        )
+        .unwrap();
 
         assert!(!extracted.is_empty());
     }
@@ -1730,16 +1728,14 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -1774,7 +1770,7 @@ mod tests {
         .await
         .unwrap();
 
-        let element = hasher.digest((*loc).to_be_bytes());
+        let element = hasher.digest(loc);
         let chunk_idx = (*loc / chunk_bits) as usize;
         assert!(proof.verify(
             &mut hasher,
@@ -1961,7 +1957,7 @@ mod tests {
             );
 
             let elements: Vec<sha256::Digest> = (0..leaf_count)
-                .map(|i| hasher.digest(i.to_be_bytes()))
+                .map(|i| hasher.digest(Location::<F>::new(i)))
                 .collect();
             // Range covers chunks 0..=1: chunk 0 is pending, chunk 1 is partial. Provide both.
             let chunks: Vec<[u8; N]> = (0..=1)
@@ -1987,7 +1983,7 @@ mod tests {
                 pending_proof.pending_chunk_digest.is_some(),
                 "expected single-element proof to carry pending chunk digest at k={k}"
             );
-            let pending_element = hasher.digest((*pending_loc).to_be_bytes());
+            let pending_element = hasher.digest(pending_loc);
             assert!(
                 pending_proof.verify(
                     &mut hasher,
@@ -2094,7 +2090,8 @@ mod tests {
             1,
             "post-state must have 1 graftable chunk"
         );
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
         let mut grafted_post = Mem::<F, sha256::Digest>::new();
         let merkleized = grafted_post
             .new_batch()
@@ -2166,16 +2163,14 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let mut grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted_hasher =
+            grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -2213,7 +2208,7 @@ mod tests {
         .unwrap();
         assert_eq!(proof.proof.inactive_peaks, aligned_inactive);
 
-        let element = hasher.digest((*loc).to_be_bytes());
+        let element = hasher.digest(loc);
         let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
         assert!(proof.verify(&mut hasher, loc, &[element], &[chunk], &root));
     }

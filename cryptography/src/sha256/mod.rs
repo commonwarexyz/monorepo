@@ -16,7 +16,7 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-use crate::{Hasher, PendingHasher, MAX_CODEC_PREIMAGE};
+use crate::{Hasher, PendingHasher};
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use bytes::{Buf, BufMut};
@@ -40,11 +40,20 @@ pub type CoreSha256 = ISha256;
 const DIGEST_LENGTH: usize = 32;
 const BLOCK_LENGTH: usize = 64;
 
-/// Bytes of scratch backing the fixed (non-streaming) hashing path: enough whole compression blocks
-/// to hold the largest supported preimage ([`MAX_CODEC_PREIMAGE`]) plus its 9 mandatory padding
-/// bytes (a `0x80` terminator and an 8-byte length). Inputs longer than [`MAX_CODEC_PREIMAGE`] fall
-/// back to the streaming hasher.
-const SCRATCH_LEN: usize = (MAX_CODEC_PREIMAGE + 9).div_ceil(BLOCK_LENGTH) * BLOCK_LENGTH;
+/// Number of whole SHA-256 compression blocks backing the fixed (non-streaming) hashing path. Two
+/// blocks (128 bytes) cover every fixed-shape Merkle preimage in the library.
+const FIXED_BLOCKS: usize = 2;
+
+/// Bytes of scratch backing the fixed (non-streaming) hashing path: [`FIXED_BLOCKS`] whole
+/// compression blocks.
+const SCRATCH_LEN: usize = FIXED_BLOCKS * BLOCK_LENGTH;
+
+/// The largest preimage the fixed (non-streaming) path hashes without streaming.
+///
+/// [`SCRATCH_LEN`] holds the preimage plus the 9 mandatory padding bytes (a `0x80` terminator and an
+/// 8-byte length), so the preimage may be up to `SCRATCH_LEN - 9` bytes. That covers every
+/// fixed-shape Merkle preimage in the library; longer inputs fall back to the streaming hasher.
+const MAX_CODEC_PREIMAGE: usize = SCRATCH_LEN - 9;
 
 const INITIAL_STATE: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,

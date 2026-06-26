@@ -458,8 +458,9 @@ mod tests {
                 while subrange_start < subrange_end {
                     // Verify a proof over a sub-range of the original range.
                     let sub_range = subrange_start..subrange_end;
-                    let sub_range_proof =
-                        proof_store.range_proof(&mut hasher, sub_range.clone()).unwrap();
+                    let sub_range_proof = proof_store
+                        .range_proof(&mut hasher, sub_range.clone())
+                        .unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
                         &mut hasher,
                         &elements[sub_range.to_usize_range()],
@@ -512,7 +513,9 @@ mod tests {
             for start in 32u64..49 {
                 for end in (start + 1)..=49 {
                     let sub_range = Location::new(start)..Location::new(end);
-                    let sub_proof = proof_store.range_proof(&mut hasher, sub_range.clone()).unwrap();
+                    let sub_proof = proof_store
+                        .range_proof(&mut hasher, sub_range.clone())
+                        .unwrap();
                     assert!(
                         sub_proof.verify_range_inclusion(
                             &mut hasher,
@@ -561,7 +564,9 @@ mod tests {
             for start in 4u64..8 {
                 for end in (start + 1)..=8 {
                     let sub_range = MmbLocation::new(start)..MmbLocation::new(end);
-                    let sub_proof = proof_store.range_proof(&mut hasher, sub_range.clone()).unwrap();
+                    let sub_proof = proof_store
+                        .range_proof(&mut hasher, sub_range.clone())
+                        .unwrap();
                     assert!(
                         sub_proof.verify_range_inclusion(
                             &mut hasher,
@@ -596,10 +601,15 @@ mod tests {
             let root = mmb.root(&mut hasher, inactive_peaks).unwrap();
 
             let range = MmbLocation::new(0)..MmbLocation::new(1);
-            let proof =
-                historical_range_proof(&mut hasher, &mmb, mmb.leaves(), range.clone(), inactive_peaks)
-                    .await
-                    .unwrap();
+            let proof = historical_range_proof(
+                &mut hasher,
+                &mmb,
+                mmb.leaves(),
+                range.clone(),
+                inactive_peaks,
+            )
+            .await
+            .unwrap();
             let proof_store = ProofStore::new(
                 &mut hasher,
                 &proof,
@@ -727,10 +737,15 @@ mod tests {
             // Build a ProofStore from a backward-folded range proof over a single leaf.
             // The other ~6 active peaks are folded into one synthetic suffix accumulator.
             let range = MmbLocation::new(0)..MmbLocation::new(1);
-            let range_proof =
-                historical_range_proof(&mut hasher, &mmb, mmb.leaves(), range.clone(), inactive_peaks)
-                    .await
-                    .unwrap();
+            let range_proof = historical_range_proof(
+                &mut hasher,
+                &mmb,
+                mmb.leaves(),
+                range.clone(),
+                inactive_peaks,
+            )
+            .await
+            .unwrap();
             let proof_store = ProofStore::new(
                 &mut hasher,
                 &range_proof,

@@ -1273,7 +1273,13 @@ mod tests {
         let partial_digest = Sha256::hash(b"partial");
 
         let without = combine_roots(&mut hasher, &ops, &grafted, None, None);
-        let with = combine_roots(&mut hasher, &ops, &grafted, None, Some((5, &partial_digest)));
+        let with = combine_roots(
+            &mut hasher,
+            &ops,
+            &grafted,
+            None,
+            Some((5, &partial_digest)),
+        );
         assert_ne!(without, with);
     }
 
@@ -1298,7 +1304,13 @@ mod tests {
         let partial_digest = Sha256::hash(b"partial");
 
         let only_pending = combine_roots(&mut hasher, &ops, &grafted, Some(&pending_digest), None);
-        let only_partial = combine_roots(&mut hasher, &ops, &grafted, None, Some((5, &partial_digest)));
+        let only_partial = combine_roots(
+            &mut hasher,
+            &ops,
+            &grafted,
+            None,
+            Some((5, &partial_digest)),
+        );
         let both = combine_roots(
             &mut hasher,
             &ops,
@@ -1349,7 +1361,13 @@ mod tests {
 
         // Partial only.
         assert_eq!(
-            combine_roots(&mut hasher, &ops, &grafted, None, Some((next_bit, &partial))),
+            combine_roots(
+                &mut hasher,
+                &ops,
+                &grafted,
+                None,
+                Some((next_bit, &partial))
+            ),
             hasher.hash((&ops, &grafted, next_bit, &partial))
         );
 
@@ -1394,8 +1412,8 @@ mod tests {
     {
         let mut batch = db.new_batch();
         for idx in start..start + count {
-            let key = Sha256::hash(&idx.to_be_bytes());
-            let value = Sha256::hash(&(idx + count).to_be_bytes());
+            let key = Sha256::new().hash_encoded(idx);
+            let value = Sha256::new().hash_encoded(idx + count);
             batch = batch.write(key, Some(value));
         }
         let merkleized = batch.merkleize(db, None).await.unwrap();

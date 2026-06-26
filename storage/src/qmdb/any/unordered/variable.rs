@@ -285,7 +285,7 @@ pub(crate) mod test {
                 let mut batch = db.new_batch();
                 for i in 0..ELEMENTS {
                     batch = batch.write(
-                        Sha256::hash(&i.to_be_bytes()),
+                        Sha256::new().hash_encoded(i),
                         Some(vec![(i % 255) as u8; ((i % 13) + 7) as usize]),
                     );
                 }
@@ -300,7 +300,7 @@ pub(crate) mod test {
             // Re-apply the updates and commit them this time.
             let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::new().hash_encoded(i);
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 batch = batch.write(k, Some(v));
             }
@@ -316,7 +316,7 @@ pub(crate) mod test {
                     if i % 3 != 0 {
                         continue;
                     }
-                    let k = Sha256::hash(&i.to_be_bytes());
+                    let k = Sha256::new().hash_encoded(i);
                     let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                     batch = batch.write(k, Some(v));
                 }
@@ -334,7 +334,7 @@ pub(crate) mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::new().hash_encoded(i);
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 batch = batch.write(k, Some(v));
             }
@@ -350,7 +350,7 @@ pub(crate) mod test {
                     if i % 7 != 1 {
                         continue;
                     }
-                    let k = Sha256::hash(&i.to_be_bytes());
+                    let k = Sha256::new().hash_encoded(i);
                     batch = batch.write(k, None);
                 }
                 let _ = batch.merkleize(&db, None).await.unwrap();
@@ -367,7 +367,7 @@ pub(crate) mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::new().hash_encoded(i);
                 batch = batch.write(k, None);
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();

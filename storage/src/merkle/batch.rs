@@ -81,11 +81,7 @@
 //! ```
 
 use crate::merkle::{
-    hasher::Hasher,
-    mem::Mem,
-    path,
-    proof::Proof,
-    Error, Family, Location, Position, Readable,
+    hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
 };
 use ahash::RandomState;
 use alloc::{
@@ -268,7 +264,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Hash `element` and add it as a leaf.
     pub fn add<E: Encode>(self, hasher: &mut impl Hasher<F, Digest = D>, element: E) -> Self {
-        let digest = hasher.leaf_digest(self.size(), element);
+        let digest = hasher.leaf_digest(self.size(), &element);
         self.add_leaf_digest(digest)
     }
 
@@ -277,7 +273,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         hasher: &mut impl Hasher<F, Digest = D>,
         element: &E,
     ) -> Self {
-        let digest = hasher.leaf_digest_ref(self.size(), element);
+        let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
     }
 
@@ -310,7 +306,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         element: E,
     ) -> Result<Self, Error<F>> {
         let pos = self.validate_loc(loc)?;
-        let digest = hasher.leaf_digest(pos, element);
+        let digest = hasher.leaf_digest(pos, &element);
         self.store_node(pos, digest);
         self.mark_dirty(loc);
         Ok(self)
@@ -668,7 +664,7 @@ mod tests {
         let batch = {
             let mut batch = mem.new_batch();
             for i in 0u64..n {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 batch = batch.add(hasher, &element);
             }
             batch.merkleize(&mem, hasher)
@@ -686,7 +682,7 @@ mod tests {
                 let base = Mem::<F, D>::new();
                 let mut batch = base.new_batch();
                 for i in 0..n {
-                    let element = hasher.digest(i.to_be_bytes());
+                    let element = hasher.digest(i);
                     batch = batch.add(&mut hasher, &element);
                 }
                 let merkleized = batch.merkleize(&base, &mut hasher);
@@ -709,7 +705,7 @@ mod tests {
             let base_root = mem_root(&base, &mut hasher);
             let mut batch = base.new_batch();
             for i in 50u64..60 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 batch = batch.add(&mut hasher, &element);
             }
             let merkleized = batch.merkleize(&base, &mut hasher);
@@ -719,15 +715,10 @@ mod tests {
             let mut applied = base;
             applied.apply_batch(&merkleized).unwrap();
             let loc = Location::<F>::new(55);
-            let element = hasher.digest(55u64.to_be_bytes());
+            let element = hasher.digest(55u64);
             let proof = applied.proof(&mut hasher, loc, 0).unwrap();
             let root = batch_root(&applied, &merkleized, &mut hasher);
-            assert!(proof.verify_element_inclusion(
-                &mut hasher,
-                &element,
-                loc,
-                &root
-            ));
+            assert!(proof.verify_element_inclusion(&mut hasher, &element, loc, &root));
         });
     }
 
@@ -738,7 +729,7 @@ mod tests {
             let mut base = build_reference::<F>(&mut hasher, 50);
             let mut batch = base.new_batch();
             for i in 50u64..75 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 batch = batch.add(&mut hasher, &element);
             }
             let merkleized = batch.merkleize(&base, &mut hasher);
@@ -746,7 +737,10 @@ mod tests {
             base.apply_batch(&merkleized).unwrap();
             assert_eq!(mem_root(&base, &mut hasher), new_root);
             let reference = build_reference::<F>(&mut hasher, 75);
-            assert_eq!(mem_root(&base, &mut hasher), mem_root(&reference, &mut hasher));
+            assert_eq!(
+                mem_root(&base, &mut hasher),
+                mem_root(&reference, &mut hasher)
+            );
         });
     }
 
@@ -758,13 +752,13 @@ mod tests {
             let base_root = mem_root(&base, &mut hasher);
             let mut ba = base.new_batch();
             for i in 50u64..60 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 ba = ba.add(&mut hasher, &element);
             }
             let ma = ba.merkleize(&base, &mut hasher);
             let mut bb = base.new_batch();
             for i in 100u64..105 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 bb = bb.add(&mut hasher, &element);
             }
             let mb = bb.merkleize(&base, &mut hasher);
@@ -784,13 +778,13 @@ mod tests {
             let base = build_reference::<F>(&mut hasher, 50);
             let mut ba = base.new_batch();
             for i in 50u64..60 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 ba = ba.add(&mut hasher, &element);
             }
             let ma = ba.merkleize(&base, &mut hasher);
             let mut bb = ma.new_batch();
             for i in 60u64..70 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 bb = bb.add(&mut hasher, &element);
             }
             let mb = bb.merkleize(&base, &mut hasher);
@@ -805,15 +799,10 @@ mod tests {
             applied.apply_batch(&mb).unwrap();
             for i in [0u64, 25, 55, 65, 69] {
                 let loc = Location::<F>::new(i);
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 let proof = applied.proof(&mut hasher, loc, 0).unwrap();
                 let root = batch_root(&applied, &mb, &mut hasher);
-                assert!(proof.verify_element_inclusion(
-                    &mut hasher,
-                    &element,
-                    loc,
-                    &root
-                ));
+                assert!(proof.verify_element_inclusion(&mut hasher, &element, loc, &root));
             }
         });
     }
@@ -854,7 +843,7 @@ mod tests {
                 .update_leaf_digest(Location::new(10), updated)
                 .unwrap();
             for i in 50u64..55 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 batch = batch.add(&mut hasher, &element);
             }
             let m = batch.merkleize(&base, &mut hasher);
@@ -903,7 +892,7 @@ mod tests {
             let base = build_reference::<F>(&mut hasher, 50);
             let mut batch = base.new_batch();
             for i in 50u64..60 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 batch = batch.add(&mut hasher, &element);
             }
             let m = batch.merkleize(&base, &mut hasher);
@@ -911,15 +900,13 @@ mod tests {
             let mut applied = base;
             applied.apply_batch(&m).unwrap();
             let loc = Location::<F>::new(55);
-            let element = hasher.digest(55u64.to_be_bytes());
+            let element = hasher.digest(55u64);
             let proof = applied.proof(&mut hasher, loc, 0).unwrap();
             let root = batch_root(&applied, &m, &mut hasher);
             assert!(proof.verify_element_inclusion(&mut hasher, &element, loc, &root));
             let range = Location::<F>::new(50)..Location::new(55);
             let rp = applied.range_proof(&mut hasher, range.clone(), 0).unwrap();
-            let elements: Vec<D> = (50u64..55)
-                .map(|i| hasher.digest(i.to_be_bytes()))
-                .collect();
+            let elements: Vec<D> = (50u64..55).map(|i| hasher.digest(i)).collect();
             let root = batch_root(&applied, &m, &mut hasher);
             assert!(rp.verify_range_inclusion(&mut hasher, &elements, range.start, &root));
         });
@@ -943,18 +930,22 @@ mod tests {
             let base = build_reference::<F>(&mut hasher, 50);
             let mut batch = base.new_batch();
             for i in 50u64..55 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 batch = batch.add(&mut hasher, &element);
             }
             let merkleized = batch.merkleize(&base, &mut hasher);
             let mut batch_again = merkleized.new_batch();
             for i in 55u64..60 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 batch_again = batch_again.add(&mut hasher, &element);
             }
             let reference = build_reference::<F>(&mut hasher, 60);
             assert_eq!(
-                batch_root(&base, &batch_again.merkleize(&base, &mut hasher), &mut hasher),
+                batch_root(
+                    &base,
+                    &batch_again.merkleize(&base, &mut hasher),
+                    &mut hasher
+                ),
                 mem_root(&reference, &mut hasher)
             );
         });
@@ -967,20 +958,23 @@ mod tests {
             let mut base = build_reference::<F>(&mut hasher, 50);
             let mut b1 = base.new_batch();
             for i in 50u64..60 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 b1 = b1.add(&mut hasher, &element);
             }
             let m1 = b1.merkleize(&base, &mut hasher);
             base.apply_batch(&m1).unwrap();
             let mut b2 = base.new_batch();
             for i in 60u64..70 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 b2 = b2.add(&mut hasher, &element);
             }
             let m2 = b2.merkleize(&base, &mut hasher);
             base.apply_batch(&m2).unwrap();
             let reference = build_reference::<F>(&mut hasher, 70);
-            assert_eq!(mem_root(&base, &mut hasher), mem_root(&reference, &mut hasher));
+            assert_eq!(
+                mem_root(&base, &mut hasher),
+                mem_root(&reference, &mut hasher)
+            );
         });
     }
 
@@ -992,7 +986,7 @@ mod tests {
             base.prune(Location::new(27)).unwrap();
             let mut batch = base.new_batch();
             for i in 100u64..110 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 batch = batch.add(&mut hasher, &element);
             }
             let m = batch.merkleize(&base, &mut hasher);
@@ -1001,7 +995,7 @@ mod tests {
             let mut applied = base;
             applied.apply_batch(&m).unwrap();
             let loc = Location::<F>::new(80);
-            let element = hasher.digest(80u64.to_be_bytes());
+            let element = hasher.digest(80u64);
             let proof = applied.proof(&mut hasher, loc, 0).unwrap();
             assert!(proof.verify_element_inclusion(&mut hasher, &element, loc, &expected_root));
             assert!(matches!(
@@ -1030,7 +1024,7 @@ mod tests {
                 .merkleize(&base, &mut hasher);
             let mut bc = mb.new_batch();
             for i in 300u64..310 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 bc = bc.add(&mut hasher, &element);
             }
             let mc = bc.merkleize(&base, &mut hasher);
@@ -1072,7 +1066,7 @@ mod tests {
             let base = build_reference::<F>(&mut hasher, 50);
             let mut batch = base.new_batch();
             for i in 50u64..60 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(i);
                 batch = batch.add(&mut hasher, &element);
             }
             let updated = Sha256::fill(0xEE);
@@ -1116,7 +1110,10 @@ mod tests {
                 .unwrap()
                 .merkleize(&base, &mut hasher);
             base.apply_batch(&batch).unwrap();
-            assert_eq!(batch_root(&base, &m, &mut hasher), mem_root(&base, &mut hasher));
+            assert_eq!(
+                batch_root(&base, &m, &mut hasher),
+                mem_root(&base, &mut hasher)
+            );
         });
     }
 

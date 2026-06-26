@@ -1,12 +1,12 @@
 //! Shared conformance test utilities and stability tests for Merkle-family structures.
 
-use crate::merkle::{hasher::Hasher, mem::Mem, Bagging::ForwardFold, Family};
+use crate::merkle::{hasher::Hasher, mem::Mem, Bagging::ForwardFold, Family, Location};
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_cryptography::{sha256, Sha256};
 
 /// Build a test Merkle structure by adding `elements` elements using the provided hasher.
 ///
-/// Each element's preimage is `i.to_be_bytes()` for `i` in `0..elements`. The elements are
+/// Each element's preimage is the leaf [`Location`] for `i` in `0..elements`. The elements are
 /// first hashed (via [`Hasher::digest`]) before being added, so the leaf digests are
 /// deterministic regardless of family.
 pub fn build_test_mem<F, H>(
@@ -21,7 +21,7 @@ where
     let batch = {
         let mut batch = mem.new_batch();
         for i in 0u64..elements {
-            let element = hasher.digest(i.to_be_bytes());
+            let element = hasher.digest(Location::<F>::new(i));
             batch = batch.add(hasher, &element);
         }
         batch.merkleize(&mem, hasher)

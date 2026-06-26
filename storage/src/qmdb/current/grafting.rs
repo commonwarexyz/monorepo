@@ -249,9 +249,7 @@ pub struct Verifier<'a, F: Graftable, H: CHasher, C: Encode + AsRef<[u8]> + Sync
     _ops_family: PhantomData<F>,
 }
 
-impl<F: Graftable, H: CHasher, C: Encode + AsRef<[u8]> + Sync> Clone
-    for Verifier<'_, F, H, C>
-{
+impl<F: Graftable, H: CHasher, C: Encode + AsRef<[u8]> + Sync> Clone for Verifier<'_, F, H, C> {
     fn clone(&self) -> Self {
         Self {
             hasher: self.hasher.clone(),
@@ -592,7 +590,10 @@ mod tests {
 
         let mut standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
         let expected_no_combine = <StandardHasher<Sha256> as HasherTrait<mmr::Family>>::node_digest(
-            &mut standard, pos_at_g, &left, &right,
+            &mut standard,
+            pos_at_g,
+            &left,
+            &right,
         );
 
         let mut v = Verifier::<mmr::Family, Sha256, _>::new(GH, 0, vec![&chunk], 0, ForwardFold);
@@ -749,9 +750,9 @@ mod tests {
             let mmr = Mmr::new();
             let ops_mmr = build_test_mmr(&mut standard, mmr, NUM_ELEMENTS);
 
-            // Generate the elements that build_test_mmr uses: sha256(i.to_be_bytes()).
+            // Generate the elements that build_test_mmr uses: digest of each leaf Location.
             let elements: Vec<_> = (0..NUM_ELEMENTS)
-                .map(|i| standard.digest(i.to_be_bytes()))
+                .map(|i| standard.digest(mmr::Location::new(i)))
                 .collect();
 
             // Height 0 grafting (1:1 mapping).
@@ -951,7 +952,12 @@ mod tests {
                     assert!(proof.verify_element_inclusion(&mut verifier, &b4, loc, &grafted_root));
 
                     // Wrong leaf element.
-                    assert!(!proof.verify_element_inclusion(&mut verifier, &b3, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(
+                        &mut verifier,
+                        &b3,
+                        loc,
+                        &grafted_root
+                    ));
 
                     // Wrong root.
                     assert!(!proof.verify_element_inclusion(&mut verifier, &b4, loc, &ops_root));
@@ -972,7 +978,12 @@ mod tests {
                         ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
-                    assert!(!proof.verify_element_inclusion(&mut verifier, &b4, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(
+                        &mut verifier,
+                        &b4,
+                        loc,
+                        &grafted_root
+                    ));
 
                     // Wrong chunk index in the verifier.
                     let mut verifier = Verifier::<mmr::Family, Sha256, _>::new(
@@ -982,7 +993,12 @@ mod tests {
                         ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
-                    assert!(!proof.verify_element_inclusion(&mut verifier, &b4, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(
+                        &mut verifier,
+                        &b4,
+                        loc,
+                        &grafted_root
+                    ));
                 }
 
                 // Verify range proofs.

@@ -1088,7 +1088,7 @@ mod tests {
     };
 
     fn test_digest(v: usize) -> Digest {
-        Sha256::hash(&v.to_be_bytes())
+        Sha256::new().hash_encoded(v)
     }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
@@ -1331,7 +1331,10 @@ mod tests {
 
         // Generate & verify a proof that spans flushed elements and the last element.
         let range = Location::<F>::new(TEST_ELEMENT as u64)..Location::<F>::new(LEAF_COUNT as u64);
-        let proof = mmr.range_proof(&mut hasher, range.clone(), 0).await.unwrap();
+        let proof = mmr
+            .range_proof(&mut hasher, range.clone(), 0)
+            .await
+            .unwrap();
         assert!(proof.verify_range_inclusion(
             &mut hasher,
             &leaves[range.to_usize_range()],
@@ -2585,10 +2588,13 @@ mod tests {
         };
 
         // Create structure with enough elements to span multiple sections.
-        let mmr =
-            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &mut hasher, cfg.clone())
-                .await
-                .unwrap();
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("init"),
+            &mut hasher,
+            cfg.clone(),
+        )
+        .await
+        .unwrap();
         let mut batch = mmr.new_batch();
         for i in 0..100 {
             batch = batch.add(&mut hasher, &test_digest(i));

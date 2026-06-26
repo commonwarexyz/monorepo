@@ -560,7 +560,7 @@ impl<D: Digest> Proof<D> {
             if *position >= self.leaf_count {
                 return Err(Error::InvalidPosition(*position));
             }
-            sorted.push((*position, hasher.hash_encoded((*position, leaf))));
+            sorted.push((*position, hasher.hash_encoded((position, leaf))));
         }
         sorted.sort_unstable_by_key(|(pos, _)| *pos);
 
@@ -697,9 +697,7 @@ mod tests {
     #[test]
     fn issue_2837_regression() {
         // Create a tree with 255 leaves (as in the issue report)
-        let digests: Vec<Digest> = (0..255u32)
-            .map(|i| Sha256::hash(&i.to_be_bytes()))
-            .collect();
+        let digests: Vec<Digest> = (0..255u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         let mut builder = Builder::<Sha256>::new(255);
         for digest in &digests {
@@ -971,7 +969,7 @@ mod tests {
     #[test]
     fn test_range_proof_basic() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1001,7 +999,7 @@ mod tests {
     #[test]
     fn test_range_proof_single_element() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1025,7 +1023,7 @@ mod tests {
     #[test]
     fn test_range_proof_full_tree() {
         // Create test data
-        let digests: Vec<Digest> = (0..7u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..7u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1046,7 +1044,7 @@ mod tests {
     #[test]
     fn test_range_proof_edge_cases() {
         // Create test data
-        let digests: Vec<Digest> = (0..15u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..15u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1079,7 +1077,7 @@ mod tests {
     #[test]
     fn test_range_proof_invalid_range() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1098,7 +1096,7 @@ mod tests {
     #[test]
     fn test_range_proof_tampering() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1149,7 +1147,7 @@ mod tests {
         // Test range proofs for trees of various sizes
         for tree_size in [1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&i.to_be_bytes()))
+                .map(|i| Sha256::new().hash_encoded(i))
                 .collect();
 
             // Build tree
@@ -1187,7 +1185,7 @@ mod tests {
     #[test]
     fn test_range_proof_malicious_wrong_position() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1214,7 +1212,7 @@ mod tests {
     #[test]
     fn test_range_proof_malicious_reordered_leaves() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1238,7 +1236,7 @@ mod tests {
     #[test]
     fn test_range_proof_malicious_extra_siblings() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1263,7 +1261,7 @@ mod tests {
     #[test]
     fn test_range_proof_malicious_missing_siblings() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1291,7 +1289,7 @@ mod tests {
     #[test]
     fn test_range_proof_integer_overflow_protection() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1309,7 +1307,7 @@ mod tests {
     #[test]
     fn test_range_proof_malicious_wrong_tree_structure() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1345,7 +1343,7 @@ mod tests {
         // Test various power-of-2 boundary conditions
         for tree_size in [1, 2, 4, 8, 16, 32] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&i.to_be_bytes()))
+                .map(|i| Sha256::new().hash_encoded(i))
                 .collect();
 
             // Build tree
@@ -1483,7 +1481,7 @@ mod tests {
     #[case::full_tree(0, 16)] // Full tree (no siblings needed at leaf level)
     fn test_range_proof_siblings_usage(#[case] start: u32, #[case] count: u32) {
         // This test ensures that all siblings in a range proof are actually used during verification
-        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1518,7 +1516,7 @@ mod tests {
         #[values(3, 5, 7, 9, 11, 13, 15)] tree_size: usize,
     ) {
         let digests: Vec<Digest> = (0..tree_size as u32)
-            .map(|i| Sha256::hash(&i.to_be_bytes()))
+            .map(|i| Sha256::new().hash_encoded(i))
             .collect();
 
         // Build tree
@@ -1543,7 +1541,7 @@ mod tests {
     #[test]
     fn test_multi_proof_basic() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1570,7 +1568,7 @@ mod tests {
     #[test]
     fn test_multi_proof_single_element() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1597,7 +1595,7 @@ mod tests {
     #[test]
     fn test_multi_proof_all_elements() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1627,7 +1625,7 @@ mod tests {
     #[test]
     fn test_multi_proof_adjacent_elements() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1654,7 +1652,7 @@ mod tests {
     #[test]
     fn test_multi_proof_sparse_positions() {
         // Create test data
-        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1701,7 +1699,7 @@ mod tests {
     #[test]
     fn test_multi_proof_empty_positions() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1720,7 +1718,7 @@ mod tests {
     #[test]
     fn test_multi_proof_duplicate_positions_error() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1743,7 +1741,7 @@ mod tests {
     #[test]
     fn test_multi_proof_unsorted_input() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1770,7 +1768,7 @@ mod tests {
         // Test multi-proofs for trees of various sizes
         for tree_size in [1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&i.to_be_bytes()))
+                .map(|i| Sha256::new().hash_encoded(i))
                 .collect();
 
             // Build tree
@@ -1821,7 +1819,7 @@ mod tests {
     #[test]
     fn test_multi_proof_wrong_elements() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1850,7 +1848,7 @@ mod tests {
     #[test]
     fn test_multi_proof_wrong_positions() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1879,7 +1877,7 @@ mod tests {
     #[test]
     fn test_multi_proof_wrong_root() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1908,7 +1906,7 @@ mod tests {
     #[test]
     fn test_multi_proof_tampering() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1954,7 +1952,7 @@ mod tests {
     #[test]
     fn test_multi_proof_deduplication() {
         // Create test data
-        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1984,7 +1982,7 @@ mod tests {
     #[test]
     fn test_multi_proof_serialization() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2018,7 +2016,7 @@ mod tests {
     #[test]
     fn test_multi_proof_serialization_truncated() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2042,7 +2040,7 @@ mod tests {
     #[test]
     fn test_multi_proof_serialization_extra() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2077,7 +2075,7 @@ mod tests {
     #[test]
     fn test_multi_proof_invalid_position() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2100,7 +2098,7 @@ mod tests {
     #[test]
     fn test_multi_proof_verify_invalid_position() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2127,7 +2125,7 @@ mod tests {
         // Test odd-sized trees that require node duplication
         for tree_size in [3, 5, 7, 9, 11, 13, 15] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&i.to_be_bytes()))
+                .map(|i| Sha256::new().hash_encoded(i))
                 .collect();
 
             // Build tree
@@ -2159,7 +2157,7 @@ mod tests {
     #[test]
     fn test_multi_proof_verify_empty_elements() {
         // Create a valid proof and try to verify with empty elements
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2261,7 +2259,7 @@ mod tests {
     #[test]
     fn test_multi_proof_malicious_leaf_count_zero() {
         // Attacker sets leaf_count = 0 but provides siblings
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2290,7 +2288,7 @@ mod tests {
     #[test]
     fn test_multi_proof_malicious_leaf_count_larger() {
         // Attacker inflates leaf_count to claim proof is for larger tree
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2325,7 +2323,7 @@ mod tests {
     #[test]
     fn test_multi_proof_malicious_leaf_count_smaller() {
         // Attacker deflates leaf_count to claim proof is for smaller tree
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2357,7 +2355,7 @@ mod tests {
     #[test]
     fn test_multi_proof_mismatched_element_count() {
         // Provide more or fewer elements than the proof was generated for
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2393,7 +2391,7 @@ mod tests {
     #[test]
     fn test_multi_proof_swapped_siblings() {
         // Swap the order of siblings in the proof
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2430,7 +2428,7 @@ mod tests {
     fn test_multi_proof_dos_large_leaf_count() {
         // Attacker sets massive leaf_count trying to cause DoS via memory allocation
         // The verify function should NOT allocate proportional to leaf_count
-        let digests: Vec<Digest> = (0..4u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..4u32).map(|i| Sha256::new().hash_encoded(i)).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2470,7 +2468,7 @@ mod tests {
             let mut digests = Vec::with_capacity(n);
             let mut builder = Builder::<Sha256>::new(n);
             for i in 0..n {
-                let digest = Sha256::hash(&i.to_be_bytes());
+                let digest = Sha256::new().hash_encoded(i);
                 builder.add(&digest);
                 digests.push(digest);
             }

@@ -31,7 +31,7 @@ where
         |hasher, (i, op)| {
             let offset = u64::try_from(i).expect("operation offset exceeds u64");
             let pos = F::location_to_position(first_leaf + offset);
-            hasher.leaf_digest_ref(pos, op)
+            hasher.leaf_digest(pos, op)
         },
     );
 

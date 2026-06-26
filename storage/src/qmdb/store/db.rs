@@ -898,7 +898,7 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for i in 0u64..ELEMENTS {
-                    let k = Blake3::hash(&i.to_be_bytes());
+                    let k = Blake3::new().hash_encoded(i);
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                     batch = batch.update(k, v);
                 }
@@ -910,7 +910,7 @@ mod test {
 
             // Apply the updates and commit them.
             for i in 0u64..ELEMENTS {
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::new().hash_encoded(i);
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 apply_entries(&mut db, [(k, Some(v.clone()))]).await;
             }
@@ -921,7 +921,7 @@ mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::new().hash_encoded(i);
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 apply_entries(&mut db, [(k, Some(v.clone()))]).await;
             }
@@ -933,7 +933,7 @@ mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::new().hash_encoded(i);
                 apply_entries(&mut db, [(k, None)]).await;
             }
             db.commit().await.unwrap();
@@ -960,8 +960,8 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_store(context.child("store").with_attribute("index", 0)).await;
-            let key0 = Blake3::hash(&0u64.to_be_bytes());
-            let key1 = Blake3::hash(&1u64.to_be_bytes());
+            let key0 = Blake3::new().hash_encoded(0u64);
+            let key1 = Blake3::new().hash_encoded(1u64);
             let value0 = vec![0, 1, 2];
             let value1 = vec![3, 4, 5, 6];
 

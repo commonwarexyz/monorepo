@@ -36,7 +36,7 @@ fn keys(items: usize, grinding: bool) -> Vec<[u8; 8]> {
             if grinding {
                 i.to_be_bytes()
             } else {
-                Sha256::hash(&i.to_be_bytes()).as_ref()[..8]
+                Sha256::new().hash_encoded(i).as_ref()[..8]
                     .try_into()
                     .unwrap()
             }

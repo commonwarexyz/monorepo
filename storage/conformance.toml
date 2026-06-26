@@ -20,7 +20,7 @@ hash = "6d6382956289a2f706581a4b1afa08c5cd8e8a4f55b11d454425333b6537cc17"
 
 ["commonware_storage::bmt::tests::conformance::RootConformance"]
 n_cases = 200
-hash = "18b1108f18520078e2eb5bb29c6a4cdf3bded6b52d8efda19d45c0f10be27207"
+hash = "444f64045af46fc4d63491156004502ee8fbc020e0527279012c3619f121a511"
 
 ["commonware_storage::cache::storage::conformance::CodecConformance<Record<u64>>"]
 n_cases = 65536
@@ -72,11 +72,11 @@ hash = "506b5a02d1a7c3e249f514b889e6099c27bb0723ebc711514263f0c71f0676ef"
 
 ["commonware_storage::merkle::conformance::MmbRootStability"]
 n_cases = 200
-hash = "6fbf2b064d89d0428c76e3859834364af7ae1cffae5a1f4e80c3458c8902d225"
+hash = "b45cfb83369c5ba7cb51e03d14831db53de33e17039ab50351fbf4e0868f721b"
 
 ["commonware_storage::merkle::conformance::MmrRootStability"]
 n_cases = 200
-hash = "55316d752dc45d30d58ab5ff1e6279d3c83a97ef667764a181acebda68dc5f02"
+hash = "79305e057680b18b7557472246d3d9650a659d797d503d769e5d9a48a55b3b47"
 
 ["commonware_storage::merkle::mmr::proof::tests::conformance::CodecConformance<Proof<Family,Sha256Digest>>"]
 n_cases = 65536

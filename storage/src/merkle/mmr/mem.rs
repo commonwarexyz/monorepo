@@ -65,7 +65,7 @@ mod tests {
 
             for leaf in leaves.iter().by_ref() {
                 let pos = Position::try_from(*leaf).unwrap();
-                let digest = hasher.leaf_digest(pos, element);
+                let digest = hasher.leaf_digest(pos, &element);
                 assert_eq!(mmr.get_node(pos).unwrap(), digest);
             }
 
@@ -131,7 +131,7 @@ mod tests {
             let batch = {
                 let mut batch = batched_mmr.new_batch();
                 for i in 0..NUM_ELEMENTS {
-                    let element = hasher.digest(i.to_be_bytes());
+                    let element = hasher.digest(Location::new(i));
                     batch = batch.add(&mut hasher, &element);
                 }
                 batch.merkleize(&batched_mmr, &mut hasher)
@@ -170,7 +170,7 @@ mod tests {
             let batch = {
                 let mut batch = mmr.new_batch_with_strategy(strategy);
                 for i in 0u64..NUM_ELEMENTS {
-                    let element = hasher.digest(i.to_be_bytes());
+                    let element = hasher.digest(Location::new(i));
                     batch = batch.add(&mut hasher, &element);
                 }
                 batch.merkleize(&mmr, &mut hasher)

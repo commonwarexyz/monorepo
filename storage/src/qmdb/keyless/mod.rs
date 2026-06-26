@@ -576,7 +576,7 @@ pub(crate) mod tests {
         journal::contiguous::Mutable,
         qmdb::{self, verify_proof},
     };
-    use commonware_cryptography::{Sha256};
+    use commonware_cryptography::Sha256;
     use commonware_parallel::Strategy;
     use commonware_runtime::{deterministic, Supervisor as _};
     use commonware_utils::NZU64;
@@ -859,7 +859,13 @@ pub(crate) mod tests {
         let root = db.root();
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
-        assert!(verify_proof(&mut hasher, &proof, Location::new(0), &ops, &root,));
+        assert!(verify_proof(
+            &mut hasher,
+            &proof,
+            Location::new(0),
+            &ops,
+            &root,
+        ));
         assert_eq!(ops.len() as u64, 1 + ELEMENTS + 1);
 
         let (proof, ops) = db.proof(Location::new(10), NZU64!(5)).await.unwrap();
@@ -1811,7 +1817,13 @@ pub(crate) mod tests {
 
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-        assert!(verify_proof(&mut hasher, &proof, Location::new(0), &ops, &root,));
+        assert!(verify_proof(
+            &mut hasher,
+            &proof,
+            Location::new(0),
+            &ops,
+            &root,
+        ));
         assert_eq!(db.bounds().await.end, 1 + BATCHES * (APPENDS_PER_BATCH + 1));
 
         db.destroy().await.unwrap();
@@ -1919,7 +1931,13 @@ pub(crate) mod tests {
 
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-        assert!(verify_proof(&mut hasher, &proof, Location::new(0), &ops, &root,));
+        assert!(verify_proof(
+            &mut hasher,
+            &proof,
+            Location::new(0),
+            &ops,
+            &root,
+        ));
         assert_eq!(db.bounds().await.end, 1 + N + 1);
 
         db.destroy().await.unwrap();

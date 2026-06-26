@@ -204,13 +204,8 @@ impl Entry {
 
     /// Compute a checksum for [Entry].
     fn compute_crc(epoch: u64, section: u64, position: u64, added: u8) -> u32 {
-        let mut hasher = Crc32::new();
-        hasher
-            .update(&epoch.to_be_bytes())
-            .update(&section.to_be_bytes())
-            .update(&position.to_be_bytes())
-            .update(&added.to_be_bytes())
-            .finalize()
+        Crc32::new()
+            .hash_encoded((epoch, section, position, added))
             .as_u32()
     }
 

@@ -249,7 +249,13 @@ mod tests {
         );
 
         // Verify with correct start location
-        assert!(verify_proof(&mut hasher, &proof, start_loc, &operations, &root));
+        assert!(verify_proof(
+            &mut hasher,
+            &proof,
+            start_loc,
+            &operations,
+            &root
+        ));
 
         // Verify fails with wrong start location
         assert!(!verify_proof(
@@ -449,8 +455,14 @@ mod tests {
         );
 
         // Create proof store
-        let proof_store =
-            create_proof_store(&mut hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
+        let proof_store = create_proof_store(
+            &mut hasher,
+            &proof,
+            Location::<F>::new(0),
+            &operations,
+            &root,
+        )
+        .unwrap();
 
         // Generate multi-proof for specific locations
         let target_locations = vec![
@@ -641,9 +653,20 @@ mod tests {
             Location::<F>::new(4),
             Location::<F>::new(7),
         ];
-        let proof = qmdb_range_proof(&mut hasher, &merkle, 0, Location::<F>::new(0)..merkle.leaves());
-        let proof_store =
-            create_proof_store(&mut hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
+        let proof = qmdb_range_proof(
+            &mut hasher,
+            &merkle,
+            0,
+            Location::<F>::new(0)..merkle.leaves(),
+        );
+        let proof_store = create_proof_store(
+            &mut hasher,
+            &proof,
+            Location::<F>::new(0),
+            &operations,
+            &root,
+        )
+        .unwrap();
         let multi_proof = create_multi_proof(&proof_store, &target_locations, &[]).unwrap();
 
         // Verify with correct operations
@@ -724,9 +747,20 @@ mod tests {
             merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root(&mut hasher, 0).unwrap();
-        let proof = qmdb_range_proof(&mut hasher, &merkle, 0, Location::<F>::new(0)..merkle.leaves());
-        let proof_store =
-            create_proof_store(&mut hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
+        let proof = qmdb_range_proof(
+            &mut hasher,
+            &merkle,
+            0,
+            Location::<F>::new(0)..merkle.leaves(),
+        );
+        let proof_store = create_proof_store(
+            &mut hasher,
+            &proof,
+            Location::<F>::new(0),
+            &operations,
+            &root,
+        )
+        .unwrap();
         assert!(matches!(
             create_multi_proof(&proof_store, &[], &[]),
             Err(crate::merkle::Error::Empty)
@@ -768,8 +802,14 @@ mod tests {
             0,
             Location::<F>::new(0)..Location::<F>::new(3),
         );
-        let proof_store =
-            create_proof_store(&mut hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
+        let proof_store = create_proof_store(
+            &mut hasher,
+            &proof,
+            Location::<F>::new(0),
+            &operations,
+            &root,
+        )
+        .unwrap();
 
         // Generate multi-proof for single element
         let multi_proof = create_multi_proof(&proof_store, &[Location::<F>::new(1)], &[]).unwrap();

@@ -38,7 +38,7 @@ mod tests {
     use std::num::{NonZeroU16, NonZeroUsize};
 
     fn test_digest(v: usize) -> Digest {
-        Sha256::hash(&v.to_be_bytes())
+        Sha256::new().hash_encoded(v)
     }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
@@ -66,17 +66,13 @@ mod tests {
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root(&mut hasher, 0).unwrap();
 
-            let mmr = Mmr::init(
-                context.child("storage"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mmr = Mmr::init(context.child("storage"), &mut hasher, test_config(&context))
+                .await
+                .unwrap();
 
             let mut batch = mmr.new_batch();
             for i in 0u64..NUM_ELEMENTS {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(Location::new(i));
                 batch = batch.add(&mut hasher, &element);
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
@@ -97,10 +93,9 @@ mod tests {
             let cfg = test_config(&context);
             let mut mmr = Mmr::init(context, &mut hasher, cfg).await.unwrap();
 
-            let mut c_hasher = Sha256::new();
             let mut batch = mmr.new_batch();
             for i in 0u64..NUM_ELEMENTS {
-                let element = c_hasher.update(&i.to_be_bytes()).finalize();
+                let element = hasher.digest(Location::new(i));
                 batch = batch.add(&mut hasher, &element);
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
@@ -114,7 +109,7 @@ mod tests {
                 let batch = {
                     let mut batch = reference_mmr.new_batch();
                     for j in 0..i {
-                        let element = c_hasher.update(&j.to_be_bytes()).finalize();
+                        let element = hasher.digest(Location::new(j));
                         batch = batch.add(&mut hasher, &element);
                     }
                     batch.merkleize(&reference_mmr, &mut hasher)
@@ -134,7 +129,7 @@ mod tests {
             {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..NUM_ELEMENTS {
-                    let element = c_hasher.update(&i.to_be_bytes()).finalize();
+                    let element = hasher.digest(Location::new(i));
                     batch = batch.add(&mut hasher, &element);
                     if i == 101 {
                         // We can't sync mid-batch, so apply the first part,
@@ -147,7 +142,7 @@ mod tests {
                 mmr.sync().await.unwrap();
                 let mut batch = mmr.new_batch();
                 for i in 102u64..NUM_ELEMENTS {
-                    let element = c_hasher.update(&i.to_be_bytes()).finalize();
+                    let element = hasher.digest(Location::new(i));
                     batch = batch.add(&mut hasher, &element);
                 }
                 let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
@@ -171,7 +166,7 @@ mod tests {
             {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..102 {
-                    let element = c_hasher.update(&i.to_be_bytes()).finalize();
+                    let element = hasher.digest(Location::new(i));
                     batch = batch.add(&mut hasher, &element);
                 }
                 let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
@@ -179,7 +174,7 @@ mod tests {
                 mmr.sync().await.unwrap();
                 let mut batch = mmr.new_batch();
                 for i in 102u64..NUM_ELEMENTS {
-                    let element = c_hasher.update(&i.to_be_bytes()).finalize();
+                    let element = hasher.digest(Location::new(i));
                     batch = batch.add(&mut hasher, &element);
                 }
                 let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
@@ -215,17 +210,13 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
             // Build base full MMR with 10 elements.
-            let mmr = Mmr::init(
-                context.child("storage"),
-                &mut hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mmr = Mmr::init(context.child("storage"), &mut hasher, test_config(&context))
+                .await
+                .unwrap();
 
             let mut batch = mmr.new_batch();
             for i in 0u64..10 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(Location::new(i));
                 batch = batch.add(&mut hasher, &element);
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
@@ -235,7 +226,7 @@ mod tests {
             // Batch A: add 5 elements.
             let mut batch_a = mmr.new_batch();
             for i in 10u64..15 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(Location::new(i));
                 batch_a = batch_a.add(&mut hasher, &element);
             }
             let merkleized_a = mmr.with_mem(|mem| batch_a.merkleize(mem, &mut hasher));
@@ -243,7 +234,7 @@ mod tests {
             // Batch B on merkleized A: add 5 more elements.
             let mut batch_b = merkleized_a.new_batch();
             for i in 15u64..20 {
-                let element = hasher.digest(i.to_be_bytes());
+                let element = hasher.digest(Location::new(i));
                 batch_b = batch_b.add(&mut hasher, &element);
             }
             let merkleized_b = mmr.with_mem(|mem| batch_b.merkleize(mem, &mut hasher));

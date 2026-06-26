@@ -7,8 +7,7 @@ use crate::{
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
         self, batch::MerkleizedBatch as GenericMerkleizedBatch, hasher::Standard as StandardHasher,
-        mem::Mem,
-        storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
+        mem::Mem, storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
     },
     qmdb::{
         self,

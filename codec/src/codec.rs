@@ -173,6 +173,10 @@ pub trait Write {
     }
 }
 
+// This blanket does not conflict with the concrete reference impls (e.g. `Write for &[T]` in
+// `types/vec.rs`) because those forward through an unsized base (`[T]`) that does not itself
+// implement `Write`, so only the concrete impl applies to `&[T]`. Do not add an `impl Write for
+// [T]` (or an `impl EncodeSize for &T`): either would make this blanket overlap and break coherence.
 impl<T: Write + ?Sized> Write for &T {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {

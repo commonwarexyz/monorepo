@@ -335,11 +335,11 @@ fn keyless_variable_compact_config(
 // Workloads
 
 fn to_digest(i: u64) -> Digest {
-    Sha256::hash(&i.to_be_bytes())
+    Sha256::new().hash_encoded(i)
 }
 
 fn to_val(i: u64, salt: u64) -> Digest {
-    Sha256::hash(&[i.to_be_bytes(), salt.wrapping_add(1).to_be_bytes()].concat())
+    Sha256::new().hash_encoded((i, salt.wrapping_add(1)))
 }
 
 /// Digest whose first byte is `prefix`, guaranteeing translator collisions under OneCap.

@@ -301,14 +301,6 @@ commonware_macros::stability_scope!(BETA {
             self.update(encoded.as_ref()).finalize()
         }
     }
-
-    /// The largest encodable value the SHA-256 fixed path hashes without allocating.
-    ///
-    /// Sized to the SHA-256 fast path: two 64-byte compression blocks hold 128 bytes, and reserving
-    /// the 9 mandatory padding bytes (a `0x80` terminator and an 8-byte length) leaves 119 for the
-    /// preimage. That covers every fixed-shape Merkle encodable value in the library. Longer values use
-    /// the standard streaming hasher.
-    pub(crate) const MAX_CODEC_PREIMAGE: usize = 2 * 64 - 9;
 });
 
 #[cfg(test)]

@@ -1452,7 +1452,10 @@ pub mod tests {
             let kvp = db.key_value_proof(&mut hasher, b.clone()).await.unwrap();
             let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
             assert!(!ForgedExclusionDb::verify_exclusion_proof(
-                &mut hasher, &c, &forged, &root
+                &mut hasher,
+                &c,
+                &forged,
+                &root
             ));
 
             db.destroy().await.unwrap();
@@ -1623,11 +1626,11 @@ pub mod tests {
     // computation on top of the `any` batch.
 
     fn key(i: u64) -> Digest {
-        Sha256::hash(&i.to_be_bytes())
+        Sha256::new().hash_encoded(i)
     }
 
     fn val(i: u64) -> Digest {
-        Sha256::hash(&(i + 10000).to_be_bytes())
+        Sha256::new().hash_encoded(i + 10000)
     }
 
     async fn mmb_commit(
