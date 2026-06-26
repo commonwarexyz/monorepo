@@ -1,7 +1,7 @@
 use crate::merkle::{
     hasher::Standard, verification::ProofStore, Error, Family, Location, Position, Proof,
 };
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeRef};
 use commonware_cryptography::{Digest, Hasher};
 
 /// Verify that a [Proof] is valid for a range of operations and a target root.
@@ -18,8 +18,7 @@ where
     H: Hasher<Digest = D>,
     D: Digest,
 {
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion(hasher, &elements, start_loc, target_root)
+    proof.verify_range_inclusion(hasher, operations, start_loc, target_root)
 }
 
 /// Verify that both a [Proof] and a set of pinned nodes are valid with respect to a target root.
@@ -37,8 +36,7 @@ where
     H: Hasher<Digest = D>,
     D: Digest,
 {
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_proof_and_pinned_nodes(hasher, &elements, start_loc, pinned_nodes, target_root)
+    proof.verify_proof_and_pinned_nodes(hasher, operations, start_loc, pinned_nodes, target_root)
 }
 
 /// Verify that a [Proof] is valid for a range of operations and extract all digests (and their
@@ -56,8 +54,7 @@ where
     H: Hasher<Digest = D>,
     D: Digest,
 {
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion_and_extract_digests(hasher, &elements, start_loc, target_root)
+    proof.verify_range_inclusion_and_extract_digests(hasher, operations, start_loc, target_root)
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
@@ -74,8 +71,7 @@ where
     H: Hasher<Digest = D>,
     D: Digest,
 {
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    ProofStore::new(hasher, proof, &elements, start_loc, root)
+    ProofStore::new(hasher, proof, operations, start_loc, root)
 }
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
@@ -114,7 +110,7 @@ where
 {
     let elements = operations
         .iter()
-        .map(|(loc, op)| (op.encode(), *loc))
+        .map(|(loc, op)| (EncodeRef::new(op), *loc))
         .collect::<Vec<_>>();
     proof.verify_multi_inclusion(hasher, &elements, target_root)
 }
@@ -167,8 +163,7 @@ mod tests {
         {
             let mut batch = merkle.new_batch();
             for op in &operations {
-                let encoded = op.encode();
-                batch = batch.add(&mut hasher, &encoded);
+                batch = batch.add(&mut hasher, op);
             }
             let batch = batch.merkleize(&merkle, &mut hasher);
             merkle.apply_batch(&batch).unwrap();
@@ -234,13 +229,12 @@ mod tests {
             // Add some initial operations (that we won't prove)
             let mut batch = merkle.new_batch();
             for i in 0u64..5 {
-                batch = batch.add(&mut hasher, &i.encode());
+                batch = batch.add(&mut hasher, i);
             }
 
             // Add operations we want to prove (starting at location 5)
             for op in &operations {
-                let encoded = op.encode();
-                batch = batch.add(&mut hasher, &encoded);
+                batch = batch.add(&mut hasher, op);
             }
             let batch = batch.merkleize(&merkle, &mut hasher);
             merkle.apply_batch(&batch).unwrap();
@@ -288,8 +282,7 @@ mod tests {
         {
             let mut batch = merkle.new_batch();
             for op in &operations {
-                let encoded = op.encode();
-                batch = batch.add(&mut hasher, &encoded);
+                batch = batch.add(&mut hasher, op);
             }
             let batch = batch.merkleize(&merkle, &mut hasher);
             merkle.apply_batch(&batch).unwrap();
@@ -344,8 +337,7 @@ mod tests {
         {
             let mut batch = merkle.new_batch();
             for op in &operations {
-                let encoded = op.encode();
-                batch = batch.add(&mut hasher, &encoded);
+                batch = batch.add(&mut hasher, op);
             }
             let batch = batch.merkleize(&merkle, &mut hasher);
             merkle.apply_batch(&batch).unwrap();
@@ -400,8 +392,7 @@ mod tests {
         {
             let mut batch = merkle.new_batch();
             for op in &operations {
-                let encoded = op.encode();
-                batch = batch.add(&mut hasher, &encoded);
+                batch = batch.add(&mut hasher, op);
             }
             let batch = batch.merkleize(&merkle, &mut hasher);
             merkle.apply_batch(&batch).unwrap();
@@ -442,8 +433,7 @@ mod tests {
         {
             let mut batch = merkle.new_batch();
             for op in &operations {
-                let encoded = op.encode();
-                batch = batch.add(&mut hasher, &encoded);
+                batch = batch.add(&mut hasher, op);
             }
             let batch = batch.merkleize(&merkle, &mut hasher);
             merkle.apply_batch(&batch).unwrap();
@@ -508,7 +498,7 @@ mod tests {
         {
             let mut batch = merkle.new_batch();
             for op in &operations {
-                batch = batch.add(&mut hasher, &op.encode());
+                batch = batch.add(&mut hasher, op);
             }
             let batch = batch.merkleize(&merkle, &mut hasher);
             merkle.apply_batch(&batch).unwrap();
@@ -638,8 +628,7 @@ mod tests {
         {
             let mut batch = merkle.new_batch();
             for op in &operations {
-                let encoded = op.encode();
-                batch = batch.add(&mut hasher, &encoded);
+                batch = batch.add(&mut hasher, op);
             }
             let batch = batch.merkleize(&merkle, &mut hasher);
             merkle.apply_batch(&batch).unwrap();
@@ -729,7 +718,7 @@ mod tests {
         {
             let mut batch = merkle.new_batch();
             for op in &operations {
-                batch = batch.add(&mut hasher, &op.encode());
+                batch = batch.add(&mut hasher, op);
             }
             let batch = batch.merkleize(&merkle, &mut hasher);
             merkle.apply_batch(&batch).unwrap();
@@ -765,8 +754,7 @@ mod tests {
         {
             let mut batch = merkle.new_batch();
             for op in &operations {
-                let encoded = op.encode();
-                batch = batch.add(&mut hasher, &encoded);
+                batch = batch.add(&mut hasher, op);
             }
             let batch = batch.merkleize(&merkle, &mut hasher);
             merkle.apply_batch(&batch).unwrap();

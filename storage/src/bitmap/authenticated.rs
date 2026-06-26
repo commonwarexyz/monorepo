@@ -44,12 +44,7 @@ pub(crate) fn partial_chunk_root<H: Hasher<mmr::Family>, const N: usize>(
 ) -> H::Digest {
     assert!(next_bit > 0);
     assert!(next_bit < UtilsBitMap::<N>::CHUNK_SIZE_BITS);
-    let next_bit = next_bit.to_be_bytes();
-    hasher.hash([
-        mmr_root.as_ref(),
-        next_bit.as_slice(),
-        last_chunk_digest.as_ref(),
-    ])
+    hasher.hash((mmr_root, next_bit, last_chunk_digest))
 }
 
 mod private {

@@ -81,13 +81,18 @@
 //! ```
 
 use crate::merkle::{
-    hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
+    hasher::Hasher,
+    mem::Mem,
+    path,
+    proof::Proof,
+    Error, Family, Location, Position, Readable,
 };
 use ahash::RandomState;
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
 use core::ops::Range;
@@ -262,8 +267,17 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Hash `element` and add it as a leaf.
-    pub fn add(self, hasher: &mut impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
+    pub fn add<E: Encode>(self, hasher: &mut impl Hasher<F, Digest = D>, element: E) -> Self {
         let digest = hasher.leaf_digest(self.size(), element);
+        self.add_leaf_digest(digest)
+    }
+
+    pub(crate) fn add_ref<E: Encode + ?Sized>(
+        self,
+        hasher: &mut impl Hasher<F, Digest = D>,
+        element: &E,
+    ) -> Self {
+        let digest = hasher.leaf_digest_ref(self.size(), element);
         self.add_leaf_digest(digest)
     }
 
@@ -289,11 +303,11 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ///
     /// Returns [`Error::LeafOutOfBounds`] if `loc` is not an existing leaf.
     /// Returns [`Error::ElementPruned`] if the leaf has been pruned.
-    pub fn update_leaf(
+    pub fn update_leaf<E: Encode>(
         mut self,
         hasher: &mut impl Hasher<F, Digest = D>,
         loc: Location<F>,
-        element: &[u8],
+        element: E,
     ) -> Result<Self, Error<F>> {
         let pos = self.validate_loc(loc)?;
         let digest = hasher.leaf_digest(pos, element);

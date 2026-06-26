@@ -22,7 +22,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
 };
-use commonware_codec::DecodeExt;
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
@@ -51,9 +51,19 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
 
 impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Hash `element` and add it as a leaf.
-    pub fn add(self, hasher: &mut impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
+    pub fn add<E: Encode>(self, hasher: &mut impl Hasher<F, Digest = D>, element: E) -> Self {
         Self {
             inner: self.inner.add(hasher, element),
+        }
+    }
+
+    pub(crate) fn add_ref<E: Encode + ?Sized>(
+        self,
+        hasher: &mut impl Hasher<F, Digest = D>,
+        element: &E,
+    ) -> Self {
+        Self {
+            inner: self.inner.add_ref(hasher, element),
         }
     }
 

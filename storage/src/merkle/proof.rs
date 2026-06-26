@@ -11,7 +11,7 @@ use alloc::{
     vec::Vec,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{varint::UInt, Encode, EncodeSize, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -130,15 +130,16 @@ impl<F: Family, D: Digest> Default for Proof<F, D> {
 impl<F: Family, D: Digest> Proof<F, D> {
     /// Return true if this proof proves that `element` appears at location `loc` within the
     /// structure with root digest `root`, using the bagging carried by `hasher`.
-    pub fn verify_element_inclusion<H>(
+    pub fn verify_element_inclusion<H, E>(
         &self,
         hasher: &mut H,
-        element: &[u8],
+        element: E,
         loc: Location<F>,
         root: &D,
     ) -> bool
     where
         H: Hasher<F, Digest = D>,
+        E: Encode,
     {
         self.verify_range_inclusion(hasher, &[element], loc, root)
     }
@@ -154,7 +155,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     ) -> bool
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
+        E: Encode,
     {
         match self.reconstruct_root_inner(hasher, elements, start_loc, None) {
             Ok(reconstructed_root) => *root == reconstructed_root,
@@ -188,7 +189,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     ) -> bool
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
+        E: Encode,
     {
         let bagging = hasher.root_bagging();
         // Empty proof is valid only for an empty tree with no extra digest data.
@@ -284,7 +285,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 digests,
             };
 
-            match proof.reconstruct_root_inner(hasher, &[element.as_ref()], *loc, None) {
+            match proof.reconstruct_root_inner(hasher, core::slice::from_ref(element), *loc, None) {
                 Ok(reconstructed_root) if &reconstructed_root == root => {}
                 Ok(_) | Err(_) => return false,
             }
@@ -304,7 +305,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     ) -> Result<D, ReconstructionError>
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
+        E: Encode,
     {
         self.reconstruct_root_inner(hasher, elements, start_loc, None)
     }
@@ -324,7 +325,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     ) -> Result<Vec<(Position<F>, D)>, Error<F>>
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
+        E: Encode,
     {
         let mut collected_digests = Vec::new();
         let Ok(reconstructed_root) =
@@ -385,7 +386,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     ) -> bool
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
+        E: Encode,
     {
         self.try_verify_proof_and_pinned_nodes(hasher, elements, start_loc, pinned_nodes, root)
             .is_some()
@@ -406,7 +407,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     ) -> Option<()>
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
+        E: Encode,
     {
         let bagging = hasher.root_bagging();
         let collected = self
@@ -494,7 +495,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     ) -> Result<D, ReconstructionError>
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
+        E: Encode,
     {
         let bagging = hasher.root_bagging();
         let mut collected = collected;
@@ -507,7 +508,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
                     return Err(ReconstructionError::MissingElements);
                 }
                 return if self.digests.is_empty() {
-                    Ok(hasher.digest(&self.leaves.to_be_bytes()))
+                    Ok(hasher.digest(self.leaves))
                 } else {
                     Err(ReconstructionError::ExtraDigests)
                 };
@@ -724,7 +725,7 @@ impl<F: Family> Subtree<F> {
     ///
     /// If `collected` is `Some`, every child `(position, digest)` pair encountered during
     /// reconstruction is appended to the vector.
-    fn reconstruct_digest<D, H, E>(
+    fn reconstruct_digest<'a, D, H, T, E>(
         &self,
         hasher: &mut H,
         range: &Range<Location<F>>,
@@ -736,7 +737,8 @@ impl<F: Family> Subtree<F> {
     where
         D: Digest,
         H: Hasher<F, Digest = D>,
-        E: Iterator<Item: AsRef<[u8]>>,
+        E: Iterator<Item = &'a T>,
+        T: Encode + ?Sized + 'a,
     {
         // Entirely outside the range: consume a sibling digest.
         if self.is_outside(range) {
@@ -752,7 +754,7 @@ impl<F: Family> Subtree<F> {
             let elem = elements
                 .next()
                 .ok_or(ReconstructionError::MissingElements)?;
-            return Ok(hasher.leaf_digest(self.pos, elem.as_ref()));
+            return Ok(hasher.leaf_digest_ref(self.pos, elem));
         }
 
         // Recurse into children.

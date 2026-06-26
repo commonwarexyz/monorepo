@@ -21,7 +21,7 @@ use crate::{
     qmdb::{self, sync::compact::Target, Error},
     Context,
 };
-use commonware_codec::{Decode as _, EncodeSize, Read, Write};
+use commonware_codec::{Decode as _, Encode, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::{AsyncMutex, RwLock};
@@ -310,7 +310,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     where
         H: Hasher<Digest = D>,
         S: Strategy,
-        Op: Read,
+        Op: Encode + Read,
     {
         let _guard = self.sync_lock.lock().await;
         self.check_import_persisted()?;
@@ -484,7 +484,7 @@ where
     F: Family,
     H: Hasher,
     S: Strategy,
-    Op: Read,
+    Op: Encode + Read,
 {
     let size = journal.size().await;
     if size == 0 {
@@ -517,7 +517,7 @@ where
     D: Digest,
     H: Hasher<Digest = D>,
     S: Strategy,
-    Op: Read,
+    Op: Encode + Read,
 {
     let leaf_count = witness.proof.leaves;
     if leaf_count == 0 {
@@ -544,7 +544,7 @@ where
         .map_err(|_| Error::DataCorrupted("failed to compute compact witness root"))?;
     if !witness.proof.verify_range_inclusion(
         &mut hasher,
-        &[witness.op_bytes.as_slice()],
+        core::slice::from_ref(&last_commit_op),
         last_commit_loc,
         &root,
     ) {
@@ -563,7 +563,7 @@ pub(crate) async fn init<E, F, H, S, Op>(
     journal: Journal<E, F, H::Digest>,
     merkle: &mut compact::Merkle<F, H::Digest, S>,
     commit_codec_config: &Op::Cfg,
-    initial_commit_op_bytes: Vec<u8>,
+    initial_commit_op: Op,
     last_commit_floor: impl FnOnce(&Op) -> Option<Location<F>>,
 ) -> Result<(Store<E, F, H::Digest>, Op), Error<F>>
 where
@@ -571,10 +571,10 @@ where
     F: Family,
     H: Hasher,
     S: Strategy,
-    Op: Read,
+    Op: Encode + Read,
 {
     if journal.size().await == 0 {
-        bootstrap_initial_commit::<E, F, H, S>(&journal, merkle, initial_commit_op_bytes).await?;
+        bootstrap_initial_commit::<E, F, H, S, Op>(&journal, merkle, initial_commit_op).await?;
     }
     let (witness, op) =
         load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config, last_commit_floor)
@@ -583,25 +583,27 @@ where
 }
 
 /// Insert and persist the initial `Commit(None, 0)` for a new compact db.
-async fn bootstrap_initial_commit<E, F, H, S>(
+async fn bootstrap_initial_commit<E, F, H, S, Op>(
     journal: &Journal<E, F, H::Digest>,
     merkle: &mut compact::Merkle<F, H::Digest, S>,
-    last_commit_op_bytes: Vec<u8>,
+    last_commit_op: Op,
 ) -> Result<(), Error<F>>
 where
     E: Context,
     F: Family,
     H: Hasher,
     S: Strategy,
+    Op: Encode,
 {
     let mut hasher = qmdb::hasher::<H>();
     let batch = {
-        let batch = merkle.new_batch().add(&mut hasher, &last_commit_op_bytes);
+        let batch = merkle.new_batch().add_ref(&mut hasher, &last_commit_op);
         merkle.with_mem(|mem| batch.merkleize(mem, &mut hasher))
     };
     merkle.apply_batch(&batch)?;
 
     // The initial commit has one leaf and an inactivity floor of 0.
+    let last_commit_op_bytes = last_commit_op.encode().to_vec();
     let verified = build_witness::<F, H, S>(merkle, Location::new(0), last_commit_op_bytes)?;
     journal.append(&verified.witness).await?;
     journal.sync().await?;

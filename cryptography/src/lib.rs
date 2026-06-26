@@ -275,59 +275,29 @@ commonware_macros::stability_scope!(BETA {
             Self::new().update(message).finalize()
         }
 
-        /// Hash the concatenation of a sequence of byte slices into a single digest.
+        /// Hash a short codec value without modifying this hasher's streaming state.
         ///
-        /// The parts are hashed back-to-back with no separators between them. This is a one-shot
-        /// helper that hashes only `parts`; it does not incorporate data previously supplied to
-        /// [`Hasher::update`]. Callers that need a fixed-shape preimage (e.g. a length prefix
-        /// followed by a digest) encode the pieces themselves and pass them as parts, for example
-        /// `hasher.hash_parts([index.to_be_bytes().as_slice(), digest.as_ref()])`.
+        /// The value is encoded with [`Encode`] and those exact bytes are hashed. This is a
+        /// one-shot helper that hashes only `value`; it does not incorporate data previously
+        /// supplied to [`Hasher::update`].
         ///
-        /// Implementations are encouraged to specialize this for short, fixed-size preimages (the
-        /// common case in Merkle trees) to avoid per-call streaming overhead.
+        /// Implementations are encouraged to specialize this for short, fixed-size codec values
+        /// (the common case in Merkle trees) to avoid per-call streaming overhead.
         #[inline]
-        fn hash_parts<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+        fn hash_codec<E: Encode>(&mut self, value: E) -> Self::Digest {
+            let encoded = value.encode();
             let mut hasher = Self::new();
-            for part in parts {
-                hasher.update(part);
-            }
+            hasher.update(encoded.as_ref());
             hasher.finalize()
-        }
-
-        /// Hash a short, fixed-shape preimage written directly into a scratch buffer.
-        ///
-        /// `write` receives a byte cursor and writes the preimage into it (e.g. a big-endian
-        /// position followed by one or more digests, or a position followed by raw element bytes).
-        /// Implementations hand `write` a reusable buffer and compress it in place, avoiding the
-        /// per-call overhead of [`Hasher::hash_parts`]. The cursor is a `&mut [u8]` (a
-        /// [`bytes::BufMut`]): write fixed-size codec values with [`commonware_codec::Write::write`]
-        /// (e.g. a `u64` writes 8 big-endian bytes, a digest writes its raw bytes) and raw bytes
-        /// with [`bytes::BufMut::put_slice`]. The bytes hashed are exactly those written, so this
-        /// produces the same digest as feeding the same bytes to [`Hasher::hash_parts`].
-        ///
-        /// The preimage must be short: writing panics if it exceeds [`MAX_CODEC_PREIMAGE`] bytes.
-        /// Longer or dynamically-counted preimages should use [`Hasher::hash_parts`].
-        ///
-        /// Example: `hasher.hash_codec(|b| { index.write(b); left.write(b); right.write(b); })`.
-        #[inline]
-        fn hash_codec(&mut self, write: impl FnOnce(&mut &mut [u8])) -> Self::Digest {
-            // Generic fallback: write into a stack buffer and hash it as a single part.
-            // Implementations should override this to write directly into their own scratch.
-            let mut buf = [0u8; MAX_CODEC_PREIMAGE];
-            let mut tail: &mut [u8] = &mut buf;
-            write(&mut tail);
-            let len = MAX_CODEC_PREIMAGE - tail.len();
-            self.hash_parts([&buf[..len]])
         }
     }
 
-    /// The largest preimage [`Hasher::hash_codec`] accepts, in bytes. Writing more panics.
+    /// The largest codec value the SHA-256 fixed path hashes without allocating.
     ///
     /// Sized to the SHA-256 fast path: two 64-byte compression blocks hold 128 bytes, and reserving
     /// the 9 mandatory padding bytes (a `0x80` terminator and an 8-byte length) leaves 119 for the
-    /// preimage. That covers every fixed-shape Merkle preimage in the library (the largest is an
-    /// 8-byte position followed by two 32-byte digests). Longer or dynamically-counted preimages use
-    /// [`Hasher::hash_parts`].
+    /// preimage. That covers every fixed-shape Merkle codec value in the library. Longer values use
+    /// the standard streaming hasher.
     pub(crate) const MAX_CODEC_PREIMAGE: usize = 2 * 64 - 9;
 });
 

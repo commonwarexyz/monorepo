@@ -18,6 +18,7 @@ use crate::merkle::{
     Bagging, Error, Family, Location, Position, Proof,
 };
 use ahash::AHashMap;
+use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use core::ops::Range;
 use futures::future::try_join_all;
@@ -60,7 +61,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     ) -> Result<Self, Error<F>>
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
+        E: Encode,
     {
         let bagging = hasher.root_bagging();
         let digests =

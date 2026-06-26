@@ -2,7 +2,7 @@
 
 use crate::merkle::{Bagging, Error, Family, Location, Position};
 use alloc::vec::Vec;
-use commonware_codec::Write;
+use commonware_codec::{Encode, EncodeRef};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// A trait for computing the various digests of a Merkle-family structure.
@@ -13,11 +13,10 @@ use commonware_cryptography::{Digest, Hasher as CHasher};
 pub trait Hasher<F: Family>: Clone + Send + Sync {
     type Digest: Digest;
 
-    /// Hash an arbitrary sequence of byte slices into a single digest.
+    /// Hash a codec value into a single digest.
     ///
-    /// The parts are concatenated before hashing (i.e. there is no domain separation between
-    /// parts).
-    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest;
+    /// The value is encoded with [`Encode`] and those exact bytes are hashed.
+    fn hash<E: Encode>(&mut self, value: E) -> Self::Digest;
 
     /// The bagging policy applied when this hasher folds peaks into a root. Only affects root peak
     /// aggregation; `hash`, `leaf_digest`, and `node_digest` are unaffected.
@@ -30,26 +29,31 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
-        self.hash([
-            (*pos).to_be_bytes().as_slice(),
-            left.as_ref(),
-            right.as_ref(),
-        ])
+        self.hash((pos, left, right))
     }
 
     /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&mut self, pos: Position<F>, element: &[u8]) -> Self::Digest {
-        self.hash([(*pos).to_be_bytes().as_slice(), element])
+    fn leaf_digest<E: Encode>(&mut self, pos: Position<F>, element: E) -> Self::Digest {
+        self.hash((pos, element))
     }
 
-    /// Compute the digest of a byte slice.
-    fn digest(&mut self, data: &[u8]) -> Self::Digest {
-        self.hash(core::iter::once(data))
+    /// Computes the digest for a leaf by borrowing the element it represents.
+    fn leaf_digest_ref<E: Encode + ?Sized>(
+        &mut self,
+        pos: Position<F>,
+        element: &E,
+    ) -> Self::Digest {
+        self.hash((pos, EncodeRef::new(element)))
+    }
+
+    /// Compute the digest of a codec value.
+    fn digest<E: Encode>(&mut self, value: E) -> Self::Digest {
+        self.hash(value)
     }
 
     /// Folds a peak digest into a running accumulator: `Hash(acc || peak)`.
     fn fold(&mut self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
-        self.hash([acc.as_ref(), peak.as_ref()])
+        self.hash((acc, peak))
     }
 
     /// Computes a root using `inactive_peaks` and the bagging policy carried by `self`.
@@ -99,7 +103,7 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         let mut peak_digests = peak_digests.into_iter();
         let Some(first) = peak_digests.next() else {
             return (inactive_peaks_to_fold == 0 && committed_inactive_peaks == 0)
-                .then(|| self.digest(&(*leaves).to_be_bytes()));
+                .then(|| self.digest(leaves));
         };
 
         let mut acc = *first;
@@ -130,13 +134,9 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         };
 
         if committed_inactive_peaks == 0 {
-            Some(self.hash([(*leaves).to_be_bytes().as_slice(), folded_peaks.as_ref()]))
+            Some(self.hash((leaves, folded_peaks)))
         } else {
-            Some(self.hash([
-                (*leaves).to_be_bytes().as_slice(),
-                (committed_inactive_peaks as u64).to_be_bytes().as_slice(),
-                folded_peaks.as_ref(),
-            ]))
+            Some(self.hash((leaves, committed_inactive_peaks, folded_peaks)))
         }
     }
 }
@@ -167,35 +167,28 @@ impl<H: CHasher> Standard<H> {
         self.bagging
     }
 
-    /// Hash an arbitrary sequence of byte slices into a single digest.
-    pub fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        self.hasher.hash_parts(parts)
+    /// Hash a codec value into a single digest.
+    pub fn hash<E: Encode>(&mut self, value: E) -> H::Digest {
+        self.hasher.hash_codec(value)
     }
 
-    /// Compute the digest of a byte slice.
-    pub fn digest(&mut self, data: &[u8]) -> H::Digest {
-        self.hash(core::iter::once(data))
+    /// Compute the digest of a codec value.
+    pub fn digest<E: Encode>(&mut self, value: E) -> H::Digest {
+        self.hash(value)
     }
 }
 
 impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     type Digest = H::Digest;
 
-    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        Self::hash(self, parts)
+    fn hash<E: Encode>(&mut self, value: E) -> H::Digest {
+        Self::hash(self, value)
     }
 
     fn root_bagging(&self) -> Bagging {
         Self::root_bagging(self)
     }
 
-    // `node_digest` is the hot path for tree construction and has a fixed-size preimage (an 8-byte
-    // position plus two digests), so it writes straight into the hasher's scratch via `hash_codec`.
-    // The position is written as a fixed 8-byte big-endian `u64` matching the storage format;
-    // `Position`'s own codec encoding is a varint and must not be used here. `leaf_digest` takes an
-    // arbitrary-length element, so it uses `hash_parts`, which keeps the same scratch fast path for
-    // short preimages but streams longer ones instead of overrunning the scratch. `#[inline]` folds
-    // both into the merkleize loop; the trait defaults produce identical bytes via the slower path.
     #[inline]
     fn node_digest(
         &mut self,
@@ -203,26 +196,26 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
-        let pos = *pos;
-        self.hasher.hash_codec(|buf| {
-            pos.write(buf);
-            left.write(buf);
-            right.write(buf);
-        })
+        self.hasher.hash_codec((pos, left, right))
     }
 
     #[inline]
-    fn leaf_digest(&mut self, pos: Position<F>, element: &[u8]) -> Self::Digest {
-        self.hasher
-            .hash_parts([(*pos).to_be_bytes().as_slice(), element])
+    fn leaf_digest<E: Encode>(&mut self, pos: Position<F>, element: E) -> Self::Digest {
+        self.hasher.hash_codec((pos, element))
+    }
+
+    #[inline]
+    fn leaf_digest_ref<E: Encode + ?Sized>(
+        &mut self,
+        pos: Position<F>,
+        element: &E,
+    ) -> Self::Digest {
+        self.hasher.hash_codec((pos, EncodeRef::new(element)))
     }
 
     #[inline]
     fn fold(&mut self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
-        self.hasher.hash_codec(|buf| {
-            acc.write(buf);
-            peak.write(buf);
-        })
+        self.hasher.hash_codec((acc, peak))
     }
 }
 
@@ -320,7 +313,7 @@ mod tests {
         let big = [0xABu8; 200];
         let pos = Position::new(2);
         let out_big = mmr_hasher.leaf_digest(pos, &big);
-        let expected_big = mmr_hasher.hash([(*pos).to_be_bytes().as_slice(), big.as_slice()]);
+        let expected_big = mmr_hasher.hash((pos, &big));
         assert_eq!(
             out_big, expected_big,
             "large leaf elements must stream to the same digest"

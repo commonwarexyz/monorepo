@@ -1076,8 +1076,8 @@ mod tests {
         let first_op = 1u8;
         let batch = merkle
             .new_batch()
-            .add(&mut hasher, &first_op.encode())
-            .add(&mut hasher, &op.encode());
+            .add(&mut hasher, first_op)
+            .add(&mut hasher, op);
         let batch = batch.merkleize(&merkle, &mut hasher);
         merkle.apply_batch(&batch).unwrap();
         let root = merkle.root(&mut hasher, 0).unwrap();

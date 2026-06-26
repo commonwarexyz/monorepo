@@ -16,6 +16,7 @@ use crate::merkle::{
     mem::{Config as MemConfig, Mem},
     Error, Family, Location,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_utils::sync::RwLock;
@@ -33,9 +34,19 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Hash `element` and add it as a leaf.
-    pub fn add(self, hasher: &mut impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
+    pub fn add<E: Encode>(self, hasher: &mut impl Hasher<F, Digest = D>, element: E) -> Self {
         Self {
             inner: self.inner.add(hasher, element),
+        }
+    }
+
+    pub(crate) fn add_ref<E: Encode + ?Sized>(
+        self,
+        hasher: &mut impl Hasher<F, Digest = D>,
+        element: &E,
+    ) -> Self {
+        Self {
+            inner: self.inner.add_ref(hasher, element),
         }
     }
 
@@ -188,7 +199,7 @@ mod tests {
         let batch = {
             let mut b = merkle.new_batch();
             for v in values {
-                b = b.add(&mut hasher, v);
+                b = b.add(&mut hasher, *v);
             }
             merkle.with_mem(|mem| b.merkleize(mem, &mut hasher))
         };

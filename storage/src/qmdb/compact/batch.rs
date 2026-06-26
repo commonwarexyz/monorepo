@@ -27,13 +27,11 @@ where
     // Hash before `with_mem` borrows committed Merkle state under its read lock.
     let leaf_digests = merkle.strategy().map_init_collect_vec(
         ops.iter().enumerate(),
-        || (qmdb::hasher::<H>(), Vec::new()),
-        |(hasher, buf), (i, op)| {
-                let offset = u64::try_from(i).expect("operation offset exceeds u64");
-                let pos = F::location_to_position(first_leaf + offset);
-                buf.clear();
-                op.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
+        qmdb::hasher::<H>,
+        |hasher, (i, op)| {
+            let offset = u64::try_from(i).expect("operation offset exceeds u64");
+            let pos = F::location_to_position(first_leaf + offset);
+            hasher.leaf_digest_ref(pos, op)
         },
     );
 

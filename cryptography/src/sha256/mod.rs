@@ -25,7 +25,7 @@ use crate::{Hasher, MAX_CODEC_PREIMAGE};
 use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    DecodeExt, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
+    DecodeExt, Encode, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -108,42 +108,26 @@ impl Hasher for Sha256 {
     }
 
     #[inline]
-    fn hash_parts<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
-        let mut parts = parts.into_iter();
-        let mut len = 0;
-        while let Some(part) = parts.next() {
-            let end = len + part.len();
-            if end > MAX_CODEC_PREIMAGE {
-                // The preimage is too long for the fixed path: stream the prefix buffered so far,
-                // this part, and the remaining parts through the standard hasher.
-                let mut hasher = ISha256::new();
-                hasher.update(&self.scratch[..len]);
-                hasher.update(part);
-                for part in parts {
-                    hasher.update(part);
-                }
-                let array: [u8; DIGEST_LENGTH] = hasher.finalize().into();
-                return Digest(array);
-            }
-            self.scratch[len..end].copy_from_slice(part);
-            len = end;
+    fn hash_codec<E: Encode>(&mut self, value: E) -> Self::Digest {
+        let len = value.encode_size();
+        if len > MAX_CODEC_PREIMAGE {
+            let encoded = value.encode();
+            let mut hasher = ISha256::new();
+            hasher.update(encoded.as_ref());
+            let array: [u8; DIGEST_LENGTH] = hasher.finalize().into();
+            return Digest(array);
         }
-        finalize_fixed(&mut self.scratch, len)
-    }
 
-    #[inline]
-    fn hash_codec(&mut self, write: impl FnOnce(&mut &mut [u8])) -> Self::Digest {
-        // Write directly into the scratch (capped at the two-block fast path; an over-long preimage
-        // panics in the cursor). For fixed-size writes `len` folds to a compile-time constant, so
-        // `finalize_fixed` const-folds at the call site, matching hand-unrolled per-shape hashing.
-        let mut tail: &mut [u8] = &mut self.scratch[..MAX_CODEC_PREIMAGE];
-        write(&mut tail);
-        let len = MAX_CODEC_PREIMAGE - tail.len();
+        // Write directly into the scratch. For fixed-size values `len` folds to a compile-time
+        // constant, so `finalize_fixed` const-folds at the call site.
+        let mut tail: &mut [u8] = &mut self.scratch[..len];
+        value.write(&mut tail);
+        assert_eq!(tail.len(), 0, "encode_size() did not match write()");
         finalize_fixed(&mut self.scratch, len)
     }
 }
 
-/// Append SHA-256 padding to the `message_len` message bytes already written at the start of
+/// Append SHA-256 padding to the `message_len` encoded bytes already written at the start of
 /// `scratch`, then compress the resulting one or two blocks into a digest.
 ///
 /// The padding (a `0x80` byte, zero fill, and the 64-bit big-endian bit length) fully overwrites
@@ -151,12 +135,11 @@ impl Hasher for Sha256 {
 /// previous call cannot leak into the result.
 #[inline]
 fn finalize_fixed(scratch: &mut [u8; SCRATCH_LEN], message_len: usize) -> Digest {
-    // SAFETY: both callers (`hash_parts`, `hash_codec`) cap the preimage at `MAX_CODEC_PREIMAGE`
-    // (`hash_parts` takes the streaming fallback for longer inputs; `hash_codec` hands `write` a
-    // cursor of exactly that length). Surfacing this invariant lets the compiler
-    // prove every padding write below is in-bounds and drop the panic paths, which is what makes the
-    // fixed path competitive with hand-unrolled per-shape hashing. In debug builds this still panics
-    // if the invariant is ever violated.
+    // SAFETY: `hash_codec` uses the streaming fallback for values larger than
+    // `MAX_CODEC_PREIMAGE`. Surfacing this invariant lets the compiler prove every padding write
+    // below is in-bounds and drop the panic paths, which is what makes the fixed path competitive
+    // with hand-unrolled per-shape hashing. In debug builds this still panics if the invariant is
+    // ever violated.
     unsafe { core::hint::assert_unchecked(message_len <= MAX_CODEC_PREIMAGE) };
     // Smallest number of blocks holding the message plus its 9 mandatory padding bytes (the `0x80`
     // terminator and the 8-byte length field).
@@ -313,48 +296,43 @@ mod tests {
         hasher.finalize()
     }
 
-    fn assert_parts_match(hasher: &mut Sha256, parts: &[&[u8]]) {
-        let total: usize = parts.iter().map(|p| p.len()).sum();
+    fn standard_codec_hash<E: Encode + ?Sized>(value: &E) -> Digest {
+        let encoded = value.encode();
+        standard_hash([encoded.as_ref()])
+    }
+
+    fn assert_codec_match<E: Encode>(hasher: &mut Sha256, value: E) {
+        let len = value.encode_size();
+        let expected = standard_codec_hash(&value);
         assert_eq!(
-            hasher.hash_parts(parts.iter().copied()),
-            standard_hash(parts.iter().copied()),
-            "hash_parts mismatch for {} parts totalling {total} bytes",
-            parts.len(),
+            hasher.hash_codec(value),
+            expected,
+            "hash_codec mismatch for {len} encoded bytes",
         );
     }
 
     #[test]
-    fn test_fixed_hashes_match_standard_sha256() {
+    fn test_codec_hashes_match_standard_sha256() {
         let left = Sha256::hash(b"left");
         let right = Sha256::hash(b"right");
         let mut hasher = Sha256::new();
-        assert_parts_match(&mut hasher, &[&7u32.to_be_bytes(), left.as_ref()]);
-        assert_parts_match(&mut hasher, &[&9u64.to_be_bytes(), left.as_ref()]);
-        assert_parts_match(&mut hasher, &[&9u64.to_be_bytes(), b"payload"]);
-        assert_parts_match(
-            &mut hasher,
-            &[&11u64.to_be_bytes(), left.as_ref(), right.as_ref()],
-        );
-        assert_parts_match(
-            &mut hasher,
-            &[&13u64.to_be_bytes(), &17u64.to_be_bytes(), left.as_ref()],
-        );
-        assert_parts_match(&mut hasher, &[]);
-        assert_parts_match(&mut hasher, &[b"x"]);
+        assert_codec_match(&mut hasher, (7u32, left));
+        assert_codec_match(&mut hasher, (9u64, left));
+        assert_codec_match(&mut hasher, (9u64, b"payload".as_slice()));
+        assert_codec_match(&mut hasher, (11u64, left, right));
+        assert_codec_match(&mut hasher, (13u64, 17u64, left));
+        assert_codec_match(&mut hasher, ());
+        assert_codec_match(&mut hasher, [b'x']);
         for len in [
             0usize, 1, 54, 55, 56, 63, 64, 71, 72, 118, 119, 120, 200, 1000,
         ] {
             let blob = vec![0xABu8; len];
-            assert_parts_match(&mut hasher, &[blob.as_slice()]);
-            let split = len.min(3);
-            assert_parts_match(&mut hasher, &[&blob[..split], &blob[split..]]);
+            assert_codec_match(&mut hasher, blob.as_slice());
+            assert_codec_match(&mut hasher, blob);
         }
         hasher.update(b"streamed");
-        let _ = hasher.hash_codec(|b| {
-            left.write(b);
-            right.write(b);
-        });
-        let _ = hasher.hash_parts([b"unrelated".as_slice(), [0xCD; 200].as_slice()]);
+        let _ = hasher.hash_codec((left, right));
+        let _ = hasher.hash_codec((b"unrelated".as_slice(), [0xCD; 200]));
         assert_eq!(hasher.finalize(), standard_hash([b"streamed".as_slice()]));
     }
 
@@ -364,60 +342,30 @@ mod tests {
         let right = Sha256::hash(b"right");
         let mut hasher = Sha256::new();
 
-        // Each `hash_codec` closure must hash the same bytes as the equivalent `hash_parts` over the
-        // big-endian encodings, across every fixed shape used in the storage crates.
+        // Each `hash_codec` call must hash exactly the codec encoding of its value.
         assert_eq!(
-            hasher.hash_codec(|b| {
-                left.write(b);
-                right.write(b);
-            }),
-            standard_hash([left.as_ref(), right.as_ref()]),
+            hasher.hash_codec((left, right)),
+            standard_codec_hash(&(left, right))
         );
         assert_eq!(
-            hasher.hash_codec(|b| {
-                7u32.write(b);
-                left.write(b);
-            }),
-            standard_hash([7u32.to_be_bytes().as_slice(), left.as_ref()]),
+            hasher.hash_codec((7u32, left)),
+            standard_codec_hash(&(7u32, left))
         );
         assert_eq!(
-            hasher.hash_codec(|b| {
-                9u64.write(b);
-                left.write(b);
-            }),
-            standard_hash([9u64.to_be_bytes().as_slice(), left.as_ref()]),
+            hasher.hash_codec((9u64, left)),
+            standard_codec_hash(&(9u64, left))
         );
         assert_eq!(
-            hasher.hash_codec(|b| {
-                11u64.write(b);
-                left.write(b);
-                right.write(b);
-            }),
-            standard_hash([
-                11u64.to_be_bytes().as_slice(),
-                left.as_ref(),
-                right.as_ref(),
-            ]),
+            hasher.hash_codec((11u64, left, right)),
+            standard_codec_hash(&(11u64, left, right)),
         );
         assert_eq!(
-            hasher.hash_codec(|b| {
-                13u64.write(b);
-                17u64.write(b);
-                left.write(b);
-            }),
-            standard_hash([
-                13u64.to_be_bytes().as_slice(),
-                17u64.to_be_bytes().as_slice(),
-                left.as_ref(),
-            ]),
+            hasher.hash_codec((13u64, 17u64, left)),
+            standard_codec_hash(&(13u64, 17u64, left)),
         );
-        // Fixed prefix followed by a raw, variable-length suffix (the Merkle leaf shape).
         assert_eq!(
-            hasher.hash_codec(|b| {
-                9u64.write(b);
-                b.put_slice(b"payload");
-            }),
-            standard_hash([9u64.to_be_bytes().as_slice(), b"payload".as_slice()]),
+            hasher.hash_codec((9u64, b"payload".as_slice())),
+            standard_codec_hash(&(9u64, b"payload".as_slice())),
         );
     }
 

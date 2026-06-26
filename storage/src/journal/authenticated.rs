@@ -66,8 +66,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     /// Add an item to the batch.
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, item: Item) -> Self {
-        let encoded = item.encode();
-        self.inner = self.inner.add(&mut self.hasher, &encoded);
+        self.inner = self.inner.add_ref(&mut self.hasher, &item);
         self.items.push(item);
         self
     }
@@ -130,12 +129,10 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         let first = self.inner.leaves();
         let digests = self.inner.strategy().map_init_collect_vec(
             items.iter().enumerate(),
-            || (self.hasher.clone(), Vec::new()),
-            |(hasher, buf), (i, item)| {
+            || self.hasher.clone(),
+            |hasher, (i, item)| {
                 let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                buf.clear();
-                item.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
+                hasher.leaf_digest_ref(pos, item)
             },
         );
 
@@ -427,7 +424,7 @@ where
                     let mut count = 0u64;
                     while count < apply_batch_size && merkle_leaves < journal_size {
                         let op = reader.read(*merkle_leaves).await?;
-                        batch = batch.add(hasher, &op.encode());
+                        batch = batch.add_ref(hasher, &op);
                         merkle_leaves += 1;
                         count += 1;
                     }
@@ -447,14 +444,12 @@ where
 
     /// Append an item to the journal and update the Merkle structure.
     pub async fn append(&mut self, item: &C::Item) -> Result<Location<F>, Error<F>> {
-        let encoded_item = item.encode();
-
         // Append item to the journal, then update the Merkle structure state.
         let loc = self.journal.append(item).await?;
         let unmerkleized_batch = self
             .merkle
             .new_batch()
-            .add(&mut self.hasher, &encoded_item);
+            .add_ref(&mut self.hasher, item);
         let batch = self
             .merkle
             .with_mem(|mem| unmerkleized_batch.merkleize(mem, &mut self.hasher));
@@ -854,7 +849,6 @@ mod tests {
             operation::Committable,
         },
     };
-    use commonware_codec::Encode;
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
@@ -1034,8 +1028,7 @@ mod tests {
         root: &<Sha256 as commonware_cryptography::Hasher>::Digest,
         hasher: &mut StandardHasher<Sha256>,
     ) -> bool {
-        let encoded_ops: Vec<_> = operations.iter().map(|op| op.encode()).collect();
-        proof.verify_range_inclusion(hasher, &encoded_ops, start_loc, root)
+        proof.verify_range_inclusion(hasher, operations, start_loc, root)
     }
 
     /// Verify that new() creates an empty authenticated journal.
@@ -1096,8 +1089,7 @@ mod tests {
                 let mut batch = merkle.new_batch();
                 for i in 0..20 {
                     let op = create_operation::<F>(i as u8);
-                    let encoded = op.encode();
-                    batch = batch.add(&mut hasher, &encoded);
+                    batch = batch.add(&mut hasher, &op);
                     journal.append(&op).await.unwrap();
                 }
                 batch

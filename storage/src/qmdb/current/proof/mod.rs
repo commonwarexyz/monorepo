@@ -348,8 +348,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let next_bit = *leaves % chunk_bits;
         let has_partial_chunk = next_bit != 0;
 
-        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-        let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
+        let chunk_vec = chunks.iter().collect::<Vec<_>>();
         let grafting_height = grafting::height::<N>();
 
         let graftable_chunks =
@@ -365,7 +364,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         }
         let has_pending_chunk = pending_chunks == 1;
 
-        let mut grafting_verifier = grafting::Verifier::<F, H>::new(
+        let mut grafting_verifier = grafting::Verifier::<F, H, _>::new(
             grafting_height,
             start_chunk,
             chunk_vec,
@@ -430,7 +429,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
         let merkle_root = match self.proof.reconstruct_root_inner(
             &mut grafting_verifier,
-            &elements,
+            ops,
             start_loc,
             collected,
         ) {

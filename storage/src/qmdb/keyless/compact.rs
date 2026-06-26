@@ -333,9 +333,7 @@ where
             journal,
             &mut merkle,
             &commit_codec_config,
-            Operation::<F, V>::Commit(None, Location::new(0))
-                .encode()
-                .to_vec(),
+            Operation::<F, V>::Commit(None, Location::new(0)),
             Operation::has_floor,
         )
         .await?;

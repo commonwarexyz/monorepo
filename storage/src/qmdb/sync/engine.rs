@@ -695,18 +695,17 @@ where
         let need_pinned = is_current_target
             && self.pinned_nodes.is_none()
             && start_loc == self.target.range.start();
-        let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
             proof.verify_proof_and_pinned_nodes(
                 &mut self.hasher,
-                &elements,
+                &operations,
                 start_loc,
                 nodes,
                 target_root,
             )
         } else {
-            proof.verify_range_inclusion(&mut self.hasher, &elements, start_loc, target_root)
+            proof.verify_range_inclusion(&mut self.hasher, &operations, start_loc, target_root)
         };
 
         // Report success or failure to the resolver.

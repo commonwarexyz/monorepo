@@ -109,6 +109,10 @@ impl<T: FixedSize> EncodeSize for T {
     }
 }
 
+impl<T: FixedSize + ?Sized> FixedSize for &T {
+    const SIZE: usize = T::SIZE;
+}
+
 /// Trait for types that can be written (encoded) to a byte buffer.
 pub trait Write {
     /// Writes the binary representation of `self` to the provided buffer `buf`.
@@ -166,6 +170,56 @@ pub trait Write {
         for item in values {
             item.write_bufs(buf);
         }
+    }
+}
+
+impl<T: Write + ?Sized> Write for &T {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        T::write(self, buf);
+    }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        T::write_bufs(self, buf);
+    }
+}
+
+/// Reference view of an encodable value.
+///
+/// This forwards [`EncodeSize`] and [`Write`] to the referenced value without requiring `&T`
+/// itself to implement [`EncodeSize`].
+pub struct EncodeRef<'a, T: Write + EncodeSize + ?Sized>(&'a T);
+
+impl<'a, T: Write + EncodeSize + ?Sized> EncodeRef<'a, T> {
+    /// Create a borrowed encodable view.
+    #[inline]
+    pub const fn new(value: &'a T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T: Write + EncodeSize + ?Sized> EncodeSize for EncodeRef<'_, T> {
+    #[inline]
+    fn encode_size(&self) -> usize {
+        self.0.encode_size()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.0.encode_inline_size()
+    }
+}
+
+impl<T: Write + EncodeSize + ?Sized> Write for EncodeRef<'_, T> {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+    }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.0.write_bufs(buf);
     }
 }
 
