@@ -166,9 +166,9 @@ num-integer = "0.1.46"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
 num-traits = { version = "0.2.19", default-features = false }
 once_cell = { version = "1.21.3", default-features = false }
-opentelemetry = "0.31.0"
-opentelemetry-otlp = "0.31.0"
-opentelemetry_sdk = "0.31.0"
+opentelemetry = "0.32.0"
+opentelemetry-otlp = "0.32.0"
+opentelemetry_sdk = "0.32.0"
 p256 = { version = "0.13.2", default-features = false }
 parking_lot = "0.12.5"
 paste = "1.0.15"
@@ -186,7 +186,7 @@ rand_core = "0.6.4"
 rand_distr = "0.4.3"
 ratatui = "0.29.0"
 rayon = { version = "1.10.0", default-features = false }
-reqwest = "0.12.12"
+reqwest = "0.13.4"
 rstest = "0.26.1"
 serde = "1.0.218"
 serde_json = "1.0.122"
@@ -198,7 +198,7 @@ thiserror = { version = "2.0.12", default-features = false }
 tokio = "1.50.0"
 toml = "0.9.8"
 tracing = "0.1.41"
-tracing-opentelemetry = "0.32.0"
+tracing-opentelemetry = "0.33.0"
 tracing-subscriber = "0.3.19"
 uuid = "1.15.1"
 x25519-dalek = "2.0.1"
