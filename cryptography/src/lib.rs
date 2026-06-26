@@ -274,6 +274,20 @@ commonware_macros::stability_scope!(BETA {
         fn hash(message: &[u8]) -> Self::Digest {
             Self::new().update(message).finalize()
         }
+
+        /// Hash the concatenation of `chunks` with a one-time-use hasher.
+        ///
+        /// Produces the same digest as feeding each chunk through [`Hasher::update`] in order and
+        /// then calling [`Hasher::finalize`]. Implementations may specialize this (e.g. SHA-256
+        /// compresses short preimages directly) to avoid per-call streaming overhead in hot paths
+        /// like Merkle node and leaf hashing.
+        fn hash_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+            let mut hasher = Self::new();
+            for chunk in chunks {
+                hasher.update(chunk);
+            }
+            hasher.finalize()
+        }
     }
 });
 

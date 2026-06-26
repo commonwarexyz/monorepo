@@ -169,11 +169,7 @@ impl<H: CHasher> Standard<H> {
 
     /// Hash an arbitrary sequence of byte slices into a single digest.
     pub fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        let mut h = H::new();
-        for part in parts {
-            h.update(part);
-        }
-        h.finalize()
+        H::hash_chunks(parts)
     }
 
     /// Compute the digest of a byte slice.

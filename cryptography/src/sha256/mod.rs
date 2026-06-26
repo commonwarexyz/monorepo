@@ -35,13 +35,29 @@ use core::{
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
-use sha2::{Digest as _, Sha256 as ISha256};
+use sha2::{block_api::compress256, Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
 pub type CoreSha256 = ISha256;
 
 const DIGEST_LENGTH: usize = 32;
+const BLOCK_LENGTH: usize = 64;
+
+/// Number of whole SHA-256 compression blocks backing the fixed (non-streaming) hashing path. Two
+/// blocks (128 bytes) cover every short fixed-shape Merkle preimage in the library.
+const FIXED_BLOCKS: usize = 2;
+
+/// Bytes of scratch backing the fixed (non-streaming) hashing path: [`FIXED_BLOCKS`] whole blocks.
+const SCRATCH_LEN: usize = FIXED_BLOCKS * BLOCK_LENGTH;
+
+/// The largest preimage the fixed path hashes without streaming. [`SCRATCH_LEN`] holds the preimage
+/// plus the 9 mandatory SHA-256 padding bytes (a `0x80` terminator and an 8-byte length).
+const MAX_FIXED_PREIMAGE: usize = SCRATCH_LEN - 9;
+
+const INITIAL_STATE: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
 
 /// SHA-256 hasher.
 #[derive(Debug, Default)]
@@ -82,6 +98,68 @@ impl Hasher for Sha256 {
         self.hasher = ISha256::new();
         self
     }
+
+    fn hash_chunks<'a>(chunks: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+        // Buffer the concatenated chunks into a stack scratch and compress the one or two whole
+        // blocks directly, avoiding the streaming hasher's per-call setup and buffering. If the
+        // preimage exceeds the fixed path, fall back to the streaming hasher mid-iteration. Either
+        // way the digest is identical to feeding the same bytes through `update`/`finalize`.
+        let mut scratch = [0u8; SCRATCH_LEN];
+        let mut len = 0usize;
+        let mut overflow: Option<ISha256> = None;
+        for chunk in chunks {
+            if let Some(hasher) = overflow.as_mut() {
+                hasher.update(chunk);
+                continue;
+            }
+            if len + chunk.len() > MAX_FIXED_PREIMAGE {
+                let mut hasher = ISha256::new();
+                hasher.update(&scratch[..len]);
+                hasher.update(chunk);
+                overflow = Some(hasher);
+                continue;
+            }
+            scratch[len..len + chunk.len()].copy_from_slice(chunk);
+            len += chunk.len();
+        }
+        overflow.map_or_else(
+            || finalize_fixed(&mut scratch, len),
+            |mut hasher| {
+                let array: [u8; DIGEST_LENGTH] = hasher.finalize_reset().into();
+                Self::Digest::from(array)
+            },
+        )
+    }
+}
+
+/// Append SHA-256 padding to the `message_len` bytes already written at the start of `scratch`, then
+/// compress the resulting one or two blocks into a digest. The padding (a `0x80` byte, zero fill,
+/// and the 64-bit big-endian bit length) overwrites every byte of the compressed blocks past
+/// `message_len`, so stale scratch data cannot leak into the result.
+#[inline]
+fn finalize_fixed(scratch: &mut [u8; SCRATCH_LEN], message_len: usize) -> Digest {
+    let bit_len = ((message_len as u64) * 8).to_be_bytes();
+    scratch[message_len] = 0x80;
+    let mut state = INITIAL_STATE;
+    if message_len < 56 {
+        scratch[message_len + 1..56].fill(0);
+        scratch[56..64].copy_from_slice(&bit_len);
+        compress256(&mut state, scratch[..64].as_chunks::<BLOCK_LENGTH>().0);
+    } else {
+        scratch[message_len + 1..120].fill(0);
+        scratch[120..128].copy_from_slice(&bit_len);
+        compress256(&mut state, scratch[..128].as_chunks::<BLOCK_LENGTH>().0);
+    }
+    digest_from_state(state)
+}
+
+#[inline]
+fn digest_from_state(state: [u32; 8]) -> Digest {
+    let mut digest = [0u8; DIGEST_LENGTH];
+    for (bytes, word) in digest.chunks_exact_mut(4).zip(state) {
+        bytes.copy_from_slice(&word.to_be_bytes());
+    }
+    Digest(digest)
 }
 
 /// Digest of a SHA-256 hashing operation.
@@ -174,6 +252,47 @@ mod tests {
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
     );
+
+    /// The fixed fast path in `hash_chunks` must produce the exact same digest as streaming the
+    /// same bytes through `update`/`finalize`, across the one-block, two-block, boundary, and
+    /// streaming-fallback cases.
+    #[test]
+    fn test_hash_chunks_matches_streaming() {
+        fn streamed(chunks: &[&[u8]]) -> Digest {
+            let mut hasher = Sha256::new();
+            for chunk in chunks {
+                hasher.update(chunk);
+            }
+            hasher.finalize()
+        }
+        let big = vec![0xABu8; 200];
+        let pos = 8u64.to_be_bytes();
+        let cases: Vec<Vec<&[u8]>> = vec![
+            vec![],
+            vec![b"".as_slice()],
+            vec![b"hello world".as_slice()],
+            vec![&pos, b"left-32-byte-digest-padding-x!!!"],
+            vec![
+                &pos,
+                b"left-32-byte-digest-padding-x!!!",
+                b"right-32-byte-digest-paddingx!!!",
+            ],
+            vec![&[0u8; 55]],
+            vec![&[0u8; 56]],
+            vec![&[0u8; 119]],
+            vec![&[0u8; 120]],
+            vec![big.as_slice()],
+            vec![&pos, big.as_slice()],
+        ];
+        for chunks in &cases {
+            assert_eq!(
+                Sha256::hash_chunks(chunks.iter().copied()),
+                streamed(chunks),
+                "hash_chunks mismatch for {} bytes",
+                chunks.iter().map(|c| c.len()).sum::<usize>(),
+            );
+        }
+    }
 
     #[test]
     fn test_sha256() {
