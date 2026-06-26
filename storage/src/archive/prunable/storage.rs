@@ -11,18 +11,12 @@ use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Error as RError, Handle, Metrics, Storage,
+    Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
 };
 use commonware_utils::Array;
-use futures::{
-    future::{try_join_all, BoxFuture, Shared},
-    pin_mut, FutureExt as _, StreamExt,
-};
+use futures::{future::try_join_all, pin_mut, StreamExt};
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use tracing::debug;
-
-/// A cloneable observer for an issued archive sync.
-type SyncObserver = Shared<BoxFuture<'static, Result<(), RError>>>;
 
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
@@ -116,12 +110,6 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
 
     /// Sections with writes not yet covered by an issued sync.
     pending: BTreeSet<u64>,
-
-    /// Outstanding sync started by [`crate::archive::Archive::start_sync`].
-    ///
-    /// Mutable archive operations wait for this before touching archive state, so later writes are
-    /// never covered by or reordered before an earlier overlapping sync.
-    syncing: Option<SyncObserver>,
 
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -232,7 +220,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             items_per_section: cfg.items_per_section.get(),
             oversized,
             pending: BTreeSet::new(),
-            syncing: None,
             oldest_allowed: None,
             indices,
             extra_indices,
@@ -322,8 +309,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         data: V,
         skip_if_index_exists: bool,
     ) -> Result<(), Error> {
-        self.wait_for_sync().await?;
-
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
@@ -382,7 +367,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 return Ok(());
             }
         }
-        self.wait_for_sync().await?;
         debug!(min, "pruning archive");
 
         // Prune oversized journal (handles both index and values)
@@ -426,16 +410,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.syncs.inc_by(pending.len() as u64);
         pending
     }
-
-    /// Wait for any overlapping sync issued by [`crate::archive::Archive::start_sync`].
-    async fn wait_for_sync(&mut self) -> Result<(), Error> {
-        let Some(syncing) = self.syncing.as_ref().cloned() else {
-            return Ok(());
-        };
-        syncing.await.map_err(crate::journal::Error::Runtime)?;
-        self.syncing = None;
-        Ok(())
-    }
 }
 
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
@@ -464,22 +438,16 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
-        self.wait_for_sync().await?;
-
         let pending = self.take_pending();
         let handles = try_join_all(pending.iter().map(|s| self.oversized.start_sync(*s))).await?;
         if handles.is_empty() {
             return Ok(Handle::ready(Ok(())));
         }
 
-        let syncing = Handle::join(handles).boxed().shared();
-        self.syncing = Some(syncing.clone());
-        Ok(Handle::from_future(syncing))
+        Ok(Handle::join(handles))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.wait_for_sync().await?;
-
         let pending = self.take_pending();
         try_join_all(pending.iter().map(|s| self.oversized.sync(*s))).await?;
         Ok(())

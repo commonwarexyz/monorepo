@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_put_after_start_sync_waits_for_in_flight_sync() {
+    fn test_put_after_start_sync_can_continue_before_sync_completes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, pending) = delayed_sync_context(context);
@@ -454,24 +454,23 @@ mod tests {
                 completed_clone.fetch_add(1, Ordering::Relaxed);
             });
 
-            reschedule().await;
+            while completed.load(Ordering::Relaxed) != 1 {
+                reschedule().await;
+            }
             assert_eq!(
                 completed.load(Ordering::Relaxed),
-                0,
-                "put should wait for the in-flight start_sync handle"
+                1,
+                "put should not wait for the in-flight start_sync handle"
             );
 
             release_pending_syncs(&pending);
             handle.await.expect("sync handle should complete");
-            while completed.load(Ordering::Relaxed) != 1 {
-                reschedule().await;
-            }
             writer.await.expect("put task should complete");
         });
     }
 
     #[test_traced]
-    fn test_sync_after_start_sync_waits_for_in_flight_sync() {
+    fn test_sync_after_start_sync_can_complete_before_sync_handle() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, pending) = delayed_sync_context(context);
@@ -496,18 +495,17 @@ mod tests {
                 completed_clone.fetch_add(1, Ordering::Relaxed);
             });
 
-            reschedule().await;
+            while completed.load(Ordering::Relaxed) != 1 {
+                reschedule().await;
+            }
             assert_eq!(
                 completed.load(Ordering::Relaxed),
-                0,
-                "sync should wait for the in-flight start_sync handle"
+                1,
+                "sync should not wait for an already-issued start_sync handle"
             );
 
             release_pending_syncs(&pending);
             handle.await.expect("sync handle should complete");
-            while completed.load(Ordering::Relaxed) != 1 {
-                reschedule().await;
-            }
             waiter.await.expect("sync waiter should complete");
         });
     }
@@ -558,7 +556,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_start_sync_after_interleaved_put_starts_new_sync() {
+    fn test_start_sync_after_interleaved_put_can_overlap_prior_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, pending) = delayed_sync_context(context);
@@ -583,7 +581,7 @@ mod tests {
             let second_started_clone = second_started.clone();
             let worker = context.inner.child("write_then_start").spawn(|_| async move {
                 archive
-                    .put(2, test_key("bbb"), 20)
+                    .put(DEFAULT_ITEMS_PER_SECTION, test_key("bbb"), 20)
                     .await
                     .expect("interleaved put should succeed");
                 put_completed_clone.fetch_add(1, Ordering::Relaxed);
@@ -596,38 +594,27 @@ mod tests {
                 second.await.expect("second sync handle should complete");
             });
 
-            reschedule().await;
-            assert_eq!(
-                put_completed.load(Ordering::Relaxed),
-                0,
-                "interleaved put should wait for the first sync before mutating"
-            );
-            assert_eq!(
-                second_started.load(Ordering::Relaxed),
-                0,
-                "second start_sync should not begin until the interleaved put can finish"
-            );
-            assert_eq!(
-                pending.lock().len(),
-                2,
-                "no new sync should start while the first sync is still pending"
-            );
-
-            release_pending_syncs(&pending);
-            first.await.expect("first sync handle should complete");
-            while put_completed.load(Ordering::Relaxed) != 1 {
-                reschedule().await;
-            }
             while second_started.load(Ordering::Relaxed) != 1 {
                 reschedule().await;
             }
             assert_eq!(
+                put_completed.load(Ordering::Relaxed),
+                1,
+                "interleaved put should not wait for the first sync"
+            );
+            assert_eq!(
+                second_started.load(Ordering::Relaxed),
+                1,
+                "second start_sync should be issued while the first sync is still pending"
+            );
+            assert_eq!(
                 pending.lock().len(),
-                2,
-                "second start_sync should start a new index and value sync"
+                4,
+                "second start_sync should start a separate index and value sync"
             );
 
             release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
             worker
                 .await
                 .expect("interleaved put and second start_sync task should complete");
@@ -635,7 +622,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_start_sync_while_in_flight_waits_for_pending_sync() {
+    fn test_start_sync_without_new_writes_does_not_wait_for_pending_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, pending) = delayed_sync_context(context);
@@ -651,8 +638,8 @@ mod tests {
                 .expect("Failed to start sync");
             assert_eq!(pending.lock().len(), 2);
 
-            // A second start_sync with no new writes must not report durability until the first
-            // (still in-flight) sync completes: the archive gates it behind the outstanding sync.
+            // A second start_sync with no new writes has no new pending sections to cover; the
+            // first handle remains the only observer for the already-issued sync.
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
             let waiter = context.inner.child("second").spawn(|_| async move {
@@ -665,18 +652,22 @@ mod tests {
                 completed_clone.fetch_add(1, Ordering::Relaxed);
             });
 
-            reschedule().await;
+            while completed.load(Ordering::Relaxed) != 1 {
+                reschedule().await;
+            }
             assert_eq!(
                 completed.load(Ordering::Relaxed),
-                0,
-                "second start_sync must not report durability while the first sync is in flight"
+                1,
+                "second start_sync should not wait for a prior handle when there are no new writes"
+            );
+            assert_eq!(
+                pending.lock().len(),
+                2,
+                "no new disk sync should start without new writes"
             );
 
             release_pending_syncs(&pending);
             first.await.expect("first sync handle should complete");
-            while completed.load(Ordering::Relaxed) != 1 {
-                reschedule().await;
-            }
             waiter
                 .await
                 .expect("second start_sync task should complete");
