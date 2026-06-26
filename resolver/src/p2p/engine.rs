@@ -407,10 +407,7 @@ where
             self.inflight.cancel(&key);
             return;
         };
-        let delivery = Delivery {
-            key: key.clone(),
-            subscribers,
-        };
+        let delivery = Delivery { key, subscribers };
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
         self.inflight.deliver(delivery, peer, response);

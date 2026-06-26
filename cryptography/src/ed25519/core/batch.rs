@@ -78,7 +78,7 @@ pub struct Item {
 impl<'msg, M: AsRef<[u8]> + ?Sized> From<(VerificationKey, Signature, &'msg M)> for Item {
     fn from(tup: (VerificationKey, Signature, &'msg M)) -> Self {
         let (vk, sig, msg) = tup;
-        let k = Scalar::from_hash(
+        let k = super::scalar_from_hash(
             Sha512::default()
                 .chain(&sig.R_bytes[..])
                 .chain(vk.as_bytes())

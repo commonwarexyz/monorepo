@@ -260,7 +260,7 @@ mod tests {
         index::partitioned::{
             ordered::Index as PartitionedOrdered, unordered::Index as PartitionedUnordered,
         },
-        translator::{OneCap, TwoCap},
+        translator::{EightCap, OneCap, TwoCap},
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
@@ -332,6 +332,150 @@ mod tests {
     ) -> PartitionedOrdered<OneCap, u64, 1> {
         // Same translator choice as the unordered variant to keep collision behavior consistent.
         PartitionedOrdered::new(context, OneCap)
+    }
+
+    /// A partitioned ordered index with a tiny spill threshold, so partitions convert to the
+    /// spilled `BTreeMap` representation almost immediately. Routing the generic battery through
+    /// this fixture re-validates every behavior against the spilled cursor / nav / value paths.
+    fn new_partitioned_ordered_spilling(
+        context: deterministic::Context,
+    ) -> PartitionedOrdered<OneCap, u64, 1> {
+        PartitionedOrdered::with_threshold(context, OneCap, 2)
+    }
+
+    /// Run the generic index battery against the spilling fixture, so the spilled-partition
+    /// representation is exercised by the same assertions as the inline (SoA) representation.
+    #[test_traced]
+    fn test_partitioned_ordered_spilling() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            macro_rules! spilled {
+                ($($h:ident),+ $(,)?) => {$(
+                    $h(&mut new_partitioned_ordered_spilling(
+                        context.child(concat!("spill_", stringify!($h))),
+                    ));
+                )+};
+            }
+            spilled!(
+                run_index_basic,
+                run_index_get_many,
+                run_index_cursor_find,
+                run_index_key_lengths_and_metrics,
+                run_index_value_order,
+                run_index_remove_specific,
+                run_index_empty_key,
+                run_index_mutate_through_iterator,
+                run_index_mutate_middle_of_four,
+                run_index_remove_through_iterator,
+                run_index_insert_through_iterator,
+                run_index_cursor_insert_after_done_appends,
+                run_index_remove_to_nothing_then_add,
+                run_index_insert_and_remove_cursor,
+                run_index_insert_and_retain_vacant,
+                run_index_insert_and_retain_vacant_not_retained,
+                run_index_insert_and_retain_replace_one,
+                run_index_insert_and_retain_dead_insert,
+                run_index_insert_and_retain_single_value,
+                run_index_remove_middle_then_next,
+                run_index_remove_to_nothing,
+                run_index_cursor_insert_with_next,
+                run_index_cursor_delete_last_then_next,
+                run_index_delete_in_middle_then_continue,
+                run_index_delete_first,
+                run_index_delete_first_and_insert,
+                run_index_insert_at_entry_then_next,
+                run_index_delete_last_then_insert_while_done,
+                run_index_drop_mid_iteration_preserves_chain,
+                run_index_entry_replacement_not_a_collision,
+                run_index_large_collision_chain,
+            );
+
+            let mut index = new_partitioned_ordered_spilling(context.child("spill_many_keys"));
+            run_index_many_keys(&mut index, |bytes| context.fill(bytes));
+
+            // Make sure that the final test in this suite actually exercises spilling.
+            assert!(
+                index.spilled_count() > 0,
+                "routing battery should exercise the spilled representation"
+            );
+        });
+    }
+
+    /// Verify ordered navigation returns keys in lexicographic order even when some keys are
+    /// shorter than the partition prefix (the case the partitioned router must place correctly).
+    /// Each key is inserted with its lexicographic rank as its value, and the keys have distinct
+    /// translated keys under `EightCap`, so a correct ordering yields the ranks in order with no
+    /// collision ambiguity. Run against both the flat and partitioned ordered indices below, which
+    /// must agree.
+    fn run_ordered_short_keys<I: Ordered<Value = u64>>(index: &mut I) {
+        // Lexicographically increasing keys; `[0x01]` and `[0x03]` are shorter than the 2-byte
+        // prefix and must still sort between their 2-byte neighbors.
+        let keys: [&[u8]; 5] = [
+            &[0x00, 0x05],
+            &[0x01],
+            &[0x02, 0x09, 0xAB],
+            &[0x03],
+            &[0xFF, 0xFF],
+        ];
+        for (rank, &key) in keys.iter().enumerate() {
+            index.insert(key, rank as u64);
+        }
+
+        let first: Vec<u64> = index.first_translated_key().unwrap().copied().collect();
+        let last: Vec<u64> = index.last_translated_key().unwrap().copied().collect();
+        assert_eq!(first, vec![0], "first key");
+        assert_eq!(last, vec![4], "last key");
+
+        let n = keys.len() as u64;
+        for (i, &key) in keys.iter().enumerate() {
+            let i = i as u64;
+            let (it, next_cycled) = index.next_translated_key(key).unwrap();
+            let next: Vec<u64> = it.copied().collect();
+            let (it, prev_cycled) = index.prev_translated_key(key).unwrap();
+            let prev: Vec<u64> = it.copied().collect();
+            if i + 1 < n {
+                assert_eq!(
+                    (next, next_cycled),
+                    (vec![i + 1], false),
+                    "next of rank {i}"
+                );
+            } else {
+                assert_eq!((next, next_cycled), (vec![0], true), "next wraps past last");
+            }
+            if i > 0 {
+                assert_eq!(
+                    (prev, prev_cycled),
+                    (vec![i - 1], false),
+                    "prev of rank {i}"
+                );
+            } else {
+                assert_eq!(
+                    (prev, prev_cycled),
+                    (vec![n - 1], true),
+                    "prev wraps before first"
+                );
+            }
+        }
+    }
+
+    #[test_traced]
+    fn test_ordered_short_keys_flat() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = ordered::Index::<EightCap, u64>::new(context, EightCap);
+            run_ordered_short_keys(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_short_keys_partitioned() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            // P=2 with EightCap on the 6-byte remainder orders by the same (<=8-byte) full key as
+            // the flat EightCap index above, so both must produce identical navigation results.
+            let mut index = PartitionedOrdered::<EightCap, u64, 2>::new(context, EightCap);
+            run_ordered_short_keys(&mut index);
+        });
     }
 
     #[test_traced]

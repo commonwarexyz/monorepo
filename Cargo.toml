@@ -66,7 +66,7 @@ homepage = "https://commonware.xyz"
 rust-version = "1.91.1"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(huge_bench)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
 warnings = "deny"
@@ -90,12 +90,6 @@ suspicious_op_assign_impl = "allow"
 ahash = { version = "0.8.12", default-features = false }
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
-ark-ec = { version = "0.6.0", default-features = false }
-ark-ed-on-bls12-381-bandersnatch = { version = "0.6.0", default-features = false }
-ark-ff = { version = "0.6.0", default-features = false }
-ark-r1cs-std = { version = "0.6.0", default-features = false }
-ark-relations = { version = "0.6.0", default-features = false }
-ark-serialize = { version = "0.6.0", default-features = false }
 aws-config = "1.8.17"
 aws-lc-rs = "1.16.3"
 aws-sdk-ec2 = { version = "1.228.0", default-features = false, features = [
@@ -172,9 +166,9 @@ num-integer = "0.1.46"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
 num-traits = { version = "0.2.19", default-features = false }
 once_cell = { version = "1.21.3", default-features = false }
-opentelemetry = "0.31.0"
-opentelemetry-otlp = "0.31.0"
-opentelemetry_sdk = "0.31.0"
+opentelemetry = "0.32.0"
+opentelemetry-otlp = "0.32.0"
+opentelemetry_sdk = "0.32.0"
 p256 = { version = "0.13.2", default-features = false }
 parking_lot = "0.12.5"
 paste = "1.0.15"
@@ -192,19 +186,19 @@ rand_core = "0.6.4"
 rand_distr = "0.4.3"
 ratatui = "0.29.0"
 rayon = { version = "1.10.0", default-features = false }
-reqwest = "0.12.12"
+reqwest = "0.13.4"
 rstest = "0.26.1"
 serde = "1.0.218"
 serde_json = "1.0.122"
 serde_yaml = "0.9.34"
-sha2 = { version = "0.10.8", default-features = false }
+sha2 = { version = "0.11.0", default-features = false }
 syn = "2.0.0"
 sysinfo = "0.37.2"
 thiserror = { version = "2.0.12", default-features = false }
 tokio = "1.50.0"
 toml = "0.9.8"
 tracing = "0.1.41"
-tracing-opentelemetry = "0.32.0"
+tracing-opentelemetry = "0.33.0"
 tracing-subscriber = "0.3.19"
 uuid = "1.15.1"
 x25519-dalek = "2.0.1"
