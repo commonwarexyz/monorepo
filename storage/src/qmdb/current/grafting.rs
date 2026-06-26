@@ -220,19 +220,6 @@ impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
     }
 }
 
-impl<F: Graftable, H: CHasher> GraftedHasher<F, merkle::hasher::Standard<H>> {
-    fn node_digest_from_scratch(
-        &self,
-        pos: Position<F>,
-        left: &H::Digest,
-        right: &H::Digest,
-    ) -> H::Digest {
-        let ops_pos = grafted_to_ops_pos::<F>(pos, self.grafting_height);
-        let mut hasher = merkle::hasher::Standard::<H>::new(self.inner.root_bagging());
-        hasher.node_digest(ops_pos, left, right)
-    }
-}
-
 /// A [`merkle::hasher::Hasher`] implementation used for verifying proofs over grafted storage.
 ///
 /// The ops structure uses family `F`, so this implements [`merkle::hasher::Hasher`] for that
@@ -364,8 +351,8 @@ pub(super) struct Storage<
     grafted_tree: &'a G,
     grafting_height: u32,
     ops_tree: &'a S,
-    grafted_hasher: GraftedHasher<F, merkle::hasher::Standard<H>>,
-    _phantom: PhantomData<F>,
+    bagging: merkle::Bagging,
+    _phantom: PhantomData<(F, H)>,
 }
 
 impl<
@@ -387,7 +374,7 @@ impl<
             grafted_tree,
             grafting_height,
             ops_tree,
-            grafted_hasher: GraftedHasher::new(hasher, grafting_height),
+            bagging: hasher.root_bagging(),
             _phantom: PhantomData,
         }
     }
@@ -408,7 +395,11 @@ impl<
     /// Returns `None` at height 0 (a grafted leaf), since leaves encode bitmap data and
     /// cannot be recomputed from the tree structure alone. The settlement guard in
     /// [`super::db::Db::sync_boundary`] ensures this case is unreachable for pruned chunks.
-    fn reconstruct_grafted_node(&self, pos: Position<F>) -> Option<H::Digest> {
+    fn reconstruct_grafted_node(
+        &self,
+        hasher: &mut merkle::hasher::Standard<H>,
+        pos: Position<F>,
+    ) -> Option<H::Digest> {
         if let Some(node) = self.grafted_tree.get_node(pos) {
             return Some(node);
         }
@@ -418,12 +409,10 @@ impl<
             return None;
         }
         let (left, right) = F::children(pos, height);
-        let left_digest = self.reconstruct_grafted_node(left)?;
-        let right_digest = self.reconstruct_grafted_node(right)?;
-        Some(
-            self.grafted_hasher
-                .node_digest_from_scratch(pos, &left_digest, &right_digest),
-        )
+        let left_digest = self.reconstruct_grafted_node(hasher, left)?;
+        let right_digest = self.reconstruct_grafted_node(hasher, right)?;
+        let ops_pos = grafted_to_ops_pos::<F>(pos, self.grafting_height);
+        Some(hasher.node_digest(ops_pos, &left_digest, &right_digest))
     }
 }
 
@@ -446,7 +435,12 @@ impl<
             return self.ops_tree.get_node(pos).await;
         }
         let grafted_pos = ops_to_grafted_pos::<F>(pos, self.grafting_height);
-        Ok(self.reconstruct_grafted_node(grafted_pos))
+        if let Some(node) = self.grafted_tree.get_node(grafted_pos) {
+            return Ok(Some(node));
+        }
+
+        let mut hasher = merkle::hasher::Standard::<H>::new(self.bagging);
+        Ok(self.reconstruct_grafted_node(&mut hasher, grafted_pos))
     }
 }
 
