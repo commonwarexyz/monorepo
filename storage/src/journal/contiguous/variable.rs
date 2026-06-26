@@ -7,7 +7,6 @@ use super::{
     blobs::{Partition, Source, View as BlobsView, Writable},
     fixed,
     metrics::VariableMetrics as Metrics,
-    replay::{self, Source as _},
     Contiguous, Many, Mutable,
 };
 use crate::{
@@ -24,7 +23,6 @@ use commonware_runtime::{
     Blob as RBlob, Buf, IoBuf, IoBufMut,
 };
 use commonware_utils::NZUsize;
-use futures::{stream, Stream, StreamExt as _};
 use std::{
     collections::BTreeMap,
     io::Cursor,
@@ -498,119 +496,6 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         )
         .ok()
     }
-
-    /// Build the replay stream over `view`, starting at `start_pos`.
-    async fn replay_from<'a>(
-        &'a self,
-        view: BlobsView<'a, E::Blob>,
-        buffer: NonZeroUsize,
-        start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send + 'a, Error> {
-        let bounds = view.bounds();
-        if start_pos > bounds.end {
-            return Err(Error::ItemOutOfRange(start_pos));
-        }
-        if start_pos < bounds.start {
-            return Err(Error::ItemPruned(start_pos));
-        }
-
-        // The byte offset of the first replayed item; later blobs start at byte 0 (a data blob's
-        // first item is at byte 0 even when the pruning boundary is mid-blob).
-        let start_byte = if start_pos < bounds.end {
-            self.offsets.read(start_pos).await?
-        } else {
-            0
-        };
-
-        build_replay_stream::<E, V>(
-            view,
-            self.items_per_blob.get(),
-            self.codec_config.clone(),
-            self.compressed,
-            buffer,
-            start_pos,
-            start_byte,
-        )
-    }
-}
-
-/// Build a replay stream from already resolved replay inputs.
-fn build_replay_stream<'a, E: Context, V: CodecShared + 'a>(
-    view: BlobsView<'a, E::Blob>,
-    items_per_blob: u64,
-    codec_config: V::Cfg,
-    compressed: bool,
-    buffer: NonZeroUsize,
-    start_pos: u64,
-    start_byte: u64,
-) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send + 'a, Error> {
-    let bounds = view.bounds();
-    let start_blob = position_to_blob(start_pos, items_per_blob);
-    let tail_blob = view.tail_blob_index();
-
-    // Seed each sealed blob's `Replay` upfront. The tail is streamed through its read view instead:
-    // a `Replay` reads physical pages from the blob and would miss the tail's buffered bytes.
-    //
-    // Each entry is (first position to emit, one past the last position, replay).
-    let mut per_blob_replays: Vec<(u64, u64, Replay<E::Blob>)> = Vec::new();
-    let end_blob = tail_blob.min(position_to_blob(bounds.end, items_per_blob));
-    let sealed_blobs = view.sealed();
-    for blob in start_blob..end_blob {
-        let idx = (blob - view.oldest_blob_index()) as usize;
-        let sealed = &sealed_blobs[idx];
-        let mut replay = sealed.replay(buffer).map_err(Error::Runtime)?;
-        let first_pos = if blob == start_blob {
-            if start_byte > sealed.size() {
-                return Err(Error::Corruption(format!(
-                    "offset {start_byte} for position {start_pos} exceeds blob size {}",
-                    sealed.size()
-                )));
-            }
-            replay.seek_to(start_byte).map_err(Error::Runtime)?;
-            start_pos
-        } else {
-            blob_first_position(blob, items_per_blob)?
-        };
-        // Sealed blobs are full: they end at the next blob boundary.
-        let next_blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
-        let end_pos = blob_first_position(next_blob, items_per_blob)?;
-        per_blob_replays.push((first_pos, end_pos, replay));
-    }
-
-    // Stream the sealed blobs in ascending order, then the tail. Each source yields batches
-    // of items; the trailing `flat_map(stream::iter)` flattens batches back into items.
-    let sealed_codec_config = codec_config.clone();
-    let sealed_batches =
-        stream::iter(per_blob_replays).flat_map(move |(first_pos, end_pos, replay)| {
-            SealedReplayState {
-                replay,
-                positions: first_pos..end_pos,
-                codec_config: sealed_codec_config.clone(),
-                compressed,
-            }
-            .into_batches()
-        });
-
-    let tail_first = if start_blob == tail_blob {
-        start_pos
-    } else {
-        blob_first_position(tail_blob, items_per_blob)?.max(bounds.start)
-    };
-    let tail_batches = TailReplayState {
-        view: view.tail(),
-        positions: tail_first..bounds.end,
-        byte_offset: if start_blob == tail_blob {
-            start_byte
-        } else {
-            0
-        },
-        chunk_len: buffer.get().max(MAX_U32_VARINT_SIZE),
-        codec_config,
-        compressed,
-    }
-    .into_batches();
-
-    Ok(sealed_batches.chain(tail_batches).flat_map(stream::iter))
 }
 
 impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
@@ -743,14 +628,6 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         self.metrics.try_read_sync_hits.inc();
         self.metrics.items_read.inc();
         Some(item)
-    }
-
-    async fn replay(
-        &self,
-        buffer: NonZeroUsize,
-        start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        self.replay_from(self.view(), buffer, start_pos).await
     }
 }
 
@@ -990,12 +867,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns [Error::InvalidRewind] if `size` is larger than current size.
     /// Returns [Error::ItemPruned] if `size` is smaller than the pruning boundary.
-    /// Returns [Error::BlobInUse] if any [`snapshot`](Self::snapshot) is alive:
-    /// rewinding truncates a blob in place, which could tear its bytes. Retry after they drop.
-    ///
     /// # Warning
     ///
     /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    /// - Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
+    ///   rewind truncates into their range.
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         match size.cmp(&self.bounds.end) {
             std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
@@ -1008,12 +884,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             return Err(Error::ItemPruned(size));
         }
 
-        // Refuse before any side effect: a refused rewind is retryable. The truncation paths
-        // below re-check the gate.
         let discard_blob = position_to_blob(size, self.items_per_blob.get());
-        if self.blobs.snapshots_alive() {
-            return Err(Error::BlobInUse(discard_blob));
-        }
 
         // The byte offset of the first discarded item is the data truncation point.
         let discard_offset = self.offsets.read(size).await?;
@@ -1207,20 +1078,22 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
-    /// creation; the snapshot stays readable across concurrent appends and prunes, and a rewind
-    /// into its range is refused ([Error::BlobInUse]) while it is alive.
-    pub fn snapshot(&self) -> Reader<'static, E, V> {
-        Reader {
+    /// creation, and the snapshot stays readable across concurrent appends and prunes.
+    ///
+    /// If the journal later rewinds into the returned reader's range, subsequent reads
+    /// from that range may observe unspecified contents.
+    pub async fn snapshot(&mut self) -> Result<Reader<'static, E, V>, Error> {
+        Ok(Reader {
             data: Source::Snapshot {
-                blobs: self.blobs.to_snapshot(),
+                blobs: self.blobs.snapshot().await?,
                 bounds: self.bounds.clone(),
             },
-            offsets: self.offsets.snapshot(),
+            offsets: self.offsets.snapshot().await?,
             items_per_blob: self.items_per_blob,
             codec_config: self.codec_config.clone(),
             compressed: self.compression.is_some(),
             metrics: self.metrics.clone(),
-        }
+        })
     }
 
     /// A reader borrowing the journal's live state.
@@ -1811,159 +1684,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 }
 
-/// Replays a single sealed blob through its `Replay`.
-struct SealedReplayState<B: RBlob, V: CodecShared> {
-    /// Sequential reader over the blob's logical bytes.
-    replay: Replay<B>,
-    /// Positions still to emit (the blob is full, so `positions.end` is its boundary).
-    positions: Range<u64>,
-    codec_config: V::Cfg,
-    compressed: bool,
-}
-
-impl<B: RBlob, V: CodecShared> replay::Source for SealedReplayState<B, V> {
-    type Item = V;
-
-    /// Decode one buffered batch of frames.
-    async fn drain(&mut self, batch: &mut Vec<Result<(u64, V), Error>>) -> Result<(), Error> {
-        if self.positions.is_empty() {
-            return Ok(());
-        }
-        loop {
-            // Buffer the varint header. Fewer bytes than a max-size varint may still hold a whole
-            // frame; only an empty buffer means the blob ended early.
-            if !self.replay.ensure(MAX_U32_VARINT_SIZE).await? && self.replay.remaining() == 0 {
-                return Err(Error::Corruption(format!(
-                    "blob ended at position {} before {}",
-                    self.positions.start, self.positions.end
-                )));
-            }
-
-            let (item_size, _) = decode_length_prefix(&mut self.replay)?;
-            if !self.replay.ensure(item_size).await? {
-                return Err(Error::Corruption(format!(
-                    "incomplete item at position {}",
-                    self.positions.start
-                )));
-            }
-            let item = decode_item::<V>(
-                (&mut self.replay).take(item_size),
-                &self.codec_config,
-                self.compressed,
-            )?;
-            batch.push(Ok((self.positions.start, item)));
-            self.positions.start += 1;
-
-            // Stop at the blob's last item or pause to refill the buffer.
-            if self.positions.is_empty() || self.replay.remaining() < MAX_U32_VARINT_SIZE {
-                return Ok(());
-            }
-        }
-    }
-}
-
-/// Replays the tail through a borrowed read view.
-struct TailReplayState<'a, B: RBlob, V: CodecShared> {
-    view: BlobView<'a, B>,
-    /// Positions still to emit; `positions.end` is the view's end bound.
-    positions: Range<u64>,
-    /// Byte offset of the next frame.
-    byte_offset: u64,
-    /// Bytes to read per chunk.
-    chunk_len: usize,
-    codec_config: V::Cfg,
-    compressed: bool,
-}
-
-impl<B: RBlob, V: CodecShared> replay::Source for TailReplayState<'_, B, V> {
-    type Item = V;
-
-    /// Decode every whole frame in one chunk-sized read. A frame larger than the chunk is read
-    /// exactly via its decoded length.
-    async fn drain(&mut self, batch: &mut Vec<Result<(u64, V), Error>>) -> Result<(), Error> {
-        if self.positions.is_empty() {
-            return Ok(());
-        }
-        let (buf, available) = self
-            .view
-            .read_up_to(
-                self.byte_offset,
-                self.chunk_len,
-                IoBufMut::with_capacity(self.chunk_len),
-            )
-            .await
-            .map_err(Error::Runtime)?;
-        let buf = buf.freeze();
-        let chunk = &buf.as_ref()[..available];
-
-        // Decode every whole frame in the chunk.
-        let mut local = 0usize;
-        while !self.positions.is_empty() {
-            let mut cursor = Cursor::new(&chunk[local..]);
-            let Ok((item_size, varint_len)) = decode_length_prefix(&mut cursor) else {
-                break;
-            };
-            let total = varint_len
-                .checked_add(item_size)
-                .ok_or(Error::OffsetOverflow)?;
-            if chunk.len() - local < total {
-                break;
-            }
-            let item = decode_item::<V>(
-                &chunk[local + varint_len..local + total],
-                &self.codec_config,
-                self.compressed,
-            )?;
-            batch.push(Ok((self.positions.start, item)));
-            self.positions.start += 1;
-            local += total;
-        }
-        self.byte_offset = self
-            .byte_offset
-            .checked_add(local as u64)
-            .ok_or(Error::OffsetOverflow)?;
-        if !batch.is_empty() || self.positions.is_empty() {
-            return Ok(());
-        }
-
-        // No whole frame fit in the chunk: either the item is larger than the chunk, or the tail
-        // ended before the view's bounds (corruption). A decodable header for a frame that
-        // extends past the chunk identifies the former.
-        let mut cursor = Cursor::new(chunk);
-        let header = decode_length_prefix(&mut cursor)
-            .ok()
-            .and_then(|(item_size, varint_len)| {
-                varint_len
-                    .checked_add(item_size)
-                    .filter(|&total| total > chunk.len())
-                    .map(|total| (item_size, varint_len, total))
-            });
-        let Some((item_size, varint_len, total)) = header else {
-            return Err(Error::Corruption(format!(
-                "blob ended at position {} before {}",
-                self.positions.start, self.positions.end
-            )));
-        };
-        let payload_offset = self
-            .byte_offset
-            .checked_add(varint_len as u64)
-            .ok_or(Error::OffsetOverflow)?;
-        let bufs = self
-            .view
-            .read_at(payload_offset, item_size)
-            .await
-            .map_err(Error::Runtime)?;
-        let item = decode_item::<V>(bufs, &self.codec_config, self.compressed)?;
-        batch.push(Ok((self.positions.start, item)));
-        self.positions.start += 1;
-        self.byte_offset = self
-            .byte_offset
-            .checked_add(total as u64)
-            .ok_or(Error::OffsetOverflow)?;
-        Ok(())
-    }
-}
-
 impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
@@ -1981,35 +1701,6 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
 
     fn try_read_sync(&self, position: u64) -> Option<V> {
         self.reader().try_read_sync(position)
-    }
-
-    async fn replay(
-        &self,
-        buffer: NonZeroUsize,
-        start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        let view = Source::owned_view(&self.blobs, self.bounds.clone());
-        let bounds = view.bounds();
-        if start_pos > bounds.end {
-            return Err(Error::ItemOutOfRange(start_pos));
-        }
-        if start_pos < bounds.start {
-            return Err(Error::ItemPruned(start_pos));
-        }
-        let start_byte = if start_pos < bounds.end {
-            self.offsets.reader().read(start_pos).await?
-        } else {
-            0
-        };
-        build_replay_stream::<E, V>(
-            view,
-            self.items_per_blob.get(),
-            self.codec_config.clone(),
-            self.compression.is_some(),
-            buffer,
-            start_pos,
-            start_byte,
-        )
     }
 }
 
@@ -2168,7 +1859,7 @@ mod tests {
         deterministic, Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-    use futures::FutureExt as _;
+    use futures::{FutureExt as _, StreamExt as _};
     use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
@@ -2332,10 +2023,10 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
                 ..cfg
             };
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
-            let reader = journal.snapshot();
+            let reader = journal.snapshot().await.unwrap();
             let items = reader.read_many(&[1, 2, 3, 7, 8, 12, 18]).await.unwrap();
             assert_eq!(items, vec![100, 200, 300, 700, 800, 1200, 1800]);
             drop(reader);
@@ -2365,7 +2056,7 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            let reader = journal.snapshot();
+            let reader = journal.snapshot().await.unwrap();
             assert!(matches!(
                 reader.read_many(&[2, 1]).await,
                 Err(Error::PositionsNotIncreasing)
@@ -2406,10 +2097,10 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
                 ..cfg
             };
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
-            let reader = journal.snapshot();
+            let reader = journal.snapshot().await.unwrap();
             let positions: Vec<u64> = (3..10).collect();
             let items = reader.read_many(&positions).await.unwrap();
             assert_eq!(items, vec![300, 400, 500, 600, 700, 800, 900]);
@@ -2564,7 +2255,7 @@ mod tests {
 
             // Test 1: Full replay
             {
-                let reader = journal.snapshot();
+                let reader = journal.snapshot().await.unwrap();
                 let stream = reader.replay(NZUsize!(20), 0).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 0..40u64 {
@@ -2577,7 +2268,7 @@ mod tests {
 
             // Test 2: Partial replay from middle of blob
             {
-                let reader = journal.snapshot();
+                let reader = journal.snapshot().await.unwrap();
                 let stream = reader.replay(NZUsize!(20), 15).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 15..40u64 {
@@ -2590,7 +2281,7 @@ mod tests {
 
             // Test 3: Partial replay from blob boundary
             {
-                let reader = journal.snapshot();
+                let reader = journal.snapshot().await.unwrap();
                 let stream = reader.replay(NZUsize!(20), 20).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 20..40u64 {
@@ -2604,19 +2295,19 @@ mod tests {
             // Test 4: Prune and verify replay from pruned
             journal.prune(20).await.unwrap();
             {
-                let reader = journal.snapshot();
+                let reader = journal.snapshot().await.unwrap();
                 let res = reader.replay(NZUsize!(20), 0).await;
                 assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
             }
             {
-                let reader = journal.snapshot();
+                let reader = journal.snapshot().await.unwrap();
                 let res = reader.replay(NZUsize!(20), 19).await;
                 assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
             }
 
             // Test 5: Replay from exactly at pruning boundary after prune
             {
-                let reader = journal.snapshot();
+                let reader = journal.snapshot().await.unwrap();
                 let stream = reader.replay(NZUsize!(20), 20).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 20..40u64 {
@@ -2629,7 +2320,7 @@ mod tests {
 
             // Test 6: Replay from the end
             {
-                let reader = journal.snapshot();
+                let reader = journal.snapshot().await.unwrap();
                 let stream = reader.replay(NZUsize!(20), 40).await.unwrap();
                 futures::pin_mut!(stream);
                 assert!(stream.next().await.is_none());
@@ -2637,7 +2328,7 @@ mod tests {
 
             // Test 7: Replay beyond the end (should error)
             {
-                let reader = journal.snapshot();
+                let reader = journal.snapshot().await.unwrap();
                 let res = reader.replay(NZUsize!(20), 41).await;
                 assert!(matches!(
                     res,
@@ -4062,7 +3753,7 @@ mod tests {
                 .await
                 .unwrap();
             let offset = {
-                let offsets = journal.offsets.snapshot();
+                let offsets = journal.offsets.snapshot().await.unwrap();
                 offsets.read(12).await.unwrap()
             };
             drop(journal);
@@ -6175,7 +5866,7 @@ mod tests {
             let items = [0, 1, 2, 3, 4];
             journal.append_many(Many::Flat(&items)).await.unwrap();
             journal.append(&5).await.unwrap();
-            let reader = journal.snapshot();
+            let reader = journal.snapshot().await.unwrap();
             reader.read(0).await.unwrap();
             reader.read_many(&[1, 2]).await.unwrap();
             reader.try_read_sync(3).unwrap();
@@ -6246,7 +5937,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // The page cache cannot hold every page, so some position must be cold.
-            let reader = journal.snapshot();
+            let reader = journal.snapshot().await.unwrap();
             let pos = (0..200)
                 .find(|&pos| reader.try_read_sync(pos).is_none())
                 .expect("some position should be cold");
@@ -6279,7 +5970,7 @@ mod tests {
                 journal.append(&(i * 100)).await.unwrap();
             }
 
-            let snapshot = journal.snapshot();
+            let snapshot = journal.snapshot().await.unwrap();
             assert_eq!(snapshot.bounds(), 0..7);
 
             // Appending past the blob boundary rolls the snapshot's tail blob into
@@ -6296,7 +5987,7 @@ mod tests {
                 Err(Error::ItemOutOfRange(7))
             ));
 
-            let fresh = journal.snapshot();
+            let fresh = journal.snapshot().await.unwrap();
             assert_eq!(fresh.bounds(), 0..23);
             assert_eq!(fresh.read(22).await.unwrap(), 2200);
 
@@ -6326,7 +6017,7 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            let snapshot = journal.snapshot();
+            let snapshot = journal.snapshot().await.unwrap();
             assert!(journal.prune(12).await.unwrap());
 
             // The straggler reads the pruned range through its own handles.
@@ -6339,93 +6030,11 @@ mod tests {
                 vec![100, 200, 300, 1100, 1600]
             );
 
-            let fresh = journal.snapshot();
+            let fresh = journal.snapshot().await.unwrap();
             assert_eq!(fresh.bounds(), 10..17);
             assert!(matches!(fresh.read(3).await, Err(Error::ItemPruned(3))));
 
             drop(snapshot);
-            drop(fresh);
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_rewind_sealed_blob_in_use() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "snapshot-rewind-sealed".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
-                .await
-                .unwrap();
-            for i in 0..12u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            let snapshot = journal.snapshot();
-            assert!(matches!(journal.rewind(3).await, Err(Error::BlobInUse(0))));
-
-            // The refused rewind left the journal fully usable and had no side effects.
-            assert_eq!(snapshot.read(11).await.unwrap(), 1100);
-            drop(snapshot);
-
-            journal.rewind(3).await.unwrap();
-            assert_eq!(journal.bounds(), 0..3);
-            for i in 3..9u64 {
-                assert_eq!(journal.append(&(i + 100)).await.unwrap(), i);
-            }
-            assert_eq!(journal.read(8).await.unwrap(), 108);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_rewind_tail_blocked_while_snapshot_live() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "snapshot-rewind-tail".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
-                .await
-                .unwrap();
-            for i in 0..8u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            // A live snapshot blocks the tail rewind (it would tear the snapshot's bytes once
-            // the rewound offsets are reappended).
-            let snapshot = journal.snapshot();
-            assert!(matches!(journal.rewind(2).await, Err(Error::BlobInUse(_))));
-            // The snapshot still reads its original, unchanged bytes.
-            assert_eq!(snapshot.read(6).await.unwrap(), 600);
-
-            // After the snapshot drops, the rewind succeeds and reappends reuse the offsets.
-            drop(snapshot);
-            journal.rewind(2).await.unwrap();
-            for i in 2..8u64 {
-                journal.append(&(i + 100)).await.unwrap();
-            }
-
-            // A fresh reader observes the new data; no stale reader is alive to see torn bytes.
-            let fresh = journal.snapshot();
-            assert_eq!(fresh.read(6).await.unwrap(), 106);
-            assert_eq!(fresh.read(1).await.unwrap(), 100);
-
             drop(fresh);
             journal.destroy().await.unwrap();
         });
@@ -6464,7 +6073,7 @@ mod tests {
             for i in 0..40u64 {
                 journal.append(&(i * 100)).await.unwrap();
                 if i % 7 == 0 {
-                    let snapshot = journal.snapshot();
+                    let snapshot = journal.snapshot().await.unwrap();
                     if tx.try_send(snapshot).is_err() {
                         break;
                     }
@@ -6497,7 +6106,7 @@ mod tests {
             }
 
             // Positions 5..7 live in the snapshot's tail blob.
-            let snapshot = journal.snapshot();
+            let snapshot = journal.snapshot().await.unwrap();
             assert_eq!(snapshot.bounds(), 0..7);
 
             // Roll the snapshot's tail into history, then prune both of its blobs away.

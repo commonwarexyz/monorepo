@@ -31,14 +31,12 @@ use std::num::NonZeroUsize;
 mod cache;
 mod read;
 mod sealed;
-mod snapshot;
 mod view;
 mod writer;
 
 pub use cache::CacheRef;
 pub use read::Replay;
 pub use sealed::Sealed;
-pub use snapshot::Snapshot;
 use tracing::{debug, error};
 pub use view::View;
 pub use writer::Writer;

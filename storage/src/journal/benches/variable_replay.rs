@@ -17,8 +17,8 @@ use std::{
 const PARTITION: &str = "variable-test-partition";
 
 /// Replay all items in the given `journal`.
-async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
-    let reader = journal.snapshot();
+async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
+    let reader = journal.snapshot().await.unwrap();
     let stream = reader
         .replay(NZUsize!(buffer), 0)
         .await
@@ -64,13 +64,13 @@ fn bench_variable_replay(c: &mut Criterion) {
                     // Benchmark: measure replay time.
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let j =
+                        let mut j =
                             get_variable_journal(ctx.child("storage"), PARTITION, ITEMS_PER_BLOB)
                                 .await;
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
-                            bench_run(&j, buffer).await;
+                            bench_run(&mut j, buffer).await;
                             duration += start.elapsed();
                         }
                         duration
