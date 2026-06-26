@@ -1,8 +1,6 @@
-//! State-coverage feedback for the Simplex honest harness.
+//! State-coverage feedback for the Simplex harness.
 //!
-//! Code coverage of the honest actors is saturated, so it no longer
-//! discriminates between shallow and deep protocol behaviors. This module adds a
-//! second, protocol-aware signal: it projects the end-of-run per-replica reporter
+//! This module adds a second, protocol-aware signal: it projects the end-of-run per-replica
 //! state to a set of canonical *state tokens* (`alpha`) and lights, for each
 //! token, one counter in a large custom SanitizerCoverage table indexed by a
 //! stable hash of the token.
@@ -26,6 +24,7 @@
 use crate::{
     invariants::get_signature_count,
     types::{ProposalData, ReporterReplicaStateData},
+    utils::{fnv1a_hash, fnv1a_hash_slices},
 };
 use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme::Scheme,
@@ -43,7 +42,7 @@ fn lower_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Projects each honest reporter into a [`ReporterReplicaStateData`], keyed by
+/// Projects each replica reporter data into a [`ReporterReplicaStateData`], keyed by
 /// replica index. Retains per-view signer sets and the finalized frontier so the
 /// abstraction below can read deeper structure than the safety oracle needs.
 pub fn encode_reporter_states<E, S, L>(
@@ -81,6 +80,7 @@ where
                     v,
                     get_signature_count::<S>(&cert.certificate, max_participants),
                 );
+                data.last_notarized = data.last_notarized.max(v);
             }
             drop(notarizations);
 
@@ -92,6 +92,7 @@ where
                     v,
                     get_signature_count::<S>(&cert.certificate, max_participants),
                 );
+                data.last_nullified = data.last_nullified.max(v);
             }
             drop(nullifications);
 
@@ -199,17 +200,6 @@ fn table() -> *mut u8 {
     &COUNTERS as *const Counters<STATE_COUNTERS> as *mut u8
 }
 
-/// FNV-1a hash, mapping a state token onto a counter index. Stable and
-/// dependency-free so the mapping is identical across every run in a campaign.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
 /// Registers the table with the SanitizerCoverage consumer (once) and zeroes it.
 ///
 /// Called at the start of every run so the counters reflect that run alone.
@@ -233,7 +223,7 @@ pub fn reset() {
 /// progress magnitude.
 pub fn observe(states: &BTreeMap<String, ReporterReplicaStateData>) {
     for token in alpha(states) {
-        let idx = (fnv1a(token.as_bytes()) % STATE_COUNTERS as u64) as usize;
+        let idx = (fnv1a_hash(token.as_bytes()) % STATE_COUNTERS as u64) as usize;
         // SAFETY: see `table`; `idx < STATE_COUNTERS` by construction.
         unsafe {
             let cell = table().add(idx);
@@ -343,7 +333,12 @@ pub fn alpha(states: &BTreeMap<String, ReporterReplicaStateData>) -> Vec<String>
     // it, libFuzzer rewards new individual tokens but not a novel token-set
     // state built from tokens it has each seen before.
     let mut result: Vec<String> = tokens.into_iter().collect();
-    let digest = fnv1a(result.join("\n").as_bytes());
+    let mut slices: Vec<&[u8]> = Vec::with_capacity(result.len() * 2);
+    for token in &result {
+        slices.push(token.as_bytes());
+        slices.push(b"\n");
+    }
+    let digest = fnv1a_hash_slices(&slices);
     result.push(format!("state:{digest:016x}"));
     result
 }

@@ -65,9 +65,9 @@ pub struct ReporterReplicaStateData {
     pub finalize_signers: BTreeMap<u64, BTreeSet<String>>,
     /// Max view with a finalization certificate.
     pub last_finalized: u64,
-    /// Max view this replica has seen notarization votes for.
+    /// Max view this replica has notarized (notarize vote or notarization certificate).
     pub last_notarized: u64,
-    /// Max view this replica has seen nullify votes for.
+    /// Max view this replica has nullified (nullify vote or nullification certificate).
     pub last_nullified: u64,
     pub invalid_votes: usize,
     pub invalid_certificates: usize,
