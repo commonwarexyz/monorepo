@@ -98,7 +98,7 @@ impl<B: Blob> Sealed<B> {
     }
 
     /// Returns a borrowed view over this blob.
-    pub fn view(&self) -> View<'_, B> {
+    fn view(&self) -> View<'_, B> {
         View {
             blob: &self.inner.blob,
             cache_ref: &self.inner.cache_ref,

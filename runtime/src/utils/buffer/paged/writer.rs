@@ -585,7 +585,7 @@ impl<B: Blob> Writer<B> {
     }
 
     /// Returns a borrowed view over this blob.
-    pub fn view(&self) -> View<'_, B> {
+    fn view(&self) -> View<'_, B> {
         View {
             blob: &self.blob,
             cache_ref: &self.cache_ref,

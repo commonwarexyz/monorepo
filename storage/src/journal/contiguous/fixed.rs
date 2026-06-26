@@ -95,7 +95,7 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::{
-    blobs::{Blobs, Partition, Writable},
+    blobs::{Blob, Blobs, Partition, Writable},
     checkpoint::Checkpoint,
 };
 use crate::{
@@ -107,7 +107,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _};
 use commonware_runtime::{
-    buffer::paged::{CacheRef, View as BlobView, Writer},
+    buffer::paged::{CacheRef, Writer},
     IoBuf,
 };
 use std::{
@@ -1030,25 +1030,25 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok(())
     }
 
-    /// Resolve `pos` to its read view and byte offset within the blob.
-    fn locate(&self, pos: u64) -> Result<(BlobView<'_, E::Blob>, u64), Error> {
+    /// Resolve `pos` to its blob and byte offset within the blob.
+    fn locate(&self, pos: u64) -> Result<(Blob<'_, E::Blob>, u64), Error> {
         self.validate_readable(pos)?;
         let items_per_blob = self.items_per_blob.get();
         let blob = pos / items_per_blob;
         let pos_in_blob = pos - first_in_blob(self.bounds.start, blob, items_per_blob)?;
         let offset = Journal::<E, A>::items_to_bytes(pos_in_blob)?;
-        let blob_view = self
+        let blob = self
             .blobs
             .get(blob)
             .expect("position in bounds maps to a retained blob");
-        Ok((blob_view, offset))
+        Ok((blob, offset))
     }
 
     /// Read the item at `pos` synchronously if its bytes are cached, else `None`.
     fn try_read_sync_cached(&self, pos: u64) -> Option<A> {
-        let (blob_view, offset) = self.locate(pos).ok()?;
+        let (blob, offset) = self.locate(pos).ok()?;
         let mut buf = vec![0u8; A::SIZE];
-        if !blob_view.try_read_sync(offset, &mut buf) {
+        if !blob.try_read_sync(offset, &mut buf) {
             return None;
         }
         A::decode(&buf[..]).ok()
@@ -1074,8 +1074,8 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
         self.metrics.record_cache_misses(1);
 
         let _timer = self.metrics.read_timer();
-        let (blob_view, offset) = self.locate(pos)?;
-        let bufs = blob_view.read_at(offset, A::SIZE).await?;
+        let (blob, offset) = self.locate(pos)?;
+        let bufs = blob.read_at(offset, A::SIZE).await?;
         let item = A::decode(bufs.coalesce()).map_err(Error::Codec)?;
         self.metrics.items_read.inc();
         Ok(item)
@@ -1101,7 +1101,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
         let chunk_size = A::SIZE;
 
         // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
-        // maximal runs that share one blob. Each group goes through the blob view's batched read,
+        // maximal runs that share one blob. Each group goes through the blob's batched read,
         // which serves page-cache and tip-buffer hits under a single lock acquisition and reads only
         // true misses from the blob (concurrently).
         let mut result: Vec<A> = Vec::with_capacity(positions.len());
@@ -1115,12 +1115,12 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
                 .map(|&pos| Journal::<E, A>::items_to_bytes(pos - first_position))
                 .collect::<Result<_, _>>()?;
 
-            let blob_view = self
+            let blob = self
                 .blobs
                 .get(blob)
                 .expect("positions in bounds map to a retained blob");
             let buf = &mut reusable_buf[..group.len() * chunk_size];
-            let group_hits = blob_view
+            let group_hits = blob
                 .read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
                 .await?;
             hits += group_hits as u64;

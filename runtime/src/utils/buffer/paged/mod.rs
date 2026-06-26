@@ -38,7 +38,6 @@ pub use cache::CacheRef;
 pub use read::Replay;
 pub use sealed::Sealed;
 use tracing::{debug, error};
-pub use view::View;
 pub use writer::Writer;
 
 // A checksum record contains two slots. Each slot stores one u16 length and one CRC.

@@ -3,9 +3,9 @@
 use crate::{journal::Error, Context};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Sealed, View as BlobView, Writer},
+    buffer::paged::{CacheRef, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
-    Blob as RBlob, Error as RError,
+    Blob as RBlob, Error as RError, IoBufMut, IoBufs,
 };
 use futures::future::try_join_all;
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
@@ -228,7 +228,7 @@ impl<E: Context> Writable<E> {
         Blobs {
             oldest_blob_index: self.oldest_blob_index,
             sealed: SealedBlobs::Borrowed(&self.sealed),
-            tail: Tail::Writer(&self.tail),
+            tail: Blob::Writer(&self.tail),
         }
     }
 
@@ -237,7 +237,7 @@ impl<E: Context> Writable<E> {
         Ok(Blobs {
             oldest_blob_index: self.oldest_blob_index,
             sealed: SealedBlobs::Owned(self.sealed.clone()),
-            tail: Tail::Sealed(self.tail.snapshot().await.map_err(Error::Runtime)?),
+            tail: Blob::Sealed(self.tail.snapshot().await.map_err(Error::Runtime)?),
         })
     }
 
@@ -405,7 +405,7 @@ pub(super) struct Blobs<'a, B: RBlob> {
     /// Sealed historical blobs.
     sealed: SealedBlobs<'a, B>,
     /// Tail blob.
-    tail: Tail<'a, B>,
+    tail: Blob<'a, B>,
 }
 
 enum SealedBlobs<'a, B: RBlob> {
@@ -422,16 +422,81 @@ impl<B: RBlob> SealedBlobs<'_, B> {
     }
 }
 
-enum Tail<'a, B: RBlob> {
+/// A read handle for one journal blob.
+pub(super) enum Blob<'a, B: RBlob> {
     Writer(&'a Writer<B>),
     Sealed(Sealed<B>),
 }
 
-impl<B: RBlob> Tail<'_, B> {
-    fn view(&self) -> BlobView<'_, B> {
+impl<B: RBlob> Clone for Blob<'_, B> {
+    fn clone(&self) -> Self {
         match self {
-            Self::Writer(writer) => writer.view(),
-            Self::Sealed(sealed) => sealed.view(),
+            Self::Writer(writer) => Self::Writer(writer),
+            Self::Sealed(sealed) => Self::Sealed(sealed.clone()),
+        }
+    }
+}
+
+impl<B: RBlob> Blob<'_, B> {
+    /// Return the blob's logical size.
+    pub(super) fn size(&self) -> u64 {
+        match self {
+            Self::Writer(writer) => writer.size(),
+            Self::Sealed(sealed) => sealed.size(),
+        }
+    }
+
+    /// Read into `buf` if the data is already cached.
+    pub(super) fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
+        match self {
+            Self::Writer(writer) => writer.try_read_sync(offset, buf),
+            Self::Sealed(sealed) => sealed.try_read_sync(offset, buf),
+        }
+    }
+
+    /// Read exactly `len` bytes at `offset`.
+    pub(super) async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        match self {
+            Self::Writer(writer) => writer.read_at(offset, len).await.map_err(Error::Runtime),
+            Self::Sealed(sealed) => sealed.read_at(offset, len).await.map_err(Error::Runtime),
+        }
+    }
+
+    /// Read up to `len` bytes at `offset`.
+    pub(super) async fn read_up_to(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufMut> + Send,
+    ) -> Result<(IoBufMut, usize), Error> {
+        match self {
+            Self::Writer(writer) => writer
+                .read_up_to(offset, len, bufs)
+                .await
+                .map_err(Error::Runtime),
+            Self::Sealed(sealed) => sealed
+                .read_up_to(offset, len, bufs)
+                .await
+                .map_err(Error::Runtime),
+        }
+    }
+
+    /// Read fixed-size items at sorted byte offsets into `buf`.
+    pub(super) async fn read_many_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<usize, Error> {
+        match self {
+            Self::Writer(writer) => writer
+                .read_many_into(buf, offsets, item_size)
+                .await
+                .map_err(Error::Runtime),
+            Self::Sealed(sealed) => sealed
+                .read_many_into(buf, offsets, item_size)
+                .await
+                .map_err(Error::Runtime),
         }
     }
 }
@@ -442,15 +507,16 @@ impl<B: RBlob> Blobs<'_, B> {
         self.oldest_blob_index + self.sealed.as_slice().len() as u64
     }
 
-    /// Resolve the read view for `blob`, if retained.
-    pub(super) fn get(&self, blob: u64) -> Option<BlobView<'_, B>> {
+    /// Resolve a blob, if retained.
+    pub(super) fn get(&self, blob: u64) -> Option<Blob<'_, B>> {
         if blob == self.tail_blob_index() {
-            return Some(self.tail.view());
+            return Some(self.tail.clone());
         }
         self.sealed
             .as_slice()
             .get(blob.checked_sub(self.oldest_blob_index)? as usize)
-            .map(Sealed::view)
+            .cloned()
+            .map(Blob::Sealed)
     }
 }
 
@@ -460,8 +526,11 @@ mod tests {
     use commonware_runtime::{deterministic, IoBufMut, Runner as _, Storage as _};
     use commonware_utils::{NZUsize, NZU16};
 
-    fn assert_insufficient_length(result: Result<(IoBufMut, usize), RError>) {
-        assert!(matches!(result, Err(RError::BlobInsufficientLength)));
+    fn assert_insufficient_length(result: Result<(IoBufMut, usize), Error>) {
+        assert!(matches!(
+            result,
+            Err(Error::Runtime(RError::BlobInsufficientLength))
+        ));
     }
 
     impl<E: Context> Writable<E> {
@@ -501,7 +570,7 @@ mod tests {
             writer.append(b"abc").await.unwrap();
 
             let size = writer.size();
-            let tail = writer.view();
+            let tail = Blob::Writer(&writer);
             assert_insufficient_length(tail.read_up_to(size, 1, IoBufMut::with_capacity(1)).await);
             assert_eq!(
                 tail.read_up_to(size, 0, IoBufMut::with_capacity(0))
@@ -512,31 +581,30 @@ mod tests {
             );
 
             let snapshot = writer.snapshot().await.unwrap();
-            let snapshot_view = snapshot.view();
+            let snapshot_blob = Blob::Sealed(snapshot);
             assert_insufficient_length(
-                snapshot_view
+                snapshot_blob
                     .read_up_to(size, 1, IoBufMut::with_capacity(1))
                     .await,
             );
             assert_eq!(
-                snapshot_view
+                snapshot_blob
                     .read_up_to(size, 0, IoBufMut::with_capacity(0))
                     .await
                     .unwrap()
                     .1,
                 0
             );
-            drop(snapshot);
 
             let sealed = writer.seal().await.unwrap();
-            let sealed_view = sealed.view();
+            let sealed_blob = Blob::Sealed(sealed);
             assert_insufficient_length(
-                sealed_view
+                sealed_blob
                     .read_up_to(size, 1, IoBufMut::with_capacity(1))
                     .await,
             );
             assert_eq!(
-                sealed_view
+                sealed_blob
                     .read_up_to(size, 0, IoBufMut::with_capacity(0))
                     .await
                     .unwrap()

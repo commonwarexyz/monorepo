@@ -4,7 +4,7 @@
 //! the preferred recovery point for replaying data to rebuild offset entries.
 
 use super::{
-    blobs::{Blobs, Partition, Writable},
+    blobs::{Blob, Blobs, Partition, Writable},
     fixed,
     metrics::VariableMetrics as Metrics,
     Contiguous, Many, Mutable,
@@ -19,7 +19,7 @@ use crate::{
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Replay, View as BlobView, Writer},
+    buffer::paged::{CacheRef, Replay, Writer},
     Blob as RBlob, Buf, IoBuf, IoBufMut,
 };
 use commonware_utils::NZUsize;
@@ -321,14 +321,10 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         Ok(())
     }
 
-    /// Read the varint-framed item at byte `offset` via `blob_view`.
-    async fn read_at_offset(
-        &self,
-        blob_view: &BlobView<'_, E::Blob>,
-        offset: u64,
-    ) -> Result<V, Error> {
+    /// Read the varint-framed item at byte `offset` via `blob`.
+    async fn read_at_offset(&self, blob: &Blob<'_, E::Blob>, offset: u64) -> Result<V, Error> {
         // Read the varint header (max 5 bytes for u32).
-        let (buf, available) = blob_view
+        let (buf, available) = blob
             .read_up_to(
                 offset,
                 MAX_U32_VARINT_SIZE,
@@ -360,9 +356,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                     .checked_add(varint_len as u64)
                     .and_then(|offset| offset.checked_add(prefix_len as u64))
                     .ok_or(Error::OffsetOverflow)?;
-                let remainder = blob_view
-                    .read_at(read_offset, total_len - prefix_len)
-                    .await?;
+                let remainder = blob.read_at(read_offset, total_len - prefix_len).await?;
                 decode_item::<V>(prefix.chain(remainder), &self.codec_config, self.compressed)
             }
         }
@@ -376,7 +370,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
     /// strictly increasing.
     async fn read_consecutive(
         &self,
-        blob_view: &BlobView<'_, E::Blob>,
+        blob_handle: &Blob<'_, E::Blob>,
         blob: u64,
         offsets: &[u64],
     ) -> Result<Vec<V>, Error> {
@@ -384,7 +378,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         if offsets.len() <= 1 {
             let mut items = Vec::with_capacity(offsets.len());
             for &offset in offsets {
-                items.push(self.read_at_offset(blob_view, offset).await?);
+                items.push(self.read_at_offset(blob_handle, offset).await?);
             }
             return Ok(items);
         }
@@ -403,7 +397,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         let start = offsets[0];
         let end = offsets[offsets.len() - 1];
         let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
-        let bytes = blob_view.read_at(start, range_len).await?.coalesce();
+        let bytes = blob_handle.read_at(start, range_len).await?.coalesce();
         let bytes = bytes.as_ref();
 
         let mut items = Vec::with_capacity(offsets.len());
@@ -443,7 +437,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             local_offset = data_end;
         }
 
-        items.push(self.read_at_offset(blob_view, end).await?);
+        items.push(self.read_at_offset(blob_handle, end).await?);
         Ok(items)
     }
 
@@ -451,10 +445,10 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
     fn try_read_sync_into(&self, position: u64, buf: &mut Vec<u8>) -> Option<V> {
         self.validate_readable(position).ok()?;
         let offset = self.offsets.try_read_sync(position)?;
-        let blob_view = self
+        let blob = self
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))?;
-        let remaining = blob_view.size().checked_sub(offset)?;
+        let remaining = blob.size().checked_sub(offset)?;
         let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
         if header_len == 0 {
             return None;
@@ -462,7 +456,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
 
         // Read the varint header to determine item size.
         let mut header = [0u8; MAX_U32_VARINT_SIZE];
-        if !blob_view.try_read_sync(offset, &mut header[..header_len]) {
+        if !blob.try_read_sync(offset, &mut header[..header_len]) {
             return None;
         }
         let mut cursor = Cursor::new(&header[..header_len]);
@@ -496,7 +490,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
 
         // Otherwise try reading the full item from cache.
         buf.resize(item_len, 0);
-        if !blob_view.try_read_sync(offset, buf) {
+        if !blob.try_read_sync(offset, buf) {
             return None;
         }
         decode_item::<V>(
@@ -529,11 +523,11 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         let _timer = self.metrics.read_timer();
         self.validate_readable(position)?;
         let offset = self.offsets.read(position).await?;
-        let blob_view = self
+        let blob = self
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))
             .expect("position in bounds maps to a retained blob");
-        let item = self.read_at_offset(&blob_view, offset).await?;
+        let item = self.read_at_offset(&blob, offset).await?;
         self.metrics.items_read.inc();
         Ok(item)
     }
@@ -602,7 +596,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 group_end += 1;
             }
 
-            let blob_view = self
+            let blob_handle = self
                 .data
                 .get(blob)
                 .expect("positions in bounds map to a retained blob");
@@ -616,7 +610,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 }
 
                 let items = self
-                    .read_consecutive(&blob_view, blob, &miss_offsets[run_start..run_end])
+                    .read_consecutive(&blob_handle, blob, &miss_offsets[run_start..run_end])
                     .await?;
 
                 for (item, &miss_idx) in items.into_iter().zip(&miss_indices[run_start..run_end]) {
