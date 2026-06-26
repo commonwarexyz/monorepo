@@ -154,10 +154,103 @@ struct BlobScan {
     torn: bool,
 }
 
+/// Sequential read buffer over a journal blob's read-only view.
+struct BlobReplay<'a, B: RBlob> {
+    blob: Blob<'a, B>,
+    offset: u64,
+    buffer_size: NonZeroUsize,
+    buf: Vec<u8>,
+    cursor: usize,
+    exhausted: bool,
+}
+
+impl<'a, B: RBlob> BlobReplay<'a, B> {
+    fn new(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Self {
+        Self {
+            blob,
+            offset,
+            buffer_size,
+            buf: Vec::with_capacity(buffer_size.get()),
+            cursor: 0,
+            exhausted: false,
+        }
+    }
+
+    const fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
+        while self.remaining() < n && !self.exhausted {
+            self.compact();
+
+            let blob_size = self.blob.size();
+            let remaining = blob_size.saturating_sub(self.offset);
+            if remaining == 0 {
+                self.exhausted = true;
+                break;
+            }
+
+            let needed = n.saturating_sub(self.remaining());
+            let read_len = self
+                .buffer_size
+                .get()
+                .max(needed)
+                .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+            let (buf, read) = self
+                .blob
+                .read_up_to(self.offset, read_len, IoBufMut::with_capacity(read_len))
+                .await?;
+            self.offset = self
+                .offset
+                .checked_add(read as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            self.buf.extend_from_slice(&buf.chunk()[..read]);
+            if self.offset == blob_size {
+                self.exhausted = true;
+            }
+        }
+
+        Ok(self.remaining() >= n)
+    }
+
+    fn compact(&mut self) {
+        match self.cursor {
+            0 => {}
+            cursor if cursor == self.buf.len() => {
+                self.buf.clear();
+                self.cursor = 0;
+            }
+            cursor => {
+                self.buf.drain(..cursor);
+                self.cursor = 0;
+            }
+        }
+    }
+}
+
+impl<B: RBlob> Buf for BlobReplay<'_, B> {
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.cursor
+    }
+
+    fn chunk(&self) -> &[u8] {
+        &self.buf[self.cursor..]
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        self.cursor = self
+            .cursor
+            .checked_add(cnt)
+            .expect("advance overflowed replay cursor");
+        assert!(self.cursor <= self.buf.len(), "advanced past replay buffer");
+    }
+}
+
 /// State for sequentially replaying variable-size frames from one data blob.
-struct DataReplayState<B: RBlob, V: Codec> {
+struct DataReplayState<'a, B: RBlob, V: Codec> {
     blob: u64,
-    replay: Replay<B>,
+    replay: BlobReplay<'a, B>,
     pos: u64,
     end_pos: u64,
     offset: u64,
@@ -166,7 +259,7 @@ struct DataReplayState<B: RBlob, V: Codec> {
     _marker: PhantomData<V>,
 }
 
-impl<B: RBlob, V: CodecShared> DataReplayState<B, V> {
+impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
     async fn next_batch(mut self) -> Option<(Vec<Result<(u64, V), Error>>, Self)> {
         if self.pos == self.end_pos {
             return None;
@@ -819,13 +912,11 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
             let start_offset = self.offsets.read(start_pos).await?;
 
             for blob in start_blob..=end_blob {
-                let mut replay = self
+                let blob_handle = self
                     .data
                     .get(blob)
-                    .expect("positions in bounds map to a retained blob")
-                    .replay(buffer)?;
+                    .expect("positions in bounds map to a retained blob");
                 let offset = if blob == start_blob { start_offset } else { 0 };
-                replay.seek_to(offset)?;
 
                 let first_pos = if blob == start_blob {
                     start_pos
@@ -837,7 +928,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
 
                 states.push(DataReplayState::<E::Blob, V> {
                     blob,
-                    replay,
+                    replay: BlobReplay::new(blob_handle, offset, buffer),
                     pos: first_pos,
                     end_pos,
                     offset,
@@ -2332,6 +2423,42 @@ mod tests {
             let items = reader.read_many(&positions).await.unwrap();
             assert_eq!(items, vec![300, 400, 500, 600, 700, 800, 900]);
             drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_reader_replay_reads_writer_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "reader-replay-writer-tail".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+
+            for i in 0..7u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+
+            {
+                let reader = journal.reader();
+                let stream = reader.replay(NZUsize!(3), 3).await.unwrap();
+                futures::pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    items.push(result.unwrap());
+                }
+                assert_eq!(items, vec![(3, 300), (4, 400), (5, 500), (6, 600)]);
+            }
 
             journal.destroy().await.unwrap();
         });
