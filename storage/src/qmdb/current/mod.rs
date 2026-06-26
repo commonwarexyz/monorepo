@@ -1353,6 +1353,112 @@ pub mod tests {
         Sequential,
     >;
 
+    // Regression test for a forged exclusion proof against the ordered partitioned index with
+    // variable-length keys shorter than the partition prefix. The buggy router zero-padded a short
+    // key into the lowest partition, so its `next_key` wrapped around the whole keyspace and the
+    // resulting authenticated span covered a live key, letting a prover forge that key's exclusion.
+    // Order-preserving routing keeps the key in lexicographic position, so the span no longer covers
+    // it.
+    #[test_traced]
+    fn test_partitioned_ordered_short_key_exclusion_not_forgeable() {
+        type ForgedExclusionDb = ordered::variable::partitioned::Db<
+            mmr::Family,
+            Context,
+            Vec<u8>,
+            Vec<u8>,
+            Sha256,
+            OneCap,
+            2,
+            32,
+            Sequential,
+        >;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let hasher = qmdb::hasher::<Sha256>();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = VariableConfig {
+                merkle_config: MerkleConfig {
+                    journal_partition: "forged-exclusion-journal".to_string(),
+                    metadata_partition: "forged-exclusion-metadata".to_string(),
+                    items_per_blob: NZU64!(11),
+                    write_buffer: NZUsize!(1024),
+                    strategy: Sequential,
+                    page_cache: page_cache.clone(),
+                },
+                journal_config: VConfig {
+                    partition: "forged-exclusion-log".to_string(),
+                    items_per_section: NZU64!(7),
+                    compression: None,
+                    codec_config: (((0..=8).into(), ()), ((0..=8).into(), ())),
+                    page_cache,
+                    write_buffer: NZUsize!(1024),
+                },
+                grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
+                translator: OneCap,
+            };
+            let mut db = ForgedExclusionDb::init(context.child("db"), cfg)
+                .await
+                .unwrap();
+
+            // `b` is shorter than the 2-byte prefix and lexicographically falls between `a` and `c`
+            // (`b` is a proper prefix of `c`). The bug routed `b` to partition 0x0001 instead of
+            // 0x0100, below `a` at 0x0080.
+            let a = vec![0x00u8, 0x80];
+            let b = vec![0x01u8];
+            let c = vec![0x01u8, 0x00];
+            let (va, vb, vc) = (vec![0x0au8], vec![0x0bu8], vec![0x0cu8]);
+
+            // Commit `a` and `b` (ring a -> b -> a), then `c` in a later batch.
+            let merkleized = db
+                .new_batch()
+                .write(a.clone(), Some(va.clone()))
+                .write(b.clone(), Some(vb.clone()))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .write(c.clone(), Some(vc.clone()))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            let root = db.root();
+
+            // All three keys are live.
+            assert_eq!(db.get(&a).await.unwrap(), Some(va));
+            assert_eq!(db.get(&b).await.unwrap(), Some(vb));
+            assert_eq!(db.get(&c).await.unwrap(), Some(vc));
+
+            // Root cause: the ring must link keys in lexicographic order, so `b`'s successor is `c`
+            // (pre-fix it wrapped around to `a`).
+            let (_, span_b) = db.get_span(&b).await.unwrap().unwrap();
+            assert_eq!(
+                span_b.next_key, c,
+                "b.next_key must be c, not the wrapped-around a"
+            );
+
+            // Honest exclusion proving refuses a live key.
+            assert!(matches!(
+                db.exclusion_proof(&hasher, &c).await,
+                Err(Error::KeyExists)
+            ));
+
+            // Forge attempt: package `b`'s authenticated update as an exclusion proof for `c`. The
+            // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
+            // [b, a), which cyclically covered `c` and verified).
+            let kvp = db.key_value_proof(&hasher, b.clone()).await.unwrap();
+            let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
+            assert!(!ForgedExclusionDb::verify_exclusion_proof(
+                &hasher, &c, &forged, &root
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     // Helper macro to create an open_db closure for a specific variant.
     macro_rules! open_db_fn {
         ($db:ty, $cfg:ident) => {

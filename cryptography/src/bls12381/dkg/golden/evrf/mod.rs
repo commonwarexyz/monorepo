@@ -1,7 +1,7 @@
-mod bandersnatch;
+mod banderwagon;
 
 use crate::{
-    bls12381::primitives::group::{Scalar, G1},
+    bls12381::primitives::group::{Scalar, ScalarReadCfg, G1},
     transcript::{Summary, Transcript},
     zk::{
         bulletproofs::circuit::{self, prove, verify},
@@ -9,7 +9,7 @@ use crate::{
     },
     Secret,
 };
-use bandersnatch::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
+use banderwagon::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read, ReadExt,
@@ -39,14 +39,14 @@ const BULLETPROOFS_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_BULLETPROO
 //
 //     internal_vars(n) = WIRES_PER_PLAYER * n + WIRES_BASE
 //
-// (See `bandersnatch::tests::measure_circuit_size_per_receiver` for the
+// (See `banderwagon::tests::measure_circuit_size_per_receiver` for the
 // raw data this fit was derived from.)
 //
 // TODO: with a hand-tailored scalar-mul gadget the per-receiver constant
 // could drop to ~2.5k (Golden paper, eprint 2025/1924), letting us hit a much
 // larger receiver count with the same (or smaller) setup.
-const WIRES_PER_PLAYER: usize = 8664;
-const WIRES_BASE: usize = 3065;
+const WIRES_PER_PLAYER: usize = 4818;
+const WIRES_BASE: usize = 1513;
 
 /// `ceil(log2(WIRES_PER_PLAYER * num_players + WIRES_BASE))`.
 ///
@@ -219,7 +219,7 @@ impl PrivateKey {
     /// a random value.
     pub(super) fn vrf_recv(&self, msg: &Summary, sender: &PublicKey) -> Scalar {
         self.inner
-            .expose(|inner| vrf_recv(msg, sender.point.clone(), inner))
+            .expose(|inner| vrf_recv(msg, &sender.point, inner))
     }
 
     /// Compute the VRF output for each receiver, along with [`VrfCommitments`]
@@ -531,11 +531,15 @@ impl Read for Proof {
 
     fn read_cfg(buf: &mut impl Buf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
         let max_proof_len = 1usize << lg_len_for_players(max_players.get());
-        let circuit_proof =
-            circuit::Proof::<Scalar, G1>::read_cfg(buf, &(max_proof_len, ((), ())))?;
+        let circuit_proof = circuit::Proof::<Scalar, G1>::read_cfg(
+            buf,
+            &(max_proof_len, ((), ScalarReadCfg::AllowZero)),
+        )?;
         let range = commonware_codec::RangeCfg::new(0..=max_players.get() as usize);
-        let pedersen_to_plain =
-            Vec::<pedersen_to_plain::Proof<Scalar, G1>>::read_cfg(buf, &(range, ((), ())))?;
+        let pedersen_to_plain = Vec::<pedersen_to_plain::Proof<Scalar, G1>>::read_cfg(
+            buf,
+            &(range, ((), ScalarReadCfg::AllowZero)),
+        )?;
         Ok(Self {
             circuit_proof,
             pedersen_to_plain,
@@ -675,7 +679,7 @@ impl VrfCommitments {
                         .map(|pk| pk.point.clone())
                         .collect();
                     let circuit =
-                        vrf_batch_checked_circuit(msg.as_ref(), sender.point.clone(), &receivers);
+                        vrf_batch_checked_circuit(msg.as_ref(), &sender.point, &receivers);
                     let claim = circuit::Claim {
                         commitments: commitments.commitments.values().to_vec(),
                     };
