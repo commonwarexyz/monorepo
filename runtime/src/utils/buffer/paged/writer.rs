@@ -1390,9 +1390,8 @@ mod tests {
         });
     }
 
-    #[test]
-    #[should_panic(expected = "read_many_into requires buf.len() == offsets.len() * item_size")]
-    fn test_read_many_into_panics_on_invalid_buffer_len() {
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_rejects_invalid_buffer_len() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
@@ -1406,16 +1405,16 @@ mod tests {
 
             let offsets = [0u64, 4];
             let mut buf = vec![0u8; 7];
-            append
+            let err = append
                 .read_many_into(&mut buf, &offsets, NZUsize!(4))
                 .await
-                .unwrap();
+                .unwrap_err();
+            assert!(matches!(err, Error::BufferLengthInvalid));
         });
     }
 
-    #[test]
-    #[should_panic(expected = "read_many_into offsets must be sorted and non-overlapping")]
-    fn test_read_many_into_panics_on_unsorted_offsets() {
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_rejects_unsorted_offsets() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
@@ -1428,16 +1427,16 @@ mod tests {
             append.append(&data).await.unwrap();
 
             let mut buf = vec![0u8; 8];
-            append
+            let err = append
                 .read_many_into(&mut buf, &[8, 4], NZUsize!(4))
                 .await
-                .unwrap();
+                .unwrap_err();
+            assert!(matches!(err, Error::OffsetsInvalid));
         });
     }
 
-    #[test]
-    #[should_panic(expected = "read_many_into offsets must be sorted and non-overlapping")]
-    fn test_read_many_into_panics_on_overlapping_offsets() {
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_rejects_overlapping_offsets() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
@@ -1450,10 +1449,11 @@ mod tests {
             append.append(&data).await.unwrap();
 
             let mut buf = vec![0u8; 8];
-            append
+            let err = append
                 .read_many_into(&mut buf, &[2, 4], NZUsize!(4))
                 .await
-                .unwrap();
+                .unwrap_err();
+            assert!(matches!(err, Error::OffsetsInvalid));
         });
     }
 

@@ -56,10 +56,9 @@ fn validate_read_many_into(
         .len()
         .checked_mul(item_size.get())
         .ok_or(Error::OffsetOverflow)?;
-    assert_eq!(
-        buf_len, expected_len,
-        "read_many_into requires buf.len() == offsets.len() * item_size"
-    );
+    if buf_len != expected_len {
+        return Err(Error::BufferLengthInvalid);
+    }
 
     let mut previous_end = None;
     for &offset in offsets {
@@ -67,10 +66,9 @@ fn validate_read_many_into(
             .checked_add(item_size.get() as u64)
             .ok_or(Error::OffsetOverflow)?;
         if let Some(previous_end) = previous_end {
-            assert!(
-                offset >= previous_end,
-                "read_many_into offsets must be sorted and non-overlapping"
-            );
+            if offset < previous_end {
+                return Err(Error::OffsetsInvalid);
+            }
         }
         if end > size {
             return Err(Error::BlobInsufficientLength);
@@ -343,10 +341,33 @@ mod tests {
         Ok,
         OffsetOverflow,
         BlobInsufficientLength,
+        BufferLengthInvalid,
+        OffsetsInvalid,
     }
 
     #[rstest]
     #[case::empty_offsets_are_a_noop(0, vec![], 4, 0, ValidationExpectation::Ok)]
+    #[case::buffer_len_must_match_items(
+        7,
+        vec![0, 4],
+        4,
+        16,
+        ValidationExpectation::BufferLengthInvalid
+    )]
+    #[case::offsets_must_not_overlap(
+        8,
+        vec![0, 2],
+        4,
+        16,
+        ValidationExpectation::OffsetsInvalid
+    )]
+    #[case::offsets_must_be_sorted(
+        8,
+        vec![8, 4],
+        4,
+        16,
+        ValidationExpectation::OffsetsInvalid
+    )]
     #[case::offset_plus_item_size_must_not_overflow(
         4,
         vec![u64::MAX - 1],
@@ -382,25 +403,13 @@ mod tests {
             ValidationExpectation::BlobInsufficientLength => {
                 assert!(matches!(result, Err(Error::BlobInsufficientLength)))
             }
+            ValidationExpectation::BufferLengthInvalid => {
+                assert!(matches!(result, Err(Error::BufferLengthInvalid)))
+            }
+            ValidationExpectation::OffsetsInvalid => {
+                assert!(matches!(result, Err(Error::OffsetsInvalid)))
+            }
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "read_many_into requires buf.len() == offsets.len() * item_size")]
-    fn test_validate_read_many_into_panics_on_invalid_buffer_len() {
-        let _ = validate_read_many_into(7, &[0, 4], NZUsize!(4), 16);
-    }
-
-    #[test]
-    #[should_panic(expected = "read_many_into offsets must be sorted and non-overlapping")]
-    fn test_validate_read_many_into_panics_on_overlapping_offsets() {
-        let _ = validate_read_many_into(8, &[0, 2], NZUsize!(4), 16);
-    }
-
-    #[test]
-    #[should_panic(expected = "read_many_into offsets must be sorted and non-overlapping")]
-    fn test_validate_read_many_into_panics_on_unsorted_offsets() {
-        let _ = validate_read_many_into(8, &[8, 4], NZUsize!(4), 16);
     }
 
     #[test]

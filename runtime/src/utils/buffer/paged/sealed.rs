@@ -584,9 +584,8 @@ mod tests {
         });
     }
 
-    #[test]
-    #[should_panic(expected = "read_many_into offsets must be sorted and non-overlapping")]
-    fn test_sealed_read_many_into_panics_on_unsorted_offsets() {
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_many_into_rejects_unsorted_offsets() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany_bad").await.unwrap();
@@ -599,10 +598,11 @@ mod tests {
             let sealed = append.seal().await.unwrap();
 
             let mut out = vec![0u8; 8];
-            sealed
+            let err = sealed
                 .read_many_into(&mut out, &[8, 4], NZUsize!(4))
                 .await
-                .unwrap();
+                .unwrap_err();
+            assert!(matches!(err, Error::OffsetsInvalid));
         });
     }
 
