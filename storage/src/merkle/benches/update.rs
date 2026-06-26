@@ -50,7 +50,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                             let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = StdRng::seed_from_u64(0);
                             let mut leaf_locations = Vec::with_capacity(leaves);
-                            let h = StandardHasher::<Sha256>::new(ForwardFold);
+                            let mut h = StandardHasher::<Sha256>::new(ForwardFold);
 
                             let mut mem = Mem::<F, _>::new();
                             let batch = {
@@ -60,9 +60,9 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                     elements.push(digest);
                                     let loc = batch.leaves();
                                     leaf_locations.push(loc);
-                                    batch = batch.add(&h, &digest);
+                                    batch = batch.add(&mut h, &digest);
                                 }
-                                batch.merkleize(&mem, &h)
+                                batch.merkleize(&mem, &mut h)
                             };
                             mem.apply_batch(&batch).unwrap();
 
@@ -87,13 +87,13 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                     Some(ref s) => {
                                         let mut batch = mem.new_batch_with_strategy(s.clone());
                                         batch = batch.update_leaf_batched(&updates).unwrap();
-                                        let batch = batch.merkleize(&mem, &h);
+                                        let batch = batch.merkleize(&mem, &mut h);
                                         mem.apply_batch(&batch).unwrap();
                                     }
                                     None => {
                                         let mut batch = mem.new_batch();
                                         batch = batch.update_leaf_batched(&updates).unwrap();
-                                        let batch = batch.merkleize(&mem, &h);
+                                        let batch = batch.merkleize(&mem, &mut h);
                                         mem.apply_batch(&batch).unwrap();
                                     }
                                 };

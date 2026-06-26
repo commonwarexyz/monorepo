@@ -9,18 +9,13 @@
 //! // Create a new BLAKE3 hasher
 //! let mut hasher = Blake3::new();
 //!
-//! // Update the hasher with some messages
-//! hasher.update(b"hello,");
-//! hasher.update(b"world!");
-//!
-//! // Finalize the hasher to get the digest
-//! let digest = hasher.finalize();
+//! let digest = hasher.update(b"hello,").update(b"world!").finalize();
 //!
 //! // Print the digest
 //! println!("digest: {:?}", digest);
 //! ```
 
-use crate::Hasher;
+use crate::{Hasher, PendingHasher};
 use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
@@ -56,12 +51,18 @@ impl Clone for Blake3 {
     }
 }
 
-impl Hasher for Blake3 {
-    type Digest = Digest;
+/// Pending BLAKE3 computation.
+#[must_use]
+pub struct Pending<'a> {
+    hasher: &'a mut Blake3,
+    finalized: bool,
+}
 
-    fn update(&mut self, message: &[u8]) -> &mut Self {
+impl Pending<'_> {
+    /// Append message to the pending hash computation.
+    pub fn update(self, message: &[u8]) -> Self {
         #[cfg(not(feature = "blake3-parallel"))]
-        self.hasher.update(message);
+        self.hasher.hasher.update(message);
 
         #[cfg(feature = "blake3-parallel")]
         {
@@ -70,20 +71,55 @@ impl Hasher for Blake3 {
 
             // Heuristic defined @ https://docs.rs/blake3/latest/blake3/struct.Hasher.html#method.update_rayon
             if message.len() >= PARALLEL_THRESHOLD {
-                self.hasher.update_rayon(message);
+                self.hasher.hasher.update_rayon(message);
             } else {
-                self.hasher.update(message);
+                self.hasher.hasher.update(message);
             }
         }
 
         self
     }
 
-    fn finalize(&mut self) -> Self::Digest {
-        let finalized = self.hasher.finalize();
-        self.hasher.reset();
+    /// Hash all recorded data and reset the underlying hasher to the initial state.
+    pub fn finalize(mut self) -> Digest {
+        self.finalized = true;
+        let finalized = self.hasher.hasher.finalize();
+        self.hasher.hasher.reset();
         let array: [u8; DIGEST_LENGTH] = finalized.into();
-        Self::Digest::from(array)
+        Digest::from(array)
+    }
+}
+
+impl PendingHasher for Pending<'_> {
+    type Digest = Digest;
+
+    fn update(self, message: &[u8]) -> Self {
+        Self::update(self, message)
+    }
+
+    fn finalize(self) -> Self::Digest {
+        Self::finalize(self)
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        if !self.finalized {
+            self.hasher.hasher.reset();
+        }
+    }
+}
+
+impl Hasher for Blake3 {
+    type Digest = Digest;
+    type Pending<'a> = Pending<'a>;
+
+    fn update(&mut self, message: &[u8]) -> Self::Pending<'_> {
+        Pending {
+            hasher: self,
+            finalized: false,
+        }
+        .update(message)
     }
 
     fn reset(&mut self) -> &mut Self {
@@ -193,20 +229,15 @@ mod tests {
     fn test_blake3() {
         let msg = b"hello world";
 
-        // Generate initial hash
         let mut hasher = Blake3::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
-        // Reuse hasher
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
-        // Test simple hasher
         let hash = Blake3::hash(msg);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
@@ -220,8 +251,7 @@ mod tests {
     fn test_codec() {
         let msg = b"hello world";
         let mut hasher = Blake3::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), DIGEST_LENGTH);

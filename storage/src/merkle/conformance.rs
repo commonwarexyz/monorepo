@@ -10,7 +10,7 @@ use commonware_cryptography::{sha256, Sha256};
 /// first hashed (via [`Hasher::digest`]) before being added, so the leaf digests are
 /// deterministic regardless of family.
 pub fn build_test_mem<F, H>(
-    hasher: &H,
+    hasher: &mut H,
     mut mem: Mem<F, sha256::Digest>,
     elements: u64,
 ) -> Mem<F, sha256::Digest>
@@ -34,7 +34,7 @@ where
 ///
 /// Thin wrapper around [`build_test_mem`] with the MMR family types fixed.
 pub fn build_test_mmr<H: Hasher<crate::mmr::Family, Digest = sha256::Digest>>(
-    hasher: &H,
+    hasher: &mut H,
     mmr: crate::mmr::mem::Mmr<sha256::Digest>,
     elements: u64,
 ) -> crate::mmr::mem::Mmr<sha256::Digest> {
@@ -55,10 +55,10 @@ struct MmrRootStability;
 
 impl Conformance for MmrRootStability {
     async fn commit(seed: u64) -> Vec<u8> {
-        let hasher = Standard::new(ForwardFold);
+        let mut hasher = Standard::new(ForwardFold);
         let mmr = crate::mmr::mem::Mmr::new();
-        build_test_mem(&hasher, mmr, seed)
-            .root(&hasher, 0)
+        build_test_mem(&mut hasher, mmr, seed)
+            .root(&mut hasher, 0)
             .unwrap()
             .to_vec()
     }
@@ -72,10 +72,10 @@ struct MmbRootStability;
 
 impl Conformance for MmbRootStability {
     async fn commit(seed: u64) -> Vec<u8> {
-        let hasher = Standard::new(ForwardFold);
+        let mut hasher = Standard::new(ForwardFold);
         let mmb = crate::mmb::mem::Mmb::new();
-        build_test_mem(&hasher, mmb, seed)
-            .root(&hasher, 0)
+        build_test_mem(&mut hasher, mmb, seed)
+            .root(&mut hasher, 0)
             .unwrap()
             .to_vec()
     }

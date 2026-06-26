@@ -20,14 +20,14 @@ mod tests {
     type H = Standard<Sha256>;
 
     fn build_mmb(n: u64) -> (H, Mmb<D>) {
-        let hasher = H::new(ForwardFold);
+        let mut hasher = H::new(ForwardFold);
         let mut mmb = Mmb::new();
         let batch = {
             let mut batch = mmb.new_batch();
             for i in 0..n {
-                batch = batch.add(&hasher, &i.to_be_bytes());
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
             }
-            batch.merkleize(&mmb, &hasher)
+            batch.merkleize(&mmb, &mut hasher)
         };
         mmb.apply_batch(&batch).unwrap();
         (hasher, mmb)
@@ -35,16 +35,16 @@ mod tests {
 
     #[test]
     fn test_append_and_size() {
-        let hasher = H::new(ForwardFold);
+        let mut hasher = H::new(ForwardFold);
         let mut mmb = Mmb::new();
 
         for i in 0u64..8 {
             let batch = {
                 let mut batch = mmb.new_batch();
                 let loc = batch.leaves();
-                batch = batch.add(&hasher, &i.to_be_bytes());
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
                 assert_eq!(*loc, i);
-                batch.merkleize(&mmb, &hasher)
+                batch.merkleize(&mmb, &mut hasher)
             };
             mmb.apply_batch(&batch).unwrap();
         }
@@ -54,7 +54,7 @@ mod tests {
 
     #[test]
     fn test_add_eight_values_structure() {
-        let (hasher, mmb) = build_mmb(8);
+        let (mut hasher, mmb) = build_mmb(8);
 
         assert_eq!(mmb.bounds().start, Location::new(0));
         assert_eq!(mmb.size(), Position::new(13));
@@ -116,7 +116,7 @@ mod tests {
             .root(Location::new(8), 0, [digest7, digest9, digest12].iter())
             .expect("zero inactive peaks is always valid");
         assert_eq!(
-            mmb.root(&hasher, 0).unwrap(),
+            mmb.root(&mut hasher, 0).unwrap(),
             expected_root,
             "incorrect root"
         );
@@ -124,22 +124,22 @@ mod tests {
 
     #[test]
     fn test_prune_and_reinit() {
-        let (hasher, mut mmb) = build_mmb(24);
+        let (mut hasher, mut mmb) = build_mmb(24);
 
-        let root = mmb.root(&hasher, 0).unwrap();
+        let root = mmb.root(&mut hasher, 0).unwrap();
         let prune_loc = Location::new(9);
         mmb.prune(prune_loc).unwrap();
 
         assert_eq!(mmb.bounds().start, prune_loc);
-        assert_eq!(mmb.root(&hasher, 0).unwrap(), root);
+        assert_eq!(mmb.root(&mut hasher, 0).unwrap(), root);
         assert!(matches!(
-            mmb.proof(&hasher, Location::new(0), 0),
+            mmb.proof(&mut hasher, Location::new(0), 0),
             Err(Error::ElementPruned(_))
         ));
 
         for loc in *prune_loc..*mmb.leaves() {
             assert!(
-                mmb.proof(&hasher, Location::new(loc), 0).is_ok(),
+                mmb.proof(&mut hasher, Location::new(loc), 0).is_ok(),
                 "loc={loc} should remain provable after pruning"
             );
         }
@@ -156,13 +156,13 @@ mod tests {
         assert_eq!(mmb_copy.size(), mmb.size());
         assert_eq!(mmb_copy.leaves(), mmb.leaves());
         assert_eq!(mmb_copy.bounds(), mmb.bounds());
-        assert_eq!(mmb_copy.root(&hasher, 0).unwrap(), root);
-        assert!(mmb_copy.proof(&hasher, Location::new(17), 0).is_ok());
+        assert_eq!(mmb_copy.root(&mut hasher, 0).unwrap(), root);
+        assert!(mmb_copy.proof(&mut hasher, Location::new(17), 0).is_ok());
     }
 
     #[test]
     fn test_init_size_validation() {
-        let hasher = H::new(ForwardFold);
+        let mut hasher = H::new(ForwardFold);
 
         assert!(Mmb::<D>::init(Config {
             nodes: vec![],

@@ -673,7 +673,7 @@ where
     /// upstream by [`crate::qmdb::any::init_with_bitmap`].
     pub(crate) async fn init_from_log(
         mut index: I,
-        log: AuthenticatedLog<F, E, C, H, S>,
+        mut log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>> {

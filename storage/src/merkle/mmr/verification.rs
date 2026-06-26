@@ -18,7 +18,7 @@ pub async fn range_proof<
     H: Hasher<Family, Digest = D>,
     S: Storage<Family, Digest = D>,
 >(
-    hasher: &H,
+    hasher: &mut H,
     mmr: &S,
     range: Range<Location>,
     inactive_peaks: usize,
@@ -32,7 +32,7 @@ pub async fn historical_range_proof<
     H: Hasher<Family, Digest = D>,
     S: Storage<Family, Digest = D>,
 >(
-    hasher: &H,
+    hasher: &mut H,
     mmr: &S,
     leaves: Location,
     range: Range<Location>,

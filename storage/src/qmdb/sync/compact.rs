@@ -450,10 +450,10 @@ where
         });
     }
 
-    let hasher = qmdb::hasher::<DB::Hasher>();
+    let mut hasher = qmdb::hasher::<DB::Hasher>();
     let last_commit_loc = Location::new(*state.leaf_count - 1);
     if !verify_proof(
-        &hasher,
+        &mut hasher,
         &state.last_commit_proof,
         last_commit_loc,
         std::slice::from_ref(&state.last_commit_op),
@@ -497,13 +497,13 @@ where
         pinned_nodes: state.pinned_nodes.clone(),
     })
     .map_err(|_| EngineError::InvalidProof)?;
-    let hasher = qmdb::hasher::<DB::Hasher>();
+    let mut hasher = qmdb::hasher::<DB::Hasher>();
     let inactive_peaks = DB::Family::inactive_peaks(
         DB::Family::location_to_position(state.leaf_count),
         inactivity_floor_loc,
     );
     let actual = mem
-        .root(&hasher, inactive_peaks)
+        .root(&mut hasher, inactive_peaks)
         .map_err(|_| EngineError::InvalidProof)?;
     if actual != target.root {
         return Err(EngineError::RootMismatch {
@@ -1070,23 +1070,23 @@ mod tests {
     }
 
     fn valid_state_and_target() -> (State<mmr::Family, u8, Digest>, Target<mmr::Family, Digest>) {
-        let hasher = qmdb::hasher::<Sha256>();
+        let mut hasher = qmdb::hasher::<Sha256>();
         let mut merkle = crate::merkle::mem::Mem::<mmr::Family, Digest>::new();
         let op = 0u8;
         let first_op = 1u8;
         let batch = merkle
             .new_batch()
-            .add(&hasher, &first_op.encode())
-            .add(&hasher, &op.encode());
-        let batch = batch.merkleize(&merkle, &hasher);
+            .add(&mut hasher, &first_op.encode())
+            .add(&mut hasher, &op.encode());
+        let batch = batch.merkleize(&merkle, &mut hasher);
         merkle.apply_batch(&batch).unwrap();
-        let root = merkle.root(&hasher, 0).unwrap();
+        let root = merkle.root(&mut hasher, 0).unwrap();
         let leaf_count = Location::new(2);
         let pinned_nodes = merkle
             .nodes_to_pin(leaf_count)
             .into_values()
             .collect::<Vec<_>>();
-        let proof = merkle.proof(&hasher, Location::new(1), 0).unwrap();
+        let proof = merkle.proof(&mut hasher, Location::new(1), 0).unwrap();
         (
             State {
                 leaf_count,

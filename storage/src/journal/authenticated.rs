@@ -67,7 +67,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, item: Item) -> Self {
         let encoded = item.encode();
-        self.inner = self.inner.add(&self.hasher, &encoded);
+        self.inner = self.inner.add(&mut self.hasher, &encoded);
         self.items.push(item);
         self
     }
@@ -99,13 +99,13 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     pub fn merkleize(self, base: &Mem<F, H::Digest>) -> MerkleizedBatchArc<F, H, Item, S> {
         let Self {
             inner,
-            hasher,
+            mut hasher,
             items,
             parent,
         } = self;
 
         let items = Arc::new(items);
-        let merkle = inner.merkleize(base, &hasher);
+        let merkle = inner.merkleize(base, &mut hasher);
         let ancestor_items = Self::collect_ancestor_items(&parent);
         Arc::new(MerkleizedBatch {
             inner: merkle,
@@ -128,11 +128,10 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         );
 
         let first = self.inner.leaves();
-        let hasher = &self.hasher;
         let digests = self.inner.strategy().map_init_collect_vec(
             items.iter().enumerate(),
-            Vec::new,
-            |buf, (i, item)| {
+            || (self.hasher.clone(), Vec::new()),
+            |(hasher, buf), (i, item)| {
                 let pos = Position::try_from(first + i as u64).expect("valid leaf location");
                 buf.clear();
                 item.write(buf);
@@ -174,7 +173,7 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     pub fn root(
         &self,
         base: &Mem<F, D>,
-        hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
+        hasher: &mut impl merkle::hasher::Hasher<F, Digest = D>,
         inactive_peaks: usize,
     ) -> Result<D, merkle::Error<F>> {
         self.inner.root(base, hasher, inactive_peaks)
@@ -183,7 +182,7 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     /// Inclusion proof for the element at `loc`.
     pub fn proof(
         &self,
-        hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
+        hasher: &mut impl merkle::hasher::Hasher<F, Digest = D>,
         loc: Location<F>,
         inactive_peaks: usize,
     ) -> Result<Proof<F, D>, merkle::Error<F>> {
@@ -193,7 +192,7 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     /// Inclusion proof for all elements in `range`.
     pub fn range_proof(
         &self,
-        hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
+        hasher: &mut impl merkle::hasher::Hasher<F, Digest = D>,
         range: core::ops::Range<Location<F>>,
         inactive_peaks: usize,
     ) -> Result<Proof<F, D>, merkle::Error<F>> {
@@ -280,9 +279,9 @@ where
 
     /// Compute the root of the Merkle structure using `inactive_peaks` and the bagging carried by
     /// the journal's hasher.
-    pub fn root(&self, inactive_peaks: usize) -> Result<H::Digest, Error<F>> {
+    pub fn root(&mut self, inactive_peaks: usize) -> Result<H::Digest, Error<F>> {
         self.merkle
-            .root(&self.hasher, inactive_peaks)
+            .root(&mut self.hasher, inactive_peaks)
             .map_err(Into::into)
     }
 
@@ -369,10 +368,10 @@ where
     pub async fn from_components(
         mut merkle: Merkle<F, E, H::Digest, S>,
         journal: C,
-        hasher: StandardHasher<H>,
+        mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error<F>> {
-        Self::align(&mut merkle, &journal, &hasher, apply_batch_size).await?;
+        Self::align(&mut merkle, &journal, &mut hasher, apply_batch_size).await?;
 
         // Sync the Merkle structure to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
@@ -392,7 +391,7 @@ where
     async fn align(
         merkle: &mut Merkle<F, E, H::Digest, S>,
         journal: &C,
-        hasher: &StandardHasher<H>,
+        hasher: &mut StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<(), Error<F>> {
         // Rewind Merkle structure elements that are ahead of the journal.
@@ -448,10 +447,13 @@ where
 
         // Append item to the journal, then update the Merkle structure state.
         let loc = self.journal.append(item).await?;
-        let unmerkleized_batch = self.merkle.new_batch().add(&self.hasher, &encoded_item);
+        let unmerkleized_batch = self
+            .merkle
+            .new_batch()
+            .add(&mut self.hasher, &encoded_item);
         let batch = self
             .merkle
-            .with_mem(|mem| unmerkleized_batch.merkleize(mem, &self.hasher));
+            .with_mem(|mem| unmerkleized_batch.merkleize(mem, &mut self.hasher));
         self.merkle.apply_batch(&batch)?;
 
         Ok(Location::new(loc))
@@ -628,11 +630,11 @@ where
 
         let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
 
-        let hasher = self.hasher.clone();
+        let mut hasher = StandardHasher::<H>::new(self.hasher.root_bagging());
         let proof = self
             .merkle
             .historical_range_proof(
-                &hasher,
+                &mut hasher,
                 historical_leaves,
                 start_loc..end_loc,
                 inactive_peaks,
@@ -707,9 +709,9 @@ macro_rules! impl_journal_new {
                     $journal_mod::Journal::init(context.child("journal"), journal_cfg).await?;
                 journal.rewind_to(rewind_predicate).await?;
 
-                let hasher = StandardHasher::<H>::new(bagging);
-                let mut merkle = Merkle::init(context.child("merkle"), &hasher, merkle_cfg).await?;
-                Self::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE).await?;
+                let mut hasher = StandardHasher::<H>::new(bagging);
+                let mut merkle = Merkle::init(context.child("merkle"), &mut hasher, merkle_cfg).await?;
+                Self::align(&mut merkle, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
                 journal.sync().await?;
                 merkle.sync().await?;
@@ -876,16 +878,18 @@ mod tests {
     >;
 
     fn journal_root<F: Family>(journal: &TestJournal<F>) -> Digest {
-        journal.root(0).unwrap()
+        let mut hasher = StandardHasher::<Sha256>::new(journal.hasher.root_bagging());
+        journal.merkle.root(&mut hasher, 0).unwrap()
     }
 
     fn batch_root<F: Family>(
         journal: &TestJournal<F>,
         batch: &MerkleizedBatch<F, Digest, TestOp<F>, Sequential>,
     ) -> Digest {
+        let mut hasher = StandardHasher::<Sha256>::new(journal.hasher.root_bagging());
         journal
             .merkle
-            .with_mem(|mem| batch.root(mem, &journal.hasher, 0))
+            .with_mem(|mem| batch.root(mem, &mut hasher, 0))
             .unwrap()
     }
 
@@ -1003,10 +1007,10 @@ mod tests {
         ContiguousJournal<deterministic::Context, TestOp<F>>,
         StandardHasher<Sha256>,
     ) {
-        let hasher = StandardHasher::new(ForwardFold);
+        let mut hasher = StandardHasher::new(ForwardFold);
         let merkle = Merkle::<F, _, Digest, Sequential>::init(
             context.child("mmr"),
-            &hasher,
+            &mut hasher,
             merkle_config(suffix, &context),
         )
         .await
@@ -1025,7 +1029,7 @@ mod tests {
         operations: &[TestOp<F>],
         start_loc: Location<F>,
         root: &<Sha256 as commonware_cryptography::Hasher>::Digest,
-        hasher: &StandardHasher<Sha256>,
+        hasher: &mut StandardHasher<Sha256>,
     ) -> bool {
         let encoded_ops: Vec<_> = operations.iter().map(|op| op.encode()).collect();
         proof.verify_range_inclusion(hasher, &encoded_ops, start_loc, root)
@@ -1055,9 +1059,9 @@ mod tests {
 
     /// Verify that align() correctly handles empty Merkle and journal components.
     async fn test_align_with_empty_mmr_and_journal_inner<F: Family + PartialEq>(context: Context) {
-        let (mut merkle, journal, hasher) = create_components::<F>(context, "align-empty").await;
+        let (mut merkle, journal, mut hasher) = create_components::<F>(context, "align-empty").await;
 
-        TestJournal::<F>::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE)
+        TestJournal::<F>::align(&mut merkle, &journal, &mut hasher, APPLY_BATCH_SIZE)
             .await
             .unwrap();
 
@@ -1079,7 +1083,7 @@ mod tests {
 
     /// Verify that align() pops Merkle elements when Merkle is ahead of the journal.
     async fn test_align_when_mmr_ahead_inner<F: Family + PartialEq>(context: Context) {
-        let (mut merkle, journal, hasher) = create_components::<F>(context, "mmr-ahead").await;
+        let (mut merkle, journal, mut hasher) = create_components::<F>(context, "mmr-ahead").await;
 
         // Add 20 operations to both Merkle and journal
         {
@@ -1088,12 +1092,12 @@ mod tests {
                 for i in 0..20 {
                     let op = create_operation::<F>(i as u8);
                     let encoded = op.encode();
-                    batch = batch.add(&hasher, &encoded);
+                    batch = batch.add(&mut hasher, &encoded);
                     journal.append(&op).await.unwrap();
                 }
                 batch
             };
-            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &mut hasher));
             merkle.apply_batch(&batch).unwrap();
         }
 
@@ -1103,7 +1107,7 @@ mod tests {
         journal.sync().await.unwrap();
 
         // Merkle has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-        TestJournal::<F>::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE)
+        TestJournal::<F>::align(&mut merkle, &journal, &mut hasher, APPLY_BATCH_SIZE)
             .await
             .unwrap();
 
@@ -1126,7 +1130,7 @@ mod tests {
 
     /// Verify that align() replays journal operations when journal is ahead of Merkle.
     async fn test_align_when_journal_ahead_inner<F: Family + PartialEq>(context: Context) {
-        let (mut merkle, journal, hasher) = create_components::<F>(context, "journal-ahead").await;
+        let (mut merkle, journal, mut hasher) = create_components::<F>(context, "journal-ahead").await;
 
         // Add 20 operations to journal only
         for i in 0..20 {
@@ -1140,7 +1144,7 @@ mod tests {
         journal.sync().await.unwrap();
 
         // Journal has 21 operations, Merkle has 0 leaves
-        TestJournal::<F>::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE)
+        TestJournal::<F>::align(&mut merkle, &journal, &mut hasher, APPLY_BATCH_SIZE)
             .await
             .unwrap();
 
@@ -1974,14 +1978,14 @@ mod tests {
         }
 
         // Verify the proof is valid
-        let hasher = StandardHasher::new(ForwardFold);
+        let mut hasher = StandardHasher::new(ForwardFold);
         let root = journal_root(&journal);
         assert!(verify_proof(
             &proof,
             &ops,
             Location::<F>::new(0),
             &root,
-            &hasher
+            &mut hasher
         ));
     }
 
@@ -2016,14 +2020,14 @@ mod tests {
         }
 
         // Verify the proof is valid
-        let hasher = StandardHasher::new(ForwardFold);
+        let mut hasher = StandardHasher::new(ForwardFold);
         let root = journal_root(&journal);
         assert!(verify_proof(
             &proof,
             &ops,
             Location::<F>::new(0),
             &root,
-            &hasher
+            &mut hasher
         ));
     }
 
@@ -2063,14 +2067,14 @@ mod tests {
         }
 
         // Verify the proof is valid
-        let hasher = StandardHasher::new(ForwardFold);
+        let mut hasher = StandardHasher::new(ForwardFold);
         let root = journal_root(&journal);
         assert!(verify_proof(
             &proof,
             &ops,
             Location::<F>::new(40),
             &root,
-            &hasher
+            &mut hasher
         ));
     }
 
@@ -2157,7 +2161,7 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "proof_historical", 50).await;
 
         // Capture root at historical state
-        let hasher = StandardHasher::new(ForwardFold);
+        let mut hasher = StandardHasher::new(ForwardFold);
         let historical_root = journal_root(&journal);
         let historical_size = journal.size().await;
 
@@ -2188,7 +2192,7 @@ mod tests {
             &ops,
             Location::<F>::new(0),
             &historical_root,
-            &hasher
+            &mut hasher
         ));
     }
 

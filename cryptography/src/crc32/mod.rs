@@ -18,15 +18,13 @@
 //!
 //! // Using the Hasher trait
 //! let mut hasher = Crc32::new();
-//! hasher.update(b"hello ");
-//! hasher.update(b"world");
-//! let digest = hasher.finalize();
+//! let digest = hasher.update(b"hello ").update(b"world").finalize();
 //!
 //! // Convert digest to u32
 //! assert_eq!(digest.as_u32(), checksum);
 //! ```
 
-use crate::Hasher;
+use crate::{Hasher, PendingHasher};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
@@ -77,16 +75,57 @@ impl Crc32 {
     }
 }
 
-impl Hasher for Crc32 {
-    type Digest = Digest;
+/// Pending CRC32C computation.
+#[must_use]
+pub struct Pending<'a> {
+    hasher: &'a mut Crc32,
+    finalized: bool,
+}
 
-    fn update(&mut self, message: &[u8]) -> &mut Self {
-        self.inner.update(message);
+impl Pending<'_> {
+    /// Append message to the pending hash computation.
+    pub fn update(self, message: &[u8]) -> Self {
+        self.hasher.inner.update(message);
         self
     }
 
-    fn finalize(&mut self) -> Self::Digest {
-        Self::Digest::from(self.inner.finalize_reset() as u32)
+    /// Hash all recorded data and reset the underlying hasher to the initial state.
+    pub fn finalize(mut self) -> Digest {
+        self.finalized = true;
+        Digest::from(self.hasher.inner.finalize_reset() as u32)
+    }
+}
+
+impl PendingHasher for Pending<'_> {
+    type Digest = Digest;
+
+    fn update(self, message: &[u8]) -> Self {
+        Self::update(self, message)
+    }
+
+    fn finalize(self) -> Self::Digest {
+        Self::finalize(self)
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        if !self.finalized {
+            self.hasher.inner = crc_fast::Digest::new(ALGORITHM);
+        }
+    }
+}
+
+impl Hasher for Crc32 {
+    type Digest = Digest;
+    type Pending<'a> = Pending<'a>;
+
+    fn update(&mut self, message: &[u8]) -> Self::Pending<'_> {
+        Pending {
+            hasher: self,
+            finalized: false,
+        }
+        .update(message)
     }
 
     fn reset(&mut self) -> &mut Self {
@@ -335,10 +374,12 @@ mod tests {
         // Test chunk sizes from 1 to 64 bytes
         for chunk_size in 1..=64 {
             let mut hasher = Crc32::new();
-            for chunk in data.chunks(chunk_size) {
-                hasher.update(chunk);
+            let mut chunks = data.chunks(chunk_size);
+            let mut pending = hasher.update(chunks.next().unwrap());
+            for chunk in chunks {
+                pending = pending.update(chunk);
             }
-            assert_eq!(hasher.finalize().as_u32(), expected);
+            assert_eq!(pending.finalize().as_u32(), expected);
         }
     }
 
@@ -368,19 +409,15 @@ mod tests {
     fn test_crc32_hasher_trait() {
         let msg = b"hello world";
 
-        // Generate initial hash using Hasher trait
         let mut hasher = Crc32::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
 
         // Verify against reference
         let expected = CRC32C_REF.checksum(msg);
         assert_eq!(digest.as_u32(), expected);
 
-        // Reuse hasher (should auto-reset after finalize)
-        hasher.update(msg);
-        let digest2 = hasher.finalize();
+        let digest2 = hasher.update(msg).finalize();
         assert_eq!(digest, digest2);
 
         // Test Hasher::hash convenience method
@@ -398,8 +435,7 @@ mod tests {
     fn test_codec() {
         let msg = b"hello world";
         let mut hasher = Crc32::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), SIZE);

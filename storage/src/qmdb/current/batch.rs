@@ -650,9 +650,9 @@ where
         (idx, chunk)
     });
 
-    let hasher = qmdb::hasher::<H>();
+    let mut hasher = qmdb::hasher::<H>();
     let new_leaves = compute_grafted_leaves::<F, H, S, N>(
-        &hasher,
+        &mut hasher,
         &ops_tree_adapter,
         chunks_to_update,
         &current_db.strategy,
@@ -672,8 +672,8 @@ where
                 grafted_batch = grafted_batch.add_leaf_digest(digest);
             }
         }
-        let gh = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-        grafted_batch.merkleize(&current_db.grafted_tree, &gh)
+        let mut gh = grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<H>(), grafting_height);
+        grafted_batch.merkleize(&current_db.grafted_tree, &mut gh)
     };
 
     // Build the layered bitmap (parent + overlay) before computing the canonical root, so that
@@ -693,7 +693,7 @@ where
         mem: &current_db.grafted_tree,
     };
     let grafted_storage =
-        grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, hasher.clone());
+        grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, qmdb::hasher::<H>());
     // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
     // index `new_complete_chunks` (the chunk currently being filled with bits) -- distinct
     // from `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can
@@ -710,7 +710,7 @@ where
         }
     };
     let canonical_root = compute_db_root::<F, H, _, _, N>(
-        &hasher,
+        &mut hasher,
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,

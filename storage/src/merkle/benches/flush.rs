@@ -62,7 +62,7 @@ fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
         c.bench_function(&format!("{}/n={n} family={family}", module_path!()), |b| {
             b.to_async(&runner).iter_custom(move |iters| async move {
                 let ctx = context::get::<Context>();
-                let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+                let mut hasher = StandardHasher::<Sha256>::new(ForwardFold);
                 let mut rng = StdRng::seed_from_u64(0);
                 let mut total = Duration::ZERO;
 
@@ -72,7 +72,7 @@ fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
                 while remaining > 0 {
                     let merkle = full::Merkle::<F, _, sha256::Digest, _>::init(
                         ctx.child(family),
-                        &hasher,
+                        &mut hasher,
                         merkle_cfg(&ctx, family),
                     )
                     .await
@@ -83,9 +83,9 @@ fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
                         // Untimed: apply a batch of `n` leaves to the in-memory structure.
                         let mut batch = merkle.new_batch();
                         for _ in 0..n {
-                            batch = batch.add(&hasher, &sha256::Digest::random(&mut rng));
+                            batch = batch.add(&mut hasher, &sha256::Digest::random(&mut rng));
                         }
-                        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+                        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &mut hasher));
                         merkle.apply_batch(&batch).unwrap();
 
                         // Timed: flush the freshly applied nodes to the journal.

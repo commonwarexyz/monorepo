@@ -270,9 +270,10 @@ where
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
+        let mut hasher = crate::qmdb::hasher::<H>();
         let root = db
             .journal
-            .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
+            .with_mem(|mem| journal.root(mem, &mut hasher, inactive_peaks))
             .expect("inactive_peaks computed from batch size");
 
         // Compute the batch chain bounds.

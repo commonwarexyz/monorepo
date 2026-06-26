@@ -80,7 +80,7 @@ pub use verify::{
 pub(crate) const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
 
 /// Return the Merkle hasher configuration used by QMDB operation roots and proofs.
-pub const fn hasher<H: CryptoHasher>() -> StandardHasher<H> {
+pub fn hasher<H: CryptoHasher>() -> StandardHasher<H> {
     StandardHasher::new(ROOT_BAGGING)
 }
 

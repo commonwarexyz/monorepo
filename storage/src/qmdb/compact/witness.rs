@@ -435,17 +435,17 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let hasher = qmdb::hasher::<H>();
+    let mut hasher = qmdb::hasher::<H>();
     merkle.with_mem(|mem| {
         let leaf_count = mem.leaves();
         let last_commit_loc = Location::new(*leaf_count - 1);
         let inactive_peaks =
             F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
-        let root = mem.root(&hasher, inactive_peaks)?;
+        let root = mem.root(&mut hasher, inactive_peaks)?;
         let pinned_nodes = F::nodes_to_pin(leaf_count)
             .map(|pos| *mem.get_node_unchecked(pos))
             .collect::<Vec<_>>();
-        let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
+        let proof = mem.proof(&mut hasher, last_commit_loc, inactive_peaks)?;
         Ok(VerifiedWitness {
             witness: Witness {
                 op_bytes: last_commit_op_bytes,
@@ -538,12 +538,12 @@ where
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
     let inactive_peaks =
         F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
-    let hasher = qmdb::hasher::<H>();
+    let mut hasher = qmdb::hasher::<H>();
     let root = merkle
-        .root(&hasher, inactive_peaks)
+        .root(&mut hasher, inactive_peaks)
         .map_err(|_| Error::DataCorrupted("failed to compute compact witness root"))?;
     if !witness.proof.verify_range_inclusion(
-        &hasher,
+        &mut hasher,
         &[witness.op_bytes.as_slice()],
         last_commit_loc,
         &root,
@@ -594,10 +594,10 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let hasher = qmdb::hasher::<H>();
+    let mut hasher = qmdb::hasher::<H>();
     let batch = {
-        let batch = merkle.new_batch().add(&hasher, &last_commit_op_bytes);
-        merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
+        let batch = merkle.new_batch().add(&mut hasher, &last_commit_op_bytes);
+        merkle.with_mem(|mem| batch.merkleize(mem, &mut hasher))
     };
     merkle.apply_batch(&batch)?;
 

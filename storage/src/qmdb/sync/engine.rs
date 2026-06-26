@@ -699,14 +699,14 @@ where
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
             proof.verify_proof_and_pinned_nodes(
-                &self.hasher,
+                &mut self.hasher,
                 &elements,
                 start_loc,
                 nodes,
                 target_root,
             )
         } else {
-            proof.verify_range_inclusion(&self.hasher, &elements, start_loc, target_root)
+            proof.verify_range_inclusion(&mut self.hasher, &elements, start_loc, target_root)
         };
 
         // Report success or failure to the resolver.

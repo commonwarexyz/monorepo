@@ -74,7 +74,7 @@ where
         )
         .await?;
 
-        let journal = authenticated::Journal::<F, _, _, _, S>::from_components(
+        let mut journal = authenticated::Journal::<F, _, _, _, S>::from_components(
             merkle,
             log,
             hasher,

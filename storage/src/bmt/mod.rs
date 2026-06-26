@@ -50,7 +50,7 @@ use alloc::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, Hasher, PendingHasher as _};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
@@ -93,9 +93,12 @@ impl<H: Hasher> Builder<H> {
     /// When added, the leaf is hashed with its position.
     pub fn add(&mut self, leaf: &H::Digest) -> u32 {
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
-        self.hasher.update(&position.to_be_bytes());
-        self.hasher.update(leaf);
-        self.leaves.push(self.hasher.finalize());
+        self.leaves.push(
+            self.hasher
+                .update(&position.to_be_bytes())
+                .update(leaf)
+                .finalize(),
+        );
         position
     }
 
@@ -135,7 +138,7 @@ impl<D: Digest> Tree<D> {
         let mut empty = false;
         let leaf_count = leaves.len() as u32;
         if leaves.is_empty() {
-            leaves.push(hasher.finalize());
+            leaves.push(hasher.update(b"").finalize());
             empty = true;
         }
 
@@ -147,19 +150,12 @@ impl<D: Digest> Tree<D> {
         while !current_level.is_singleton() {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
             for chunk in current_level.chunks(2) {
-                // Hash the left child
-                hasher.update(&chunk[0]);
-
-                // Hash the right child
-                if chunk.len() == 2 {
-                    hasher.update(&chunk[1]);
+                let right = if chunk.len() == 2 {
+                    &chunk[1]
                 } else {
-                    // If no right child exists, duplicate left child.
-                    hasher.update(&chunk[0]);
+                    &chunk[0]
                 };
-
-                // Compute the parent digest
-                next_level.push(hasher.finalize());
+                next_level.push(hasher.update(&chunk[0]).update(right).finalize());
             }
 
             // Add the computed level to the tree
@@ -170,9 +166,10 @@ impl<D: Digest> Tree<D> {
         // Compute the finalized root: H(leaf_count || tree_root)
         // This binds the root to the tree size, preventing malleability attacks.
         let tree_root = levels.last().first();
-        hasher.update(&leaf_count.to_be_bytes());
-        hasher.update(tree_root);
-        let root = hasher.finalize();
+        let root = hasher
+            .update(&leaf_count.to_be_bytes())
+            .update(tree_root)
+            .finalize();
 
         Self {
             empty,
@@ -484,9 +481,10 @@ impl<D: Digest> Proof<D> {
         }
 
         // Compute the position-hashed leaf
-        hasher.update(&position.to_be_bytes());
-        hasher.update(leaf);
-        let mut computed = hasher.finalize();
+        let mut computed = hasher
+            .update(&position.to_be_bytes())
+            .update(leaf)
+            .finalize();
 
         // Track level size to handle odd-sized levels
         let mut level_size = self.leaf_count as usize;
@@ -511,9 +509,7 @@ impl<D: Digest> Proof<D> {
             };
 
             // Compute the parent digest
-            hasher.update(left_node);
-            hasher.update(right_node);
-            computed = hasher.finalize();
+            computed = hasher.update(left_node).update(right_node).finalize();
 
             // Move up the tree
             position /= 2;
@@ -527,9 +523,10 @@ impl<D: Digest> Proof<D> {
 
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
-        hasher.update(&self.leaf_count.to_be_bytes());
-        hasher.update(&computed);
-        let finalized = hasher.finalize();
+        let finalized = hasher
+            .update(&self.leaf_count.to_be_bytes())
+            .update(&computed)
+            .finalize();
 
         if finalized == *root {
             Ok(())
@@ -556,10 +553,11 @@ impl<D: Digest> Proof<D> {
         if elements.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
-                let empty_tree_root = hasher.finalize();
-                hasher.update(&0u32.to_be_bytes());
-                hasher.update(&empty_tree_root);
-                let finalized = hasher.finalize();
+                let empty_tree_root = hasher.update(b"").finalize();
+                let finalized = hasher
+                    .update(&0u32.to_be_bytes())
+                    .update(&empty_tree_root)
+                    .finalize();
                 if finalized == *root {
                     return Ok(());
                 } else {
@@ -575,9 +573,13 @@ impl<D: Digest> Proof<D> {
             if *position >= self.leaf_count {
                 return Err(Error::InvalidPosition(*position));
             }
-            hasher.update(&position.to_be_bytes());
-            hasher.update(leaf);
-            sorted.push((*position, hasher.finalize()));
+            sorted.push((
+                *position,
+                hasher
+                    .update(&position.to_be_bytes())
+                    .update(leaf)
+                    .finalize(),
+            ));
         }
         sorted.sort_unstable_by_key(|(pos, _)| *pos);
 
@@ -628,9 +630,7 @@ impl<D: Digest> Proof<D> {
                 };
 
                 // Hash parent
-                hasher.update(&left);
-                hasher.update(&right);
-                next_level.push((parent_pos, hasher.finalize()));
+                next_level.push((parent_pos, hasher.update(&left).update(&right).finalize()));
 
                 idx += 1;
             }
@@ -653,9 +653,10 @@ impl<D: Digest> Proof<D> {
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
         let tree_root = current[0].1;
-        hasher.update(&self.leaf_count.to_be_bytes());
-        hasher.update(&tree_root);
-        let finalized = hasher.finalize();
+        let finalized = hasher
+            .update(&self.leaf_count.to_be_bytes())
+            .update(&tree_root)
+            .finalize();
 
         if finalized == *root {
             Ok(())
@@ -1495,9 +1496,10 @@ mod tests {
 
         // The root should be the hash of empty data
         let mut hasher = Sha256::default();
-        hasher.update(0u32.to_be_bytes().as_slice());
-        hasher.update(Sha256::hash(b"").as_ref());
-        let expected_root = hasher.finalize();
+        let expected_root = hasher
+            .update(0u32.to_be_bytes().as_slice())
+            .update(Sha256::hash(b"").as_ref())
+            .finalize();
         assert_eq!(roots[0], expected_root);
     }
 
