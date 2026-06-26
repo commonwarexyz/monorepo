@@ -501,7 +501,7 @@ mod tests {
         let batch = {
             let mut batch = mem.new_batch();
             for i in 0u64..n {
-                let element = hasher.digest(&i.to_be_bytes());
+                let element = hasher.digest(i.to_be_bytes());
                 batch = batch.add(hasher, &element);
             }
             batch.merkleize(&mem, hasher)
@@ -660,7 +660,7 @@ mod tests {
             let mut reference = Mem::<F, D>::new();
             let mut pruned = Mem::<F, D>::new();
             for i in 0u64..200 {
-                let element = hasher.digest(&i.to_be_bytes());
+                let element = hasher.digest(i.to_be_bytes());
                 let cs = reference
                     .new_batch()
                     .add(&mut hasher, &element)
@@ -703,7 +703,7 @@ mod tests {
         let batch = {
             let mut batch = mem.new_batch();
             for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
-                let element = hasher.digest(&leaf.to_be_bytes());
+                let element = hasher.digest(leaf.to_be_bytes());
                 batch = batch
                     .update_leaf(hasher, Location::new(leaf), &element)
                     .unwrap();

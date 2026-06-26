@@ -237,9 +237,6 @@ commonware_macros::stability_scope!(BETA {
 
     pub type DigestOf<H> = <H as Hasher>::Digest;
 
-    /// In-progress hash computation for `H`.
-    pub type Pending<'a, H> = <H as Hasher>::Pending<'a>;
-
     /// A hash computation that has accepted at least one update and must either be extended or
     /// finalized.
     pub trait PendingHasher: Sized {

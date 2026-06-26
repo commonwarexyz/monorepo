@@ -14,8 +14,7 @@ pub struct FuzzInput {
     pub case_selector: u8,
 }
 
-fn hash_chunks(chunks: &[Vec<u8>]) -> Digest {
-    let mut hasher = OurSha256::new();
+fn hash_chunks_with(hasher: &mut OurSha256, chunks: &[Vec<u8>]) -> Digest {
     let mut chunks = chunks.iter();
     let Some(first) = chunks.next() else {
         return hasher.update(b"").finalize();
@@ -25,6 +24,10 @@ fn hash_chunks(chunks: &[Vec<u8>]) -> Digest {
         pending = pending.update(chunk);
     }
     pending.finalize()
+}
+
+fn hash_chunks(chunks: &[Vec<u8>]) -> Digest {
+    hash_chunks_with(&mut OurSha256::new(), chunks)
 }
 
 // Basic hashing comparison with chunks
@@ -55,18 +58,7 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
 
     // Reset and second round
     our_hasher.reset();
-    let our_result_after_reset = {
-        let mut chunks_iter = chunks.iter();
-        if let Some(first) = chunks_iter.next() {
-            let mut pending = our_hasher.update(first);
-            for chunk in chunks_iter {
-                pending = pending.update(chunk);
-            }
-            pending.finalize()
-        } else {
-            our_hasher.update(b"").finalize()
-        }
-    };
+    let our_result_after_reset = hash_chunks_with(&mut our_hasher, chunks);
     let mut ref_hasher = RefSha256::new();
     for chunk in chunks {
         ref_hasher.update(chunk);

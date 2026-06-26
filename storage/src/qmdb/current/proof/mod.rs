@@ -221,11 +221,11 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         .await?;
 
         let partial_chunk_digest =
-            partial_chunk::<_, N>(status).map(|(chunk, _)| hasher.digest(&chunk));
+            partial_chunk::<_, N>(status).map(|(chunk, _)| hasher.digest(chunk));
 
         let pending_chunk_digest: F::PendingChunk<D> =
             pending_chunk::<_, _, N>(status, ops_leaves, grafting_height)?
-                .map(|chunk| hasher.digest(&chunk))
+                .map(|chunk| hasher.digest(chunk))
                 .try_into()
                 .expect("pending_chunk must be consistent with family");
 
@@ -987,7 +987,7 @@ mod tests {
         .await
         .unwrap();
 
-        let element = hasher.digest(&(*loc).to_be_bytes());
+        let element = hasher.digest((*loc).to_be_bytes());
         assert!(proof.verify(
             &mut hasher,
             loc,
@@ -1088,7 +1088,7 @@ mod tests {
         .await
         .unwrap();
 
-        let element = hasher.digest(&(*loc).to_be_bytes());
+        let element = hasher.digest((*loc).to_be_bytes());
         let chunk_idx = (*loc / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
         assert!(proof.verify(
             &mut hasher,
@@ -1199,7 +1199,7 @@ mod tests {
         .unwrap();
 
         let elements = (*start_loc..leaf_count)
-            .map(|idx| hasher.digest(&idx.to_be_bytes()))
+            .map(|idx| hasher.digest(idx.to_be_bytes()))
             .collect::<Vec<_>>();
         let start_chunk_idx = (*start_loc / chunk_bits) as usize;
         let end_chunk_idx = complete_chunks as usize;
@@ -1295,7 +1295,7 @@ mod tests {
         .await
         .unwrap();
 
-        let element = hasher.digest(&(*loc).to_be_bytes());
+        let element = hasher.digest((*loc).to_be_bytes());
         let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
 
         // Tamper with the proof by injecting a fake partial chunk digest
@@ -1389,7 +1389,7 @@ mod tests {
         .await
         .unwrap();
         let operations = (*range.start..*range.end)
-            .map(|i| hasher.digest(&i.to_be_bytes()))
+            .map(|i| hasher.digest(i.to_be_bytes()))
             .collect::<Vec<_>>();
 
         // Provide every bitmap chunk touched by the proven operation range.
@@ -1774,7 +1774,7 @@ mod tests {
         .await
         .unwrap();
 
-        let element = hasher.digest(&(*loc).to_be_bytes());
+        let element = hasher.digest((*loc).to_be_bytes());
         let chunk_idx = (*loc / chunk_bits) as usize;
         assert!(proof.verify(
             &mut hasher,
@@ -1908,9 +1908,9 @@ mod tests {
             let pending_chunk_digest =
                 db::pending_chunk::<F, _, N>(&status, ops_leaves_for_root, grafting_height)
                     .unwrap()
-                    .map(|c| hasher.digest(&c));
+                    .map(|c| hasher.digest(c));
             let partial_digest =
-                db::partial_chunk::<_, N>(&status).map(|(c, nb)| (nb, hasher.digest(&c)));
+                db::partial_chunk::<_, N>(&status).map(|(c, nb)| (nb, hasher.digest(c)));
             let grafted_root = db::compute_grafted_root::<F, Sha256, _, _, N>(
                 &mut hasher,
                 &status,
@@ -1961,7 +1961,7 @@ mod tests {
             );
 
             let elements: Vec<sha256::Digest> = (0..leaf_count)
-                .map(|i| hasher.digest(&i.to_be_bytes()))
+                .map(|i| hasher.digest(i.to_be_bytes()))
                 .collect();
             // Range covers chunks 0..=1: chunk 0 is pending, chunk 1 is partial. Provide both.
             let chunks: Vec<[u8; N]> = (0..=1)
@@ -1987,7 +1987,7 @@ mod tests {
                 pending_proof.pending_chunk_digest.is_some(),
                 "expected single-element proof to carry pending chunk digest at k={k}"
             );
-            let pending_element = hasher.digest(&(*pending_loc).to_be_bytes());
+            let pending_element = hasher.digest((*pending_loc).to_be_bytes());
             assert!(
                 pending_proof.verify(
                     &mut hasher,
@@ -2213,7 +2213,7 @@ mod tests {
         .unwrap();
         assert_eq!(proof.proof.inactive_peaks, aligned_inactive);
 
-        let element = hasher.digest(&(*loc).to_be_bytes());
+        let element = hasher.digest((*loc).to_be_bytes());
         let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
         assert!(proof.verify(&mut hasher, loc, &[element], &[chunk], &root));
     }

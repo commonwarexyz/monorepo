@@ -212,12 +212,12 @@ where
     .await?;
     let ops_root = any.root();
     let partial_digest = partial.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(&chunk);
+        let digest = hasher.digest(chunk);
         (next_bit, digest)
     });
     let pending_digest =
         db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
-            .map(|chunk| hasher.digest(&chunk));
+            .map(|chunk| hasher.digest(chunk));
     let root = db::combine_roots(
         &mut hasher,
         &ops_root,

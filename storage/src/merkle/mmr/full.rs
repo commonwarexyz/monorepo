@@ -76,7 +76,7 @@ mod tests {
 
             let mut batch = mmr.new_batch();
             for i in 0u64..NUM_ELEMENTS {
-                let element = hasher.digest(&i.to_be_bytes());
+                let element = hasher.digest(i.to_be_bytes());
                 batch = batch.add(&mut hasher, &element);
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
@@ -225,7 +225,7 @@ mod tests {
 
             let mut batch = mmr.new_batch();
             for i in 0u64..10 {
-                let element = hasher.digest(&i.to_be_bytes());
+                let element = hasher.digest(i.to_be_bytes());
                 batch = batch.add(&mut hasher, &element);
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &mut hasher));
@@ -235,7 +235,7 @@ mod tests {
             // Batch A: add 5 elements.
             let mut batch_a = mmr.new_batch();
             for i in 10u64..15 {
-                let element = hasher.digest(&i.to_be_bytes());
+                let element = hasher.digest(i.to_be_bytes());
                 batch_a = batch_a.add(&mut hasher, &element);
             }
             let merkleized_a = mmr.with_mem(|mem| batch_a.merkleize(mem, &mut hasher));
@@ -243,7 +243,7 @@ mod tests {
             // Batch B on merkleized A: add 5 more elements.
             let mut batch_b = merkleized_a.new_batch();
             for i in 15u64..20 {
-                let element = hasher.digest(&i.to_be_bytes());
+                let element = hasher.digest(i.to_be_bytes());
                 batch_b = batch_b.add(&mut hasher, &element);
             }
             let merkleized_b = mmr.with_mem(|mem| batch_b.merkleize(mem, &mut hasher));

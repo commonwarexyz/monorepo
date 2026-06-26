@@ -168,6 +168,7 @@ impl<H: CHasher> Standard<H> {
     }
 
     /// Hash an encodable value into a single digest.
+    #[inline]
     pub fn hash<E: Encode>(&mut self, value: E) -> H::Digest {
         self.hasher.hash_encoded(value)
     }
@@ -181,41 +182,13 @@ impl<H: CHasher> Standard<H> {
 impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     type Digest = H::Digest;
 
+    #[inline]
     fn hash<E: Encode>(&mut self, value: E) -> H::Digest {
         Self::hash(self, value)
     }
 
     fn root_bagging(&self) -> Bagging {
         Self::root_bagging(self)
-    }
-
-    #[inline]
-    fn node_digest(
-        &mut self,
-        pos: Position<F>,
-        left: &Self::Digest,
-        right: &Self::Digest,
-    ) -> Self::Digest {
-        self.hasher.hash_encoded((pos, left, right))
-    }
-
-    #[inline]
-    fn leaf_digest<E: Encode>(&mut self, pos: Position<F>, element: E) -> Self::Digest {
-        self.hasher.hash_encoded((pos, element))
-    }
-
-    #[inline]
-    fn leaf_digest_ref<E: Encode + ?Sized>(
-        &mut self,
-        pos: Position<F>,
-        element: &E,
-    ) -> Self::Digest {
-        self.hasher.hash_encoded((pos, EncodeRef::new(element)))
-    }
-
-    #[inline]
-    fn fold(&mut self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
-        self.hasher.hash_encoded((acc, peak))
     }
 }
 
@@ -296,23 +269,23 @@ mod tests {
         let digest1 = test_digest::<H>(1);
         let digest2 = test_digest::<H>(2);
 
-        let out = mmr_hasher.leaf_digest(Position::new(0), &digest1);
+        let out = mmr_hasher.leaf_digest(Position::new(0), digest1);
         assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
 
-        let mut out2 = mmr_hasher.leaf_digest(Position::new(0), &digest1);
+        let mut out2 = mmr_hasher.leaf_digest(Position::new(0), digest1);
         assert_eq!(out, out2, "hash should be re-computed consistently");
 
-        out2 = mmr_hasher.leaf_digest(Position::new(1), &digest1);
+        out2 = mmr_hasher.leaf_digest(Position::new(1), digest1);
         assert_ne!(out, out2, "hash should change with different pos");
 
-        out2 = mmr_hasher.leaf_digest(Position::new(0), &digest2);
+        out2 = mmr_hasher.leaf_digest(Position::new(0), digest2);
         assert_ne!(out, out2, "hash should change with different input digest");
 
         // A leaf element far longer than the fixed-hash scratch must stream to the correct digest
         // rather than overrun the scratch.
         let big = [0xABu8; 200];
         let pos = Position::new(2);
-        let out_big = mmr_hasher.leaf_digest(pos, &big);
+        let out_big = mmr_hasher.leaf_digest(pos, big);
         let expected_big = mmr_hasher.hash((pos, &big));
         assert_eq!(
             out_big, expected_big,

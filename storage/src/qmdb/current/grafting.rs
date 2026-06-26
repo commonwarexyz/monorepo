@@ -751,7 +751,7 @@ mod tests {
 
             // Generate the elements that build_test_mmr uses: sha256(i.to_be_bytes()).
             let elements: Vec<_> = (0..NUM_ELEMENTS)
-                .map(|i| standard.digest(&i.to_be_bytes()))
+                .map(|i| standard.digest(i.to_be_bytes()))
                 .collect();
 
             // Height 0 grafting (1:1 mapping).

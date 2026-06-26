@@ -286,13 +286,13 @@ where
         )
         .await?;
         let partial_chunk = partial_chunk::<_, N>(self.any.bitmap.as_ref())
-            .map(|(chunk, next_bit)| (next_bit, hasher.digest(&chunk)));
+            .map(|(chunk, next_bit)| (next_bit, hasher.digest(chunk)));
         let pending_chunk_digest: F::PendingChunk<H::Digest> = pending_chunk::<F, _, N>(
             self.any.bitmap.as_ref(),
             ops_leaves,
             grafting::height::<N>(),
         )?
-        .map(|chunk| hasher.digest(&chunk))
+        .map(|chunk| hasher.digest(chunk))
         .try_into()
         .expect("pending_chunk must be consistent with family");
         Ok(OpsRootWitness {
@@ -953,9 +953,9 @@ pub(super) async fn compute_db_root<
     let grafted_root =
         compute_grafted_root(hasher, status, storage, ops_leaves, inactivity_floor).await?;
     let pending = pending_chunk::<F, B, N>(status, ops_leaves, grafting::height::<N>())?
-        .map(|chunk| hasher.digest(&chunk));
+        .map(|chunk| hasher.digest(chunk));
     let partial = partial_chunk.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(&chunk);
+        let digest = hasher.digest(chunk);
         (next_bit, digest)
     });
     Ok(combine_roots(

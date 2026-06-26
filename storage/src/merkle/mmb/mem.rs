@@ -73,7 +73,7 @@ mod tests {
 
         let leaf_positions = [0u64, 1, 3, 4, 6, 8, 10, 11];
         for (i, pos) in leaf_positions.into_iter().enumerate() {
-            let expected = hasher.leaf_digest(Position::new(pos), &(i as u64).to_be_bytes());
+            let expected = hasher.leaf_digest(Position::new(pos), (i as u64).to_be_bytes());
             assert_eq!(
                 mmb.get_node(Position::new(pos)).unwrap(),
                 expected,

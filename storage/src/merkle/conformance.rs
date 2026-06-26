@@ -21,7 +21,7 @@ where
     let batch = {
         let mut batch = mem.new_batch();
         for i in 0u64..elements {
-            let element = hasher.digest(&i.to_be_bytes());
+            let element = hasher.digest(i.to_be_bytes());
             batch = batch.add(hasher, &element);
         }
         batch.merkleize(&mem, hasher)
