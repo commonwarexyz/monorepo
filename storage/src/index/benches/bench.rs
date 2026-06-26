@@ -13,6 +13,7 @@ mod insert;
 mod insert_and_retain;
 mod lookup;
 mod lookup_miss;
+mod snapshot;
 
 pub(crate) type Digest = <Sha256 as Hasher>::Digest;
 
@@ -57,4 +58,5 @@ criterion_main!(
     insert_and_retain::benches,
     lookup::benches,
     lookup_miss::benches,
+    snapshot::benches,
 );

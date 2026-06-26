@@ -34,11 +34,11 @@ mod cursor;
 mod partition;
 
 pub use self::cursor::Cursor;
-use self::partition::Partition;
+use self::partition::PartitionState;
 use crate::{
     index::{
         partitioned::partition_index_and_sub_key, Cursor as CursorTrait, Factory, Ordered,
-        Unordered,
+        OrderedReadable, Readable, Snapshottable, Unordered,
     },
     translator::Translator,
 };
@@ -47,8 +47,8 @@ use commonware_runtime::{
     Metrics,
 };
 use std::{
-    collections::{btree_map, hash_map, BTreeMap, HashMap},
-    ops::Bound,
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
 };
 
 /// Sorted-array length at which a partition converts to a `BTreeMap`, bounding the O(occupancy)
@@ -57,6 +57,7 @@ use std::{
 /// entries at `P=1`, past ~33M at `P=2`, and only past ~8.5B at `P=3` (so P=3 effectively never
 /// spills under honest load). See the module docs.
 const SPILL_THRESHOLD: usize = 512;
+const MAX_SPARSE_DEPTH: u16 = 8;
 
 /// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
 /// partition to a `BTreeMap` to bound its O(occupancy) insert cost (see `spilled` and the module
@@ -65,15 +66,14 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     /// Translates the prefix-stripped key bytes into a partition-local key.
     translator: T,
 
-    /// The `2^(8*P)` partitions, indexed by the `P`-byte key prefix. Each stores its translated
-    /// keys and values as sorted arrays (the inline representation); an emptied partition may
-    /// instead have spilled (see `spilled`).
-    partitions: Box<[Partition<T::Key, V>]>,
+    /// Compacted base visible to snapshots.
+    base: Arc<Base<T::Key, V>>,
 
-    /// Partitions that have spilled out of their sorted arrays (reached `SPILL_THRESHOLD` entries),
-    /// keyed by partition index; each maps translated keys to their values newest-first. Empty until
-    /// a partition fills, whether from honest growth at low `P` or adversarial grinding.
-    spilled: HashMap<usize, BTreeMap<T::Key, Vec<V>>>,
+    /// Immutable overlay chain visible to snapshots.
+    sealed: Arc<Epoch<T::Key, V>>,
+
+    /// Writer-owned changed runs since `sealed`.
+    head: Overlay<T::Key, V>,
 
     /// Sorted-array length at which a partition spills to `spilled`; [SPILL_THRESHOLD] in
     /// production, lowered by tests to exercise spilling cheaply.
@@ -89,6 +89,190 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     pruned: Counter,
 }
 
+/// Read-only snapshot of a partitioned ordered index.
+#[derive(Clone)]
+pub struct Snapshot<T: Translator, V: Send + Sync, const P: usize> {
+    translator: T,
+    base: Arc<Base<T::Key, V>>,
+    sealed: Arc<Epoch<T::Key, V>>,
+    count: usize,
+}
+
+struct Base<K, V> {
+    partitions: Box<[PartitionState<K, V>]>,
+}
+
+struct Overlay<K, V> {
+    partitions: HashMap<usize, BTreeMap<K, Vec<V>>>,
+}
+
+impl<K, V> Default for Overlay<K, V> {
+    fn default() -> Self {
+        Self {
+            partitions: HashMap::new(),
+        }
+    }
+}
+
+struct Epoch<K, V> {
+    parent: Option<Arc<Self>>,
+    overlay: Overlay<K, V>,
+    depth: u16,
+    changed_runs: usize,
+}
+
+impl<K, V> Default for Epoch<K, V> {
+    fn default() -> Self {
+        Self {
+            parent: None,
+            overlay: Overlay::default(),
+            depth: 0,
+            changed_runs: 0,
+        }
+    }
+}
+
+impl<K: Ord + Copy, V> Overlay<K, V> {
+    fn is_empty(&self) -> bool {
+        self.partitions.is_empty()
+    }
+
+    fn changed_runs(&self) -> usize {
+        self.partitions.values().map(BTreeMap::len).sum()
+    }
+
+    fn run(&self, i: usize, key: &K) -> Option<&[V]> {
+        self.partitions
+            .get(&i)
+            .and_then(|partition| partition.get(key))
+            .map(Vec::as_slice)
+    }
+
+    fn next_key(&self, i: usize, after: Option<K>) -> Option<K> {
+        let partition = self.partitions.get(&i)?;
+        after.map_or_else(
+            || partition.first_key_value().map(|(key, _)| *key),
+            |key| {
+                partition
+                    .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
+                    .next()
+                    .map(|(key, _)| *key)
+            },
+        )
+    }
+
+    fn prev_key(&self, i: usize, before: Option<K>) -> Option<K> {
+        let partition = self.partitions.get(&i)?;
+        before.map_or_else(
+            || partition.last_key_value().map(|(key, _)| *key),
+            |key| {
+                partition
+                    .range((std::ops::Bound::Unbounded, std::ops::Bound::Excluded(key)))
+                    .next_back()
+                    .map(|(key, _)| *key)
+            },
+        )
+    }
+
+    fn apply_to_partition(&self, i: usize, runs: &mut BTreeMap<K, Vec<V>>)
+    where
+        V: Clone,
+    {
+        let Some(partition) = self.partitions.get(&i) else {
+            return;
+        };
+        for (key, values) in partition {
+            // Empty runs are tombstones that mask older/base values.
+            if values.is_empty() {
+                runs.remove(key);
+            } else {
+                runs.insert(*key, values.clone());
+            }
+        }
+    }
+}
+
+impl<K: Ord + Copy, V> Epoch<K, V> {
+    fn run(&self, i: usize, key: &K) -> Option<&[V]> {
+        self.overlay
+            .run(i, key)
+            .or_else(|| self.parent.as_deref().and_then(|parent| parent.run(i, key)))
+    }
+
+    fn parent_changed_runs(parent: &Option<Arc<Self>>) -> usize {
+        parent.as_ref().map_or(0, |parent| parent.changed_runs)
+    }
+
+    fn next_key(&self, i: usize, after: Option<K>) -> Option<K> {
+        let parent = self
+            .parent
+            .as_deref()
+            .and_then(|parent| parent.next_key(i, after));
+        next_candidate(after, [self.overlay.next_key(i, after), parent])
+    }
+
+    fn prev_key(&self, i: usize, before: Option<K>) -> Option<K> {
+        let parent = self
+            .parent
+            .as_deref()
+            .and_then(|parent| parent.prev_key(i, before));
+        prev_candidate(before, [self.overlay.prev_key(i, before), parent])
+    }
+
+    fn apply_to_partition(&self, i: usize, runs: &mut BTreeMap<K, Vec<V>>)
+    where
+        V: Clone,
+    {
+        // Apply oldest to newest so later overlays win.
+        if let Some(parent) = &self.parent {
+            parent.apply_to_partition(i, runs);
+        }
+        self.overlay.apply_to_partition(i, runs);
+    }
+}
+
+fn base_next_key<K: Ord + Copy, V>(
+    partition: &PartitionState<K, V>,
+    after: Option<K>,
+) -> Option<K> {
+    after.map_or_else(
+        || partition.first_key(),
+        |key| partition.next_key_after(&key),
+    )
+}
+
+fn base_prev_key<K: Ord + Copy, V>(
+    partition: &PartitionState<K, V>,
+    before: Option<K>,
+) -> Option<K> {
+    before.map_or_else(
+        || partition.last_key(),
+        |key| partition.prev_key_before(&key),
+    )
+}
+
+fn next_candidate<K: Ord + Copy>(
+    after: Option<K>,
+    candidates: impl IntoIterator<Item = Option<K>>,
+) -> Option<K> {
+    candidates
+        .into_iter()
+        .flatten()
+        .filter(|candidate| after.is_none_or(|after| *candidate > after))
+        .min()
+}
+
+fn prev_candidate<K: Ord + Copy>(
+    before: Option<K>,
+    candidates: impl IntoIterator<Item = Option<K>>,
+) -> Option<K> {
+    candidates
+        .into_iter()
+        .flatten()
+        .filter(|candidate| before.is_none_or(|before| *candidate < before))
+        .max()
+}
+
 impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     /// Create a new [Index] with the given metrics context and translator.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
@@ -97,13 +281,14 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         }
         let count = 1usize << (P * 8);
         let partitions = (0..count)
-            .map(|_| Partition::default())
+            .map(|_| PartitionState::default())
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
             translator,
-            partitions,
-            spilled: HashMap::new(),
+            base: Arc::new(Base { partitions }),
+            sealed: Arc::new(Epoch::default()),
+            head: Overlay::default(),
             threshold: SPILL_THRESHOLD,
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
@@ -111,99 +296,148 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         }
     }
 
-    /// Create a new [Index] with an explicit spill threshold so tests can exercise spilling without
-    /// inserting [SPILL_THRESHOLD] keys.
-    #[cfg(test)]
-    pub(crate) fn with_threshold(ctx: impl Metrics, translator: T, threshold: usize) -> Self {
-        let mut index = Self::new(ctx, translator);
-        index.threshold = threshold;
-        index
+    /// Merge base and overlays for one partition.
+    fn compact_base_partition(&self, i: usize) -> PartitionState<T::Key, V>
+    where
+        V: Clone,
+    {
+        let mut runs = self.base.partitions[i]
+            .runs()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        self.sealed.apply_to_partition(i, &mut runs);
+        self.head.apply_to_partition(i, &mut runs);
+        PartitionState::from_runs(runs, self.threshold)
     }
 
-    /// Spill partition `i` to the side-table if its sorted array has reached the threshold.
-    fn maybe_spill(&mut self, i: usize) {
-        if self.partitions[i].len() < self.threshold {
-            return;
+    const fn count(&self) -> usize {
+        1usize << (P * 8)
+    }
+
+    fn run(&self, i: usize, k: &T::Key) -> &[V] {
+        self.head
+            .run(i, k)
+            .or_else(|| self.sealed.run(i, k))
+            .unwrap_or_else(|| self.base.partitions[i].values(k))
+    }
+
+    /// Materialize the visible run into the live head overlay.
+    fn ensure_run(&mut self, i: usize, k: T::Key) -> &mut Vec<V>
+    where
+        V: Clone,
+    {
+        if self
+            .head
+            .partitions
+            .get(&i)
+            .is_some_and(|partition| partition.contains_key(&k))
+        {
+            return self
+                .head
+                .partitions
+                .get_mut(&i)
+                .unwrap()
+                .get_mut(&k)
+                .unwrap();
         }
-        let inner: BTreeMap<T::Key, Vec<V>> = self.partitions[i].drain_runs().into_iter().collect();
-        self.spilled.insert(i, inner);
+
+        // First mutation after a snapshot clones the visible run.
+        let run = self
+            .sealed
+            .run(i, &k)
+            .unwrap_or_else(|| self.base.partitions[i].values(&k))
+            .to_vec();
+        self.head
+            .partitions
+            .entry(i)
+            .or_default()
+            .entry(k)
+            .or_insert(run)
     }
 
-    /// The `BTreeMap` of spilled partition `i`, or `None` if `i` has not spilled. The empty-map
-    /// check skips hashing `i` in the common case where no partition has ever spilled.
-    fn spilled_partition(&self, i: usize) -> Option<&BTreeMap<T::Key, Vec<V>>> {
-        if self.spilled.is_empty() {
-            return None;
-        }
-        self.spilled.get(&i)
+    /// Smallest visible key in partition `i` strictly greater than `after`.
+    fn next_key_in_partition(&self, i: usize, after: Option<T::Key>) -> Option<T::Key> {
+        next_candidate(
+            after,
+            [
+                self.head.next_key(i, after),
+                self.sealed.next_key(i, after),
+                base_next_key(&self.base.partitions[i], after),
+            ],
+        )
     }
 
-    /// The values for translated key `k` in partition `i` (empty if absent), from whichever
-    /// representation the partition currently uses.
-    fn partition_values(&self, i: usize, k: &T::Key) -> &[V] {
-        if !self.partitions[i].is_empty() {
-            return self.partitions[i].values(k);
-        }
-        self.spilled_partition(i)
-            .and_then(|inner| inner.get(k))
-            .map_or(&[], Vec::as_slice)
+    /// Largest visible key in partition `i` strictly less than `before`.
+    fn prev_key_in_partition(&self, i: usize, before: Option<T::Key>) -> Option<T::Key> {
+        prev_candidate(
+            before,
+            [
+                self.head.prev_key(i, before),
+                self.sealed.prev_key(i, before),
+                base_prev_key(&self.base.partitions[i], before),
+            ],
+        )
     }
 
-    /// Values of the smallest key in partition `i` (None if the partition is empty).
-    fn partition_first(&self, i: usize) -> Option<&[V]> {
-        self.partitions[i].first_values().or_else(|| {
-            self.spilled_partition(i)?
-                .first_key_value()
-                .map(|(_, v)| v.as_slice())
-        })
-    }
-
-    /// Values of the largest key in partition `i` (None if the partition is empty).
-    fn partition_last(&self, i: usize) -> Option<&[V]> {
-        self.partitions[i].last_values().or_else(|| {
-            self.spilled_partition(i)?
-                .last_key_value()
-                .map(|(_, v)| v.as_slice())
-        })
-    }
-
-    /// Values of the smallest key strictly greater than `k` in partition `i`.
-    fn partition_next_after(&self, i: usize, k: &T::Key) -> Option<&[V]> {
-        self.partitions[i].next_values_after(k).or_else(|| {
-            self.spilled_partition(i)?
-                .range((Bound::Excluded(*k), Bound::Unbounded))
-                .next()
-                .map(|(_, v)| v.as_slice())
-        })
-    }
-
-    /// Values of the largest key strictly less than `k` in partition `i`.
-    fn partition_prev_before(&self, i: usize, k: &T::Key) -> Option<&[V]> {
-        self.partitions[i].prev_values_before(k).or_else(|| {
-            self.spilled_partition(i)?
-                .range((Bound::Unbounded, Bound::Excluded(*k)))
-                .next_back()
-                .map(|(_, v)| v.as_slice())
-        })
-    }
-
-    /// Number of partitions currently spilled to the side-table.
-    #[cfg(test)]
-    pub(crate) fn spilled_count(&self) -> usize {
-        self.spilled.len()
+    /// Returns whether sealed overlays should be merged into the base soon.
+    pub fn needs_compaction(&self) -> bool {
+        self.sealed.depth >= MAX_SPARSE_DEPTH || self.sealed.changed_runs >= self.count()
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> Factory<T> for Index<T, V, P> {
+impl<T: Translator, V: Clone + Send + Sync, const P: usize> Index<T, V, P> {
+    /// Merge sealed overlays and the live head into a new base.
+    pub fn compact(&mut self) {
+        let count = self.count();
+        self.base = Arc::new(Base {
+            partitions: (0..count)
+                .map(|i| self.compact_base_partition(i))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        });
+        self.sealed = Arc::new(Epoch::default());
+        self.head = Overlay::default();
+    }
+}
+
+impl<T: Translator, V: Send + Sync, const P: usize> Snapshot<T, V, P> {
+    fn run(&self, i: usize, k: &T::Key) -> &[V] {
+        self.sealed
+            .run(i, k)
+            .unwrap_or_else(|| self.base.partitions[i].values(k))
+    }
+
+    fn next_key_in_partition(&self, i: usize, after: Option<T::Key>) -> Option<T::Key> {
+        next_candidate(
+            after,
+            [
+                self.sealed.next_key(i, after),
+                base_next_key(&self.base.partitions[i], after),
+            ],
+        )
+    }
+
+    fn prev_key_in_partition(&self, i: usize, before: Option<T::Key>) -> Option<T::Key> {
+        prev_candidate(
+            before,
+            [
+                self.sealed.prev_key(i, before),
+                base_prev_key(&self.base.partitions[i], before),
+            ],
+        )
+    }
+}
+
+impl<T: Translator, V: Clone + Send + Sync, const P: usize> Factory<T> for Index<T, V, P> {
     fn new(ctx: impl Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P> {
+impl<T: Translator, V: Clone + Send + Sync, const P: usize> Unordered for Index<T, V, P> {
     type Value = V;
     type Cursor<'a>
-        = Cursor<'a, T::Key, V>
+        = Cursor<'a, V>
     where
         Self: 'a;
 
@@ -213,7 +447,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        self.partition_values(i, &k).iter()
+        self.run(i, &k).iter()
     }
 
     fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
@@ -233,7 +467,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
             .collect();
         order.sort_unstable();
         for (partition, translated, key_idx) in order {
-            for value in self.partition_values(partition, &translated) {
+            for value in self.run(partition, &translated) {
                 visit(key_idx, value);
             }
         }
@@ -242,38 +476,13 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        if !self.partitions[i].is_empty() {
-            let run = self.partitions[i].run_range(&k);
-            if run.is_empty() {
-                return None;
-            }
-            return Some(Cursor::soa(
-                &mut self.partitions[i],
-                k,
-                run,
-                &self.keys,
-                &self.items,
-                &self.pruned,
-            ));
+        if self.run(i, &k).is_empty() {
+            return None;
         }
-
-        // Hand out a spilled cursor if the partition has spilled and holds `k`.
-        if self
-            .spilled_partition(i)
-            .is_some_and(|inner| inner.contains_key(&k))
-        {
-            return Some(Cursor::spilled(
-                &mut self.spilled,
-                i,
-                k,
-                &self.keys,
-                &self.items,
-                &self.pruned,
-            ));
-        }
-
-        // Partition is genuinely empty.
-        None
+        let keys = self.keys.clone();
+        let items = self.items.clone();
+        let pruned = self.pruned.clone();
+        Some(Cursor::new(self.ensure_run(i, k), keys, items, pruned))
     }
 
     fn get_mut_or_insert<'a>(
@@ -283,88 +492,28 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     ) -> Option<Self::Cursor<'a>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        if !self.partitions[i].is_empty() {
-            let run = self.partitions[i].run_range(&k);
-            if !run.is_empty() {
-                return Some(Cursor::soa(
-                    &mut self.partitions[i],
-                    k,
-                    run,
-                    &self.keys,
-                    &self.items,
-                    &self.pruned,
-                ));
-            }
-            self.partitions[i].insert_at(run.start, k, value);
-            self.keys.inc();
-            self.items.inc();
-            self.maybe_spill(i);
-            return None;
+        if !self.run(i, &k).is_empty() {
+            let keys = self.keys.clone();
+            let items = self.items.clone();
+            let pruned = self.pruned.clone();
+            return Some(Cursor::new(self.ensure_run(i, k), keys, items, pruned));
         }
-
-        // Partition i is empty. If it's because it has spilled, serve or create the key in its
-        // `BTreeMap`.
-        if let Some(inner) = self.spilled_partition(i) {
-            if inner.contains_key(&k) {
-                return Some(Cursor::spilled(
-                    &mut self.spilled,
-                    i,
-                    k,
-                    &self.keys,
-                    &self.items,
-                    &self.pruned,
-                ));
-            }
-            self.spilled.get_mut(&i).unwrap().insert(k, vec![value]);
-            self.keys.inc();
-            self.items.inc();
-            return None;
-        }
-
-        // Partition i is genuinely empty: start a fresh sorted array.
-        self.partitions[i].insert_at(0, k, value);
+        self.ensure_run(i, k).insert(0, value);
         self.keys.inc();
         self.items.inc();
-        self.maybe_spill(i);
-
         None
     }
 
     fn insert(&mut self, key: &[u8], value: Self::Value) {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        if !self.partitions[i].is_empty() {
-            let run = self.partitions[i].run_range(&k);
-            let new_key = run.is_empty();
-            self.partitions[i].insert_at(run.start, k, value);
-            self.items.inc();
-            if new_key {
-                self.keys.inc();
-            }
-            self.maybe_spill(i);
-            return;
-        }
-
-        // Route into the spilled partition's `BTreeMap`.
-        if !self.spilled.is_empty() {
-            if let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i) {
-                match partition.get_mut().entry(k) {
-                    btree_map::Entry::Occupied(mut run) => run.get_mut().insert(0, value),
-                    btree_map::Entry::Vacant(run) => {
-                        run.insert(vec![value]);
-                        self.keys.inc();
-                    }
-                }
-                self.items.inc();
-                return;
-            }
-        }
-
-        // Genuinely empty partition: start a fresh sorted array.
-        self.partitions[i].insert_at(0, k, value);
+        let run = self.ensure_run(i, k);
+        let new_key = run.is_empty();
+        run.insert(0, value);
         self.items.inc();
-        self.keys.inc();
-        self.maybe_spill(i);
+        if new_key {
+            self.keys.inc();
+        }
     }
 
     fn insert_and_retain(
@@ -386,33 +535,15 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     fn remove(&mut self, key: &[u8]) {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        if !self.partitions[i].is_empty() {
-            let run = self.partitions[i].run_range(&k);
-            if run.is_empty() {
-                return;
-            }
-            let n = run.len();
-            self.partitions[i].remove_run(run);
-            self.keys.dec();
-            self.items.dec_by(n as i64);
-            self.pruned.inc_by(n as u64);
+        if self.run(i, &k).is_empty() {
             return;
         }
-        // Partition i is empty here; if spilled, remove from its `BTreeMap` (and drop the
-        // partition entry, reverting to an empty sorted array, once its last key is gone).
-        if !self.spilled.is_empty() {
-            if let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i) {
-                if let Some(vals) = partition.get_mut().remove(&k) {
-                    let n = vals.len();
-                    self.keys.dec();
-                    self.items.dec_by(n as i64);
-                    self.pruned.inc_by(n as u64);
-                    if partition.get().is_empty() {
-                        partition.remove();
-                    }
-                }
-            }
-        }
+        let run = self.ensure_run(i, k);
+        let n = run.len();
+        run.clear();
+        self.keys.dec();
+        self.items.dec_by(n as i64);
+        self.pruned.inc_by(n as u64);
     }
 
     #[cfg(test)]
@@ -431,7 +562,184 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> Readable for Snapshot<T, V, P> {
+    type Value = V;
+
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + Send + 'a
+    where
+        V: 'a,
+    {
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
+        self.run(i, &k).iter()
+    }
+
+    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
+    where
+        V: 'a,
+    {
+        let mut order: Vec<(usize, T::Key, usize)> = keys
+            .iter()
+            .enumerate()
+            .map(|(key_idx, key)| {
+                let (partition, sub) = partition_index_and_sub_key::<P>(key.as_ref());
+                (partition, self.translator.transform(sub), key_idx)
+            })
+            .collect();
+        order.sort_unstable();
+        for (partition, translated, key_idx) in order {
+            for value in self.run(partition, &translated) {
+                visit(key_idx, value);
+            }
+        }
+    }
+}
+
+impl<T: Translator, V: Send + Sync, const P: usize> OrderedReadable for Snapshot<T, V, P> {
+    fn prev_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
+    where
+        V: 'a,
+    {
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
+        let mut before = Some(k);
+        while let Some(candidate) = self.prev_key_in_partition(i, before) {
+            let vals = self.run(i, &candidate);
+            if !vals.is_empty() {
+                return Some((vals.iter(), false));
+            }
+            before = Some(candidate);
+        }
+        for p in (0..i).rev() {
+            let mut before = None;
+            while let Some(candidate) = self.prev_key_in_partition(p, before) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some((vals.iter(), false));
+                }
+                before = Some(candidate);
+            }
+        }
+        for p in (0..self.count).rev() {
+            let mut before = None;
+            while let Some(candidate) = self.prev_key_in_partition(p, before) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some((vals.iter(), true));
+                }
+                before = Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn next_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
+    where
+        V: 'a,
+    {
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
+        let mut after = Some(k);
+        while let Some(candidate) = self.next_key_in_partition(i, after) {
+            let vals = self.run(i, &candidate);
+            if !vals.is_empty() {
+                return Some((vals.iter(), false));
+            }
+            after = Some(candidate);
+        }
+        for p in i + 1..self.count {
+            let mut after = None;
+            while let Some(candidate) = self.next_key_in_partition(p, after) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some((vals.iter(), false));
+                }
+                after = Some(candidate);
+            }
+        }
+        for p in 0..self.count {
+            let mut after = None;
+            while let Some(candidate) = self.next_key_in_partition(p, after) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some((vals.iter(), true));
+                }
+                after = Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
+    where
+        V: 'a,
+    {
+        for p in 0..self.count {
+            let mut after = None;
+            while let Some(candidate) = self.next_key_in_partition(p, after) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some(vals.iter());
+                }
+                after = Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
+    where
+        V: 'a,
+    {
+        for p in (0..self.count).rev() {
+            let mut before = None;
+            while let Some(candidate) = self.prev_key_in_partition(p, before) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some(vals.iter());
+                }
+                before = Some(candidate);
+            }
+        }
+        None
+    }
+}
+
+impl<T: Translator, V: Clone + Send + Sync + 'static, const P: usize> Snapshottable
+    for Index<T, V, P>
+{
+    type Value = V;
+    type Snapshot = Snapshot<T, V, P>;
+
+    fn snapshot(&mut self) -> Self::Snapshot {
+        let count = self.count();
+        if !self.head.is_empty() {
+            // Avoid linking the empty root epoch.
+            let parent = (self.sealed.depth > 0).then(|| Arc::clone(&self.sealed));
+            let overlay = std::mem::take(&mut self.head);
+            self.sealed = Arc::new(Epoch {
+                depth: self.sealed.depth + 1,
+                changed_runs: Epoch::parent_changed_runs(&parent) + overlay.changed_runs(),
+                parent,
+                overlay,
+            });
+        }
+        Snapshot {
+            translator: self.translator.clone(),
+            base: Arc::clone(&self.base),
+            sealed: Arc::clone(&self.sealed),
+            count,
+        }
+    }
+}
+
+impl<T: Translator, V: Clone + Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
@@ -443,17 +751,32 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         let k = self.translator.transform(sub);
         // The largest translated key strictly less than `k`: within the partition first, then the
         // last key of the nearest lower partition, else cycle to the global last key.
-        if let Some(vals) = self.partition_prev_before(i, &k) {
-            return Some((vals.iter(), false));
-        }
-        for p in (0..i).rev() {
-            if let Some(vals) = self.partition_last(p) {
+        let mut before = Some(k);
+        while let Some(candidate) = self.prev_key_in_partition(i, before) {
+            let vals = self.run(i, &candidate);
+            if !vals.is_empty() {
                 return Some((vals.iter(), false));
             }
+            before = Some(candidate);
         }
-        for p in (0..self.partitions.len()).rev() {
-            if let Some(vals) = self.partition_last(p) {
-                return Some((vals.iter(), true));
+        for p in (0..i).rev() {
+            let mut before = None;
+            while let Some(candidate) = self.prev_key_in_partition(p, before) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some((vals.iter(), false));
+                }
+                before = Some(candidate);
+            }
+        }
+        for p in (0..self.count()).rev() {
+            let mut before = None;
+            while let Some(candidate) = self.prev_key_in_partition(p, before) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some((vals.iter(), true));
+                }
+                before = Some(candidate);
             }
         }
         None
@@ -470,17 +793,32 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         let k = self.translator.transform(sub);
         // The smallest translated key strictly greater than `k`: within the partition first, then
         // the first key of the nearest higher partition, else cycle to the global first key.
-        if let Some(vals) = self.partition_next_after(i, &k) {
-            return Some((vals.iter(), false));
-        }
-        for p in i + 1..self.partitions.len() {
-            if let Some(vals) = self.partition_first(p) {
+        let mut after = Some(k);
+        while let Some(candidate) = self.next_key_in_partition(i, after) {
+            let vals = self.run(i, &candidate);
+            if !vals.is_empty() {
                 return Some((vals.iter(), false));
             }
+            after = Some(candidate);
         }
-        for p in 0..self.partitions.len() {
-            if let Some(vals) = self.partition_first(p) {
-                return Some((vals.iter(), true));
+        for p in i + 1..self.count() {
+            let mut after = None;
+            while let Some(candidate) = self.next_key_in_partition(p, after) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some((vals.iter(), false));
+                }
+                after = Some(candidate);
+            }
+        }
+        for p in 0..self.count() {
+            let mut after = None;
+            while let Some(candidate) = self.next_key_in_partition(p, after) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some((vals.iter(), true));
+                }
+                after = Some(candidate);
             }
         }
         None
@@ -490,9 +828,14 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     where
         V: 'a,
     {
-        for p in 0..self.partitions.len() {
-            if let Some(vals) = self.partition_first(p) {
-                return Some(vals.iter());
+        for p in 0..self.count() {
+            let mut after = None;
+            while let Some(candidate) = self.next_key_in_partition(p, after) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some(vals.iter());
+                }
+                after = Some(candidate);
             }
         }
         None
@@ -502,9 +845,14 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     where
         V: 'a,
     {
-        for p in (0..self.partitions.len()).rev() {
-            if let Some(vals) = self.partition_last(p) {
-                return Some(vals.iter());
+        for p in (0..self.count()).rev() {
+            let mut before = None;
+            while let Some(candidate) = self.prev_key_in_partition(p, before) {
+                let vals = self.run(p, &candidate);
+                if !vals.is_empty() {
+                    return Some(vals.iter());
+                }
+                before = Some(candidate);
             }
         }
         None
@@ -518,6 +866,35 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
+
+    impl<T: Translator, V: Clone + Send + Sync, const P: usize> Index<T, V, P> {
+        /// Create a new [Index] with an explicit spill threshold so tests can exercise spilling without
+        /// inserting [SPILL_THRESHOLD] keys.
+        pub(crate) fn with_threshold(ctx: impl Metrics, translator: T, threshold: usize) -> Self {
+            let mut index = Self::new(ctx, translator);
+            index.threshold = threshold;
+            index
+        }
+
+        /// Number of partitions that compact into the spilled representation.
+        pub(crate) fn spilled_count(&self) -> usize {
+            (0..self.count())
+                .filter(|&i| self.compact_base_partition(i).is_spilled())
+                .count()
+        }
+
+        pub(crate) fn epoch_depth(&self) -> u16 {
+            self.sealed.depth
+        }
+
+        pub(crate) fn changed_runs(&self) -> usize {
+            self.sealed.changed_runs
+        }
+
+        pub(crate) fn head_changed_runs(&self) -> usize {
+            self.head.changed_runs()
+        }
+    }
 
     fn new_index(context: deterministic::Context) -> Index<OneCap, u64, 1> {
         Index::new(context, OneCap)
@@ -618,7 +995,7 @@ mod tests {
             assert_eq!(index.spilled_count(), 1);
 
             index.remove(&[0x10, 0x01]);
-            assert_eq!(index.spilled_count(), 1); // 0x02 still present
+            assert_eq!(index.spilled_count(), 0); // 0x02 compacts to inline in the live overlay
             index.remove(&[0x10, 0x02]);
             assert_eq!(index.spilled_count(), 0); // last key removed -> de-spilled
             assert_eq!(index.keys(), 0);
@@ -653,14 +1030,13 @@ mod tests {
             assert_eq!(index.keys(), 2);
             assert_eq!(index.items(), 2);
 
-            // Spilled -> empty, draining both keys through a cursor over the spilled representation
-            // (the cursor de-spill path); the partition reverts only once its last key is gone.
+            // Spilled -> empty, draining both keys through materialized overlay runs.
             {
                 let mut cursor = index.get_mut(&[0x10, 0x01]).unwrap();
                 assert_eq!(cursor.next().copied(), Some(1));
                 cursor.delete();
             }
-            assert_eq!(index.spilled_count(), 1); // 0x02 still present
+            assert_eq!(index.spilled_count(), 0); // 0x02 compacts to inline in the live overlay
             {
                 let mut cursor = index.get_mut(&[0x10, 0x02]).unwrap();
                 assert_eq!(cursor.next().copied(), Some(2));
@@ -684,9 +1060,9 @@ mod tests {
                 vec![4]
             );
 
-            // Spilled -> empty again, this time via `remove` (the other de-spill path).
+            // Spilled -> empty again, this time via `remove`.
             index.remove(&[0x10, 0x03]);
-            assert_eq!(index.spilled_count(), 1); // 0x04 still present
+            assert_eq!(index.spilled_count(), 0); // 0x04 compacts to inline in the live overlay
             index.remove(&[0x10, 0x04]);
             assert_eq!(index.spilled_count(), 0);
             assert_eq!(index.keys(), 0);
@@ -707,8 +1083,8 @@ mod tests {
             assert_eq!(index.keys(), 2);
             assert_eq!(index.items(), 2);
 
-            // Existing key in a spilled partition: returns a cursor over its values; the passed
-            // value is not inserted.
+            // Existing key in a spilled base partition: returns a cursor over its materialized run;
+            // the passed value is not inserted.
             {
                 let mut cursor = index.get_mut_or_insert(&[0x10, 0x01], 99).unwrap();
                 assert_eq!(cursor.next().copied(), Some(1));
@@ -741,7 +1117,7 @@ mod tests {
             let mut index = new_index_spilling(context);
             index.insert(&[0x10, 0x01], 1);
             index.insert(&[0x10, 0x02], 2); // spills
-            let mut cursor = index.get_mut(&[0x10, 0x01]).unwrap(); // cursor over the spilled partition
+            let mut cursor = index.get_mut(&[0x10, 0x01]).unwrap();
             cursor.delete();
         });
     }

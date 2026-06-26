@@ -22,6 +22,69 @@ pub mod ordered;
 pub mod partitioned;
 pub mod unordered;
 
+/// Read-only access to an index.
+pub trait Readable: Send + Sync {
+    /// The type of values the index stores.
+    type Value: Send + Sync;
+
+    /// Returns an iterator over all values associated with a translated key.
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + Send + 'a
+    where
+        Self::Value: 'a;
+
+    /// Visits every value associated with each key, calling `visit(key_idx, value)`.
+    fn get_many<'a, K: AsRef<[u8]>>(
+        &'a self,
+        keys: &[K],
+        mut visit: impl FnMut(usize, &'a Self::Value),
+    ) where
+        Self::Value: 'a,
+    {
+        for (key_idx, key) in keys.iter().enumerate() {
+            for value in self.get(key.as_ref()) {
+                visit(key_idx, value);
+            }
+        }
+    }
+}
+
+/// Read-only ordered traversal.
+pub trait OrderedReadable: Readable {
+    fn prev_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>
+    where
+        Self::Value: 'a;
+
+    fn next_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>
+    where
+        Self::Value: 'a;
+
+    fn first_translated_key<'a>(
+        &'a self,
+    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
+    where
+        Self::Value: 'a;
+
+    fn last_translated_key<'a>(
+        &'a self,
+    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
+    where
+        Self::Value: 'a;
+}
+
+/// Index that can capture an immutable read view.
+pub trait Snapshottable: Send + Sync {
+    type Value: Send + Sync;
+    type Snapshot: Readable<Value = Self::Value> + Clone + Send + Sync + 'static;
+
+    fn snapshot(&mut self) -> Self::Snapshot;
+}
+
 /// A mutable iterator over the values associated with a translated key, allowing in-place
 /// modifications.
 ///
@@ -37,8 +100,8 @@ pub mod unordered;
 ///
 /// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
 /// - Once `next()` returns `None`, only `insert()` can be called.
-/// - The cursor mutates the chain of values in place. If the sole element is deleted, dropping the
-///   cursor removes the map entry.
+/// - The cursor mutates the value run in place. Deleting the sole value removes the key from the
+///   live view.
 ///
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_retain()`, or
 /// `remove()` from [Unordered] instead._
@@ -268,9 +331,36 @@ mod tests {
     use rand::Rng;
     use std::{
         collections::{HashMap, HashSet},
-        sync::Arc,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
         thread,
     };
+
+    struct CountedClone {
+        clones: Arc<AtomicUsize>,
+        value: u64,
+    }
+
+    impl CountedClone {
+        fn new(clones: &Arc<AtomicUsize>, value: u64) -> Self {
+            Self {
+                clones: Arc::clone(clones),
+                value,
+            }
+        }
+    }
+
+    impl Clone for CountedClone {
+        fn clone(&self) -> Self {
+            self.clones.fetch_add(1, Ordering::SeqCst);
+            Self {
+                clones: Arc::clone(&self.clones),
+                value: self.value,
+            }
+        }
+    }
 
     fn run_index_basic<I: Unordered<Value = u64>>(index: &mut I) {
         // Generate a collision and check metrics to make sure it's captured
@@ -336,11 +426,239 @@ mod tests {
 
     /// A partitioned ordered index with a tiny spill threshold, so partitions convert to the
     /// spilled `BTreeMap` representation almost immediately. Routing the generic battery through
-    /// this fixture re-validates every behavior against the spilled cursor / nav / value paths.
+    /// this fixture re-validates behavior against spilled base, nav, and value paths.
     fn new_partitioned_ordered_spilling(
         context: deterministic::Context,
     ) -> PartitionedOrdered<OneCap, u64, 1> {
         PartitionedOrdered::with_threshold(context, OneCap, 2)
+    }
+
+    fn run_snapshot_stability<I>(index: &mut I)
+    where
+        I: Unordered<Value = u64> + Snapshottable<Value = u64>,
+        I::Snapshot: Readable<Value = u64>,
+    {
+        index.insert(b"dup", 1);
+        index.insert(b"dup", 2);
+        index.insert(b"other", 7);
+
+        let snapshot = Snapshottable::snapshot(index);
+
+        index.insert(b"dup", 3);
+        index.remove(b"other");
+        index.insert(b"new", 9);
+
+        assert_eq!(
+            Readable::get(&snapshot, b"dup")
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(
+            Readable::get(&snapshot, b"other")
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![7]
+        );
+        assert!(Readable::get(&snapshot, b"new").next().is_none());
+    }
+
+    fn run_ordered_snapshot_stability<I>(index: &mut I)
+    where
+        I: Ordered<Value = u64> + Snapshottable<Value = u64>,
+        I::Snapshot: OrderedReadable<Value = u64>,
+    {
+        let keys: [&[u8]; 3] = [&[0x10, 0x01], &[0x20, 0x01], &[0x30, 0x01]];
+        for (i, key) in keys.iter().enumerate() {
+            index.insert(key, i as u64);
+        }
+
+        let snapshot = Snapshottable::snapshot(index);
+
+        index.remove(keys[1]);
+        index.insert(&[0x25, 0x01], 99);
+        index.insert(keys[2], 100);
+
+        let (next, wrapped) = OrderedReadable::next_translated_key(&snapshot, keys[0]).unwrap();
+        assert_eq!(
+            (next.copied().collect::<Vec<_>>(), wrapped),
+            (vec![1], false)
+        );
+
+        let (prev, wrapped) = OrderedReadable::prev_translated_key(&snapshot, keys[0]).unwrap();
+        assert_eq!(
+            (prev.copied().collect::<Vec<_>>(), wrapped),
+            (vec![2], true)
+        );
+
+        assert_eq!(
+            OrderedReadable::last_translated_key(&snapshot)
+                .unwrap()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
+
+    fn run_snapshot_compaction_stability<I>(index: &mut I)
+    where
+        I: Unordered<Value = u64> + Snapshottable<Value = u64>,
+        I::Snapshot: Readable<Value = u64>,
+    {
+        index.insert(b"stable", 1);
+        let old = Snapshottable::snapshot(index);
+
+        for i in 0..12 {
+            index.insert(b"live", i);
+            let _ = Snapshottable::snapshot(index);
+        }
+
+        assert_eq!(
+            Readable::get(&old, b"stable").copied().collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert!(Readable::get(&old, b"live").next().is_none());
+        assert_eq!(index.get(b"stable").copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            index.get(b"live").copied().collect::<Vec<_>>(),
+            (0..12).rev().collect::<Vec<_>>()
+        );
+    }
+
+    fn run_ordered_tombstone_snapshot_stability<I>(index: &mut I)
+    where
+        I: Ordered<Value = u64> + Snapshottable<Value = u64>,
+        I::Snapshot: OrderedReadable<Value = u64>,
+    {
+        let keys: [&[u8]; 3] = [&[0x10, 0x01], &[0x20, 0x01], &[0x30, 0x01]];
+        for (i, key) in keys.iter().enumerate() {
+            index.insert(key, i as u64);
+        }
+        let before_delete = Snapshottable::snapshot(index);
+
+        index.remove(keys[1]);
+        let (next, wrapped) = index.next_translated_key(keys[0]).unwrap();
+        assert_eq!(
+            (next.copied().collect::<Vec<_>>(), wrapped),
+            (vec![2], false)
+        );
+
+        let after_delete = Snapshottable::snapshot(index);
+        let (next, wrapped) = OrderedReadable::next_translated_key(&after_delete, keys[0]).unwrap();
+        assert_eq!(
+            (next.copied().collect::<Vec<_>>(), wrapped),
+            (vec![2], false)
+        );
+
+        let (next, wrapped) =
+            OrderedReadable::next_translated_key(&before_delete, keys[0]).unwrap();
+        assert_eq!(
+            (next.copied().collect::<Vec<_>>(), wrapped),
+            (vec![1], false)
+        );
+    }
+
+    fn run_snapshot_cursor_stability<I>(index: &mut I)
+    where
+        I: Unordered<Value = u64> + Snapshottable<Value = u64>,
+        I::Snapshot: Readable<Value = u64>,
+    {
+        index.insert(b"update", 1);
+        index.insert(b"update", 2);
+        let before_update = Snapshottable::snapshot(index);
+        {
+            let mut cursor = index.get_mut(b"update").unwrap();
+            assert_eq!(cursor.next().copied(), Some(2));
+            cursor.update(20);
+        }
+        assert_eq!(
+            Readable::get(&before_update, b"update")
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(
+            index.get(b"update").copied().collect::<Vec<_>>(),
+            vec![20, 1]
+        );
+
+        index.insert(b"delete", 7);
+        let before_delete = Snapshottable::snapshot(index);
+        {
+            let mut cursor = index.get_mut(b"delete").unwrap();
+            assert_eq!(cursor.next().copied(), Some(7));
+            cursor.delete();
+        }
+        assert_eq!(
+            Readable::get(&before_delete, b"delete")
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![7]
+        );
+        assert!(index.get(b"delete").next().is_none());
+
+        index.insert(b"insert", 9);
+        let before_insert = Snapshottable::snapshot(index);
+        {
+            let mut cursor = index.get_mut(b"insert").unwrap();
+            assert_eq!(cursor.next().copied(), Some(9));
+            cursor.insert(10);
+        }
+        assert_eq!(
+            Readable::get(&before_insert, b"insert")
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![9]
+        );
+        assert_eq!(
+            index.get(b"insert").copied().collect::<Vec<_>>(),
+            vec![9, 10]
+        );
+    }
+
+    fn run_dirty_run_reuse_avoids_extra_clone<I>(index: &mut I)
+    where
+        I: Unordered<Value = CountedClone> + Snapshottable<Value = CountedClone>,
+    {
+        let clones = Arc::new(AtomicUsize::new(0));
+        index.insert(b"key", CountedClone::new(&clones, 1));
+        let _snapshot = Snapshottable::snapshot(index);
+
+        index.insert(b"key", CountedClone::new(&clones, 2));
+        assert_eq!(clones.load(Ordering::SeqCst), 1);
+
+        index.insert(b"key", CountedClone::new(&clones, 3));
+        assert_eq!(clones.load(Ordering::SeqCst), 1);
+    }
+
+    fn run_ordered_cursor_tombstone_snapshot_stability<I>(index: &mut I)
+    where
+        I: Ordered<Value = u64> + Snapshottable<Value = u64>,
+        I::Snapshot: OrderedReadable<Value = u64>,
+    {
+        let keys: [&[u8]; 3] = [&[0x10, 0x01], &[0x20, 0x01], &[0x30, 0x01]];
+        for (i, key) in keys.iter().enumerate() {
+            index.insert(key, i as u64);
+        }
+        let before_delete = Snapshottable::snapshot(index);
+
+        {
+            let mut cursor = index.get_mut(keys[1]).unwrap();
+            assert_eq!(cursor.next().copied(), Some(1));
+            cursor.delete();
+        }
+        let (next, wrapped) = index.next_translated_key(keys[0]).unwrap();
+        assert_eq!(
+            (next.copied().collect::<Vec<_>>(), wrapped),
+            (vec![2], false)
+        );
+
+        let (next, wrapped) =
+            OrderedReadable::next_translated_key(&before_delete, keys[0]).unwrap();
+        assert_eq!(
+            (next.copied().collect::<Vec<_>>(), wrapped),
+            (vec![1], false)
+        );
     }
 
     /// Run the generic index battery against the spilling fixture, so the spilled-partition
@@ -398,6 +716,170 @@ mod tests {
                 index.spilled_count() > 0,
                 "routing battery should exercise the spilled representation"
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_snapshot_stability() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            run_snapshot_stability(&mut new_unordered(context.child("unordered")));
+            run_snapshot_stability(&mut new_ordered(context.child("ordered")));
+            run_snapshot_stability(&mut new_partitioned_unordered(
+                context.child("part_unordered"),
+            ));
+            run_snapshot_stability(&mut new_partitioned_ordered(context.child("part_ordered")));
+            run_snapshot_stability(&mut new_partitioned_ordered_spilling(
+                context.child("part_ordered_spilling"),
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_snapshot_stability() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            run_ordered_snapshot_stability(&mut new_ordered(context.child("ordered")));
+            run_ordered_snapshot_stability(&mut new_partitioned_ordered(context.child("part")));
+            run_ordered_snapshot_stability(&mut new_partitioned_ordered_spilling(
+                context.child("spill"),
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_snapshot_compaction_stability() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            run_snapshot_compaction_stability(&mut new_unordered(context.child("unordered")));
+            run_snapshot_compaction_stability(&mut new_ordered(context.child("ordered")));
+            run_snapshot_compaction_stability(&mut new_partitioned_unordered(
+                context.child("part_unordered"),
+            ));
+            run_snapshot_compaction_stability(&mut new_partitioned_ordered(
+                context.child("part_ordered"),
+            ));
+            run_snapshot_compaction_stability(&mut new_partitioned_ordered_spilling(
+                context.child("part_ordered_spilling"),
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_explicit_compaction_pressure() {
+        macro_rules! check {
+            ($index:expr) => {{
+                let mut index = $index;
+                index.insert(b"stable", 7);
+                let old = Snapshottable::snapshot(&mut index);
+                index.compact();
+
+                for value in 0..8 {
+                    index.insert(b"live", value);
+                    assert_eq!(index.head_changed_runs(), 1);
+                    let _ = Snapshottable::snapshot(&mut index);
+                }
+
+                assert_eq!(index.epoch_depth(), 8);
+                assert_eq!(index.changed_runs(), 8);
+                assert!(index.needs_compaction());
+
+                index.compact();
+                assert_eq!(index.epoch_depth(), 0);
+                assert_eq!(index.changed_runs(), 0);
+                assert_eq!(index.head_changed_runs(), 0);
+                assert_eq!(
+                    Readable::get(&old, b"stable").copied().collect::<Vec<_>>(),
+                    vec![7]
+                );
+                assert!(Readable::get(&old, b"live").next().is_none());
+                assert_eq!(
+                    index.get(b"live").copied().collect::<Vec<_>>(),
+                    vec![7, 6, 5, 4, 3, 2, 1, 0]
+                );
+            }};
+        }
+
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            check!(new_unordered(context.child("unordered")));
+            check!(new_ordered(context.child("ordered")));
+            check!(new_partitioned_unordered(context.child("part_unordered")));
+            check!(new_partitioned_ordered(context.child("part_ordered")));
+            check!(new_partitioned_ordered_spilling(
+                context.child("part_ordered_spilling")
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_snapshot_tombstone_skip() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            run_ordered_tombstone_snapshot_stability(&mut new_ordered(context.child("ordered")));
+            run_ordered_tombstone_snapshot_stability(&mut new_partitioned_ordered(
+                context.child("part"),
+            ));
+            run_ordered_tombstone_snapshot_stability(&mut new_partitioned_ordered_spilling(
+                context.child("spill"),
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_cursor_snapshot_stability() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            run_snapshot_cursor_stability(&mut new_unordered(context.child("unordered")));
+            run_snapshot_cursor_stability(&mut new_ordered(context.child("ordered")));
+            run_snapshot_cursor_stability(&mut new_partitioned_unordered(
+                context.child("part_unordered"),
+            ));
+            run_snapshot_cursor_stability(&mut new_partitioned_ordered(
+                context.child("part_ordered"),
+            ));
+            run_snapshot_cursor_stability(&mut new_partitioned_ordered_spilling(
+                context.child("part_ordered_spilling"),
+            ));
+
+            run_ordered_cursor_tombstone_snapshot_stability(&mut new_ordered(
+                context.child("ordered_tombstone"),
+            ));
+            run_ordered_cursor_tombstone_snapshot_stability(&mut new_partitioned_ordered(
+                context.child("part_tombstone"),
+            ));
+            run_ordered_cursor_tombstone_snapshot_stability(&mut new_partitioned_ordered_spilling(
+                context.child("spill_tombstone"),
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_dirty_run_reuse_avoids_extra_clone() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            run_dirty_run_reuse_avoids_extra_clone(&mut unordered::Index::new(
+                context.child("unordered"),
+                TwoCap,
+            ));
+            run_dirty_run_reuse_avoids_extra_clone(&mut ordered::Index::new(
+                context.child("ordered"),
+                TwoCap,
+            ));
+            run_dirty_run_reuse_avoids_extra_clone(&mut PartitionedUnordered::<
+                OneCap,
+                CountedClone,
+                1,
+            >::new(
+                context.child("part_unordered"), OneCap
+            ));
+            run_dirty_run_reuse_avoids_extra_clone(&mut PartitionedOrdered::<
+                OneCap,
+                CountedClone,
+                1,
+            >::new(
+                context.child("part_ordered"), OneCap
+            ));
         });
     }
 
@@ -2566,8 +3048,7 @@ mod tests {
         });
     }
 
-    /// Exercises a single translated key holding a very large overflow chain, ensuring inserts and
-    /// the resulting `Vec` overflow stay correct at scale.
+    /// Exercises a single translated key holding a very large run.
     fn run_index_large_collision_chain<I: Unordered<Value = u64>>(index: &mut I) {
         const ITEMS: usize = 50_000;
         for i in 0..ITEMS {
