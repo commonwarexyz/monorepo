@@ -1369,6 +1369,7 @@ dependencies = [
  "proptest",
  "rand 0.8.5",
  "rand_core 0.6.4",
+ "sancov",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4651,6 +4652,21 @@ checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
 ]
+
+[[package]]
+name = "sancov"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af16836ee8af2fad59bc5fd1696bbc1d1d22c3cff968449fd5918611265d1fa3"
+dependencies = [
+ "sancov-sys",
+]
+
+[[package]]
+name = "sancov-sys"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c833f55b794340c08597547044316511d47b79dee8c4fd06f95fc61ca1c682a3"
 
 [[package]]
 name = "schannel"

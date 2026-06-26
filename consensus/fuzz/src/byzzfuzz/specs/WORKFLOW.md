@@ -120,7 +120,7 @@ The invariants catalog is read once at the start of the workflow (see "Step 4: I
 ### Add a new ByzzFuzz fuzz target
 
 1. Read [ByzzFuzz/Harness Contract](contracts/byzzfuzz-harness.md).
-2. Add a target that calls `fuzz::<P, Byzzfuzz>(input)`.
+2. Add a target that calls `fuzz::<P, Byzzfuzz, CodeCoverage>(input)`.
 3. Confirm `Byzzfuzz` mode is still installed through `Mode::Byzzfuzz`.
 4. Verify every affected invariant still holds.
 

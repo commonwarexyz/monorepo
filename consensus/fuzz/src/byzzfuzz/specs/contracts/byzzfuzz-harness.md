@@ -9,7 +9,7 @@ The fuzz harness dispatches into ByzzFuzz through `Mode::Byzzfuzz` and `byzzfuzz
 | Interface | Package | Consumed By | Purpose |
 | --------- | ------- | ----------- | ------- |
 | `pub mod byzzfuzz` | `consensus/fuzz/src/lib.rs` | Fuzz crate users | Exposes the ByzzFuzz module. |
-| `pub use runner::run` | `consensus/fuzz/src/byzzfuzz/mod.rs` | `fuzz::<P, Byzzfuzz>` dispatch | Runs one ByzzFuzz iteration. |
+| `pub use runner::run` | `consensus/fuzz/src/byzzfuzz/mod.rs` | `fuzz::<P, Byzzfuzz, CodeCoverage>` dispatch | Runs one ByzzFuzz iteration. |
 | `pub struct Byzzfuzz` | `consensus/fuzz/src/lib.rs` | Fuzz targets | Marker type implementing `FuzzMode`. |
 | `Mode::Byzzfuzz` | `consensus/fuzz/src/lib.rs` | `fuzz` dispatcher | Selects ByzzFuzz mode. |
 | `setup_network` | `consensus/fuzz/src/lib.rs` | `runner.rs` | Builds simulated network, participants, schemes, and channel registrations. |
@@ -21,7 +21,7 @@ The fuzz harness dispatches into ByzzFuzz through `Mode::Byzzfuzz` and `byzzfuzz
 ByzzFuzz fuzz targets call:
 
 ```rust
-fuzz::<SimplexId, Byzzfuzz>(input);
+fuzz::<SimplexId, Byzzfuzz, CodeCoverage>(input);
 ```
 
 `fuzz` installs the ByzzFuzz panic hook when `M::MODE == Mode::Byzzfuzz`, then dispatches to `byzzfuzz::run::<P>(input)` inside `panic::catch_unwind`.
