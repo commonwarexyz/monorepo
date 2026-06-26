@@ -2,10 +2,12 @@
 
 #[cfg(feature = "mocks")]
 mod fuzz {
-    use commonware_consensus_fuzz::{fuzz, FaultyMessaging, FuzzInput, SimplexCertificateMock};
+    use commonware_consensus_fuzz::{
+        fuzz, CodeCoverage, FaultyMessaging, FuzzInput, SimplexCertificateMock,
+    };
     use libfuzzer_sys::fuzz_target;
 
     fuzz_target!(|input: FuzzInput| {
-        fuzz::<SimplexCertificateMock, FaultyMessaging>(input);
+        fuzz::<SimplexCertificateMock, FaultyMessaging, CodeCoverage>(input);
     });
 }

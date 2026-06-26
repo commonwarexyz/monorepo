@@ -1280,12 +1280,12 @@ enum TwinsRole {
     Campaign,
 }
 
-fn run_with_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
-    run_twins::<P>(input, TwinsRole::Mutator);
+fn run_with_twins_mutator<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool) {
+    run_twins::<P>(input, TwinsRole::Mutator, state_coverage);
 }
 
-fn run_with_twins_campaign<P: simplex::Simplex>(input: FuzzInput) {
-    run_twins::<P>(input, TwinsRole::Campaign);
+fn run_with_twins_campaign<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool) {
+    run_twins::<P>(input, TwinsRole::Campaign, state_coverage);
 }
 
 fn twins_resolver_view<P: simplex::Simplex>(
@@ -1311,7 +1311,7 @@ fn twins_resolver_view<P: simplex::Simplex>(
 /// Only the secondary half (Disrupter vs full engine) and the liveness wait
 /// shape (absolute view vs prefix-trailing count) differ; both are keyed on
 /// `role`. Invariants and liveness always run over honest reporters only.
-fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
+fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_coverage: bool) {
     input.partition = Partition::Connected;
     input.configuration = N4F1C3;
 
@@ -1722,6 +1722,11 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
         if config.is_valid() {
             let honest_reporters = &reporters[honest_start..];
             invariants::check_vote_invariants_with_byzantine(&compromised, honest_reporters);
+            if state_coverage {
+                let reporter_states =
+                    state_cov::encode_reporter_states(honest_reporters, config.n as usize);
+                state_cov::observe(&reporter_states);
+            }
             let states = invariants::extract(
                 reporters.into_iter().skip(honest_start).collect(),
                 config.n as usize,
@@ -1778,6 +1783,29 @@ pub enum Mode {
 
 pub trait FuzzMode {
     const MODE: Mode;
+}
+
+/// Whether a harness run also emits protocol-state coverage feedback.
+///
+/// Orthogonal to [`FuzzMode`]: any honest-reporter mode (Standard, FaultyNet,
+/// TwinsMutator, TwinsCampaign) can run with or without the [`state_cov`] signal.
+pub trait Coverage {
+    /// When `true`, the run projects its honest reporters through
+    /// [`state_cov::observe`] so libFuzzer also tracks protocol-state novelty.
+    const STATE: bool;
+}
+
+/// Only libFuzzer's default code-edge coverage; no protocol-state feedback (the
+/// baseline).
+pub struct CodeCoverage;
+impl Coverage for CodeCoverage {
+    const STATE: bool = false;
+}
+
+/// Protocol-state coverage feedback enabled (see [`state_cov`]).
+pub struct StateCoverage;
+impl Coverage for StateCoverage {
+    const STATE: bool = true;
 }
 
 /// **Standard mode** - the baseline harness.
@@ -1924,7 +1952,7 @@ fn install_byzzfuzz_panic_hook() {
     });
 }
 
-pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
+pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput) {
     if matches!(M::MODE, Mode::Byzzfuzz) {
         install_byzzfuzz_panic_hook();
     } else {
@@ -1938,16 +1966,20 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
 
     let raw_bytes = input.raw_bytes.clone();
     let run_result = match M::MODE {
-        Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, false))),
+        Mode::Standard => {
+            panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, C::STATE)))
+        }
         Mode::FaultyMessaging => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_faulty_messaging::<P>(input)
         })),
-        Mode::FaultyNet => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, false))),
+        Mode::FaultyNet => {
+            panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, C::STATE)))
+        }
         Mode::TwinsMutator => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_with_twins_mutator::<P>(input)
+            run_with_twins_mutator::<P>(input, C::STATE)
         })),
         Mode::TwinsCampaign => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_with_twins_campaign::<P>(input)
+            run_with_twins_campaign::<P>(input, C::STATE)
         })),
         Mode::Byzzfuzz => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
@@ -1969,23 +2001,6 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
             // in this arm.
             panic::resume_unwind(payload);
         }
-    }
-}
-
-/// Honest harness with protocol-state coverage feedback.
-///
-/// Runs the standard honest path (identical to [`Mode::Standard`]), then projects
-/// the per-replica reporter state to a feature vector and folds it into the
-/// custom SanitizerCoverage table (see [`state_cov`]). libFuzzer retains inputs
-/// that reach a new protocol state even when they light no new code edge.
-pub fn fuzz_state_cov<P: simplex::Simplex>(input: FuzzInput) {
-    print_fuzz_input(Mode::Standard, &input);
-
-    let raw_bytes = input.raw_bytes.clone();
-    let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, true)));
-    if let Err(payload) = run_result {
-        println!("Panicked with raw_bytes: {:?}", raw_bytes);
-        panic::resume_unwind(payload);
     }
 }
 
