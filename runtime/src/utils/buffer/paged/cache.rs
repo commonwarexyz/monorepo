@@ -495,8 +495,8 @@ mod tests {
     use super::{super::Checksum, *};
     use crate::{
         buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, Buf, BufferPool,
-        BufferPoolConfig, Clock as _, Handle, IoBufsMut, Runner as _, Spawner as _, Storage as _,
-        Supervisor as _,
+        BufferPoolConfig, Clock as _, Handle, IoBufMut, IoBufsMut, Runner as _, Spawner as _,
+        Storage as _, Supervisor as _,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
@@ -528,7 +528,8 @@ mod tests {
 
     impl Blob for BlockingBlob {
         async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufsMut::default()).await
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+                .await
         }
 
         async fn read_at_buf(
@@ -599,7 +600,8 @@ mod tests {
 
     impl Blob for ControlledBlob {
         async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufsMut::default()).await
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+                .await
         }
 
         async fn read_at_buf(

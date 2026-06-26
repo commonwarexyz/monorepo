@@ -64,7 +64,7 @@ macro_rules! bench_sizes {
             });
 
             bench_decode_fixed::<$size, _>($c, "vec_slice", || {
-                let vec = vec.clone();
+                let vec = black_box(vec.clone());
                 FixedBytes::<$size>::decode(vec.as_slice()).unwrap()
             });
 

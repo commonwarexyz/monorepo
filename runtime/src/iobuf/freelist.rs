@@ -13,11 +13,10 @@
 //! [`Drop`] only release buffers currently parked here. **An outstanding buffer
 //! that is never returned will leak**.
 //!
-//! The buffer pool keeps this requirement by pairing every pooled backing
-//! outside the freelist with a size-class lease, and by banking one strong
-//! size-class reference for every buffer held in a thread-local cache. Those
-//! leases and banked references keep the owning size class, and therefore this
-//! freelist, alive until the buffer returns here.
+//! The buffer pool keeps this requirement by storing a live size-class lease in
+//! every pooled buffer outside the freelist, including buffers held in a
+//! thread-local cache. Those leases keep the owning size class, and therefore
+//! this freelist, alive until the buffer returns here.
 //!
 //! This is intentionally narrower than a general multi-producer, multi-consumer
 //! queue:
@@ -27,12 +26,13 @@
 //! - Slot ownership is managed by the buffer pool.
 //! - Refill and spill paths naturally move buffers in batches.
 //!
-//! Each slot has two pieces of freelist state: a parking cell and a free bit.
-//! The parking cell holds the [`PooledBuffer`] while the slot is globally free.
-//! The bit records whether that cell currently contains an initialized buffer
-//! that can be taken. The bit transition is the synchronization boundary:
-//! returning a buffer writes the cell and then sets the bit, while taking a
-//! buffer clears a set bit and then reads the cell.
+//! Each slot has two pieces of freelist state: a side-table entry and a free
+//! bit. The side-table entry is stable for the lifetime of the size class and
+//! stores the data pointer, capacity, routing fields, refcount, and any live
+//! size-class lease. The free bit records whether that slot is globally
+//! available. Returning a buffer consumes its lease and sets the bit; taking a
+//! buffer clears a set bit and then rebuilds a [`PooledBuffer`] handle from the
+//! side-table entry.
 //!
 //! Free bits are split across cache-line-padded atomic words. The pool passes
 //! its expected parallelism so the freelist can size this bitmap for the
@@ -96,7 +96,7 @@
 //!
 //! The hot paths are fast for a few concrete reasons:
 //!
-//! - `put` is just "write buffer into the parking cell, then `fetch_or` one bit".
+//! - `put` is just "validate the slot, then `fetch_or` one bit".
 //! - `take` uses a stable per-thread home word before scanning others, so
 //!   threads tend to start from different stripes.
 //! - `take` and `take_batch` rotate bit selection inside each word, so threads
@@ -113,14 +113,15 @@
 //! standalone general-purpose container. It relies on the buffer pool's
 //! ownership discipline: a slot is either owned by a pooled backing, parked in a
 //! thread-local cache, or available in this freelist. Only the thread that owns
-//! a slot outside the freelist may access that slot's parking cell.
-use super::buffer::PooledBuffer;
+//! a slot outside the freelist may mutate that slot's side-table entry.
+use super::owner::{PooledBuffer, PooledOwner};
 use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
     cell::Cell,
     mem::MaybeUninit,
     num::{NonZeroU32, NonZeroUsize},
+    ptr,
     sync::atomic::Ordering,
 };
 
@@ -151,9 +152,9 @@ const INLINE_PUT_BATCH_MASKS: usize = 128;
 /// class. Pooled backing values and thread-local caches may temporarily hold
 /// [`PooledBuffer`] handles, but those handles must eventually return here so
 /// they can be released with the correct layout. The buffer pool keeps the
-/// freelist alive for those outstanding handles with pooled-backing leases
-/// or TLS-banked size-class references. Draining or dropping the freelist
-/// only deallocates buffers currently parked in it.
+/// freelist alive for those outstanding handles with live leases stored in
+/// pooled slot entries. Draining or dropping the freelist only deallocates buffers
+/// currently parked in it.
 ///
 /// The bitmap is intentionally striped over a power-of-two number of words.
 /// That makes the slot-to-word mapping cheap and keeps small freelists from
@@ -173,20 +174,21 @@ pub struct Freelist {
     /// steady state. Without padding, different bitmap words could still share
     /// a cache line even when they represent disjoint slot stripes.
     words: Box<[CachePadded<AtomicU64>]>,
-    /// Per-slot parking place for returned buffers.
+    /// Per-slot pooled owner state.
     ///
-    /// A bit transition is the synchronization boundary. `put` writes the
-    /// buffer into the parking cell before setting the bit, and `take` clears
-    /// the bit before reading the buffer back out.
-    storage: Box<[UnsafeCell<MaybeUninit<PooledBuffer>>]>,
+    /// A slot is mutated only while its free bit is clear and the slot is owned
+    /// by exactly one buffer/cache path. Publishing a slot to the global
+    /// freelist is the bitmap bit's Release transition; taking it is the
+    /// matching Acquire transition.
+    slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
     /// Mask used to map a slot id to its striped bitmap word.
     word_mask: usize,
     /// Number of low slot-id bits consumed by the word index.
     word_shift: u32,
 }
 
-// SAFETY: parking cells are only accessed by the thread that currently
-// owns their slot id. Publication and removal from the global free set are
+// SAFETY: side-table entries are mutated only by the thread that currently owns
+// their slot id. Publication and removal from the global free set are
 // synchronized via bitmap bit transitions.
 unsafe impl Send for Freelist {}
 // SAFETY: Same slot-ownership and bit-transition synchronization as above.
@@ -201,6 +203,7 @@ impl Freelist {
     ///
     /// If `prefill` is true, creates `capacity` buffers and makes them
     /// immediately available in the freelist.
+    ///
     pub fn new(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
@@ -238,8 +241,8 @@ impl Freelist {
             .map(|_| CachePadded::new(AtomicU64::new(0)))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let storage = (0..capacity)
-            .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+        let slots = (0..capacity as u32)
+            .map(|slot| CachePadded::new(UnsafeCell::new(PooledOwner::new(slot, layout.size()))))
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
@@ -247,7 +250,7 @@ impl Freelist {
             layout,
             created: AtomicUsize::new(0),
             words,
-            storage,
+            slots,
             word_mask,
             word_shift,
         };
@@ -268,25 +271,23 @@ impl Freelist {
     /// Returns `None` once every slot id in the fixed-capacity freelist has
     /// been reserved.
     ///
-    /// The returned buffer does not deallocate itself. The `(slot, buffer)`
-    /// pair must be returned to this same freelist before the freelist is
-    /// finally dropped, otherwise the buffer leaks.
+    /// The returned buffer does not deallocate itself. It must be returned to
+    /// this same freelist before the freelist is finally dropped, otherwise
+    /// the buffer leaks.
     #[inline(always)]
-    pub(super) fn try_create(&self, zeroed: bool) -> Option<(u32, PooledBuffer)> {
+    pub(super) fn try_create(&self, zeroed: bool) -> Option<PooledBuffer> {
         let slot = self
             .created
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
-                (created < self.storage.len()).then_some(created + 1)
+                (created < self.slots.len()).then_some(created + 1)
             })
             .ok()? as u32;
 
-        let buffer = if zeroed {
-            PooledBuffer::new_zeroed(self.layout)
-        } else {
-            PooledBuffer::new(self.layout)
-        };
+        // SAFETY: this fetch_update reserved `slot` exactly once, so no other
+        // thread can initialize or publish this side-table entry.
+        let buffer = unsafe { PooledBuffer::new(self.slot_ptr(slot), self.layout, zeroed) };
 
-        Some((slot, buffer))
+        Some(buffer)
     }
 
     /// Returns the bitmap word index and bit mask for a slot id.
@@ -314,20 +315,19 @@ impl Freelist {
 
     /// Puts one tracked buffer into the global freelist.
     ///
-    /// The buffer is first written back into its parking cell, then the slot's
+    /// The buffer's slot id is read from its side-table entry, then that slot's
     /// free bit is set with `Release` ordering. A successful `take` performs
-    /// the matching `Acquire` operation before reading the buffer back out.
+    /// the matching `Acquire` operation before rebuilding a buffer handle from
+    /// the same side-table entry.
     ///
-    /// The caller must own `slot`, and `slot` must not already be available in
-    /// this freelist. `buffer` must belong to this freelist and must have been
-    /// allocated by this freelist.
+    /// The caller must own `buffer`, its slot must not already be available in
+    /// this freelist, and the buffer must have been created by this freelist.
     #[inline]
-    pub fn put(&self, slot: u32, buffer: PooledBuffer) {
-        // Park the buffer before marking the slot free.
-        self.park(slot, buffer);
+    pub fn put(&self, buffer: PooledBuffer) {
+        let slot = buffer.slot();
 
-        // Setting the slot bit makes the parked buffer available. `Release` pairs
-        // with the taker's `Acquire` clear before it reads the parking cell.
+        // Setting the slot bit makes the slot available. `Release` pairs with
+        // the taker's `Acquire` clear before it reuses the side-table entry.
         let (word_index, mask) = self.slot_word(slot);
         let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
         assert_eq!(
@@ -343,26 +343,26 @@ impl Freelist {
     /// stripe needs only one atomic `fetch_or`, regardless of how many entries
     /// in the batch map to that word.
     ///
-    /// The caller must own every slot in the batch. Slots must be unique within
-    /// the batch and must not already be available in this freelist. Each
-    /// buffer must belong to this freelist.
-    ///
-    /// The iterator **must not panic** after yielding an entry.
-    ///
     /// `BufferPool` callers use simple drain and array iterators, avoiding
     /// per-entry guards keeps this path allocation-free for ordinary batches.
+    ///
+    /// The caller must own every buffer in the batch. Slots must be unique
+    /// within the batch and must not already be available in this freelist.
+    /// Each buffer must have been created by this freelist. If this method
+    /// panics after accepting one or more buffers, accepted-but-unpublished
+    /// buffers may leak.
     #[inline]
-    pub fn put_batch(&self, entries: impl IntoIterator<Item = (u32, PooledBuffer)>) {
+    pub fn put_batch(&self, entries: impl IntoIterator<Item = PooledBuffer>) {
         let mut entries = entries.into_iter();
 
         // Keep empty and single-entry batches on the cheapest path. The mask
         // scratch space is only needed once there are multiple slots to
         // coalesce.
-        let Some((slot, buffer)) = entries.next() else {
+        let Some(buffer) = entries.next() else {
             return;
         };
-        let Some((next_slot, next_buffer)) = entries.next() else {
-            self.put(slot, buffer);
+        let Some(next_buffer) = entries.next() else {
+            self.put(buffer);
             return;
         };
 
@@ -380,20 +380,13 @@ impl Freelist {
                 ptr.write_bytes(0, word_count);
                 std::slice::from_raw_parts_mut(ptr, word_count)
             };
-            self.put_entries(masks, slot, buffer, next_slot, next_buffer, entries);
+            self.put_entries(masks, buffer, next_buffer, entries);
         } else {
             // Very large freelists are uncommon, so keep the common case on the
             // stack and fall back to heap scratch only when the bitmap is wider
             // than the fixed inline staging area.
             let mut masks = vec![0u64; word_count];
-            self.put_entries(
-                masks.as_mut_slice(),
-                slot,
-                buffer,
-                next_slot,
-                next_buffer,
-                entries,
-            );
+            self.put_entries(masks.as_mut_slice(), buffer, next_buffer, entries);
         }
     }
 
@@ -402,31 +395,27 @@ impl Freelist {
     /// `put_batch` peels the first two entries before calling this helper, so
     /// this path only handles batches large enough to benefit from coalescing.
     /// `masks` must contain exactly one zeroed entry per bitmap word. Each slot
-    /// is parked first and ORed into its word's scratch mask. Once all entries
-    /// are staged, one `Release` `fetch_or` per non-empty mask makes the
-    /// corresponding parked buffers available.
+    /// is ORed into its word's scratch mask. Once all entries are
+    /// staged, one `Release` `fetch_or` per non-empty mask makes the
+    /// corresponding slots available.
     ///
-    /// The caller must own every slot, slots must be unique, none of the slots
-    /// may already be available in this freelist, and every buffer must belong
-    /// to this freelist. The iterator must not panic after yielding an entry,
-    /// because staged-but-not-inserted buffers would no longer be owned by the
-    /// caller and would not yet be reachable through the bitmap.
+    /// The iterator must not panic after yielding an entry, because
+    /// staged-but-not-inserted buffers would no longer be owned by the caller
+    /// and would not yet be reachable through the bitmap.
     #[inline(always)]
     fn put_entries(
         &self,
         masks: &mut [u64],
-        slot: u32,
         buffer: PooledBuffer,
-        next_slot: u32,
         next_buffer: PooledBuffer,
-        entries: impl Iterator<Item = (u32, PooledBuffer)>,
+        entries: impl Iterator<Item = PooledBuffer>,
     ) {
-        // Masks are staged by word after parking the buffers. The later
-        // Release `fetch_or` makes every staged slot in that word available.
-        self.stage_put(masks, slot, buffer);
-        self.stage_put(masks, next_slot, next_buffer);
-        for (slot, buffer) in entries {
-            self.stage_put(masks, slot, buffer);
+        // Masks are staged by word before the later Release `fetch_or` makes
+        // every staged slot in that word available.
+        self.stage_put(masks, buffer);
+        self.stage_put(masks, next_buffer);
+        for buffer in entries {
+            self.stage_put(masks, buffer);
         }
 
         for (word_index, &mask) in masks.iter().enumerate() {
@@ -434,8 +423,8 @@ impl Freelist {
                 continue;
             }
 
-            // One Release operation makes every parked buffer represented
-            // by this word mask.
+            // One Release operation makes every returned slot represented by
+            // this word mask available.
             let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
             assert_eq!(
                 previous & mask,
@@ -445,35 +434,32 @@ impl Freelist {
         }
     }
 
-    /// Parks one buffer and records its slot in the batch scratch mask.
+    /// Records one returned buffer's slot in the batch scratch mask.
     ///
     /// This helper intentionally does not touch the atomic bitmap. The caller
     /// later inserts the accumulated mask for each word, so multiple slots that
-    /// map to the same bitmap word share a single `Release` operation. Parking
-    /// happens before the bit is staged, preserving the same order as `put`.
+    /// map to the same bitmap word share a single `Release` operation.
     ///
-    /// `masks` must contain the scratch word for `slot`.
+    /// `masks` must contain the scratch word for `buffer`'s slot.
     #[inline(always)]
-    fn stage_put(&self, masks: &mut [u64], slot: u32, buffer: PooledBuffer) {
-        // Park first, then stage the bit for the later per-word insert.
-        self.park(slot, buffer);
+    fn stage_put(&self, masks: &mut [u64], buffer: PooledBuffer) {
+        let slot = buffer.slot();
         let (word_index, mask) = self.slot_word(slot);
         masks[word_index] |= mask;
     }
 
     /// Takes any one available slot from the global freelist.
     ///
-    /// On success, ownership of the returned `(slot, buffer)` pair is
-    /// transferred to the caller. The pair must be returned to this same
-    /// freelist before the freelist is finally dropped, otherwise the buffer
-    /// leaks.
+    /// On success, ownership of the returned buffer is transferred to the
+    /// caller. The buffer must be returned to this same freelist before the
+    /// freelist is finally dropped, otherwise it leaks.
     ///
     /// The search starts from a stable per-thread home word and scans the other
     /// stripes only on miss. Within a word, `fetch_and` claims one bit. That is
     /// important: unlike a full-word CAS loop, two threads removing different
     /// bits from the same word can both succeed.
     #[inline]
-    pub fn take(&self) -> Option<(u32, PooledBuffer)> {
+    pub fn take(&self) -> Option<PooledBuffer> {
         // Capture this thread's probe state once so the inner loop does not
         // repeatedly touch thread-local storage.
         let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
@@ -493,10 +479,9 @@ impl Freelist {
                 let observed = word_ref.fetch_and(!mask, Ordering::Acquire);
                 if observed & mask != 0 {
                     let slot = self.slot_index(word_index, bit);
-                    // Clear the bit before reading the parked buffer. The
-                    // Acquire `fetch_and` above synchronizes with the put-side
-                    // Release operation.
-                    return Some((slot, self.unpark(slot)));
+                    // The Acquire `fetch_and` above synchronizes with the
+                    // put-side Release operation.
+                    return Some(self.buffer(slot));
                 }
 
                 // Another thread removed that bit first. Reuse the returned
@@ -511,27 +496,27 @@ impl Freelist {
 
     /// Takes up to `max` available slots from the global freelist.
     ///
-    /// Ownership of each claimed `(slot, buffer)` pair is transferred to
-    /// `on_entry`. Each pair must be returned to this same freelist before the
-    /// freelist is finally dropped, otherwise the buffer leaks.
+    /// Ownership of each claimed buffer is transferred to `on_entry`. Each
+    /// buffer must be returned to this same freelist before the freelist is
+    /// finally dropped, otherwise it leaks.
     ///
-    /// `on_entry` receives each claimed `(slot, buffer)` pair. This avoids
-    /// internal allocation and lets callers fill an existing spill/refill
-    /// buffer directly. `on_entry` **must not panic**: for batch claims, bits
-    /// are cleared before buffers are handed to the callback, so a panic could
+    /// `on_entry` receives each claimed buffer. This avoids internal
+    /// allocation and lets callers fill an existing spill/refill buffer
+    /// directly. `on_entry` **must not panic**: for batch claims, bits are
+    /// cleared before buffers are handed to the callback, so a panic could
     /// strand already-claimed slots outside the freelist.
     ///
     /// For `max > 1`, the implementation tries to claim several bits from the
     /// same word in a single atomic `fetch_and`, which amortizes the shared
     /// synchronization cost across the batch.
     #[inline]
-    pub fn take_batch(&self, max: usize, mut on_entry: impl FnMut(u32, PooledBuffer)) -> usize {
+    pub fn take_batch(&self, max: usize, mut on_entry: impl FnMut(PooledBuffer)) -> usize {
         if max == 1 {
             // Keep single-slot takes on the cheaper path.
-            let Some((slot, buffer)) = self.take() else {
+            let Some(buffer) = self.take() else {
                 return 0;
             };
-            on_entry(slot, buffer);
+            on_entry(buffer);
             return 1;
         }
 
@@ -564,9 +549,8 @@ impl Freelist {
                     let bit = claimed.trailing_zeros() as usize;
                     let slot = self.slot_index(word_index, bit);
                     // These bits were cleared by the Acquire `fetch_and` above,
-                    // so each corresponding parked buffer is now owned by this
-                    // caller.
-                    on_entry(slot, self.unpark(slot));
+                    // so each corresponding slot is now owned by this caller.
+                    on_entry(self.buffer(slot));
                     claimed &= claimed - 1;
                     filled += 1;
                 }
@@ -601,8 +585,8 @@ impl Freelist {
             while claimed != 0 {
                 let bit = claimed.trailing_zeros() as usize;
                 let slot = self.slot_index(word_index, bit);
-                let buffer = self.unpark(slot);
-                // SAFETY: every buffer inserted into this freelist must have been
+                let buffer = self.buffer(slot);
+                // SAFETY: this freelist created the buffer for this slot,
                 // allocated with this freelist's layout.
                 unsafe { buffer.deallocate(self.layout) };
                 claimed &= claimed - 1;
@@ -613,76 +597,38 @@ impl Freelist {
         drained
     }
 
-    /// Parks a buffer in the storage cell for a slot outside the freelist.
-    ///
-    /// The caller must own `slot` and mark the corresponding bit only after
-    /// this write completes.
+    /// Returns the side-table pointer for a slot id.
     #[inline(always)]
-    fn park(&self, slot: u32, buffer: PooledBuffer) {
+    fn slot_ptr(&self, slot: u32) -> ptr::NonNull<PooledOwner> {
         let cell = self
-            .storage
+            .slots
             .get(slot as usize)
             .expect("slot id must refer to an allocated slot");
 
         cfg_if::cfg_if! {
             if #[cfg(not(feature = "loom"))] {
-                // SAFETY: the caller owns this slot while it is outside the
-                // freelist, so no other thread can access the parking cell until
-                // the slot bit is set.
-                unsafe {
-                    (*cell.get()).write(buffer);
-                }
+                ptr::NonNull::new(cell.get()).expect("slot pointers are non-null")
             } else {
-                // Use loom's tracked cell API so the model can detect a
-                // parking-cell access that is not synchronized by the bitmap bit
-                // transition.
-                cell.with_mut(|ptr| {
-                    // SAFETY: the caller owns this slot while it is outside the
-                    // freelist, so no other thread can access the parking cell
-                    // until the slot bit is set.
-                    unsafe { (*ptr).write(buffer) };
-                });
+                cell.with(|ptr| ptr::NonNull::new(ptr.cast_mut()).expect("slot pointers are non-null"))
             }
         }
     }
 
-    /// Removes the parked buffer from a slot whose free bit was just claimed.
+    /// Rebuilds a pooled buffer handle for a claimed slot.
     ///
-    /// The caller must have cleared the slot's bit before reading the cell.
+    /// The caller must have cleared the slot's free bit or freshly reserved
+    /// the slot before calling this method.
     #[inline(always)]
-    fn unpark(&self, slot: u32) -> PooledBuffer {
-        let cell = self
-            .storage
-            .get(slot as usize)
-            .expect("slot id must refer to an allocated slot");
-
-        cfg_if::cfg_if! {
-            if #[cfg(not(feature = "loom"))] {
-                // SAFETY: a successful bit clear removes this slot from the free
-                // set, so we have exclusive access to the initialized buffer that
-                // was made available by the matching put.
-                unsafe { (*cell.get()).assume_init_read() }
-            } else {
-                // Use loom's tracked cell API so the model can detect a
-                // parking-cell access that is not synchronized by the bitmap bit
-                // transition.
-                cell.with_mut(|ptr| {
-                    // SAFETY: a successful bit clear removes this slot from the
-                    // free set, so we have exclusive access to the initialized
-                    // buffer that was made available by the matching put.
-                    unsafe { (*ptr).assume_init_read() }
-                })
-            }
-        }
+    fn buffer(&self, slot: u32) -> PooledBuffer {
+        // SAFETY: the caller owns the slot and its data allocation is live.
+        unsafe { PooledBuffer::from_owner(self.slot_ptr(slot)) }
     }
 }
 
 impl Drop for Freelist {
     fn drop(&mut self) {
-        // Any slot still free in the freelist owns an initialized parked
-        // buffer in its parking cell. Drain them explicitly so the underlying
-        // pooled allocations are released before the raw storage backing the
-        // freelist itself goes away.
+        // Any slot still free in the freelist owns a live pooled allocation.
+        // Drain it explicitly before the side-table storage goes away.
         self.drain();
     }
 }
@@ -852,10 +798,10 @@ pub(super) mod tests {
         assert_eq!(created(&set), 0);
 
         // Without prefill, slots are reserved lazily as buffers are created.
-        let (slot0, buffer0) = set.try_create(false).expect("first creation");
-        let (slot1, buffer1) = set.try_create(false).expect("second creation");
-        assert_eq!(slot0, 0);
-        assert_eq!(slot1, 1);
+        let buffer0 = set.try_create(false).expect("first creation");
+        let buffer1 = set.try_create(false).expect("second creation");
+        assert_eq!(buffer0.slot(), 0);
+        assert_eq!(buffer1.slot(), 1);
         assert_eq!(created(&set), 2);
 
         // Slot reservation is bounded by capacity, even if the created
@@ -864,8 +810,8 @@ pub(super) mod tests {
 
         // Returning created buffers makes them available for reuse, but does
         // not reopen slot creation beyond the fixed capacity.
-        set.put(slot0, buffer0);
-        set.put(slot1, buffer1);
+        set.put(buffer0);
+        set.put(buffer1);
         assert_eq!(len(&set), 2);
 
         assert_eq!(created(&set), 2);
@@ -883,23 +829,24 @@ pub(super) mod tests {
         // keeping the expected slot set easy to inspect.
         let set = Freelist::new(NZU32!(3), NZUsize!(1), TEST_LAYOUT, false);
 
-        let (slot0, buffer0) = set.try_create(false).unwrap();
-        let (slot1, buffer1) = set.try_create(false).unwrap();
-        let (slot2, buffer2) = set.try_create(false).unwrap();
-        assert_eq!([slot0, slot1, slot2], [0, 1, 2]);
-        set.put(slot0, buffer0);
-        set.put(slot1, buffer1);
-        set.put(slot2, buffer2);
+        let buffer0 = set.try_create(false).unwrap();
+        let buffer1 = set.try_create(false).unwrap();
+        let buffer2 = set.try_create(false).unwrap();
+        assert_eq!([buffer0.slot(), buffer1.slot(), buffer2.slot()], [0, 1, 2]);
+        set.put(buffer0);
+        set.put(buffer1);
+        set.put(buffer2);
 
         // Every free slot should be returned exactly once, and the
         // freelist should report empty afterward.
         let mut seen = [false; 3];
         let mut taken = Vec::new();
         for _ in 0..3 {
-            let (slot, buffer) = set.take().expect("slot should be available");
+            let buffer = set.take().expect("slot should be available");
+            let slot = buffer.slot();
             assert!(!seen[slot as usize]);
             seen[slot as usize] = true;
-            taken.push((slot, buffer));
+            taken.push(buffer);
         }
 
         assert_eq!(len(&set), 0);
@@ -907,8 +854,8 @@ pub(super) mod tests {
         assert!(set.take().is_none());
 
         // Return taken test buffers so the freelist owns deallocation.
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
+        for buffer in taken {
+            set.put(buffer);
         }
     }
 
@@ -956,54 +903,46 @@ pub(super) mod tests {
         // Reserve the full slot range
         let mut created = Vec::new();
         for expected in 0..8 {
-            let (slot, buffer) = set.try_create(false).unwrap();
-            assert_eq!(slot, expected);
+            let buffer = set.try_create(false).unwrap();
+            assert_eq!(buffer.slot(), expected);
             created.push(Some(buffer));
         }
 
         // A single-entry batch delegates to `put`, preserving the cheaper
         // one-buffer path.
         let buffer = created[3].take().unwrap();
-        set.put_batch(vec![(3, buffer)]);
+        set.put_batch(vec![buffer]);
         assert_eq!(len(&set), 1);
 
         let mut taken = Vec::new();
-        assert_eq!(
-            set.take_batch(1, |slot, buffer| taken.push((slot, buffer))),
-            1
-        );
+        assert_eq!(set.take_batch(1, |buffer| taken.push(buffer)), 1);
         assert_eq!(taken.len(), 1);
-        assert_eq!(taken[0].0, 3);
+        assert_eq!(taken[0].slot(), 3);
         let single = taken.pop().expect("single entry was taken");
 
-        // Multi-entry batches should make every slot available and preserve ownership
-        // of each parked buffer until it is taken.
+        // Multi-entry batches should make every slot available and preserve
+        // ownership of each returned buffer until it is taken.
         let mut batch = Vec::new();
         for slot in [1, 5, 7] {
             let buffer = created[slot as usize].take().unwrap();
-            batch.push((slot, buffer));
+            batch.push(buffer);
         }
         set.put_batch(batch);
         assert_eq!(len(&set), 3);
 
-        assert_eq!(
-            set.take_batch(3, |slot, buffer| taken.push((slot, buffer))),
-            3
-        );
-        let mut slots = taken.iter().map(|(slot, _)| *slot).collect::<Vec<_>>();
+        assert_eq!(set.take_batch(3, |buffer| taken.push(buffer)), 3);
+        let mut slots = taken.iter().map(PooledBuffer::slot).collect::<Vec<_>>();
         slots.sort_unstable();
         assert_eq!(slots, vec![1, 5, 7]);
         assert_eq!(len(&set), 0);
 
         // Return taken test buffers so the freelist owns deallocation.
-        set.put(single.0, single.1);
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
+        set.put(single);
+        for buffer in taken {
+            set.put(buffer);
         }
-        for (slot, buffer) in created.into_iter().enumerate() {
-            if let Some(buffer) = buffer {
-                set.put(slot as u32, buffer);
-            }
+        for buffer in created.into_iter().flatten() {
+            set.put(buffer);
         }
     }
 
@@ -1018,58 +957,60 @@ pub(super) mod tests {
         // valid while only those slots are published to the freelist.
         let mut created = Vec::new();
         for expected in 0..8193 {
-            let (slot, buffer) = set.try_create(false).expect("slot");
-            assert_eq!(slot, expected);
+            let buffer = set.try_create(false).expect("slot");
+            assert_eq!(buffer.slot(), expected);
             created.push(Some(buffer));
         }
 
         let mut batch = Vec::new();
         for slot in [0, 1, 64, 8192] {
             let buffer = created[slot as usize].take().expect("slot buffer");
-            batch.push((slot, buffer));
+            batch.push(buffer);
         }
         set.put_batch(batch);
         assert_eq!(len(&set), 4);
 
         let mut taken = Vec::new();
-        assert_eq!(
-            set.take_batch(8, |slot, buffer| taken.push((slot, buffer))),
-            4
-        );
-        let mut slots = taken.iter().map(|(slot, _)| *slot).collect::<Vec<_>>();
+        assert_eq!(set.take_batch(8, |buffer| taken.push(buffer)), 4);
+        let mut slots = taken.iter().map(PooledBuffer::slot).collect::<Vec<_>>();
         slots.sort_unstable();
         assert_eq!(slots, vec![0, 1, 64, 8192]);
         assert_eq!(len(&set), 0);
 
         // Return taken test buffers so the freelist owns deallocation.
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
+        for buffer in taken {
+            set.put(buffer);
         }
-        for (slot, buffer) in created.into_iter().enumerate() {
-            if let Some(buffer) = buffer {
-                set.put(slot as u32, buffer);
-            }
+        for buffer in created.into_iter().flatten() {
+            set.put(buffer);
         }
     }
 
     #[test]
     fn test_freelist_drain_returns_all_available_slots() {
         let set = Freelist::new(NZU32!(4), NZUsize!(4), TEST_LAYOUT, false);
-        let (slot0, buffer0) = set.try_create(false).unwrap();
-        let (slot1, buffer1) = set.try_create(false).unwrap();
-        let (slot2, buffer2) = set.try_create(false).unwrap();
-        let (slot3, buffer3) = set.try_create(false).unwrap();
-        assert_eq!([slot0, slot1, slot2, slot3], [0, 1, 2, 3]);
-
-        set.put(slot0, buffer0);
-        set.put(slot2, buffer2);
-        set.put(slot3, buffer3);
+        let buffer0 = set.try_create(false).unwrap();
+        let buffer1 = set.try_create(false).unwrap();
+        let buffer2 = set.try_create(false).unwrap();
+        let buffer3 = set.try_create(false).unwrap();
+        assert_eq!(
+            [
+                buffer0.slot(),
+                buffer1.slot(),
+                buffer2.slot(),
+                buffer3.slot()
+            ],
+            [0, 1, 2, 3]
+        );
+        set.put(buffer0);
+        set.put(buffer2);
+        set.put(buffer3);
 
         assert_eq!(set.drain(), 3);
         assert_eq!(len(&set), 0);
 
         // Return taken test buffer so the freelist owns deallocation.
-        set.put(slot1, buffer1);
+        set.put(buffer1);
     }
 
     #[test]
@@ -1078,13 +1019,13 @@ pub(super) mod tests {
         // partial, and empty refill behavior in one setup.
         let set = Freelist::new(NZU32!(4), NZUsize!(4), TEST_LAYOUT, false);
         for expected in [0, 1, 2] {
-            let (slot, buffer) = set.try_create(false).expect("slot");
-            assert_eq!(slot, expected);
-            set.put(slot, buffer);
+            let buffer = set.try_create(false).expect("slot");
+            assert_eq!(buffer.slot(), expected);
+            set.put(buffer);
         }
 
         let mut taken = Vec::new();
-        let mut record = |slot, buffer| taken.push((slot, buffer));
+        let mut record = |buffer| taken.push(buffer);
 
         // `max == 0` must return immediately and must not call the callback.
         assert_eq!(set.take_batch(0, &mut record), 0);
@@ -1101,13 +1042,13 @@ pub(super) mod tests {
         assert_eq!(set.take_batch(1, &mut record), 0);
         assert_eq!(taken.len(), 3);
 
-        let mut slots = taken.iter().map(|(slot, _)| *slot).collect::<Vec<_>>();
+        let mut slots = taken.iter().map(PooledBuffer::slot).collect::<Vec<_>>();
         slots.sort_unstable();
         assert_eq!(slots, vec![0, 1, 2]);
 
         // Return taken test buffers so the freelist owns deallocation.
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
+        for buffer in taken {
+            set.put(buffer);
         }
     }
 
@@ -1121,19 +1062,16 @@ pub(super) mod tests {
         // A two-slot batch should fill from this thread's first probed word
         // and stop immediately.
         let mut taken = Vec::new();
-        assert_eq!(
-            set.take_batch(2, |slot, buffer| taken.push((slot, buffer))),
-            2
-        );
+        assert_eq!(set.take_batch(2, |buffer| taken.push(buffer)), 2);
 
-        let mut slots = taken.iter().map(|(slot, _)| *slot).collect::<Vec<_>>();
+        let mut slots = taken.iter().map(PooledBuffer::slot).collect::<Vec<_>>();
         slots.sort_unstable();
         assert_eq!(slots, vec![slot0, slot1]);
         assert_eq!(len(&set), 14);
 
         // Return taken test buffers so the freelist owns deallocation.
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
+        for buffer in taken {
+            set.put(buffer);
         }
     }
 
@@ -1150,24 +1088,21 @@ pub(super) mod tests {
         ];
 
         let mut taken = Vec::new();
-        assert_eq!(
-            set.take_batch(2, |slot, buffer| taken.push((slot, buffer))),
-            2
-        );
+        assert_eq!(set.take_batch(2, |buffer| taken.push(buffer)), 2);
         assert_eq!(len(&set), 22);
 
         // The third slot should remain free and be retrievable normally.
         let remaining = set.take().expect("one slot should remain free");
-        let mut seen = taken.iter().map(|(slot, _)| *slot).collect::<Vec<_>>();
-        seen.push(remaining.0);
+        let mut seen = taken.iter().map(PooledBuffer::slot).collect::<Vec<_>>();
+        seen.push(remaining.slot());
         seen.sort_unstable();
         assert_eq!(seen, slots);
 
         // Return taken test buffers so the freelist owns deallocation.
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
+        for buffer in taken {
+            set.put(buffer);
         }
-        set.put(remaining.0, remaining.1);
+        set.put(remaining);
     }
 
     #[test]
@@ -1250,9 +1185,9 @@ pub(super) mod tests {
         // path before discovering that another thread already claimed the slot.
         for _ in 0..32 {
             let set = Arc::new(Freelist::new(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false));
-            let (slot, buffer) = set.try_create(false).unwrap();
-            assert_eq!(slot, 0);
-            set.put(slot, buffer);
+            let buffer = set.try_create(false).unwrap();
+            assert_eq!(buffer.slot(), 0);
+            set.put(buffer);
 
             // Align the contenders so several can race on the same observed
             // word instead of serializing before `take`.
@@ -1285,7 +1220,7 @@ pub(super) mod tests {
             let claimed = claimed_rx.recv().expect("one thread claimed the slot");
             assert!(claimed_rx.try_recv().is_err());
             // Return the claimed buffer so the freelist owns deallocation.
-            set.put(claimed.0, claimed.1);
+            set.put(claimed);
         }
     }
 
@@ -1295,9 +1230,9 @@ pub(super) mod tests {
         // globally free slots.
         let set = Freelist::new(NZU32!(2), NZUsize!(2), TEST_LAYOUT, false);
         for expected in [0, 1] {
-            let (slot, buffer) = set.try_create(false).expect("slot");
-            assert_eq!(slot, expected);
-            set.put(slot, buffer);
+            let buffer = set.try_create(false).expect("slot");
+            assert_eq!(buffer.slot(), expected);
+            set.put(buffer);
         }
         drop(set);
     }
@@ -1316,23 +1251,20 @@ mod loom_tests {
     };
 
     // This module uses loom to model the freelist's ownership protocol between
-    // bitmap bits and parking cells: a producer parks a buffer, publishes its
-    // bit, and exactly one consumer clears that bit before reading the cell.
+    // bitmap bits and side-table slots: a producer publishes a returned slot,
+    // and exactly one consumer clears that bit before rebuilding a buffer
+    // handle from the slot.
     // The models keep capacities small so loom can exhaustively explore the
     // interleavings that stress this protocol: same-word RMW composition,
     // striped scans across independent bitmap words, stale relaxed candidate
-    // loads, and the Release/Acquire edge that makes a parked buffer visible
-    // after its bit is claimed. Geometry-matrix tests cover single-word/single-bit,
+    // loads, and the Release/Acquire edge that transfers slot ownership after
+    // its bit is claimed. Geometry-matrix tests cover single-word/single-bit,
     // single-word/multi-bit, multi-word/single-bit, and multi-word/multi-bit
     // layouts so both degenerate and striped cases stay exercised.
 
     fn single_word_freelist(capacity: u32) -> Freelist {
-        Freelist::new(
-            NZU32!(capacity),
-            NZUsize!(1),
-            Layout::from_size_align(64, 64).unwrap(),
-            false,
-        )
+        let layout = Layout::from_size_align(64, 64).unwrap();
+        Freelist::new(NZU32!(capacity), NZUsize!(1), layout, false)
     }
 
     // Each geometry gives a model a small bitmap layout: one or more active
@@ -1351,18 +1283,14 @@ mod loom_tests {
             match self {
                 Self::SingleWordSingleBit => single_word_freelist(1),
                 Self::SingleWordMultiBit => single_word_freelist(2),
-                Self::MultiWordSingleBit => Freelist::new(
-                    NZU32!(4),
-                    NZUsize!(4),
-                    Layout::from_size_align(64, 64).unwrap(),
-                    false,
-                ),
-                Self::MultiWordMultiBit => Freelist::new(
-                    NZU32!(4),
-                    NZUsize!(2),
-                    Layout::from_size_align(64, 64).unwrap(),
-                    false,
-                ),
+                Self::MultiWordSingleBit => {
+                    let layout = Layout::from_size_align(64, 64).unwrap();
+                    Freelist::new(NZU32!(4), NZUsize!(4), layout, false)
+                }
+                Self::MultiWordMultiBit => {
+                    let layout = Layout::from_size_align(64, 64).unwrap();
+                    Freelist::new(NZU32!(4), NZUsize!(2), layout, false)
+                }
             }
         }
 
@@ -1423,7 +1351,7 @@ mod loom_tests {
     // must be returned to the same freelist before that freelist is dropped.
     struct Leases {
         freelist: Arc<Freelist>,
-        buffers: Mutex<Vec<(u32, PooledBuffer)>>,
+        buffers: Mutex<Vec<PooledBuffer>>,
     }
 
     impl Leases {
@@ -1434,12 +1362,12 @@ mod loom_tests {
             })
         }
 
-        fn reserve(freelist: Arc<Freelist>) -> (Arc<Self>, Vec<(u32, PooledBuffer)>) {
+        fn reserve(freelist: Arc<Freelist>) -> (Arc<Self>, Vec<PooledBuffer>) {
             let entries = Self::entries(&freelist);
             (Self::new(freelist), entries)
         }
 
-        fn entries(freelist: &Freelist) -> Vec<(u32, PooledBuffer)> {
+        fn entries(freelist: &Freelist) -> Vec<PooledBuffer> {
             let mut entries = Vec::new();
             while let Some(entry) = freelist.try_create(false) {
                 entries.push(entry);
@@ -1447,58 +1375,51 @@ mod loom_tests {
             entries
         }
 
-        fn push(&self, slot: u32, buffer: PooledBuffer) {
-            self.buffers.lock().push((slot, buffer));
+        fn push(&self, buffer: PooledBuffer) {
+            self.buffers.lock().push(buffer);
         }
 
-        fn push_expected(
-            &self,
-            seen: &AtomicUsize,
-            expected: usize,
-            slot: u32,
-            buffer: PooledBuffer,
-        ) {
+        fn push_expected(&self, seen: &AtomicUsize, expected: usize, buffer: PooledBuffer) {
+            let slot = buffer.slot();
             let mask = 1usize << slot;
             assert_ne!(expected & mask, 0);
             let previous = seen.fetch_or(mask, Ordering::Relaxed);
             assert_eq!(previous & mask, 0);
-            self.push(slot, buffer);
+            self.push(buffer);
         }
     }
 
     impl Drop for Leases {
         fn drop(&mut self) {
-            for (slot, buffer) in self.buffers.lock().drain(..) {
-                self.freelist.put(slot, buffer);
+            for buffer in self.buffers.lock().drain(..) {
+                self.freelist.put(buffer);
             }
         }
     }
 
     #[test]
     fn put_publishes_before_take() {
-        // `put` writes the parking cell before publishing the bit with a
-        // Release RMW. The taker spins until it can clear that bit with an
-        // Acquire RMW, then reads the same cell.
-        //
-        // If the publish/claim edge is weakened, loom should be able to
-        // schedule the cell read without seeing the prior cell write.
+        // `put` publishes the returned slot with a Release RMW. The taker
+        // spins until it can clear that bit with an Acquire RMW, then rebuilds
+        // a buffer handle from the same side-table slot.
         model(&ALL_GEOMETRIES, |geometry, freelist| {
             let slot = geometry.slots()[0];
-            let (_, buffer) = freelist.try_create(false).unwrap();
+            let buffer = freelist.try_create(false).unwrap();
+            assert_eq!(buffer.slot(), slot);
             let leases = Leases::new(freelist.clone());
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(slot, buffer)
+                move || freelist.put(buffer)
             });
 
             let reader = thread::spawn({
                 let freelist = freelist.clone();
                 let leases = leases.clone();
                 move || loop {
-                    if let Some((taken, buffer)) = freelist.take() {
-                        assert_eq!(taken, slot);
-                        leases.push(taken, buffer);
+                    if let Some(buffer) = freelist.take() {
+                        assert_eq!(buffer.slot(), slot);
+                        leases.push(buffer);
                         break;
                     }
                     thread::yield_now();
@@ -1524,25 +1445,25 @@ mod loom_tests {
             let seen = Arc::new(AtomicUsize::new(0));
             let expected = 0b11;
             let (leases, mut entries) = Leases::reserve(freelist.clone());
-            let (slot0, buffer0) = entries.pop().unwrap();
-            let (slot1, buffer1) = entries.pop().unwrap();
+            let buffer0 = entries.pop().unwrap();
+            let buffer1 = entries.pop().unwrap();
 
             let first = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(slot0, buffer0)
+                move || freelist.put(buffer0)
             });
 
             let second = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(slot1, buffer1)
+                move || freelist.put(buffer1)
             });
 
             first.join().unwrap();
             second.join().unwrap();
 
             assert_eq!(
-                freelist.take_batch(2, |slot, buffer| {
-                    leases.push_expected(&seen, expected, slot, buffer)
+                freelist.take_batch(2, |buffer| {
+                    leases.push_expected(&seen, expected, buffer)
                 }),
                 2
             );
@@ -1578,8 +1499,8 @@ mod loom_tests {
             second.join().unwrap();
 
             assert_eq!(
-                freelist.take_batch(4, |slot, buffer| {
-                    leases.push_expected(&seen, expected, slot, buffer)
+                freelist.take_batch(4, |buffer| {
+                    leases.push_expected(&seen, expected, buffer)
                 }),
                 4
             );
@@ -1601,14 +1522,14 @@ mod loom_tests {
             let initial_entry = entries.pop().unwrap();
             let writer_entry = entries.pop().unwrap();
             assert!(entries.pop().is_none());
-            freelist.put(initial_entry.0, initial_entry.1);
+            freelist.put(initial_entry);
 
             let seen = Arc::new(AtomicUsize::new(0));
             let expected = 0b11;
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(writer_entry.0, writer_entry.1)
+                move || freelist.put(writer_entry)
             });
 
             let taker = thread::spawn({
@@ -1616,8 +1537,8 @@ mod loom_tests {
                 let seen = seen.clone();
                 let leases = leases.clone();
                 move || {
-                    let (slot, buffer) = freelist.take().expect("slot 0 starts free");
-                    leases.push_expected(&seen, expected, slot, buffer);
+                    let buffer = freelist.take().expect("slot 0 starts free");
+                    leases.push_expected(&seen, expected, buffer);
                 }
             });
 
@@ -1627,8 +1548,8 @@ mod loom_tests {
             // The taker may run before slot 1 is published. After the writer
             // has joined, any slot not claimed during the race must still be
             // available exactly once.
-            while let Some((slot, buffer)) = freelist.take() {
-                leases.push_expected(&seen, expected, slot, buffer);
+            while let Some(buffer) = freelist.take() {
+                leases.push_expected(&seen, expected, buffer);
             }
 
             assert_eq!(seen.load(Ordering::Relaxed), expected);
@@ -1649,14 +1570,14 @@ mod loom_tests {
             let initial_entry = entries.pop().unwrap();
             let writer_entry = entries.pop().unwrap();
             assert!(entries.pop().is_none());
-            freelist.put(initial_entry.0, initial_entry.1);
+            freelist.put(initial_entry);
 
             let seen = Arc::new(AtomicUsize::new(0));
             let expected = 0b11;
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(writer_entry.0, writer_entry.1)
+                move || freelist.put(writer_entry)
             });
 
             let batch_taker = thread::spawn({
@@ -1664,8 +1585,8 @@ mod loom_tests {
                 let seen = seen.clone();
                 let leases = leases.clone();
                 move || {
-                    let count = freelist.take_batch(2, |slot, buffer| {
-                        leases.push_expected(&seen, expected, slot, buffer);
+                    let count = freelist.take_batch(2, |buffer| {
+                        leases.push_expected(&seen, expected, buffer);
                     });
                     assert!((1..=2).contains(&count));
                 }
@@ -1676,8 +1597,8 @@ mod loom_tests {
 
             // If the batch taker ran before slot 1 was published, the slot must
             // still be visible after the writer completes.
-            while let Some((slot, buffer)) = freelist.take() {
-                leases.push_expected(&seen, expected, slot, buffer);
+            while let Some(buffer) = freelist.take() {
+                leases.push_expected(&seen, expected, buffer);
             }
 
             assert_eq!(seen.load(Ordering::Relaxed), expected);
@@ -1699,7 +1620,7 @@ mod loom_tests {
             let writer_entry1 = entries.pop().unwrap();
             let initial_entry = entries.pop().unwrap();
             assert!(entries.pop().is_none());
-            freelist.put(initial_entry.0, initial_entry.1);
+            freelist.put(initial_entry);
 
             let drained = Arc::new(AtomicUsize::new(0));
 
@@ -1737,8 +1658,8 @@ mod loom_tests {
         // ownership.
         loom::model(|| {
             let freelist = Arc::new(single_word_freelist(2));
-            let (_, buffer) = freelist.try_create(false).unwrap();
-            freelist.put(0, buffer);
+            let buffer = freelist.try_create(false).unwrap();
+            freelist.put(buffer);
 
             let seen = Arc::new(AtomicUsize::new(0));
             let expected = 0b1;
@@ -1751,8 +1672,8 @@ mod loom_tests {
                     let seen = seen.clone();
                     let leases = leases.clone();
                     move || {
-                        if let Some((slot, buffer)) = freelist.take() {
-                            leases.push_expected(&seen, expected, slot, buffer);
+                        if let Some(buffer) = freelist.take() {
+                            leases.push_expected(&seen, expected, buffer);
                         }
                     }
                 }));
@@ -1778,7 +1699,7 @@ mod loom_tests {
             let (leases, mut entries) = Leases::reserve(freelist.clone());
             let entry = entries.pop().unwrap();
             assert!(entries.pop().is_none());
-            freelist.put(entry.0, entry.1);
+            freelist.put(entry);
 
             let transfers = Arc::new(AtomicUsize::new(0));
             let mut handles = Vec::new();
@@ -1789,13 +1710,14 @@ mod loom_tests {
                     let transfers = transfers.clone();
                     let leases = leases.clone();
                     move || loop {
-                        if let Some((slot, buffer)) = freelist.take() {
+                        if let Some(buffer) = freelist.take() {
+                            let slot = buffer.slot();
                             assert_eq!(slot, 0);
                             let transfer = transfers.fetch_add(1, Ordering::Relaxed) + 1;
                             if transfer == 1 {
-                                freelist.put(slot, buffer);
+                                freelist.put(buffer);
                             } else {
-                                leases.push(slot, buffer);
+                                leases.push(buffer);
                             }
                             break;
                         }
@@ -1839,8 +1761,8 @@ mod loom_tests {
                     let seen = seen.clone();
                     let leases = leases.clone();
                     move || {
-                        if let Some((slot, buffer)) = freelist.take() {
-                            leases.push_expected(&seen, expected, slot, buffer);
+                        if let Some(buffer) = freelist.take() {
+                            leases.push_expected(&seen, expected, buffer);
                         }
                     }
                 }));
@@ -1880,9 +1802,9 @@ mod loom_tests {
                 let batch_callbacks = batch_callbacks.clone();
                 let leases = leases.clone();
                 move || {
-                    let count = freelist.take_batch(slots.len(), |slot, buffer| {
+                    let count = freelist.take_batch(slots.len(), |buffer| {
                         batch_callbacks.fetch_add(1, Ordering::Relaxed);
-                        leases.push_expected(&seen, expected, slot, buffer);
+                        leases.push_expected(&seen, expected, buffer);
                     });
                     batch_count.store(count, Ordering::Relaxed);
                 }
@@ -1893,8 +1815,8 @@ mod loom_tests {
                 let seen = seen.clone();
                 let leases = leases.clone();
                 move || {
-                    if let Some((slot, buffer)) = freelist.take() {
-                        leases.push_expected(&seen, expected, slot, buffer);
+                    if let Some(buffer) = freelist.take() {
+                        leases.push_expected(&seen, expected, buffer);
                     }
                 }
             });
@@ -1933,8 +1855,8 @@ mod loom_tests {
                     let total = total.clone();
                     let leases = leases.clone();
                     move || {
-                        let count = freelist.take_batch(slots.len(), |slot, buffer| {
-                            leases.push_expected(&seen, expected, slot, buffer);
+                        let count = freelist.take_batch(slots.len(), |buffer| {
+                            leases.push_expected(&seen, expected, buffer);
                         });
                         total.fetch_add(count, Ordering::Relaxed);
                     }
@@ -1974,8 +1896,8 @@ mod loom_tests {
                     let total = total.clone();
                     let leases = leases.clone();
                     move || {
-                        let count = freelist.take_batch(2, |slot, buffer| {
-                            leases.push_expected(&seen, expected, slot, buffer);
+                        let count = freelist.take_batch(2, |buffer| {
+                            leases.push_expected(&seen, expected, buffer);
                         });
                         total.fetch_add(count, Ordering::Relaxed);
                     }
@@ -1996,7 +1918,7 @@ mod loom_tests {
     fn put_batch_publishes_to_take_batch() {
         // This exercises the batch-specific publish and claim path end to end
         // across selected bitmap geometries: Release `fetch_or` publications
-        // make parked cells visible, and Acquire `fetch_and` claims may
+        // make returned slots visible, and Acquire `fetch_and` claims may
         // transfer one or more bits per word.
         //
         // The reader loops because loom may run it before the writer has
@@ -2019,8 +1941,8 @@ mod loom_tests {
                 let leases = leases.clone();
                 move || {
                     while seen.load(Ordering::Relaxed) != expected {
-                        let claimed = freelist.take_batch(slots.len(), |slot, buffer| {
-                            leases.push_expected(&seen, expected, slot, buffer);
+                        let claimed = freelist.take_batch(slots.len(), |buffer| {
+                            leases.push_expected(&seen, expected, buffer);
                         });
 
                         if claimed == 0 {
@@ -2043,17 +1965,17 @@ mod loom_tests {
         // publication so this model checks the put-side Release edge rather
         // than relying on thread-spawn visibility from pre-populated state.
         //
-        // If the swap does not synchronize with the successful put, loom's
-        // tracked parking cell can observe the drainer reading the buffer
-        // without seeing the writer's earlier cell initialization.
+        // If the swap does not compose with the successful put, the model can
+        // lose or duplicate the returned slot.
         model(&ALL_GEOMETRIES, |geometry, freelist| {
             let drained = Arc::new(AtomicUsize::new(0));
             let slot = geometry.slots()[0];
-            let (_, buffer) = freelist.try_create(false).unwrap();
+            let buffer = freelist.try_create(false).unwrap();
+            assert_eq!(buffer.slot(), slot);
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(slot, buffer)
+                move || freelist.put(buffer)
             });
 
             let drainer = thread::spawn({
@@ -2084,13 +2006,13 @@ mod loom_tests {
 
     #[test]
     fn put_batch_publishes_to_drain() {
-        // A batch publish parks multiple cells before publishing the touched
-        // bitmap word masks. The drainer loops until its Acquire swaps have
-        // observed every publication and dropped every parked buffer.
+        // A batch publish stages multiple returned slots before publishing the
+        // touched bitmap word masks. The drainer loops until its Acquire swaps
+        // have observed every publication and dropped every returned buffer.
         //
         // This is the drain analogue of `put_batch_publishes_to_take_batch`:
-        // each whole-word swap must make all cells represented by the returned
-        // word visible before they are dropped.
+        // each whole-word swap must claim all slots represented by the returned
+        // word exactly once before they are dropped.
         model(&BATCH_GEOMETRIES, |geometry, freelist| {
             let drained = Arc::new(AtomicUsize::new(0));
             let slots = geometry.slots();
@@ -2142,8 +2064,8 @@ mod loom_tests {
             let writer = thread::spawn({
                 let freelist = freelist.clone();
                 move || {
-                    for (slot, buffer) in entries {
-                        freelist.put(slot, buffer);
+                    for buffer in entries {
+                        freelist.put(buffer);
                     }
                 }
             });
@@ -2154,8 +2076,8 @@ mod loom_tests {
                 let leases = leases.clone();
                 move || {
                     while seen.load(Ordering::Relaxed) != expected {
-                        if let Some((slot, buffer)) = freelist.take() {
-                            leases.push_expected(&seen, expected, slot, buffer);
+                        if let Some(buffer) = freelist.take() {
+                            leases.push_expected(&seen, expected, buffer);
                         } else {
                             thread::yield_now();
                         }
@@ -2175,7 +2097,7 @@ mod loom_tests {
     fn drain_and_take_do_not_duplicate_or_lose_slots() {
         // `drain` clears a whole word with `swap(0)` while `take` clears one
         // bit with `fetch_and`. Racing them should transfer ownership of each
-        // parked buffer exactly once and leave no free bits behind.
+        // globally free buffer exactly once and leave no free bits behind.
         //
         // This also covers the synchronization shape used by `Drop`, which
         // drains any buffers that remain globally free.
@@ -2202,8 +2124,8 @@ mod loom_tests {
                 let taken = taken.clone();
                 let leases = leases.clone();
                 move || {
-                    if let Some((slot, buffer)) = freelist.take() {
-                        leases.push_expected(&taken, expected_mask, slot, buffer);
+                    if let Some(buffer) = freelist.take() {
+                        leases.push_expected(&taken, expected_mask, buffer);
                     }
                 }
             });
@@ -2285,8 +2207,8 @@ mod loom_tests {
                 let taken_slots = taken_slots.clone();
                 let leases = leases.clone();
                 move || {
-                    let count = freelist.take_batch(expected, |slot, buffer| {
-                        leases.push_expected(&taken_slots, expected_mask, slot, buffer);
+                    let count = freelist.take_batch(expected, |buffer| {
+                        leases.push_expected(&taken_slots, expected_mask, buffer);
                     });
                     taken.store(count, Ordering::Relaxed);
                 }

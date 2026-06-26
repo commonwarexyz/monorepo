@@ -12,8 +12,8 @@ pub use write::Write;
 mod tests {
     use super::*;
     use crate::{
-        deterministic, Blob as _, Buf, BufMut, Clock, Error, Handle, IoBufMut, IoBufs, IoBufsMut,
-        Runner, Spawner, Storage, Supervisor as _,
+        deterministic, Blob as _, Buf, Clock, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner,
+        Spawner, Storage, Supervisor as _,
     };
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
@@ -67,7 +67,8 @@ mod tests {
 
     impl crate::Blob for BlockingReadBlob {
         async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::default()).await
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+                .await
         }
 
         async fn read_at_buf(
@@ -86,7 +87,10 @@ mod tests {
             }
 
             let mut out = buf.into();
-            out.put_slice(&data[start..end]);
+            assert!(out.capacity() >= len);
+            // SAFETY: `len` bytes are filled by copy_from_slice below.
+            unsafe { out.set_len(len) };
+            out.copy_from_slice(&data[start..end]);
             Ok(out)
         }
 
@@ -198,7 +202,8 @@ mod tests {
 
     impl crate::Blob for SyncTrackingBlob {
         async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::default()).await
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+                .await
         }
 
         async fn read_at_buf(
@@ -215,7 +220,10 @@ mod tests {
             }
 
             let mut out = buf.into();
-            out.put_slice(&state.data[start..end]);
+            assert!(out.capacity() >= len);
+            // SAFETY: `len` bytes are filled by copy_from_slice below.
+            unsafe { out.set_len(len) };
+            out.copy_from_slice(&state.data[start..end]);
             Ok(out)
         }
 
