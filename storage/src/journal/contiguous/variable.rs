@@ -4,7 +4,7 @@
 //! the preferred recovery point for replaying data to rebuild offset entries.
 
 use super::{
-    blobs::{Partition, Source, View as BlobsView, Writable},
+    blobs::{Blobs, Partition, Writable},
     fixed,
     metrics::VariableMetrics as Metrics,
     Contiguous, Many, Mutable,
@@ -288,7 +288,10 @@ pub struct Journal<E: Context, V: Codec> {
 /// A reader over a variable journal.
 pub struct Reader<'a, E: Context, V: Codec> {
     /// The journal's data blobs.
-    data: Source<'a, E>,
+    data: Blobs<'a, E::Blob>,
+
+    /// The readable position range `[start, end)`.
+    bounds: Range<u64>,
 
     /// Maps positions to byte offsets within the data blobs.
     offsets: fixed::Reader<'a, E, u64>,
@@ -307,9 +310,15 @@ pub struct Reader<'a, E: Context, V: Codec> {
 }
 
 impl<E: Context, V: CodecShared> Reader<'_, E, V> {
-    /// A borrowed view over this reader's data.
-    fn view(&self) -> BlobsView<'_, E::Blob> {
-        self.data.view()
+    /// Validate a position to be read: must lie within `bounds`.
+    const fn validate_readable(&self, position: u64) -> Result<(), Error> {
+        if position >= self.bounds.end {
+            return Err(Error::ItemOutOfRange(position));
+        }
+        if position < self.bounds.start {
+            return Err(Error::ItemPruned(position));
+        }
+        Ok(())
     }
 
     /// Read the varint-framed item at byte `offset` via `blob_view`.
@@ -440,10 +449,11 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
 
     /// Read an item synchronously from cached bytes, returning `None` on any miss.
     fn try_read_sync_into(&self, position: u64, buf: &mut Vec<u8>) -> Option<V> {
-        let view = self.view();
-        view.validate_readable(position).ok()?;
+        self.validate_readable(position).ok()?;
         let offset = self.offsets.try_read_sync(position)?;
-        let blob_view = view.get(position_to_blob(position, self.items_per_blob.get()))?;
+        let blob_view = self
+            .data
+            .get(position_to_blob(position, self.items_per_blob.get()))?;
         let remaining = blob_view.size().checked_sub(offset)?;
         let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
         if header_len == 0 {
@@ -502,7 +512,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
     type Item = V;
 
     fn bounds(&self) -> Range<u64> {
-        self.data.bounds()
+        self.bounds.clone()
     }
 
     async fn read(&self, position: u64) -> Result<V, Error> {
@@ -517,10 +527,10 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         }
 
         let _timer = self.metrics.read_timer();
-        let view = self.view();
-        view.validate_readable(position)?;
+        self.validate_readable(position)?;
         let offset = self.offsets.read(position).await?;
-        let blob_view = view
+        let blob_view = self
+            .data
             .get(position_to_blob(position, self.items_per_blob.get()))
             .expect("position in bounds maps to a retained blob");
         let item = self.read_at_offset(&blob_view, offset).await?;
@@ -534,13 +544,11 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         }
         let _timer = self.metrics.read_many_timer();
         self.metrics.read_many_calls.inc();
-        let view = self.view();
-        let bounds = view.bounds();
-        if positions[0] < bounds.start {
+        if positions[0] < self.bounds.start {
             return Err(Error::ItemPruned(positions[0]));
         }
         let last_position = *positions.last().expect("positions is not empty");
-        if last_position >= bounds.end {
+        if last_position >= self.bounds.end {
             return Err(Error::ItemOutOfRange(last_position));
         }
 
@@ -594,7 +602,8 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 group_end += 1;
             }
 
-            let blob_view = view
+            let blob_view = self
+                .data
                 .get(blob)
                 .expect("positions in bounds map to a retained blob");
             let mut run_start = group_start;
@@ -1084,10 +1093,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// from that range may observe unspecified contents.
     pub async fn snapshot(&mut self) -> Result<Reader<'static, E, V>, Error> {
         Ok(Reader {
-            data: Source::Snapshot {
-                blobs: self.blobs.snapshot().await?,
-                bounds: self.bounds.clone(),
-            },
+            data: self.blobs.snapshot().await?,
+            bounds: self.bounds.clone(),
             offsets: self.offsets.snapshot().await?,
             items_per_blob: self.items_per_blob,
             codec_config: self.codec_config.clone(),
@@ -1099,10 +1106,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// A reader borrowing the journal's live state.
     fn reader(&self) -> Reader<'_, E, V> {
         Reader {
-            data: Source::Owned {
-                blobs: &self.blobs,
-                bounds: self.bounds.clone(),
-            },
+            data: self.blobs.reader(),
+            bounds: self.bounds.clone(),
             offsets: self.offsets.reader(),
             items_per_blob: self.items_per_blob,
             codec_config: self.codec_config.clone(),

@@ -8,7 +8,7 @@ use commonware_runtime::{
     Blob as RBlob, Error as RError,
 };
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, num::NonZeroUsize, ops::Range, sync::Arc};
+use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
 
 /// Metrics for a journal's blobs.
@@ -223,12 +223,21 @@ impl<E: Context> Writable<E> {
         &mut self.tail
     }
 
-    /// Capture an owned [`Snapshot`] of the current blobs.
-    pub(super) async fn snapshot(&mut self) -> Result<Snapshot<E::Blob>, Error> {
-        Ok(Snapshot {
+    /// Borrow the current blobs for a live reader.
+    pub(super) fn reader(&self) -> Blobs<'_, E::Blob> {
+        Blobs {
             oldest_blob_index: self.oldest_blob_index,
-            sealed: self.sealed.clone(),
-            tail: self.tail.snapshot().await.map_err(Error::Runtime)?,
+            sealed: SealedBlobs::Borrowed(&self.sealed),
+            tail: Tail::Writer(&self.tail),
+        }
+    }
+
+    /// Capture owned blob handles for a snapshot reader.
+    pub(super) async fn snapshot(&mut self) -> Result<Blobs<'static, E::Blob>, Error> {
+        Ok(Blobs {
+            oldest_blob_index: self.oldest_blob_index,
+            sealed: SealedBlobs::Owned(self.sealed.clone()),
+            tail: Tail::Sealed(self.tail.snapshot().await.map_err(Error::Runtime)?),
         })
     }
 
@@ -347,8 +356,8 @@ impl<E: Context> Writable<E> {
 
     /// Remove every blob and start an empty journal with its tail at `tail_blob`.
     ///
-    /// Safe with live [`Snapshot`]s, like [Self::prune]: snapshots keep their own handles, which the
-    /// runtime's read-after-remove contract keeps valid.
+    /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
+    /// the runtime's read-after-remove contract keeps valid.
     pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
         for blob in self.oldest_blob_index..=self.tail_blob_index() {
             self.partition.remove(blob).await?;
@@ -386,110 +395,60 @@ impl<E: Context> Writable<E> {
     }
 }
 
-/// An owned copy of the journal's blob handles, captured by [`Writable::snapshot`]. Later
-/// appends, seals, and prunes are invisible to it: it serves reads from the handles retained at
-/// capture, so even pruned blobs stay readable. If the journal later rewinds or truncates into
-/// this snapshot's range, subsequent reads from that range may observe unspecified contents.
-pub(super) struct Snapshot<B: RBlob> {
-    /// Index of the first blob in [Self::sealed].
-    pub(super) oldest_blob_index: u64,
-
-    /// Sealed historical blobs, ascending and contiguous from `oldest_blob_index`.
-    pub(super) sealed: Arc<[Sealed<B>]>,
-
-    /// Owned sealed view of the tail.
-    pub(super) tail: Sealed<B>,
-}
-
-/// Reader-owned blob source, either journal-owned or snapshot-backed.
-pub(super) enum Source<'a, E: Context> {
-    Snapshot {
-        blobs: Snapshot<E::Blob>,
-        bounds: Range<u64>,
-    },
-    Owned {
-        blobs: &'a Writable<E>,
-        bounds: Range<u64>,
-    },
-}
-
-impl<E: Context> Source<'_, E> {
-    /// Returns a borrowed view over owned journal blobs.
-    pub(super) fn owned_view(blobs: &Writable<E>, bounds: Range<u64>) -> View<'_, E::Blob> {
-        View {
-            bounds,
-            oldest_blob_index: blobs.oldest_blob_index,
-            sealed: &blobs.sealed,
-            tail: blobs.tail.view(),
-        }
-    }
-
-    /// The readable position range `[start, end)`.
-    pub(super) fn bounds(&self) -> Range<u64> {
-        match self {
-            Self::Snapshot { bounds, .. } | Self::Owned { bounds, .. } => bounds.clone(),
-        }
-    }
-
-    /// Returns a borrowed view over the retained blobs.
-    pub(super) fn view(&self) -> View<'_, E::Blob> {
-        match self {
-            Self::Snapshot { blobs, bounds } => View {
-                bounds: bounds.clone(),
-                oldest_blob_index: blobs.oldest_blob_index,
-                sealed: &blobs.sealed,
-                tail: blobs.tail.view(),
-            },
-            Self::Owned { blobs, bounds } => Self::owned_view(blobs, bounds.clone()),
-        }
-    }
-}
-
-/// A borrowed view of sealed blobs and a tail.
-pub(super) struct View<'a, B: RBlob> {
-    /// The readable position range `[start, end)`.
-    bounds: Range<u64>,
+/// Blob handles used by a reader.
+///
+/// Live readers borrow the writable tail and sealed history. Snapshot readers own cloned sealed
+/// history and an owned sealed tail.
+pub(super) struct Blobs<'a, B: RBlob> {
     /// Index of the first sealed blob.
     oldest_blob_index: u64,
-    /// Sealed historical blobs, ascending and contiguous from [`Self::oldest_blob_index`].
-    sealed: &'a [Sealed<B>],
-    /// Read view of the tail blob.
-    tail: BlobView<'a, B>,
+    /// Sealed historical blobs.
+    sealed: SealedBlobs<'a, B>,
+    /// Tail blob.
+    tail: Tail<'a, B>,
 }
 
-impl<'a, B: RBlob> View<'a, B> {
-    /// The readable position range `[start, end)`.
-    pub(super) fn bounds(&self) -> Range<u64> {
-        self.bounds.clone()
-    }
+enum SealedBlobs<'a, B: RBlob> {
+    Borrowed(&'a [Sealed<B>]),
+    Owned(Arc<[Sealed<B>]>),
+}
 
-    /// Validate a position to be read: must lie within `bounds`.
-    pub(super) const fn validate_readable(&self, pos: u64) -> Result<(), Error> {
-        if pos >= self.bounds.end {
-            return Err(Error::ItemOutOfRange(pos));
+impl<B: RBlob> SealedBlobs<'_, B> {
+    fn as_slice(&self) -> &[Sealed<B>] {
+        match self {
+            Self::Borrowed(sealed) => sealed,
+            Self::Owned(sealed) => sealed,
         }
-        if pos < self.bounds.start {
-            return Err(Error::ItemPruned(pos));
-        }
-        Ok(())
     }
+}
 
+enum Tail<'a, B: RBlob> {
+    Writer(&'a Writer<B>),
+    Sealed(Sealed<B>),
+}
+
+impl<B: RBlob> Tail<'_, B> {
+    fn view(&self) -> BlobView<'_, B> {
+        match self {
+            Self::Writer(writer) => writer.view(),
+            Self::Sealed(sealed) => sealed.view(),
+        }
+    }
+}
+
+impl<B: RBlob> Blobs<'_, B> {
     /// Index of the newest blob (the tail).
-    pub(super) const fn tail_blob_index(&self) -> u64 {
-        self.oldest_blob_index + self.sealed.len() as u64
-    }
-
-    /// Read view of the tail blob.
-    pub(super) const fn tail(&self) -> BlobView<'a, B> {
-        self.tail
+    pub(super) fn tail_blob_index(&self) -> u64 {
+        self.oldest_blob_index + self.sealed.as_slice().len() as u64
     }
 
     /// Resolve the read view for `blob`, if retained.
-    pub(super) fn get(&self, blob: u64) -> Option<BlobView<'a, B>> {
+    pub(super) fn get(&self, blob: u64) -> Option<BlobView<'_, B>> {
         if blob == self.tail_blob_index() {
-            return Some(self.tail());
+            return Some(self.tail.view());
         }
         self.sealed
+            .as_slice()
             .get(blob.checked_sub(self.oldest_blob_index)? as usize)
             .map(Sealed::view)
     }

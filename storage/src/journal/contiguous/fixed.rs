@@ -95,7 +95,7 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::{
-    blobs::{Partition, Source, View as BlobsView, Writable},
+    blobs::{Blobs, Partition, Writable},
     checkpoint::Checkpoint,
 };
 use crate::{
@@ -703,10 +703,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// from that range may observe unspecified contents.
     pub async fn snapshot(&mut self) -> Result<Reader<'static, E, A>, Error> {
         Ok(Reader {
-            source: Source::Snapshot {
-                blobs: self.blobs.snapshot().await?,
-                bounds: self.bounds.clone(),
-            },
+            blobs: self.blobs.snapshot().await?,
+            bounds: self.bounds.clone(),
             items_per_blob: self.items_per_blob,
             metrics: self.metrics.clone(),
             _phantom: PhantomData,
@@ -716,10 +714,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// A reader borrowing the journal's live state.
     pub(super) fn reader(&self) -> Reader<'_, E, A> {
         Reader {
-            source: Source::Owned {
-                blobs: &self.blobs,
-                bounds: self.bounds.clone(),
-            },
+            blobs: self.blobs.reader(),
+            bounds: self.bounds.clone(),
             items_per_blob: self.items_per_blob,
             metrics: self.metrics.clone(),
             _phantom: PhantomData,
@@ -1015,27 +1011,34 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
 /// A reader over a fixed journal.
 pub struct Reader<'a, E: Context, A> {
-    source: Source<'a, E>,
+    blobs: Blobs<'a, E::Blob>,
+    bounds: Range<u64>,
     items_per_blob: NonZeroU64,
     metrics: Arc<Metrics<E>>,
     _phantom: PhantomData<A>,
 }
 
 impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
-    /// A borrowed view over this reader.
-    fn view(&self) -> BlobsView<'_, E::Blob> {
-        self.source.view()
+    /// Validate a position to be read: must lie within `bounds`.
+    const fn validate_readable(&self, pos: u64) -> Result<(), Error> {
+        if pos >= self.bounds.end {
+            return Err(Error::ItemOutOfRange(pos));
+        }
+        if pos < self.bounds.start {
+            return Err(Error::ItemPruned(pos));
+        }
+        Ok(())
     }
 
     /// Resolve `pos` to its read view and byte offset within the blob.
     fn locate(&self, pos: u64) -> Result<(BlobView<'_, E::Blob>, u64), Error> {
-        let view = self.view();
-        view.validate_readable(pos)?;
+        self.validate_readable(pos)?;
         let items_per_blob = self.items_per_blob.get();
         let blob = pos / items_per_blob;
-        let pos_in_blob = pos - first_in_blob(view.bounds().start, blob, items_per_blob)?;
+        let pos_in_blob = pos - first_in_blob(self.bounds.start, blob, items_per_blob)?;
         let offset = Journal::<E, A>::items_to_bytes(pos_in_blob)?;
-        let blob_view = view
+        let blob_view = self
+            .blobs
             .get(blob)
             .expect("position in bounds maps to a retained blob");
         Ok((blob_view, offset))
@@ -1056,7 +1059,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
     type Item = A;
 
     fn bounds(&self) -> Range<u64> {
-        self.source.bounds()
+        self.bounds.clone()
     }
 
     async fn read(&self, pos: u64) -> Result<A, Error> {
@@ -1090,12 +1093,11 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
                 return Err(Error::PositionsNotIncreasing);
             }
             prev = Some(pos);
-            self.view().validate_readable(pos)?;
+            self.validate_readable(pos)?;
         }
 
-        let view = self.view();
         let items_per_blob = self.items_per_blob.get();
-        let pruning_boundary = view.bounds().start;
+        let pruning_boundary = self.bounds.start;
         let chunk_size = A::SIZE;
 
         // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
@@ -1113,7 +1115,8 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
                 .map(|&pos| Journal::<E, A>::items_to_bytes(pos - first_position))
                 .collect::<Result<_, _>>()?;
 
-            let blob_view = view
+            let blob_view = self
+                .blobs
                 .get(blob)
                 .expect("positions in bounds map to a retained blob");
             let buf = &mut reusable_buf[..group.len() * chunk_size];
