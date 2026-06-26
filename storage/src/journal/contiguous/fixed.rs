@@ -110,6 +110,7 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Writer},
     IoBuf,
 };
+use futures::{stream, Stream, StreamExt as _};
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -134,6 +135,37 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
         .checked_mul(items_per_blob)
         .ok_or(Error::OffsetOverflow)?;
     Ok(pruning_boundary.max(start))
+}
+
+async fn replay_via_read_limit<'a, C>(
+    journal: &'a C,
+    buffer: NonZeroUsize,
+    start_pos: u64,
+) -> Result<impl Stream<Item = Result<(u64, C::Item), Error>> + Send + 'a, Error>
+where
+    C: super::Contiguous + 'a,
+{
+    let bounds = journal.bounds();
+    if start_pos > bounds.end {
+        return Err(Error::ItemOutOfRange(start_pos));
+    }
+    if start_pos < bounds.start {
+        return Err(Error::ItemPruned(start_pos));
+    }
+
+    Ok(stream::unfold(start_pos, move |pos| async move {
+        if pos == bounds.end {
+            return None;
+        }
+        match journal.read_limit(pos, buffer).await {
+            Ok((items, next)) => {
+                let batch = (pos..next).zip(items).map(Ok).collect::<Vec<_>>();
+                Some((stream::iter(batch), next))
+            }
+            Err(err) => Some((stream::iter(vec![Err(err)]), bounds.end)),
+        }
+    })
+    .flatten())
 }
 
 /// How a blob's on-disk item count compares to its logical capacity.
@@ -1163,6 +1195,14 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
         let items = self.read_many(&positions).await?;
         Ok((items, end))
     }
+
+    async fn replay(
+        &self,
+        buffer: NonZeroUsize,
+        start_pos: u64,
+    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
+        replay_via_read_limit(self, buffer, start_pos).await
+    }
 }
 
 impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
@@ -1190,6 +1230,14 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         budget: NonZeroUsize,
     ) -> Result<(Vec<A>, u64), Error> {
         self.reader().read_limit(start_pos, budget).await
+    }
+
+    async fn replay(
+        &self,
+        buffer: NonZeroUsize,
+        start_pos: u64,
+    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
+        replay_via_read_limit(self, buffer, start_pos).await
     }
 }
 

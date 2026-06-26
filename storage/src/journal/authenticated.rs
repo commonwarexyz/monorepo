@@ -31,7 +31,7 @@ use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
-use futures::{try_join, TryFutureExt as _};
+use futures::{try_join, Stream, TryFutureExt as _};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -760,6 +760,14 @@ where
         budget: NonZeroUsize,
     ) -> Result<(Vec<C::Item>, u64), JournalError> {
         self.journal.read_limit(start_pos, budget).await
+    }
+
+    async fn replay(
+        &self,
+        buffer: NonZeroUsize,
+        start_pos: u64,
+    ) -> Result<impl Stream<Item = Result<(u64, C::Item), JournalError>> + Send, JournalError> {
+        self.journal.replay(buffer, start_pos).await
     }
 }
 

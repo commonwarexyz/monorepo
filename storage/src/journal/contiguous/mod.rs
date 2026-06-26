@@ -5,7 +5,7 @@
 //! [variable]-size item journals are supported.
 
 use super::Error;
-use futures::{stream, Stream, StreamExt as _};
+use futures::Stream;
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
@@ -89,31 +89,7 @@ pub trait Contiguous: Send + Sync {
         start_pos: u64,
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
-    > + Send {
-        async move {
-            let bounds = self.bounds();
-            if start_pos > bounds.end {
-                return Err(Error::ItemOutOfRange(start_pos));
-            }
-            if start_pos < bounds.start {
-                return Err(Error::ItemPruned(start_pos));
-            }
-
-            Ok(stream::unfold(start_pos, move |pos| async move {
-                if pos == bounds.end {
-                    return None;
-                }
-                match self.read_limit(pos, buffer).await {
-                    Ok((items, next)) => {
-                        let batch = (pos..next).zip(items).map(Ok).collect::<Vec<_>>();
-                        Some((stream::iter(batch), next))
-                    }
-                    Err(err) => Some((stream::iter(vec![Err(err)]), bounds.end)),
-                }
-            })
-            .flatten())
-        }
-    }
+    > + Send;
 }
 
 /// Items to append via [`Mutable::append_many`].

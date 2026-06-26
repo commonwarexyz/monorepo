@@ -158,6 +158,7 @@ struct BlobScan {
 struct DataReplayState<'a, B: RBlob, V: Codec> {
     blob: u64,
     replay: BlobReplay<'a, B>,
+    budget: u64,
     pos: u64,
     end_pos: u64,
     offset: u64,
@@ -173,6 +174,7 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
         }
 
         let mut batch = Vec::new();
+        let mut consumed = 0u64;
         loop {
             if self.pos == self.end_pos {
                 return (!batch.is_empty()).then_some((batch, self));
@@ -239,6 +241,7 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
                 self.pos = self.end_pos;
                 return Some((batch, self));
             };
+            let item_len = next_offset - self.offset;
 
             match decode_item::<V>(
                 (&mut self.replay).take(item_size),
@@ -254,6 +257,14 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
                     };
                     self.pos = next_pos;
                     self.offset = next_offset;
+                    consumed = match consumed.checked_add(item_len) {
+                        Some(consumed) => consumed,
+                        None => {
+                            batch.push(Err(Error::OffsetOverflow));
+                            self.pos = self.end_pos;
+                            return Some((batch, self));
+                        }
+                    };
                     batch.push(Ok((pos, item)));
                 }
                 Err(err) => {
@@ -263,6 +274,9 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
                 }
             }
 
+            if consumed >= self.budget {
+                return Some((batch, self));
+            }
             if self.replay.remaining() < MAX_U32_VARINT_SIZE {
                 return Some((batch, self));
             }
@@ -426,7 +440,7 @@ pub struct Reader<'a, E: Context, V: Codec> {
     metrics: Arc<Metrics<E>>,
 }
 
-impl<E: Context, V: CodecShared> Reader<'_, E, V> {
+impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     /// Validate a position to be read: must lie within `bounds`.
     const fn validate_readable(&self, position: u64) -> Result<(), Error> {
         if position >= self.bounds.end {
@@ -617,6 +631,58 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         )
         .ok()
     }
+
+    async fn replay_states(
+        &self,
+        buffer: NonZeroUsize,
+        start_pos: u64,
+    ) -> Result<Vec<DataReplayState<'a, E::Blob, V>>, Error> {
+        let bounds = self.bounds();
+        if start_pos > bounds.end {
+            return Err(Error::ItemOutOfRange(start_pos));
+        }
+        if start_pos < bounds.start {
+            return Err(Error::ItemPruned(start_pos));
+        }
+
+        let mut states = Vec::new();
+        if start_pos < bounds.end {
+            let items_per_blob = self.items_per_blob.get();
+            let start_blob = position_to_blob(start_pos, items_per_blob);
+            let end_blob = position_to_blob(bounds.end - 1, items_per_blob);
+            let start_offset = self.offsets.read(start_pos).await?;
+
+            for blob in start_blob..=end_blob {
+                let blob_handle = self
+                    .data
+                    .get(blob)
+                    .expect("positions in bounds map to a retained blob");
+                let offset = if blob == start_blob { start_offset } else { 0 };
+
+                let first_pos = if blob == start_blob {
+                    start_pos
+                } else {
+                    blob_first_position(blob, items_per_blob)?
+                };
+                let next_blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
+                let end_pos = blob_first_position(next_blob, items_per_blob)?.min(bounds.end);
+
+                states.push(DataReplayState::<E::Blob, V> {
+                    blob,
+                    replay: blob_handle.replay_from(offset, buffer)?,
+                    budget: buffer.get() as u64,
+                    pos: first_pos,
+                    end_pos,
+                    offset,
+                    codec_config: self.codec_config.clone(),
+                    compressed: self.compressed,
+                    _marker: PhantomData,
+                });
+            }
+        }
+
+        Ok(states)
+    }
 }
 
 impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
@@ -804,47 +870,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        let bounds = self.bounds();
-        if start_pos > bounds.end {
-            return Err(Error::ItemOutOfRange(start_pos));
-        }
-        if start_pos < bounds.start {
-            return Err(Error::ItemPruned(start_pos));
-        }
-        let mut states = Vec::new();
-        if start_pos < bounds.end {
-            let items_per_blob = self.items_per_blob.get();
-            let start_blob = position_to_blob(start_pos, items_per_blob);
-            let end_blob = position_to_blob(bounds.end - 1, items_per_blob);
-            let start_offset = self.offsets.read(start_pos).await?;
-
-            for blob in start_blob..=end_blob {
-                let blob_handle = self
-                    .data
-                    .get(blob)
-                    .expect("positions in bounds map to a retained blob");
-                let offset = if blob == start_blob { start_offset } else { 0 };
-
-                let first_pos = if blob == start_blob {
-                    start_pos
-                } else {
-                    blob_first_position(blob, items_per_blob)?
-                };
-                let next_blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
-                let end_pos = blob_first_position(next_blob, items_per_blob)?.min(bounds.end);
-
-                states.push(DataReplayState::<E::Blob, V> {
-                    blob,
-                    replay: blob_handle.replay_from(offset, buffer)?,
-                    pos: first_pos,
-                    end_pos,
-                    offset,
-                    codec_config: self.codec_config.clone(),
-                    compressed: self.compressed,
-                    _marker: PhantomData,
-                });
-            }
-        }
+        let states = self.replay_states(buffer, start_pos).await?;
 
         Ok(stream::iter(states).flat_map(|state| {
             stream::unfold(state, DataReplayState::next_batch).flat_map(stream::iter)
@@ -1927,6 +1953,19 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
     ) -> Result<(Vec<V>, u64), Error> {
         self.reader().read_limit(start_pos, budget).await
     }
+
+    async fn replay(
+        &self,
+        buffer: NonZeroUsize,
+        start_pos: u64,
+    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
+        let reader = self.reader();
+        let states = reader.replay_states(buffer, start_pos).await?;
+
+        Ok(stream::iter(states).flat_map(|state| {
+            stream::unfold(state, DataReplayState::next_batch).flat_map(stream::iter)
+        }))
+    }
 }
 
 impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
@@ -2636,6 +2675,52 @@ mod tests {
                 .expect("read limit should return at least one item");
             assert_eq!(next, 4);
             assert_eq!(items, vec![item(3)]);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_replay_batches_by_byte_budget() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "variable-replay-budget".into(),
+                items_per_section: NZU64!(100),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, FixedBytes<1>>::init(context.child("storage"), cfg)
+                .await
+                .unwrap();
+
+            for i in 0u8..20 {
+                journal.append(&FixedBytes::new([i])).await.unwrap();
+            }
+
+            let reader = journal.snapshot().await.unwrap();
+            let blob = reader.data.get(0).expect("blob should exist");
+            let state = DataReplayState::<_, FixedBytes<1>> {
+                blob: 0,
+                replay: blob.replay_from(0, NZUsize!(10)).unwrap(),
+                budget: 10,
+                pos: 0,
+                end_pos: 20,
+                offset: 0,
+                codec_config: (),
+                compressed: false,
+                _marker: PhantomData,
+            };
+
+            let (batch, state) = DataReplayState::next_batch(state)
+                .await
+                .expect("batch should be returned");
+            let batch = batch.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+
+            assert_eq!(batch.len(), 5);
+            assert_eq!(state.pos, 5);
 
             journal.destroy().await.unwrap();
         });

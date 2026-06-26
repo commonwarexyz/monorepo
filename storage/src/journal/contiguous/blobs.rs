@@ -679,14 +679,14 @@ impl<B: RBlob> Buf for ViewReplay<'_, B> {
     }
 }
 
-impl<B: RBlob> Blobs<'_, B> {
+impl<'a, B: RBlob> Blobs<'a, B> {
     /// Index of the newest blob (the tail).
     pub(super) fn tail_blob_index(&self) -> u64 {
         self.oldest_blob_index + self.sealed.as_slice().len() as u64
     }
 
     /// Resolve a blob, if retained.
-    pub(super) fn get(&self, blob: u64) -> Option<Blob<'_, B>> {
+    pub(super) fn get(&self, blob: u64) -> Option<Blob<'a, B>> {
         if blob == self.tail_blob_index() {
             return Some(self.tail.clone());
         }
