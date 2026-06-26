@@ -2645,10 +2645,7 @@ mod tests {
                 .append(2, entry2, &value2)
                 .await
                 .expect("Failed to append to section 2");
-            oversized
-                .sync(2)
-                .await
-                .expect("Failed to sync section 2");
+            oversized.sync(2).await.expect("Failed to sync section 2");
             drop(oversized);
 
             // Truncate section 1's index to 0 (making it empty)

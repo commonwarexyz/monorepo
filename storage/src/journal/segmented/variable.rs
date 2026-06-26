@@ -702,10 +702,7 @@ mod tests {
             assert!(buffer.contains("first_tracked 1"));
 
             // Drop and re-open the journal to simulate a restart
-            journal
-                .sync(index)
-                .await
-                .expect("Failed to sync journal");
+            journal.sync(index).await.expect("Failed to sync journal");
             drop(journal);
             let mut journal = Journal::<_, i32>::init(context.child("second"), cfg)
                 .await
@@ -1182,10 +1179,7 @@ mod tests {
                 .append_raw(section, IoBuf::copy_from_slice(&[0xFF, 0xFF]))
                 .await
                 .expect("Failed to append trailing bytes");
-            journal
-                .sync(section)
-                .await
-                .expect("Failed to sync journal");
+            journal.sync(section).await.expect("Failed to sync journal");
             drop(journal);
 
             let mut journal = Journal::init(context.child("second"), cfg)
@@ -2718,10 +2712,7 @@ mod tests {
                     .await
                     .expect("Failed to append after clear");
             }
-            journal
-                .sync(10)
-                .await
-                .expect("Failed to sync after clear");
+            journal.sync(10).await.expect("Failed to sync after clear");
 
             // New data should be readable
             assert_eq!(journal.get(10, 0).await.unwrap(), 0);

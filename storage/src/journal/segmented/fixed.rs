@@ -1361,10 +1361,7 @@ mod tests {
                     .await
                     .expect("Failed to append after clear");
             }
-            journal
-                .sync(10)
-                .await
-                .expect("Failed to sync after clear");
+            journal.sync(10).await.expect("Failed to sync after clear");
 
             // New data should be readable
             assert_eq!(journal.get(10, 0).await.unwrap(), test_digest(0));
