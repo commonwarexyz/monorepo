@@ -1755,9 +1755,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let mut journal = Journal::init(context.child("storage"), cfg)
-                .await
-                .unwrap();
+            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
 
             for i in 0u64..5 {
                 journal.append(&test_digest(i)).await.unwrap();

@@ -664,8 +664,12 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                     .expect("position in bounds maps to a retained blob")
                     .size()
             };
-            let item_len = next_offset.checked_sub(offset).ok_or(Error::OffsetOverflow)?;
-            consumed = consumed.checked_add(item_len).ok_or(Error::OffsetOverflow)?;
+            let item_len = next_offset
+                .checked_sub(offset)
+                .ok_or(Error::OffsetOverflow)?;
+            consumed = consumed
+                .checked_add(item_len)
+                .ok_or(Error::OffsetOverflow)?;
             pos = next_pos;
             if consumed >= byte_budget {
                 break;
