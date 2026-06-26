@@ -3,7 +3,7 @@
 use crate::{journal::Error, Context};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Sealed, Writer},
+    buffer::paged::{CacheRef, Replay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
     Blob as RBlob, Error as RError, IoBufMut, IoBufs,
 };
@@ -497,6 +497,16 @@ impl<B: RBlob> Blob<'_, B> {
                 .read_many_into(buf, offsets, item_size)
                 .await
                 .map_err(Error::Runtime),
+        }
+    }
+
+    /// Return a sequential replay handle for immutable blob views.
+    pub(super) fn replay(&self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
+        match self {
+            Self::Sealed(sealed) => sealed.replay(buffer_size).map_err(Error::Runtime),
+            Self::Writer(_) => Err(Error::Corruption(
+                "live writer blobs cannot be replayed through a read-only view".into(),
+            )),
         }
     }
 }

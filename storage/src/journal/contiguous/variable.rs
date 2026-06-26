@@ -23,6 +23,7 @@ use commonware_runtime::{
     Blob as RBlob, Buf, IoBuf, IoBufMut,
 };
 use commonware_utils::NZUsize;
+use futures::{stream, Stream, StreamExt as _};
 use std::{
     collections::BTreeMap,
     io::Cursor,
@@ -151,6 +152,122 @@ struct BlobScan {
     valid_size: u64,
     /// Whether undecodable trailing bytes follow `valid_size`.
     torn: bool,
+}
+
+/// State for sequentially replaying variable-size frames from one data blob.
+struct DataReplayState<B: RBlob, V: Codec> {
+    blob: u64,
+    replay: Replay<B>,
+    pos: u64,
+    end_pos: u64,
+    offset: u64,
+    codec_config: V::Cfg,
+    compressed: bool,
+    _marker: PhantomData<V>,
+}
+
+impl<B: RBlob, V: CodecShared> DataReplayState<B, V> {
+    async fn next_batch(mut self) -> Option<(Vec<Result<(u64, V), Error>>, Self)> {
+        if self.pos == self.end_pos {
+            return None;
+        }
+
+        let mut batch = Vec::new();
+        loop {
+            if self.pos == self.end_pos {
+                return (!batch.is_empty()).then_some((batch, self));
+            }
+
+            match self.replay.ensure(MAX_U32_VARINT_SIZE).await {
+                Ok(true) => {}
+                Ok(false) if self.replay.remaining() == 0 => {
+                    batch.push(Err(Error::Corruption(format!(
+                        "data blob {} ended before position {}",
+                        self.blob, self.pos
+                    ))));
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    batch.push(Err(err.into()));
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+            }
+
+            let before_remaining = self.replay.remaining();
+            let (item_size, varint_len) = match decode_length_prefix(&mut self.replay) {
+                Ok(result) => result,
+                Err(err) => {
+                    if self.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
+                        batch.push(Err(Error::Corruption(format!(
+                            "incomplete frame header in data blob {} at offset {}",
+                            self.blob, self.offset
+                        ))));
+                    } else {
+                        batch.push(Err(err));
+                    }
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+            };
+
+            match self.replay.ensure(item_size).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    batch.push(Err(Error::Corruption(format!(
+                        "incomplete frame in data blob {} at offset {}",
+                        self.blob, self.offset
+                    ))));
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+                Err(err) => {
+                    batch.push(Err(err.into()));
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+            }
+
+            let next_offset = self
+                .offset
+                .checked_add(varint_len as u64)
+                .and_then(|offset| offset.checked_add(item_size as u64));
+            let Some(next_offset) = next_offset else {
+                batch.push(Err(Error::OffsetOverflow));
+                self.pos = self.end_pos;
+                return Some((batch, self));
+            };
+
+            match decode_item::<V>(
+                (&mut self.replay).take(item_size),
+                &self.codec_config,
+                self.compressed,
+            ) {
+                Ok(item) => {
+                    let pos = self.pos;
+                    let Some(next_pos) = self.pos.checked_add(1) else {
+                        batch.push(Err(Error::OffsetOverflow));
+                        self.pos = self.end_pos;
+                        return Some((batch, self));
+                    };
+                    self.pos = next_pos;
+                    self.offset = next_offset;
+                    batch.push(Ok((pos, item)));
+                }
+                Err(err) => {
+                    batch.push(Err(err));
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+            }
+
+            if self.replay.remaining() < MAX_U32_VARINT_SIZE {
+                return Some((batch, self));
+            }
+        }
+    }
 }
 
 /// The blob index where the item at `position` should be stored.
@@ -680,6 +797,60 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         let positions: Vec<_> = (start_pos..pos).collect();
         let items = self.read_many(&positions).await?;
         Ok((items, pos))
+    }
+
+    async fn replay(
+        &self,
+        buffer: NonZeroUsize,
+        start_pos: u64,
+    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
+        let bounds = self.bounds();
+        if start_pos > bounds.end {
+            return Err(Error::ItemOutOfRange(start_pos));
+        }
+        if start_pos < bounds.start {
+            return Err(Error::ItemPruned(start_pos));
+        }
+        let mut states = Vec::new();
+        if start_pos < bounds.end {
+            let items_per_blob = self.items_per_blob.get();
+            let start_blob = position_to_blob(start_pos, items_per_blob);
+            let end_blob = position_to_blob(bounds.end - 1, items_per_blob);
+            let start_offset = self.offsets.read(start_pos).await?;
+
+            for blob in start_blob..=end_blob {
+                let mut replay = self
+                    .data
+                    .get(blob)
+                    .expect("positions in bounds map to a retained blob")
+                    .replay(buffer)?;
+                let offset = if blob == start_blob { start_offset } else { 0 };
+                replay.seek_to(offset)?;
+
+                let first_pos = if blob == start_blob {
+                    start_pos
+                } else {
+                    blob_first_position(blob, items_per_blob)?
+                };
+                let next_blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
+                let end_pos = blob_first_position(next_blob, items_per_blob)?.min(bounds.end);
+
+                states.push(DataReplayState::<E::Blob, V> {
+                    blob,
+                    replay,
+                    pos: first_pos,
+                    end_pos,
+                    offset,
+                    codec_config: self.codec_config.clone(),
+                    compressed: self.compressed,
+                    _marker: PhantomData,
+                });
+            }
+        }
+
+        Ok(stream::iter(states).flat_map(|state| {
+            stream::unfold(state, DataReplayState::next_batch).flat_map(stream::iter)
+        }))
     }
 }
 
@@ -1915,7 +2086,7 @@ mod tests {
         deterministic, Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-    use futures::{FutureExt as _, StreamExt as _};
+    use futures::FutureExt as _;
     use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
