@@ -116,9 +116,7 @@ impl Conformance for SegmentedFixed {
             }
 
             // Sync all sections
-            for section in 0..3 {
-                journal.sync(section).await.unwrap();
-            }
+            journal.sync([0, 1, 2]).await.unwrap();
             drop(journal);
 
             context.storage_audit().to_vec()
@@ -158,9 +156,7 @@ impl Conformance for SegmentedGlob {
             }
 
             // Sync all sections
-            for section in 0..3 {
-                journal.sync(section).await.unwrap();
-            }
+            journal.sync([0, 1, 2]).await.unwrap();
             drop(journal);
 
             context.storage_audit().to_vec()
@@ -202,9 +198,7 @@ impl Conformance for SegmentedVariable {
             }
 
             // Sync all sections
-            for section in 0..3 {
-                journal.sync(section).await.unwrap();
-            }
+            journal.sync([0, 1, 2]).await.unwrap();
             drop(journal);
 
             context.storage_audit().to_vec()
@@ -302,9 +296,7 @@ impl Conformance for SegmentedOversized {
             }
 
             // Sync all sections
-            for section in 0..3 {
-                journal.sync(section).await.unwrap();
-            }
+            journal.sync([0, 1, 2]).await.unwrap();
             drop(journal);
 
             context.storage_audit().to_vec()
