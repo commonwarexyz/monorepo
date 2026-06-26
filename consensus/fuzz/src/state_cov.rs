@@ -34,8 +34,10 @@ use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_utils::ordered::Quorum;
 use rand_core::CryptoRngCore;
 use sancov::Counters;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write,
+};
 
 fn lower_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -337,7 +339,11 @@ fn local_token(replica: &ReporterReplicaStateData, class: &BTreeMap<&str, usize>
             "|N{view}:{}:p{}:{:?}:{:?}",
             class[proposal.payload.as_str()],
             proposal.parent,
-            replica.notarization_signature_counts.get(view).copied().flatten(),
+            replica
+                .notarization_signature_counts
+                .get(view)
+                .copied()
+                .flatten(),
             replica.notarize_signers.get(view),
         );
     }
@@ -347,7 +353,11 @@ fn local_token(replica: &ReporterReplicaStateData, class: &BTreeMap<&str, usize>
             "|F{view}:{}:p{}:{:?}:{:?}",
             class[proposal.payload.as_str()],
             proposal.parent,
-            replica.finalization_signature_counts.get(view).copied().flatten(),
+            replica
+                .finalization_signature_counts
+                .get(view)
+                .copied()
+                .flatten(),
             replica.finalize_signers.get(view),
         );
     }
@@ -355,7 +365,11 @@ fn local_token(replica: &ReporterReplicaStateData, class: &BTreeMap<&str, usize>
         let _ = write!(
             token,
             "|U{view}:{:?}:{:?}",
-            replica.nullification_signature_counts.get(view).copied().flatten(),
+            replica
+                .nullification_signature_counts
+                .get(view)
+                .copied()
+                .flatten(),
             replica.nullify_signers.get(view),
         );
     }
@@ -401,7 +415,10 @@ mod tests {
     #[test]
     fn alpha_is_deterministic() {
         let mut states = BTreeMap::new();
-        states.insert("0".into(), replica(&[(1, "aa"), (2, "bb")], &[(1, "aa")], &[3], 1));
+        states.insert(
+            "0".into(),
+            replica(&[(1, "aa"), (2, "bb")], &[(1, "aa")], &[3], 1),
+        );
         assert_eq!(alpha(&states), alpha(&states));
     }
 
@@ -451,7 +468,10 @@ mod tests {
     #[test]
     fn whole_state_token_distinguishes_token_sets() {
         let state_token = |s: &BTreeMap<String, ReporterReplicaStateData>| {
-            alpha(s).into_iter().find(|t| t.starts_with("state:")).unwrap()
+            alpha(s)
+                .into_iter()
+                .find(|t| t.starts_with("state:"))
+                .unwrap()
         };
         let mut a = BTreeMap::new();
         a.insert("0".into(), replica(&[(1, "aa")], &[(1, "aa")], &[], 1));
