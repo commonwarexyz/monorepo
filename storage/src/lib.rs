@@ -45,7 +45,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     }
 
     impl Sections for u64 {
-        type Iter = core::iter::Once<u64>;
+        type Iter = core::iter::Once<Self>;
 
         fn sections(self) -> Self::Iter {
             core::iter::once(self)
