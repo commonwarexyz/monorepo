@@ -1102,7 +1102,7 @@ impl<
 
         // Sync journal
         journal
-            .sync(&[section])
+            .sync(section)
             .await
             .expect("unable to sync journal");
 

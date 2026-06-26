@@ -56,21 +56,21 @@ fn validate_read_many_into(
         .len()
         .checked_mul(item_size.get())
         .ok_or(Error::OffsetOverflow)?;
-    if buf_len != expected_len {
-        return Err(Error::InvalidInput(
-            "read_many_into requires buf.len() == offsets.len() * item_size",
-        ));
-    }
+    assert_eq!(
+        buf_len, expected_len,
+        "read_many_into requires buf.len() == offsets.len() * item_size"
+    );
 
     let mut previous_end = None;
     for &offset in offsets {
         let end = offset
             .checked_add(item_size.get() as u64)
             .ok_or(Error::OffsetOverflow)?;
-        if previous_end.is_some_and(|previous_end| offset < previous_end) {
-            return Err(Error::InvalidInput(
-                "read_many_into offsets must be sorted and non-overlapping",
-            ));
+        if let Some(previous_end) = previous_end {
+            assert!(
+                offset >= previous_end,
+                "read_many_into offsets must be sorted and non-overlapping"
+            );
         }
         if end > size {
             return Err(Error::BlobInsufficientLength);
@@ -85,8 +85,7 @@ fn validate_read_many_into(
 ///
 /// `buf` holds one `item_size` slot per offset (validated by [validate_read_many_into]). `tail`
 /// holds the logical bytes at `[tail_offset, tail_offset + tail.len())`; for [Writer] this is the
-/// tip buffer, for [Sealed] the partial last page. Items entirely within
-/// `tail` are copied into
+/// tip buffer, for [Sealed] the partial last page. Items entirely within `tail` are copied into
 /// place. Items fully or partially below `tail_offset` are returned as `(dest_slice, offset)`
 /// pairs for the caller to read from the page cache or blob. `chunks_exact_mut` yields disjoint
 /// per-item slots, so returned slices never alias.
@@ -104,7 +103,7 @@ fn split_read_many<'a>(
             .checked_add(item_size as u64)
             .expect("offset overflow checked by validate_read_many_into");
         if end <= tail_offset {
-            // Entirely below the tail bytes -- needs a cache/blob read.
+            // Entirely below the tail bytes, so this needs a cache/blob read.
             cache_ranges.push((item_buf, offset));
         } else if offset >= tail_offset {
             // Entirely within the tail bytes.
@@ -342,22 +341,12 @@ mod tests {
 
     enum ValidationExpectation {
         Ok,
-        InvalidInput,
         OffsetOverflow,
         BlobInsufficientLength,
     }
 
     #[rstest]
     #[case::empty_offsets_are_a_noop(0, vec![], 4, 0, ValidationExpectation::Ok)]
-    #[case::buffer_must_have_one_slot_per_offset(
-        7,
-        vec![0, 4],
-        4,
-        16,
-        ValidationExpectation::InvalidInput
-    )]
-    #[case::offsets_must_not_overlap(8, vec![0, 2], 4, 16, ValidationExpectation::InvalidInput)]
-    #[case::offsets_must_be_sorted(8, vec![8, 4], 4, 16, ValidationExpectation::InvalidInput)]
     #[case::offset_plus_item_size_must_not_overflow(
         4,
         vec![u64::MAX - 1],
@@ -387,9 +376,6 @@ mod tests {
 
         match expected {
             ValidationExpectation::Ok => assert!(result.is_ok()),
-            ValidationExpectation::InvalidInput => {
-                assert!(matches!(result, Err(Error::InvalidInput(_))))
-            }
             ValidationExpectation::OffsetOverflow => {
                 assert!(matches!(result, Err(Error::OffsetOverflow)))
             }
@@ -397,6 +383,24 @@ mod tests {
                 assert!(matches!(result, Err(Error::BlobInsufficientLength)))
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "read_many_into requires buf.len() == offsets.len() * item_size")]
+    fn test_validate_read_many_into_panics_on_invalid_buffer_len() {
+        let _ = validate_read_many_into(7, &[0, 4], NZUsize!(4), 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "read_many_into offsets must be sorted and non-overlapping")]
+    fn test_validate_read_many_into_panics_on_overlapping_offsets() {
+        let _ = validate_read_many_into(8, &[0, 2], NZUsize!(4), 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "read_many_into offsets must be sorted and non-overlapping")]
+    fn test_validate_read_many_into_panics_on_unsorted_offsets() {
+        let _ = validate_read_many_into(8, &[8, 4], NZUsize!(4), 16);
     }
 
     #[test]

@@ -35,6 +35,79 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod ordinal;
     pub mod rmap;
 
+    /// Section selector for storage operations that act on one or more sections.
+    pub trait Sections {
+        /// Iterator over selected sections.
+        type Iter: Iterator<Item = u64>;
+
+        /// Convert into selected section indices.
+        fn sections(self) -> Self::Iter;
+    }
+
+    impl Sections for u64 {
+        type Iter = core::iter::Once<u64>;
+
+        fn sections(self) -> Self::Iter {
+            core::iter::once(self)
+        }
+    }
+
+    impl<const N: usize> Sections for [u64; N] {
+        type Iter = core::array::IntoIter<u64, N>;
+
+        fn sections(self) -> Self::Iter {
+            self.into_iter()
+        }
+    }
+
+    impl<'a, const N: usize> Sections for &'a [u64; N] {
+        type Iter = core::iter::Copied<core::slice::Iter<'a, u64>>;
+
+        fn sections(self) -> Self::Iter {
+            self.iter().copied()
+        }
+    }
+
+    impl<'a> Sections for &'a [u64] {
+        type Iter = core::iter::Copied<core::slice::Iter<'a, u64>>;
+
+        fn sections(self) -> Self::Iter {
+            self.iter().copied()
+        }
+    }
+
+    impl Sections for Vec<u64> {
+        type Iter = std::vec::IntoIter<u64>;
+
+        fn sections(self) -> Self::Iter {
+            self.into_iter()
+        }
+    }
+
+    impl<'a> Sections for &'a Vec<u64> {
+        type Iter = core::iter::Copied<core::slice::Iter<'a, u64>>;
+
+        fn sections(self) -> Self::Iter {
+            self.iter().copied()
+        }
+    }
+
+    impl Sections for std::collections::BTreeSet<u64> {
+        type Iter = std::collections::btree_set::IntoIter<u64>;
+
+        fn sections(self) -> Self::Iter {
+            self.into_iter()
+        }
+    }
+
+    impl<'a> Sections for &'a std::collections::BTreeSet<u64> {
+        type Iter = core::iter::Copied<std::collections::btree_set::Iter<'a, u64>>;
+
+        fn sections(self) -> Self::Iter {
+            self.iter().copied()
+        }
+    }
+
     /// A runtime context providing storage, timing, and metrics capabilities.
     ///
     /// This is a convenience alias for the trait bound

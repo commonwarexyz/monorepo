@@ -18,6 +18,14 @@ pub mod variable;
 #[cfg(test)]
 mod tests;
 
+/// Return the number of items that can be written before crossing the current blob boundary.
+fn batch_count_to_blob_boundary(position: u64, remaining: usize, items_per_blob: u64) -> usize {
+    let pos_in_blob = position % items_per_blob;
+    let remaining_space = items_per_blob - pos_in_blob;
+    // Keep the min in u64 so a 2^32-item blob space does not truncate to zero on 32-bit targets
+    remaining_space.min(remaining as u64) as usize
+}
+
 /// A read-only, position-based view of a contiguous journal.
 ///
 /// Maintains a monotonically increasing position counter where each appended item receives a unique

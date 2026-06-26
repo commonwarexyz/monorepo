@@ -927,7 +927,7 @@ impl<
         let section = self.get_journal_section(height);
         let journal = self.journal.as_mut().expect("journal must be initialized");
         journal
-            .sync(&[section])
+            .sync(section)
             .await
             .expect("unable to sync journal");
     }
