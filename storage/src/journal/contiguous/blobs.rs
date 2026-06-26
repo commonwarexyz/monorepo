@@ -534,11 +534,7 @@ impl<'a, B: RBlob> Replay<'a, B> {
         }
     }
 
-    fn view(
-        blob: Blob<'a, B>,
-        offset: u64,
-        buffer_size: NonZeroUsize,
-    ) -> Result<Self, Error> {
+    fn view(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
         Ok(Self {
             inner: ReplayInner::View(ViewReplay::new(blob, offset, buffer_size)?),
         })

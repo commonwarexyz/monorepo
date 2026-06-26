@@ -226,9 +226,7 @@ impl<B: RBlob, A: CodecFixedShared> FixedReplayState<'_, B, A> {
 
         let available = (self.replay.remaining() / A::SIZE) as u64;
         let remaining = self.end_pos - self.pos;
-        let count = available
-            .min(self.items_per_batch as u64)
-            .min(remaining) as usize;
+        let count = available.min(self.items_per_batch as u64).min(remaining) as usize;
         let Some(next_pos) = self.pos.checked_add(count as u64) else {
             batch.push(Err(Error::OffsetOverflow));
             self.pos = self.end_pos;
@@ -1285,7 +1283,13 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        replay_stream(&self.blobs, self.bounds.clone(), self.items_per_blob, buffer, start_pos)
+        replay_stream(
+            &self.blobs,
+            self.bounds.clone(),
+            self.items_per_blob,
+            buffer,
+            start_pos,
+        )
     }
 }
 
@@ -1322,7 +1326,13 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
         let blobs = self.blobs.reader();
-        replay_stream(&blobs, self.bounds.clone(), self.items_per_blob, buffer, start_pos)
+        replay_stream(
+            &blobs,
+            self.bounds.clone(),
+            self.items_per_blob,
+            buffer,
+            start_pos,
+        )
     }
 }
 
