@@ -1,6 +1,6 @@
 //! Shared hasher trait and standard implementation for Merkle-family data structures.
 
-use crate::merkle::{Bagging, Error, Family, Location, Position};
+use crate::merkle::{Bagging, Error, Family, Location};
 use alloc::vec::Vec;
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher as CHasher};
@@ -32,21 +32,6 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     /// underlying hasher's `merge_digest_pair` contract (its output is domain-separated from
     /// `hash`), which is what lets leaves hash a variable-length element directly.
     fn node_digest(&self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest;
-
-    /// Computes the digest for an internal node at structural position `pos`.
-    ///
-    /// The node digest itself does not depend on `pos`; this hook exists so that hashers which fuse
-    /// in external data keyed by tree position (e.g. the grafting verifier, which combines a bitmap
-    /// chunk at the grafting height) can act during proof reconstruction. The default ignores `pos`
-    /// and is identical to [`Hasher::node_digest`].
-    fn node_digest_at(
-        &self,
-        _pos: Position<F>,
-        left: &Self::Digest,
-        right: &Self::Digest,
-    ) -> Self::Digest {
-        self.node_digest(left, right)
-    }
 
     /// Computes the digest for a leaf given its location and the element it represents.
     fn leaf_digest(&self, loc: Location<F>, element: &[u8]) -> Self::Digest {

@@ -483,8 +483,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
     /// Reconstruct a root from range-proof digests and optionally collect authenticated nodes.
     ///
-    /// Reads the bagging policy from `hasher`. When `collected` is supplied, the verifier records
-    /// the intermediate node digests it authenticates while reconstructing the range.
+    /// Internal nodes are combined with [`Hasher::node_digest`]. Reads the bagging policy from
+    /// `hasher`. When `collected` is supplied, the verifier records the intermediate node digests it
+    /// authenticates while reconstructing the range.
     pub(crate) fn reconstruct_root_inner<H, E>(
         &self,
         hasher: &H,
@@ -495,6 +496,35 @@ impl<F: Family, D: Digest> Proof<F, D> {
     where
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
+    {
+        self.reconstruct_root_with(
+            hasher,
+            &|_, left, right| hasher.node_digest(left, right),
+            elements,
+            start_loc,
+            collected,
+        )
+    }
+
+    /// Reconstruct a root from range-proof digests, combining internal nodes with a caller-supplied
+    /// `combine` function.
+    ///
+    /// `combine(pos, left, right)` yields the digest of the internal node at `pos`. Plain callers
+    /// use [`Self::reconstruct_root_inner`], which passes [`Hasher::node_digest`]; the grafting
+    /// verifier passes a combiner that fuses a bitmap chunk at the grafting height. `hasher` still
+    /// supplies leaf digests, peak folding, and the root bagging policy.
+    pub(crate) fn reconstruct_root_with<H, E, C>(
+        &self,
+        hasher: &H,
+        combine: &C,
+        elements: &[E],
+        start_loc: Location<F>,
+        collected: Option<&mut Vec<(Position<F>, D)>>,
+    ) -> Result<D, ReconstructionError>
+    where
+        H: Hasher<F, Digest = D>,
+        E: AsRef<[u8]>,
+        C: Fn(Position<F>, &D, &D) -> D,
     {
         let bagging = hasher.root_bagging();
         let mut collected = collected;
@@ -551,6 +581,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         for peak in &bp.range_peaks {
             let peak_digest = peak.reconstruct_digest(
                 hasher,
+                combine,
                 &bp.range,
                 &mut elements_iter,
                 proof_digests.siblings,
@@ -710,7 +741,7 @@ impl<F: Family> Subtree<F> {
         let (left, right) = self.children();
         let left_d = left.reconstruct_from_pins(hasher, pinned_map)?;
         let right_d = right.reconstruct_from_pins(hasher, pinned_map)?;
-        Some(hasher.node_digest_at(self.pos, &left_d, &right_d))
+        Some(hasher.node_digest(&left_d, &right_d))
     }
 
     /// Reconstruct the digest of this subtree from a range of elements and sibling digests,
@@ -719,13 +750,20 @@ impl<F: Family> Subtree<F> {
     /// At each node:
     /// - If the subtree is entirely outside the range: consume a sibling digest.
     /// - If it's a leaf in the range: hash the next element.
-    /// - Otherwise: recurse into children via [`Family::children`] and compute the node digest.
+    /// - Otherwise: recurse into children via [`Family::children`] and compute the node digest via
+    ///   `combine`.
+    ///
+    /// `combine(pos, left, right)` yields the digest of the internal node at `pos`. Plain
+    /// reconstruction passes [`Hasher::node_digest`]; the grafting verifier passes a combiner that
+    /// fuses a bitmap chunk at the grafting height.
     ///
     /// If `collected` is `Some`, every child `(position, digest)` pair encountered during
     /// reconstruction is appended to the vector.
-    fn reconstruct_digest<D, H, E>(
+    #[allow(clippy::too_many_arguments)]
+    fn reconstruct_digest<D, H, E, C>(
         &self,
         hasher: &H,
+        combine: &C,
         range: &Range<Location<F>>,
         elements: &mut E,
         siblings: &[D],
@@ -736,6 +774,7 @@ impl<F: Family> Subtree<F> {
         D: Digest,
         H: Hasher<F, Digest = D>,
         E: Iterator<Item: AsRef<[u8]>>,
+        C: Fn(Position<F>, &D, &D) -> D,
     {
         // Entirely outside the range: consume a sibling digest.
         if self.is_outside(range) {
@@ -758,6 +797,7 @@ impl<F: Family> Subtree<F> {
         let (left, right) = self.children();
         let left_d = left.reconstruct_digest(
             hasher,
+            combine,
             range,
             elements,
             siblings,
@@ -766,6 +806,7 @@ impl<F: Family> Subtree<F> {
         )?;
         let right_d = right.reconstruct_digest(
             hasher,
+            combine,
             range,
             elements,
             siblings,
@@ -778,7 +819,7 @@ impl<F: Family> Subtree<F> {
             cd.push((right.pos, right_d));
         }
 
-        Ok(hasher.node_digest_at(self.pos, &left_d, &right_d))
+        Ok(combine(self.pos, &left_d, &right_d))
     }
 }
 

@@ -82,10 +82,10 @@ fn bench_build_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fami
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
-                            let root = match &strategy {
-                                Some(s) => build::<F, _>(&h, &elements, s.clone()),
-                                None => build::<F, _>(&h, &elements, Sequential),
-                            };
+                            let root = strategy.as_ref().map_or_else(
+                                || build::<F, _>(&h, &elements, Sequential),
+                                |s| build::<F, _>(&h, &elements, s.clone()),
+                            );
                             total += start.elapsed();
                             black_box(root);
                         }

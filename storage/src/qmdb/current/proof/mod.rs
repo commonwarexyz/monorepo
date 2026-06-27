@@ -30,10 +30,8 @@
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
     merkle::{
-        self,
-        hasher::{Hasher, Standard as StandardHasher},
-        storage::Storage,
-        Family, Graftable, Location, PendingChunk, Position, Proof,
+        self, hasher::Standard as StandardHasher, storage::Storage, Family, Graftable, Location,
+        PendingChunk, Position, Proof,
     },
     qmdb::{
         self,
@@ -417,8 +415,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             }
         }
 
-        let merkle_root = match self.proof.reconstruct_root_inner(
-            &grafting_verifier,
+        let merkle_root = match self.proof.reconstruct_root_with(
+            grafting_verifier.hasher(),
+            &|pos, left, right| grafting_verifier.combine(pos, left, right),
             &elements,
             start_loc,
             collected,

@@ -142,7 +142,7 @@
 //! height, it uses standard hashing. At the grafting height, it detects the boundary and
 //! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks the
 //! grafted leaf is `hash(chunk || ops_subtree_root)`; for all-zero chunks the grafted leaf is the
-//! ops subtree root itself (identity optimization -- see `grafting::Verifier::node`). Above the
+//! ops subtree root itself (identity optimization -- see `grafting::Verifier::combine`). Above the
 //! grafting height, it resumes standard hashing. If the reconstructed root matches the expected
 //! root and bit _i_ is set in the chunk, the operation is proven active.
 //!

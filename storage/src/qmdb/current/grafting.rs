@@ -175,20 +175,20 @@ pub fn grafted_to_ops_pos<F: Graftable>(
     F::subtree_root_position(ops_leaf_start, ops_height)
 }
 
-/// A [`merkle::hasher::Hasher`] implementation used for verifying proofs over grafted storage.
+/// Node combiner used for verifying proofs over grafted storage.
 ///
-/// The ops structure uses family `F`, so this implements [`merkle::hasher::Hasher`] for that
-/// family to match the proof.
-/// Proof verification walks the tree from leaves to root, recomputing digests at each node.
-/// Since a proof path crosses the grafting boundary (from ops leaves up through grafted peaks),
-/// two different hashing behaviors are needed depending on the node's height relative to the
-/// grafting height:
+/// Proof reconstruction walks the ops tree (family `F`) from leaves to root. Because a proof path
+/// crosses the grafting boundary (from ops leaves up through grafted peaks), [`Self::combine`]
+/// applies two behaviors depending on the node's height relative to the grafting height:
 ///
-/// - **Below or above**: standard hash using ops-space positions (`F`).
-/// - **At**: the children form an ops subtree root, which is combined with a bitmap chunk element
+/// - **Below or above**: a plain node digest.
+/// - **At**: the children form an ops subtree root, which is combined with the node's bitmap chunk
 ///   to reconstruct the grafted leaf digest.
+///
+/// [`Self::combine`] is paired with [`Self::hasher`] (which supplies leaf digests, peak folding, and
+/// the root bagging policy) when reconstructing a grafted proof's root.
 #[derive(Clone)]
-pub struct Verifier<'a, F: Graftable, H: CHasher> {
+pub(crate) struct Verifier<'a, F: Graftable, H: CHasher> {
     hasher: merkle::hasher::Standard<H>,
     grafting_height: u32,
 
@@ -211,7 +211,7 @@ impl<'a, F: Graftable, H: CHasher> Verifier<'a, F, H> {
     /// `graftable_chunks` is the number of chunks committed by the grafted tree; any chunk index
     /// in `chunks` at or beyond this boundary is treated as pending and **not** combined with
     /// the ops subtree root at the grafting height.
-    pub const fn new(
+    pub(crate) const fn new(
         grafting_height: u32,
         start_chunk_index: u64,
         chunks: Vec<&'a [u8]>,
@@ -227,24 +227,25 @@ impl<'a, F: Graftable, H: CHasher> Verifier<'a, F, H> {
             _ops_family: PhantomData,
         }
     }
-}
 
-impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
-    type Digest = H::Digest;
-
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        self.hasher.hash(parts)
+    /// The plain hasher used for leaf digests, peak folding, and the root bagging policy during
+    /// reconstruction. Pair it with [`Self::combine`] when calling the proof reconstruction.
+    pub(crate) const fn hasher(&self) -> &merkle::hasher::Standard<H> {
+        &self.hasher
     }
 
-    fn root_bagging(&self) -> merkle::Bagging {
-        <merkle::hasher::Standard<H> as HasherTrait<F>>::root_bagging(&self.hasher)
+    /// Hash a bitmap chunk, used to validate supplied chunk bytes against a digest in the proof.
+    pub(crate) fn digest(&self, data: &[u8]) -> H::Digest {
+        self.hasher.digest(data)
     }
 
-    fn node_digest(&self, left: &H::Digest, right: &H::Digest) -> H::Digest {
-        <merkle::hasher::Standard<H> as HasherTrait<F>>::node_digest(&self.hasher, left, right)
-    }
-
-    fn node_digest_at(
+    /// Combine two child digests for the ops-tree node at `pos`, fusing the node's bitmap chunk when
+    /// `pos` sits at the grafting height.
+    ///
+    /// Below or above the grafting height this is a plain node digest. At the grafting height the
+    /// children form an ops subtree root, which is combined with the node's bitmap chunk to
+    /// reconstruct the grafted leaf digest.
+    pub(crate) fn combine(
         &self,
         pos: merkle::Position<F>,
         left_digest: &H::Digest,
@@ -253,19 +254,11 @@ impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
         match F::pos_to_height(pos).cmp(&self.grafting_height) {
             Ordering::Less | Ordering::Greater => {
                 // Below or above grafting height: plain node digest.
-                <merkle::hasher::Standard<H> as HasherTrait<F>>::node_digest(
-                    &self.hasher,
-                    left_digest,
-                    right_digest,
-                )
+                self.hasher.node_digest(left_digest, right_digest)
             }
             Ordering::Equal => {
                 // At grafting height: compute ops subtree root, then combine with bitmap chunk.
-                let ops_subtree_root = <merkle::hasher::Standard<H> as HasherTrait<F>>::node_digest(
-                    &self.hasher,
-                    left_digest,
-                    right_digest,
-                );
+                let ops_subtree_root = self.hasher.node_digest(left_digest, right_digest);
 
                 // Convert the F-family position to a chunk index using F's leftmost_leaf.
                 let loc = F::leftmost_leaf(pos, self.grafting_height);
@@ -293,7 +286,7 @@ impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
                 if chunk.iter().all(|&b| b == 0) {
                     ops_subtree_root
                 } else {
-                    self.hash([chunk, ops_subtree_root.as_ref()])
+                    self.hasher.hash([chunk, ops_subtree_root.as_ref()])
                 }
             }
         }
@@ -426,6 +419,40 @@ mod tests {
     /// every call site.
     const ALL_CHUNKS_GRAFTABLE: u64 = u64::MAX;
 
+    /// Verify a grafted range proof by reconstructing the root with the verifier's combiner and its
+    /// plain hasher, then comparing against `root`. The grafting [`Verifier`] is a node combiner
+    /// rather than a [`merkle::hasher::Hasher`], so it cannot be passed to `verify_range_inclusion`
+    /// directly.
+    fn verify_grafted_range<E: AsRef<[u8]>>(
+        proof: &merkle::Proof<mmr::Family, sha256::Digest>,
+        verifier: &Verifier<'_, mmr::Family, Sha256>,
+        elements: &[E],
+        start_loc: Location,
+        root: &sha256::Digest,
+    ) -> bool {
+        matches!(
+            proof.reconstruct_root_with(
+                verifier.hasher(),
+                &|pos, left, right| verifier.combine(pos, left, right),
+                elements,
+                start_loc,
+                None,
+            ),
+            Ok(reconstructed) if reconstructed == *root
+        )
+    }
+
+    /// Single-element convenience wrapper around [`verify_grafted_range`].
+    fn verify_grafted_element(
+        proof: &merkle::Proof<mmr::Family, sha256::Digest>,
+        verifier: &Verifier<'_, mmr::Family, Sha256>,
+        element: &[u8],
+        loc: Location,
+        root: &sha256::Digest,
+    ) -> bool {
+        verify_grafted_range(proof, verifier, &[element], loc, root)
+    }
+
     /// Count chunks of `2^G` leaves in `0..ops_leaves` that have a single covering peak at height G.
     ///
     /// Used as the oracle for `graftable_chunks` property tests.
@@ -543,9 +570,7 @@ mod tests {
         let expected_no_combine = standard.node_digest(&left, &right);
 
         let v = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 0, ForwardFold);
-        let got = <Verifier<'_, mmr::Family, Sha256> as HasherTrait<mmr::Family>>::node_digest_at(
-            &v, pos_at_g, &left, &right,
-        );
+        let got = v.combine(pos_at_g, &left, &right);
         assert_eq!(
             got, expected_no_combine,
             "graftable_chunks=0 must skip chunk combination at the grafting height"
@@ -553,13 +578,7 @@ mod tests {
 
         // Sanity: with graftable_chunks=1 the chunk IS combined, so the digest differs.
         let v_graftable = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 1, ForwardFold);
-        let got_graftable =
-            <Verifier<'_, mmr::Family, Sha256> as HasherTrait<mmr::Family>>::node_digest_at(
-                &v_graftable,
-                pos_at_g,
-                &left,
-                &right,
-            );
+        let got_graftable = v_graftable.combine(pos_at_g, &left, &right);
         assert_ne!(got, got_graftable);
     }
 
@@ -858,13 +877,25 @@ mod tests {
                         ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
-                    assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
+                    assert!(verify_grafted_element(
+                        &proof,
+                        &verifier,
+                        &b1,
+                        loc,
+                        &grafted_root
+                    ));
 
                     let loc = Location::new(1);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(&verifier, &b2, loc, &grafted_root));
+                    assert!(verify_grafted_element(
+                        &proof,
+                        &verifier,
+                        &b2,
+                        loc,
+                        &grafted_root
+                    ));
 
                     let loc = Location::new(2);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
@@ -877,13 +908,25 @@ mod tests {
                         ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
-                    assert!(proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
+                    assert!(verify_grafted_element(
+                        &proof,
+                        &verifier,
+                        &b3,
+                        loc,
+                        &grafted_root
+                    ));
 
                     let loc = Location::new(3);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(verify_grafted_element(
+                        &proof,
+                        &verifier,
+                        &b4,
+                        loc,
+                        &grafted_root
+                    ));
                 }
 
                 // Verify that manipulated inputs cause proof verification to fail.
@@ -899,16 +942,31 @@ mod tests {
                         ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
-                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(verify_grafted_element(
+                        &proof,
+                        &verifier,
+                        &b4,
+                        loc,
+                        &grafted_root
+                    ));
 
                     // Wrong leaf element.
-                    assert!(!proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
+                    assert!(!verify_grafted_element(
+                        &proof,
+                        &verifier,
+                        &b3,
+                        loc,
+                        &grafted_root
+                    ));
 
                     // Wrong root.
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &ops_root));
+                    assert!(!verify_grafted_element(
+                        &proof, &verifier, &b4, loc, &ops_root
+                    ));
 
                     // Wrong position.
-                    assert!(!proof.verify_element_inclusion(
+                    assert!(!verify_grafted_element(
+                        &proof,
                         &verifier,
                         &b4,
                         loc + 1,
@@ -923,7 +981,13 @@ mod tests {
                         ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(!verify_grafted_element(
+                        &proof,
+                        &verifier,
+                        &b4,
+                        loc,
+                        &grafted_root
+                    ));
 
                     // Wrong chunk index in the verifier.
                     let verifier = Verifier::<mmr::Family, Sha256>::new(
@@ -933,7 +997,13 @@ mod tests {
                         ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(!verify_grafted_element(
+                        &proof,
+                        &verifier,
+                        &b4,
+                        loc,
+                        &grafted_root
+                    ));
                 }
 
                 // Verify range proofs.
@@ -954,7 +1024,8 @@ mod tests {
                         ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
-                    assert!(proof.verify_range_inclusion(
+                    assert!(verify_grafted_range(
+                        &proof,
                         &verifier,
                         &range,
                         Location::new(0),
@@ -969,7 +1040,8 @@ mod tests {
                         ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
-                    assert!(!proof.verify_range_inclusion(
+                    assert!(!verify_grafted_range(
+                        &proof,
                         &verifier,
                         &range,
                         Location::new(0),
@@ -1023,7 +1095,13 @@ mod tests {
                 ALL_CHUNKS_GRAFTABLE,
                 ForwardFold,
             );
-            assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
+            assert!(verify_grafted_element(
+                &proof,
+                &verifier,
+                &b1,
+                loc,
+                &grafted_root
+            ));
 
             let verifier = Verifier::<mmr::Family, Sha256>::new(
                 GRAFTING_HEIGHT,
@@ -1036,7 +1114,13 @@ mod tests {
             let proof = merkle::verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                 .await
                 .unwrap();
-            assert!(proof.verify_element_inclusion(&verifier, &b5, loc, &grafted_root));
+            assert!(verify_grafted_element(
+                &proof,
+                &verifier,
+                &b5,
+                loc,
+                &grafted_root
+            ));
         });
     }
 
