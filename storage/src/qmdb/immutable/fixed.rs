@@ -113,7 +113,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_cache_size: 1024,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 

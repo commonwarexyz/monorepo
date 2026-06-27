@@ -142,7 +142,8 @@ pub(crate) mod test {
         deterministic::{self, Context},
         Metrics as _, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{test_rng_seeded, NZU64};
+    use commonware_utils::{test_rng_seeded, NZUsize, NZU64};
+    use core::num::NonZeroUsize;
     use rand::RngCore;
     use std::collections::HashMap;
 
@@ -255,7 +256,7 @@ pub(crate) mod test {
     }
 
     /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
-    /// with the cache disabled (`init_cache_size = 0`) or enabled must produce the identical root.
+    /// with the cache disabled (`init_cache_size = None`) or enabled must produce the identical root.
     #[test_traced("WARN")]
     fn test_unordered_fixed_init_cache_equivalence() {
         deterministic::Runner::default().start(|context| async move {
@@ -271,12 +272,18 @@ pub(crate) mod test {
 
             // Reopen with the cache disabled and with a large cache; both rebuild the snapshot by
             // replaying the same immutable log, so both roots must equal the pre-drop root.
-            for cache_size in [0, 1 << 20] {
+            for cache_size in [None, Some(NZUsize!(1 << 20))] {
                 let mut cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
                 cfg.init_cache_size = cache_size;
-                let ctx = context.child("reopen").with_attribute("cache", cache_size);
+                let ctx = context
+                    .child("reopen")
+                    .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));
                 let db = AnyTest::init(ctx, cfg).await.unwrap();
-                assert_eq!(db.root(), root, "root mismatch at cache_size={cache_size}");
+                assert_eq!(
+                    db.root(),
+                    root,
+                    "root mismatch at cache_size={cache_size:?}"
+                );
                 drop(db);
             }
         });

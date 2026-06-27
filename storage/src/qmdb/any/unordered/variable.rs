@@ -173,7 +173,7 @@ pub(crate) mod test {
                 page_cache,
             },
             translator: TwoCap,
-            init_cache_size: 1024,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 

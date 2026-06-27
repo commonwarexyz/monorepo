@@ -46,6 +46,7 @@ use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::{range::NonEmptyRange, Array};
+use core::num::NonZeroUsize;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -60,7 +61,7 @@ async fn build_db<F, E, U, I, H, C, T, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
-    cache_size: usize,
+    cache_size: Option<NonZeroUsize>,
 ) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
     F: merkle::Family,

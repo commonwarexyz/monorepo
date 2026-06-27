@@ -47,7 +47,7 @@ pub const VARIABLE_VALUE_MAX_LEN: usize = 256;
 pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 /// Default init-time `(location -> key)` cache size for bench databases. The init benchmark
 /// overrides this per-case to sweep cache sizes.
-pub const INIT_CACHE_SIZE: usize = 1 << 18;
+pub const INIT_CACHE_SIZE: Option<NonZeroUsize> = Some(NZUsize!(1 << 18));
 
 // -- Fixed value (Digest), fixed storage layout --
 

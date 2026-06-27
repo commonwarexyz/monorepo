@@ -83,6 +83,7 @@ use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use core::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -112,8 +113,8 @@ pub struct Config<T: Translator, J, S: Strategy> {
     pub translator: T,
 
     /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
-    /// collisions without re-reading the log; `0` disables it.
-    pub init_cache_size: usize,
+    /// collisions without re-reading the log; `None` disables it.
+    pub init_cache_size: Option<NonZeroUsize>,
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
@@ -237,7 +238,7 @@ pub(crate) mod test {
                 write_buffer: NZUsize!(1024),
             },
             translator: T::default(),
-            init_cache_size: 1024,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -264,7 +265,7 @@ pub(crate) mod test {
                 write_buffer: NZUsize!(1024),
             },
             translator: T::default(),
-            init_cache_size: 1024,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 

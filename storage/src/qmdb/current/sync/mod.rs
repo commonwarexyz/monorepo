@@ -71,6 +71,7 @@ use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
+use core::num::NonZeroUsize;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -100,7 +101,7 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
-    cache_size: usize,
+    cache_size: Option<NonZeroUsize>,
     metadata_partition: String,
     strategy: S,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>

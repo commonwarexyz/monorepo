@@ -150,7 +150,7 @@ fn bench(folder: &str) {
 
     // No-cache baseline; also learn the replay region R (ops above the inactivity floor) -- what the
     // location cache must cover to avoid eviction (a key-cache would need only the key count).
-    let (baseline, region) = time_init(&cfg, 0);
+    let (baseline, region) = time_init(&cfg, None);
     if region == 0 {
         eprintln!("no database at {folder}; run `generate {folder} <elements>` first");
         return;
@@ -160,9 +160,12 @@ fn bench(folder: &str) {
     println!("  cache=off          : {baseline:?}");
     let _ = std::io::stdout().flush();
 
-    for cache_size in [(region / 4) as usize, region as usize] {
+    for cache_size in [
+        NonZeroUsize::new((region / 4) as usize),
+        NonZeroUsize::new(region as usize),
+    ] {
         let (elapsed, _) = time_init(&cfg, cache_size);
-        println!("  cache={cache_size:>11}: {elapsed:?}");
+        println!("  cache={cache_size:?}: {elapsed:?}");
         let _ = std::io::stdout().flush();
     }
 }
@@ -177,7 +180,7 @@ fn destroy(folder: &str) {
 
 /// Time a single `init` of the database at `cfg`'s folder with the given cache size, returning the
 /// elapsed time and the replay-region size (`0` if the database is empty/absent).
-fn time_init(cfg: &Config, cache_size: usize) -> (Duration, u64) {
+fn time_init(cfg: &Config, cache_size: Option<NonZeroUsize>) -> (Duration, u64) {
     Runner::new(cfg.clone()).start(|ctx| async move {
         let mut config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE);
         config.init_cache_size = cache_size;
@@ -186,7 +189,7 @@ fn time_init(cfg: &Config, cache_size: usize) -> (Duration, u64) {
             .await
             .unwrap();
         let elapsed = start.elapsed();
-        let end: u64 = *db.bounds().await.end;
+        let end: u64 = *db.bounds().end;
         let floor: u64 = *db.inactivity_floor_loc().await;
         (elapsed, end.saturating_sub(floor))
     })

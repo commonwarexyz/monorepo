@@ -13,15 +13,17 @@ use commonware_runtime::{
     Runner as _, Supervisor as _,
 };
 use commonware_storage::{merkle::Family, qmdb::any::traits::DbAny};
+use commonware_utils::NZUsize;
+use core::num::NonZeroUsize;
 use criterion::{criterion_group, Criterion};
 
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
 const COMMIT_FREQUENCY: u32 = 10_000;
 
-/// Init-time `(location -> key)` cache sizes to compare: `0` disables the cache (the no-cache
+/// Init-time `(location -> key)` cache sizes to compare: `None` disables the cache (the no-cache
 /// baseline), and a reasonably sized cache that covers the bench's working set.
-const CACHE_SIZES: [usize; 2] = [0, 1 << 18];
+const CACHE_SIZES: [Option<NonZeroUsize>; 2] = [None, Some(NZUsize!(1 << 18))];
 
 cfg_if::cfg_if! {
     if #[cfg(not(full_bench))] {
@@ -74,10 +76,11 @@ fn bench_fixed_value_init(c: &mut Criterion) {
             // every cache size for this variant (all read the same on-disk database).
             let mut initialized = false;
             for &cache_size in &CACHE_SIZES {
+                let cache = cache_size.map_or(0, NonZeroUsize::get);
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
-                        "{}/variant={} cache={cache_size} elements={elements}",
+                        "{}/variant={} cache={cache} elements={elements}",
                         module_path!(),
                         variant.name(),
                     ),
@@ -140,10 +143,11 @@ fn bench_var_value_init(c: &mut Criterion) {
             // every cache size for this variant (all read the same on-disk database).
             let mut initialized = false;
             for &cache_size in &CACHE_SIZES {
+                let cache = cache_size.map_or(0, NonZeroUsize::get);
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
-                        "{}/variant={} cache={cache_size} elements={elements}",
+                        "{}/variant={} cache={cache} elements={elements}",
                         module_path!(),
                         variant.name(),
                     ),

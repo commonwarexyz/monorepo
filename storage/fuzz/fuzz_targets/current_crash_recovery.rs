@@ -23,7 +23,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -120,7 +120,7 @@ fn make_config(
         },
         grafted_metadata_partition: format!("crash-grafted-merkle-metadata-{suffix}"),
         translator: TwoCap,
-        init_cache_size: 3,
+        init_cache_size: Some(NZUsize!(3)),
     }
 }
 

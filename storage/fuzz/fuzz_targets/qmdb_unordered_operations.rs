@@ -109,7 +109,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     page_cache,
                 },
                 translator: EightCap,
-                init_cache_size: 3,
+                init_cache_size: Some(NZUsize!(3)),
             };
 
             let mut db: GenericDb<F> =

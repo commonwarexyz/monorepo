@@ -349,6 +349,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap::Prunable as BitMap;
+use core::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub mod batch;
@@ -378,8 +379,8 @@ pub struct Config<T: Translator, J, S: Strategy> {
     pub translator: T,
 
     /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
-    /// collisions without re-reading the log; `0` disables it.
-    pub init_cache_size: usize,
+    /// collisions without re-reading the log; `None` disables it.
+    pub init_cache_size: Option<NonZeroUsize>,
 }
 
 impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
@@ -572,7 +573,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
-            init_cache_size: 1024,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -601,7 +602,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
-            init_cache_size: 1024,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -1403,7 +1404,7 @@ pub mod tests {
                 },
                 grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
                 translator: OneCap,
-                init_cache_size: 1024,
+                init_cache_size: Some(NZUsize!(1024)),
             };
             let mut db = ForgedExclusionDb::init(context.child("db"), cfg)
                 .await

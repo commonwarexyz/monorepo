@@ -94,7 +94,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
             page_cache,
         },
         translator: OneCap,
-        init_cache_size: 3,
+        init_cache_size: Some(NZUsize!(3)),
     }
 }
 
