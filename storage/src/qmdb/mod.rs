@@ -244,7 +244,7 @@ where
 {
     let bounds = reader.bounds();
     let stream = reader
-        .replay(SNAPSHOT_READ_BUFFER_SIZE, *inactivity_floor_loc)
+        .replay(*inactivity_floor_loc, SNAPSHOT_READ_BUFFER_SIZE)
         .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);

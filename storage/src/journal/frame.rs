@@ -1,8 +1,7 @@
 //! Varint length-prefixed framing for variable-length journal items.
 //!
 //! Each item is stored as a frame: a varint `u32` length prefix followed by the (optionally
-//! zstd-compressed) encoded item. Shared by [super::segmented::variable] and
-//! [super::contiguous::variable].
+//! zstd-compressed) encoded item.
 
 use super::Error;
 use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt as _, Write as _};

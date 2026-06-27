@@ -54,7 +54,9 @@ use tracing::warn;
 /// Indicates which CRC slot in a page record must not be overwritten.
 #[derive(Clone, Copy)]
 enum ProtectedCrc {
+    /// The first slot still protects the committed prefix.
     First,
+    /// The second slot still protects the committed prefix.
     Second,
 }
 
@@ -316,8 +318,11 @@ impl<B: Blob> Writer<B> {
         Ok(offset)
     }
 
-    /// Append all bytes in `buf` to the tip of the blob, writing whole pages directly to the
-    /// underlying blob instead of staging them in the write buffer when `buf` is large.
+    /// Append owned bytes to the tip of the blob.
+    ///
+    /// Large appends fill the current tip to a page boundary, write complete pages directly to the
+    /// blob, and leave only a sub-page suffix in the write buffer. This avoids copying full-page
+    /// payloads while preserving the invariant that the buffer starts at `current_page`.
     pub async fn append_owned(&mut self, buf: IoBuf) -> Result<u64, Error> {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let offset = self.buffer.size();
@@ -352,7 +357,8 @@ impl<B: Blob> Writer<B> {
             );
         }
 
-        // Prepare physical pages for the whole pages remaining in `buf` without copying them.
+        // Prepare physical pages for the whole pages remaining in `buf` without copying logical
+        // payload bytes.
         let bulk_len = (buf.len() - fill) / logical_page_size * logical_page_size;
         let bulk = buf.slice(fill..fill + bulk_len);
         let mut physical_pages = IoBufs::default();
@@ -642,16 +648,16 @@ impl<B: Blob> Writer<B> {
         self.view().read_into(buf, offset).await
     }
 
-    /// Returns the protected region info for a partial page, if any.
+    /// Return the first-page region that must be skipped to preserve a committed partial page.
     ///
     /// # Returns
     ///
     /// `None` if there's no existing partial page.
     ///
     /// `Some((prefix_len, protected_crc))` where:
-    /// - `prefix_len`: bytes `[0..prefix_len]` were already written and can be substituted with
-    ///   zeros (skip writing)
-    /// - `protected_crc`: which CRC slot must not be overwritten
+    /// - `prefix_len`: bytes `[0, prefix_len)` are committed logical data already covered by the
+    ///   protected CRC and do not need to be rewritten
+    /// - `protected_crc`: which CRC slot must not be overwritten by the next flush
     fn identify_protected_regions(
         partial_page_state: Option<&Checksum>,
     ) -> Option<(usize, ProtectedCrc)> {
@@ -803,8 +809,11 @@ impl<B: Blob> Writer<B> {
         bytes
     }
 
-    /// Build a CRC record that preserves the old CRC in its original slot and places
-    /// the new CRC in the other slot.
+    /// Build a CRC record that preserves the old CRC in its original slot and places the new CRC
+    /// in the other slot.
+    ///
+    /// A subsequent flush writes around the preserved slot, so an interrupted rewrite can recover
+    /// either the old partial page or the new one.
     const fn build_crc_record_preserving_old(
         new_len: u16,
         new_crc: u32,

@@ -3,9 +3,9 @@
 use crate::{journal::Error, Context};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Sealed, Writer},
+    buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
-    Blob as RBlob, Error as RError, IoBufMut, IoBufs,
+    Blob as RBlob, Buf, Error as RError, IoBufMut, IoBufs,
 };
 use futures::future::try_join_all;
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
@@ -395,10 +395,9 @@ impl<E: Context> Writable<E> {
     }
 }
 
-/// Blob handles used by a reader.
+/// Blob handles for a contiguous journal view.
 ///
-/// Live readers borrow the writable tail and sealed history. Snapshot readers own cloned sealed
-/// history and an owned sealed tail.
+/// Stores sealed history separately from the tail because the tail can use a different read path.
 pub(super) struct Blobs<'a, B: RBlob> {
     /// Index of the first sealed blob.
     oldest_blob_index: u64,
@@ -408,8 +407,11 @@ pub(super) struct Blobs<'a, B: RBlob> {
     tail: Blob<'a, B>,
 }
 
+/// Storage for the sealed history slice.
 enum SealedBlobs<'a, B: RBlob> {
+    /// Borrowed sealed slice.
     Borrowed(&'a [Sealed<B>]),
+    /// Owned sealed slice.
     Owned(Arc<[Sealed<B>]>),
 }
 
@@ -424,7 +426,9 @@ impl<B: RBlob> SealedBlobs<'_, B> {
 
 /// A read handle for one journal blob.
 pub(super) enum Blob<'a, B: RBlob> {
+    /// Writable tail, read through the writer's cache-aware logical view.
     Writer(&'a Writer<B>),
+    /// Immutable historical blob.
     Sealed(Sealed<B>),
 }
 
@@ -437,7 +441,7 @@ impl<B: RBlob> Clone for Blob<'_, B> {
     }
 }
 
-impl<B: RBlob> Blob<'_, B> {
+impl<'a, B: RBlob> Blob<'a, B> {
     /// Return the blob's logical size.
     pub(super) fn size(&self) -> u64 {
         match self {
@@ -481,6 +485,29 @@ impl<B: RBlob> Blob<'_, B> {
         }
     }
 
+    /// Return a sequential replay handle starting at `offset`.
+    ///
+    /// Constructing the handle is cheap: paged replay stores prefetch settings, and writer-view
+    /// replay starts with an empty buffer. Read buffers are allocated later by `Replay::ensure`.
+    ///
+    /// Sealed blobs can use paged replay directly because their bytes are already fixed. The
+    /// writable tail is replayed through a live view so replay observes logical bytes without
+    /// mutating or flushing the writer.
+    pub(super) fn replay_from(
+        self,
+        offset: u64,
+        buffer_size: NonZeroUsize,
+    ) -> Result<Replay<'a, B>, Error> {
+        match self {
+            Self::Writer(writer) => Replay::view(Self::Writer(writer), offset, buffer_size),
+            Self::Sealed(sealed) => {
+                let mut replay = sealed.replay(buffer_size).map_err(Error::Runtime)?;
+                replay.seek_to(offset).map_err(Error::Runtime)?;
+                Ok(Replay::paged(replay))
+            }
+        }
+    }
+
     /// Read fixed-size items at sorted byte offsets into `buf`.
     pub(super) async fn read_many_into(
         &self,
@@ -501,14 +528,193 @@ impl<B: RBlob> Blob<'_, B> {
     }
 }
 
-impl<B: RBlob> Blobs<'_, B> {
+/// Sequential replay over either a sealed paged blob or a live writer view.
+pub(super) struct Replay<'a, B: RBlob> {
+    inner: ReplayInner<'a, B>,
+}
+
+/// Backing strategy for sequential blob replay.
+enum ReplayInner<'a, B: RBlob> {
+    /// Paged replay over sealed data. CRC bytes are validated and skipped by the runtime buffer.
+    Paged(PagedReplay<B>),
+    /// Logical replay over a live writer or any other blob view.
+    View(ViewReplay<'a, B>),
+}
+
+impl<'a, B: RBlob> Replay<'a, B> {
+    /// Wrap a paged replay handle.
+    const fn paged(replay: PagedReplay<B>) -> Self {
+        Self {
+            inner: ReplayInner::Paged(replay),
+        }
+    }
+
+    /// Build a replay handle over a logical blob view.
+    fn view(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
+        Ok(Self {
+            inner: ReplayInner::View(ViewReplay::new(blob, offset, buffer_size)?),
+        })
+    }
+
+    /// Return whether the underlying blob has reached EOF.
+    ///
+    /// The replay buffer may still hold bytes after this becomes true.
+    pub(super) const fn is_exhausted(&self) -> bool {
+        match &self.inner {
+            ReplayInner::Paged(replay) => replay.is_exhausted(),
+            ReplayInner::View(replay) => replay.is_exhausted(),
+        }
+    }
+
+    /// Ensure at least `n` logical bytes are buffered unless EOF is reached first.
+    pub(super) async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => replay.ensure(n).await.map_err(Error::Runtime),
+            ReplayInner::View(replay) => replay.ensure(n).await,
+        }
+    }
+}
+
+impl<B: RBlob> Buf for Replay<'_, B> {
+    fn remaining(&self) -> usize {
+        match &self.inner {
+            ReplayInner::Paged(replay) => replay.remaining(),
+            ReplayInner::View(replay) => replay.remaining(),
+        }
+    }
+
+    fn chunk(&self) -> &[u8] {
+        match &self.inner {
+            ReplayInner::Paged(replay) => replay.chunk(),
+            ReplayInner::View(replay) => replay.chunk(),
+        }
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => replay.advance(cnt),
+            ReplayInner::View(replay) => replay.advance(cnt),
+        }
+    }
+}
+
+/// Sequential read buffer over a live journal blob view.
+struct ViewReplay<'a, B: RBlob> {
+    /// The source blob view.
+    blob: Blob<'a, B>,
+    /// Next logical offset to read from `blob`.
+    offset: u64,
+    /// Minimum read size when more bytes are needed.
+    buffer_size: NonZeroUsize,
+    /// Buffered logical bytes.
+    buf: Vec<u8>,
+    /// Offset of the next unread byte in `buf`.
+    cursor: usize,
+    /// Whether `offset` has reached the source blob's logical size.
+    exhausted: bool,
+}
+
+impl<'a, B: RBlob> ViewReplay<'a, B> {
+    /// Create a view replay positioned at `offset`.
+    fn new(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
+        if offset > blob.size() {
+            return Err(Error::Runtime(RError::BlobInsufficientLength));
+        }
+
+        Ok(Self {
+            blob,
+            offset,
+            buffer_size,
+            buf: Vec::new(),
+            cursor: 0,
+            exhausted: false,
+        })
+    }
+
+    /// Return whether the source view has no more bytes to read.
+    const fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    /// Ensure at least `n` bytes are available through the [`Buf`] implementation.
+    async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
+        while self.remaining() < n && !self.exhausted {
+            self.compact();
+
+            let blob_size = self.blob.size();
+            let remaining = blob_size.saturating_sub(self.offset);
+            if remaining == 0 {
+                self.exhausted = true;
+                break;
+            }
+
+            // Read enough to satisfy the request, but keep ordinary prefetch bounded by the replay
+            // budget and never ask past the current logical EOF.
+            let needed = n.saturating_sub(self.remaining());
+            let read_len = self
+                .buffer_size
+                .get()
+                .max(needed)
+                .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+            let (buf, read) = self
+                .blob
+                .read_up_to(self.offset, read_len, IoBufMut::with_capacity(read_len))
+                .await?;
+            self.offset = self
+                .offset
+                .checked_add(read as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            self.buf.extend_from_slice(&buf.chunk()[..read]);
+            if self.offset == blob_size {
+                self.exhausted = true;
+            }
+        }
+
+        Ok(self.remaining() >= n)
+    }
+
+    /// Discard bytes already consumed through [`Buf::advance`].
+    fn compact(&mut self) {
+        match self.cursor {
+            0 => {}
+            cursor if cursor == self.buf.len() => {
+                self.buf.clear();
+                self.cursor = 0;
+            }
+            cursor => {
+                self.buf.drain(..cursor);
+                self.cursor = 0;
+            }
+        }
+    }
+}
+
+impl<B: RBlob> Buf for ViewReplay<'_, B> {
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.cursor
+    }
+
+    fn chunk(&self) -> &[u8] {
+        &self.buf[self.cursor..]
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        self.cursor = self
+            .cursor
+            .checked_add(cnt)
+            .expect("advance overflowed replay cursor");
+        assert!(self.cursor <= self.buf.len(), "advanced past replay buffer");
+    }
+}
+
+impl<'a, B: RBlob> Blobs<'a, B> {
     /// Index of the newest blob (the tail).
     pub(super) fn tail_blob_index(&self) -> u64 {
         self.oldest_blob_index + self.sealed.as_slice().len() as u64
     }
 
     /// Resolve a blob, if retained.
-    pub(super) fn get(&self, blob: u64) -> Option<Blob<'_, B>> {
+    pub(super) fn get(&self, blob: u64) -> Option<Blob<'a, B>> {
         if blob == self.tail_blob_index() {
             return Some(self.tail.clone());
         }

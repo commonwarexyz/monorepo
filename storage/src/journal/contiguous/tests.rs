@@ -207,6 +207,8 @@ where
     test_sequential_appends(&indexed_factory).await;
     test_replay_from_start(&indexed_factory).await;
     test_replay_from_middle(&indexed_factory).await;
+    test_replay_from_unsealed_tail(&indexed_factory).await;
+    test_replay_with_small_buffer(&indexed_factory).await;
     test_prune_retains_size(&indexed_factory).await;
     test_through_trait(&indexed_factory).await;
     test_replay_after_prune(&indexed_factory).await;
@@ -386,7 +388,7 @@ where
     }
 
     {
-        let stream = journal.replay(NZUsize!(1024), 0).await.unwrap();
+        let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -417,7 +419,7 @@ where
     }
 
     {
-        let stream = journal.replay(NZUsize!(1024), 7).await.unwrap();
+        let stream = journal.replay(7, NZUsize!(1024)).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -429,6 +431,69 @@ where
         for (i, (pos, value)) in items.iter().enumerate() {
             assert_eq!(*pos, (i + 7) as u64);
             assert_eq!(*value, ((i + 7) as u64) * 10);
+        }
+    }
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test replay starting in the writable tail.
+async fn test_replay_from_unsealed_tail<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: Mutable<Item = u64>,
+{
+    let mut journal = factory("replay-from-unsealed-tail".into()).await.unwrap();
+
+    for i in 0..17u64 {
+        journal.append(&(i * 10)).await.unwrap();
+    }
+
+    {
+        let stream = journal.replay(13, NZUsize!(1024)).await.unwrap();
+        futures::pin_mut!(stream);
+
+        let mut items = Vec::new();
+        while let Some(result) = stream.next().await {
+            items.push(result.unwrap());
+        }
+
+        assert_eq!(items.len(), 4);
+        for (i, (pos, value)) in items.iter().enumerate() {
+            let expected_pos = (i + 13) as u64;
+            assert_eq!(*pos, expected_pos);
+            assert_eq!(*value, expected_pos * 10);
+        }
+    }
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test replay with a small buffer.
+async fn test_replay_with_small_buffer<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: Mutable<Item = u64>,
+{
+    let mut journal = factory("replay-with-small-buffer".into()).await.unwrap();
+
+    for i in 0..25u64 {
+        journal.append(&(i * 10)).await.unwrap();
+    }
+
+    {
+        let stream = journal.replay(0, NZUsize!(9)).await.unwrap();
+        futures::pin_mut!(stream);
+
+        let mut items = Vec::new();
+        while let Some(result) = stream.next().await {
+            items.push(result.unwrap());
+        }
+
+        assert_eq!(items.len(), 25);
+        for (i, (pos, value)) in items.iter().enumerate() {
+            assert_eq!(*pos, i as u64);
+            assert_eq!(*value, (i as u64) * 10);
         }
     }
 
@@ -505,7 +570,7 @@ where
     {
         // Replay from a position that may or may not be pruned (section-aligned)
         // We replay from position 10 which should be safe
-        let stream = journal.replay(NZUsize!(1024), 10).await.unwrap();
+        let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -582,7 +647,7 @@ where
 
     {
         // Replay from position 10 and verify positions
-        let stream = journal.replay(NZUsize!(1024), 10).await.unwrap();
+        let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -635,7 +700,7 @@ where
     let journal = factory("replay-on-empty".into()).await.unwrap();
 
     {
-        let stream = journal.replay(NZUsize!(1024), 0).await.unwrap();
+        let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -664,7 +729,7 @@ where
     let bounds = journal.bounds();
 
     {
-        let stream = journal.replay(NZUsize!(1024), bounds.end).await.unwrap();
+        let stream = journal.replay(bounds.end, NZUsize!(1024)).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -763,7 +828,7 @@ where
 
         // Replay and verify all items
         {
-            let stream = journal.replay(NZUsize!(1024), 0).await.unwrap();
+            let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -826,7 +891,7 @@ where
 
         // Replay from position 10 (first non-pruned position)
         {
-            let stream = journal.replay(NZUsize!(1024), 10).await.unwrap();
+            let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -1252,7 +1317,7 @@ where
 
         // Replay should yield no items
         {
-            let stream = journal.replay(NZUsize!(1024), 0).await.unwrap();
+            let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();

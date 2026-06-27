@@ -8,12 +8,10 @@
 //! - The pruning boundary, when it falls mid-blob (from
 //!   [Journal::init_at_size](super::fixed::Journal::init_at_size)): recovery needs the exact
 //!   position where the oldest blob's items begin.
-//! - The recovery watermark: a floor on the journal size that external consumers (such as the
-//!   [variable journal](super::variable::Journal), which indexes its data with a fixed journal)
-//!   have durably recorded. Items below the watermark must survive a crash; items above it may
-//!   be replayed, discarded, or (after an in-place rewind followed by new appends) decode to a
-//!   value from neither the pre- nor post-rewind history, so consumers must not treat them as
-//!   authenticated.
+//! - The recovery watermark: a floor on the journal size that has been durably recorded. Items
+//!   below the watermark must survive a crash; items above it may be replayed, discarded, or (after
+//!   an in-place rewind followed by new appends) decode to a value from neither the pre- nor
+//!   post-rewind history.
 //! - The clear target, while a clear/reset is in progress: the target is recorded before any
 //!   blob is deleted, so a crash mid-clear is finished on reopen instead of being misread as
 //!   corruption.

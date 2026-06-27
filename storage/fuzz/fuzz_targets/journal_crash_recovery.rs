@@ -298,8 +298,8 @@ trait FuzzJournal: Sized {
 
     fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> impl Future<Output = Result<Vec<(u64, Item)>, Error>> + Send;
 
     fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
@@ -308,10 +308,10 @@ trait FuzzJournal: Sized {
 /// Drain a reader's replay stream into a `(position, item)` vector.
 async fn collect_replay<C: Contiguous<Item = Item>>(
     reader: &C,
-    buffer: NonZeroUsize,
     start_pos: u64,
+    buffer: NonZeroUsize,
 ) -> Result<Vec<(u64, Item)>, Error> {
-    let stream = reader.replay(buffer, start_pos).await?;
+    let stream = reader.replay(start_pos, buffer).await?;
     futures::pin_mut!(stream);
     let mut out = Vec::new();
     while let Some(result) = stream.next().await {
@@ -374,10 +374,10 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
     async fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> Result<Vec<(u64, Item)>, Error> {
-        collect_replay(self, buffer, start_pos).await
+        collect_replay(self, start_pos, buffer).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -437,10 +437,10 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     async fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> Result<Vec<(u64, Item)>, Error> {
-        collect_replay(self, buffer, start_pos).await
+        collect_replay(self, start_pos, buffer).await
     }
 
     async fn commit(&mut self) -> Result<(), Error> {
@@ -509,7 +509,7 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
 
     // Replay must yield exactly [boundary, size) contiguously and agree with `read()` everywhere.
     let items = journal
-        .replay(NZUsize!(VERIFY_REPLAY_BUF), boundary)
+        .replay(boundary, NZUsize!(VERIFY_REPLAY_BUF))
         .await
         .expect("replay during recovery verification");
     assert_eq!(
@@ -532,7 +532,7 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
 async fn to_expected<J: FuzzJournal>(journal: &J) -> Expected {
     let bounds = journal.bounds();
     let items = journal
-        .replay(NZUsize!(VERIFY_REPLAY_BUF), bounds.start)
+        .replay(bounds.start, NZUsize!(VERIFY_REPLAY_BUF))
         .await
         .expect("to_expected replay");
     let mut values = vec![Item::from([0u8; ITEM_SIZE]); bounds.end as usize];
@@ -725,7 +725,7 @@ async fn run_ops<J: FuzzJournal>(
                 // tail-repair I/O fault.
                 let bounds = journal.bounds();
                 let clamped = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
-                let clamped_ok = match journal.replay(NZUsize!(*buffer), clamped).await {
+                let clamped_ok = match journal.replay(clamped, NZUsize!(*buffer)).await {
                     Ok(items) => {
                         assert_replay_suffix(&items, clamped, &bounds);
                         for (pos, item) in &items {
@@ -746,7 +746,7 @@ async fn run_ops<J: FuzzJournal>(
                 };
                 clamped_ok
                     && should_continue_raw_replay(
-                        journal.replay(NZUsize!(*buffer), *start_pos).await,
+                        journal.replay(*start_pos, NZUsize!(*buffer)).await,
                         *start_pos,
                         &bounds,
                     )

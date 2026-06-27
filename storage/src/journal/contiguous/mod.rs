@@ -5,7 +5,7 @@
 //! [variable]-size item journals are supported.
 
 use super::Error;
-use futures::{stream, Stream, StreamExt as _};
+use futures::Stream;
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
@@ -19,11 +19,32 @@ pub mod variable;
 mod tests;
 
 /// Return the number of items that can be written before crossing the current blob boundary.
+///
+/// `position` is the next logical item position and `remaining` is the number of items left in the
+/// append batch. The result is always at least one when `remaining > 0`.
 fn batch_count_to_blob_boundary(position: u64, remaining: usize, items_per_blob: u64) -> usize {
     let pos_in_blob = position % items_per_blob;
     let remaining_space = items_per_blob - pos_in_blob;
-    // Keep the min in u64 so a 2^32-item blob space does not truncate to zero on 32-bit targets
+
+    // Keep the min in u64 so a 2^32-item blob space does not truncate to zero on 32-bit targets.
     remaining_space.min(remaining as u64) as usize
+}
+
+/// Return the exclusive logical end for `blob`, clamped to `end`.
+const fn blob_end_position(blob: u64, items_per_blob: u64, end: u64) -> u64 {
+    // No positions exist, so `end - 1` would underflow
+    if end == 0 {
+        return 0;
+    }
+
+    // This blob contains `end - 1`, so clamp to the journal end
+    let end_blob = (end - 1) / items_per_blob;
+    if blob >= end_blob {
+        return end;
+    }
+
+    // Earlier blobs have a representable natural boundary
+    (blob + 1) * items_per_blob
 }
 
 /// A read-only, position-based view of a contiguous journal.
@@ -71,42 +92,14 @@ pub trait Contiguous: Send + Sync {
 
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
-    /// `buffer` controls how many logical positions are read per chunk.
+    /// `buffer` controls the replay byte budget for each chunk.
     fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
-    > + Send {
-        async move {
-            let bounds = self.bounds();
-            if start_pos > bounds.end {
-                return Err(Error::ItemOutOfRange(start_pos));
-            }
-            if start_pos < bounds.start {
-                return Err(Error::ItemPruned(start_pos));
-            }
-
-            let items_per_batch = buffer.get() as u64;
-            Ok(stream::unfold(start_pos, move |pos| async move {
-                if pos == bounds.end {
-                    return None;
-                }
-                let end = pos.saturating_add(items_per_batch).min(bounds.end);
-                let positions: Vec<_> = (pos..end).collect();
-                let result = self
-                    .read_many(&positions)
-                    .await
-                    .map(|items| positions.into_iter().zip(items));
-                match result {
-                    Ok(items) => Some((stream::iter(items.map(Ok).collect::<Vec<_>>()), end)),
-                    Err(err) => Some((stream::iter(vec![Err(err)]), bounds.end)),
-                }
-            })
-            .flatten())
-        }
-    }
+    > + Send;
 }
 
 /// Items to append via [`Mutable::append_many`].
