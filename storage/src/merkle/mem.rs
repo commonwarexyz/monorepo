@@ -1164,7 +1164,7 @@ mod tests {
         mem.apply_batch(&c).unwrap();
 
         // B's overwrite must have been applied.
-        let updated = hasher.leaf_digest(pos0, b"updated-0");
+        let updated = hasher.leaf_digest(Location::<F>::new(0), b"updated-0");
         assert_eq!(
             mem.get_node(pos0),
             Some(updated),

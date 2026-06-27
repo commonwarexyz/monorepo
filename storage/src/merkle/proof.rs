@@ -370,7 +370,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     /// ```
     ///
     /// The verifier walks down from `p7` via `F::children`, pulls the pins for `p2` and `p5`, and
-    /// hashes them back up (`node_digest(p7, pin[p2], pin[p5])`) to compare against the `p7`
+    /// hashes them back up (`node_digest(pin[p2], pin[p5])`) to compare against the `p7`
     /// digest the proof authenticates.
     ///
     /// Returns `true` only if the proof reconstructs to `root` and every pinned node digest is
@@ -688,8 +688,7 @@ impl<F: Family> Subtree<F> {
     /// each pin as it is used.
     ///
     /// Walks down via [`Self::children`] until each recursion hits a pin, then hashes back up with
-    /// [`Hasher::node_digest`] for position-keyed domain separation. Returns `None` if any required
-    /// pin is missing.
+    /// [`Hasher::node_digest`]. Returns `None` if any required pin is missing.
     ///
     /// On failure, `pinned_map` may have been partially consumed. Callers are expected to return
     /// immediately without inspecting it further.
@@ -711,7 +710,7 @@ impl<F: Family> Subtree<F> {
         let (left, right) = self.children();
         let left_d = left.reconstruct_from_pins(hasher, pinned_map)?;
         let right_d = right.reconstruct_from_pins(hasher, pinned_map)?;
-        Some(hasher.node_digest(self.pos, &left_d, &right_d))
+        Some(hasher.node_digest_at(self.pos, &left_d, &right_d))
     }
 
     /// Reconstruct the digest of this subtree from a range of elements and sibling digests,
@@ -752,7 +751,7 @@ impl<F: Family> Subtree<F> {
             let elem = elements
                 .next()
                 .ok_or(ReconstructionError::MissingElements)?;
-            return Ok(hasher.leaf_digest(self.pos, elem.as_ref()));
+            return Ok(hasher.leaf_digest(self.leaf_start, elem.as_ref()));
         }
 
         // Recurse into children.
@@ -779,7 +778,7 @@ impl<F: Family> Subtree<F> {
             cd.push((right.pos, right_d));
         }
 
-        Ok(hasher.node_digest(self.pos, &left_d, &right_d))
+        Ok(hasher.node_digest_at(self.pos, &left_d, &right_d))
     }
 }
 

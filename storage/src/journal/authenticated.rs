@@ -64,7 +64,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, item: Item) -> Self {
         let mut state = self.hasher.state();
-        let digest = state.leaf_encoded(self.inner.size(), &item);
+        let digest = state.leaf_encoded(self.inner.leaves(), &item);
         self.inner = self.inner.add_leaf_digest(digest);
         self.items.push(item);
         self
@@ -129,10 +129,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         let digests = self.inner.strategy().map_init_collect_vec(
             items.iter().enumerate(),
             || self.hasher.state(),
-            |state, (i, item)| {
-                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                state.leaf_encoded(pos, item)
-            },
+            |state, (i, item)| state.leaf_encoded(first + i as u64, item),
         );
 
         self.inner = self.inner.add_leaf_digests(digests);

@@ -248,9 +248,12 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         size
     }
 
-    /// Add a run of pre-computed leaf digests, in order.
+    /// Append a run of pre-computed leaf digests, in order.
+    ///
+    /// Bulk counterpart to [`Self::add_leaf_digest`]: reserves capacity once and advances the leaf
+    /// count incrementally, so it is the efficient path for building a structure from many leaves.
     #[cfg(feature = "std")]
-    pub(crate) fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
+    pub fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
         // Each leaf also appends its parent placeholders, so reserve for the full node count.
         let digests = digests.into_iter();
         let n = digests.size_hint().0 as u64;
@@ -269,7 +272,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Hash `element` and add it as a leaf.
     pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
-        let digest = hasher.leaf_digest(self.size(), element);
+        let digest = hasher.leaf_digest(self.leaves(), element);
         self.add_leaf_digest(digest)
     }
 
@@ -302,7 +305,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         element: &[u8],
     ) -> Result<Self, Error<F>> {
         let pos = self.validate_loc(loc)?;
-        let digest = hasher.leaf_digest(pos, element);
+        let digest = hasher.leaf_digest(loc, element);
         self.store_node(pos, digest);
         self.mark_dirty(loc);
         Ok(self)
@@ -353,29 +356,15 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Consume this batch and produce an immutable [`MerkleizedBatch`] using reusable hash state.
     #[cfg(feature = "std")]
     pub(crate) fn merkleize_reusing<H: CHasher<Digest = D>>(
-        self,
-        base: &Mem<F, D>,
-    ) -> Arc<MerkleizedBatch<F, D, S>> {
-        self.merkleize_reusing_with::<H, _>(base, |pos| pos)
-    }
-
-    /// Consume this batch using reusable hash state and a hash-position mapper.
-    #[cfg(feature = "std")]
-    pub(crate) fn merkleize_reusing_with<H, M>(
         mut self,
         base: &Mem<F, D>,
-        map_pos: M,
-    ) -> Arc<MerkleizedBatch<F, D, S>>
-    where
-        H: CHasher<Digest = D>,
-        M: Fn(Position<F>) -> Position<F> + Copy + Send + Sync,
-    {
+    ) -> Arc<MerkleizedBatch<F, D, S>> {
         let buckets = self.prepare_dirty_buckets();
         for (height, positions) in buckets.iter().enumerate() {
             if positions.is_empty() {
                 continue;
             }
-            self.merkleize_bucket_reusing::<H, M>(base, positions, height as u32, map_pos);
+            self.merkleize_bucket_reusing::<H>(base, positions, height as u32);
         }
 
         self.finish_merkleize()
@@ -424,7 +413,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
                 let (left, right) = F::children(pos, height);
                 let left_d = self.get_node(base, left).expect("left child missing");
                 let right_d = self.get_node(base, right).expect("right child missing");
-                let digest = hasher.node_digest(pos, &left_d, &right_d);
+                let digest = hasher.node_digest(&left_d, &right_d);
                 self.store_node(pos, digest);
             }
             return;
@@ -437,7 +426,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
                 let (left, right) = F::children(pos, height);
                 let left_d = self.get_node(base, left).expect("left child missing");
                 let right_d = self.get_node(base, right).expect("right child missing");
-                let digest = hasher.node_digest(pos, &left_d, &right_d);
+                let digest = hasher.node_digest(&left_d, &right_d);
                 (pos, digest)
             },
         );
@@ -447,15 +436,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     #[cfg(feature = "std")]
-    fn merkleize_bucket_reusing<H, M>(
+    fn merkleize_bucket_reusing<H>(
         &mut self,
         base: &Mem<F, D>,
         positions: &[Position<F>],
         height: u32,
-        map_pos: M,
     ) where
         H: CHasher<Digest = D>,
-        M: Fn(Position<F>) -> Position<F> + Copy + Send + Sync,
     {
         if positions.len() < SEQUENTIAL_BUCKET_THRESHOLD {
             let mut state = Standard::<H>::new(Bagging::ForwardFold).state();
@@ -463,7 +450,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
                 let (left, right) = F::children(pos, height);
                 let left_d = self.get_node(base, left).expect("left child missing");
                 let right_d = self.get_node(base, right).expect("right child missing");
-                let digest = state.node_digest(map_pos(pos), &left_d, &right_d);
+                let digest = state.node_digest(&left_d, &right_d);
                 self.store_node(pos, digest);
             }
             return;
@@ -476,7 +463,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
                 let (left, right) = F::children(pos, height);
                 let left_d = self.get_node(base, left).expect("left child missing");
                 let right_d = self.get_node(base, right).expect("right child missing");
-                let digest = state.node_digest(map_pos(pos), &left_d, &right_d);
+                let digest = state.node_digest(&left_d, &right_d);
                 (pos, digest)
             },
         );

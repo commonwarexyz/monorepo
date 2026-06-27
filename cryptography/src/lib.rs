@@ -387,7 +387,20 @@ commonware_macros::stability_scope!(BETA {
             self.hash_parts([left.as_ref(), right.as_ref()])
         }
 
-        /// Merge two Merkle child digests.
+        /// Hash a pair of digests, domain-separated from [`Hasher::hash`].
+        ///
+        /// Unlike [`Hasher::hash_digest_pair`], this carries a security contract: its output must be
+        /// domain-separated from standard hashing, i.e. it must be infeasible to find a byte string
+        /// `x` and digests `(l, r)` such that `hash(x) == merge_digest_pair(l, r)`. This lets a
+        /// caller use digest-pair hashing and standard hashing for distinct roles in one structure
+        /// without an explicit domain tag.
+        ///
+        /// Implementations MUST achieve this via a construction `hash` cannot reproduce. SHA-256
+        /// compresses the 64-byte `l || r` block from a distinct initial state, so its output cannot
+        /// coincide with a finalized `hash` (which starts from the standard initial state) except by
+        /// a generic collision, uniformly for any input length. The default below delegates to
+        /// [`Hasher::hash_digest_pair`] and does NOT provide this separation; a hasher that relies on
+        /// the default must not be used where this property is required.
         #[doc(hidden)]
         #[inline]
         fn merge_digest_pair(
@@ -396,18 +409,6 @@ commonware_macros::stability_scope!(BETA {
             right: &Self::Digest,
         ) -> Self::Digest {
             self.hash_digest_pair(left, right)
-        }
-
-        /// Hash a `u64` followed by two digests.
-        #[doc(hidden)]
-        #[inline]
-        fn hash_u64_digest_pair(
-            &mut self,
-            prefix: u64,
-            left: &Self::Digest,
-            right: &Self::Digest,
-        ) -> Self::Digest {
-            self.hash_parts([prefix.to_be_bytes().as_slice(), left.as_ref(), right.as_ref()])
         }
     }
 });

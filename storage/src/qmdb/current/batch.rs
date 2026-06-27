@@ -671,9 +671,7 @@ where
                 grafted_batch = grafted_batch.add_leaf_digest(digest);
             }
         }
-        grafted_batch.merkleize_reusing_with::<H, _>(&current_db.grafted_tree, |pos| {
-            grafting::grafted_to_ops_pos::<F>(pos, grafting_height)
-        })
+        grafted_batch.merkleize_reusing::<H>(&current_db.grafted_tree)
     };
 
     // Build the layered bitmap (parent + overlay) before computing the canonical root, so that

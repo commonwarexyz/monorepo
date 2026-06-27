@@ -6,8 +6,9 @@
 //! status of each operation. To authenticate both structures efficiently, we combine them: each
 //! _graftable_ chunk of the bitmap is hashed together with the corresponding subtree root from the
 //! ops tree to produce a single "grafted leaf" digest. These digests, along with their ancestor
-//! nodes, are stored in an in-memory Merkle structure (using grafted-space positions internally,
-//! with ops-space positions in hash pre-images).
+//! nodes, are stored in an in-memory Merkle structure keyed by grafted-space positions. Node
+//! digests do not depend on position, so a grafted ancestor and its corresponding ops node share
+//! the same digest whenever their children match.
 //!
 //! A chunk is _graftable_ once its height-`G` ancestor exists in the ops tree as a single node. In
 //! MMR every complete chunk is immediately graftable. MMB's delayed merges allow at most one chunk
@@ -56,7 +57,7 @@
 //!
 //! Nodes at the grafting height (positions 6 and 13) are "grafted leaves" whose digests combine the
 //! bitmap chunk with the ops subtree root: `hash(chunk || ops_subtree_root)`. Nodes above the
-//! grafting height (position 14) use standard hashing with ops-space positions.
+//! grafting height (position 14) use standard node hashing.
 //!
 //! The grafted tree is incrementally maintained when grafted leaves change.
 
@@ -174,52 +175,6 @@ pub fn grafted_to_ops_pos<F: Graftable>(
     F::subtree_root_position(ops_leaf_start, ops_height)
 }
 
-/// A hasher adapter that maps grafted-structure positions to ops-structure positions.
-///
-/// Both the grafted structure and ops structure use the same family `F`. The grafted
-/// structure's leaves correspond 1:1 with bitmap chunks. This adapter intercepts
-/// [`HasherTrait::node_digest`] to convert each grafted position to the corresponding
-/// ops-space position via [`Graftable::leftmost_leaf`] and [`Graftable::subtree_root_position`],
-/// ensuring hash pre-images use ops-space positions for domain separation.
-#[derive(Clone)]
-pub(super) struct GraftedHasher<F: Graftable, H: HasherTrait<F>> {
-    inner: H,
-    grafting_height: u32,
-    _family: PhantomData<F>,
-}
-
-impl<F: Graftable, H: HasherTrait<F>> GraftedHasher<F, H> {
-    pub(super) const fn new(inner: H, grafting_height: u32) -> Self {
-        Self {
-            inner,
-            grafting_height,
-            _family: PhantomData,
-        }
-    }
-}
-
-impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
-    type Digest = H::Digest;
-
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
-        self.inner.hash(parts)
-    }
-
-    fn root_bagging(&self) -> merkle::Bagging {
-        self.inner.root_bagging()
-    }
-
-    fn node_digest(
-        &self,
-        pos: Position<F>,
-        left: &Self::Digest,
-        right: &Self::Digest,
-    ) -> Self::Digest {
-        let ops_pos = grafted_to_ops_pos::<F>(pos, self.grafting_height);
-        self.inner.node_digest(ops_pos, left, right)
-    }
-}
-
 /// A [`merkle::hasher::Hasher`] implementation used for verifying proofs over grafted storage.
 ///
 /// The ops structure uses family `F`, so this implements [`merkle::hasher::Hasher`] for that
@@ -285,7 +240,11 @@ impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
         <merkle::hasher::Standard<H> as HasherTrait<F>>::root_bagging(&self.hasher)
     }
 
-    fn node_digest(
+    fn node_digest(&self, left: &H::Digest, right: &H::Digest) -> H::Digest {
+        <merkle::hasher::Standard<H> as HasherTrait<F>>::node_digest(&self.hasher, left, right)
+    }
+
+    fn node_digest_at(
         &self,
         pos: merkle::Position<F>,
         left_digest: &H::Digest,
@@ -293,12 +252,20 @@ impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
     ) -> H::Digest {
         match F::pos_to_height(pos).cmp(&self.grafting_height) {
             Ordering::Less | Ordering::Greater => {
-                // Below or above grafting height: standard hash with ops-space position.
-                self.hasher.node_digest(pos, left_digest, right_digest)
+                // Below or above grafting height: plain node digest.
+                <merkle::hasher::Standard<H> as HasherTrait<F>>::node_digest(
+                    &self.hasher,
+                    left_digest,
+                    right_digest,
+                )
             }
             Ordering::Equal => {
                 // At grafting height: compute ops subtree root, then combine with bitmap chunk.
-                let ops_subtree_root = self.hasher.node_digest(pos, left_digest, right_digest);
+                let ops_subtree_root = <merkle::hasher::Standard<H> as HasherTrait<F>>::node_digest(
+                    &self.hasher,
+                    left_digest,
+                    right_digest,
+                );
 
                 // Convert the F-family position to a chunk index using F's leftmost_leaf.
                 let loc = F::leftmost_leaf(pos, self.grafting_height);
@@ -353,7 +320,7 @@ pub(super) struct Storage<
     grafted_tree: &'a G,
     grafting_height: u32,
     ops_tree: &'a S,
-    grafted_hasher: GraftedHasher<F, H>,
+    hasher: H,
     _phantom: PhantomData<(F, D)>,
 }
 
@@ -377,7 +344,7 @@ impl<
             grafted_tree,
             grafting_height,
             ops_tree,
-            grafted_hasher: GraftedHasher::new(hasher, grafting_height),
+            hasher,
             _phantom: PhantomData,
         }
     }
@@ -410,10 +377,7 @@ impl<
         let (left, right) = F::children(pos, height);
         let left_digest = self.reconstruct_grafted_node(left)?;
         let right_digest = self.reconstruct_grafted_node(right)?;
-        Some(
-            self.grafted_hasher
-                .node_digest(pos, &left_digest, &right_digest),
-        )
+        Some(self.hasher.node_digest(&left_digest, &right_digest))
     }
 }
 
@@ -576,12 +540,10 @@ mod tests {
         let pos_at_g = mmr::Family::subtree_root_position(Location::new(0), GH);
 
         let standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
-        let expected_no_combine = <StandardHasher<Sha256> as HasherTrait<mmr::Family>>::node_digest(
-            &standard, pos_at_g, &left, &right,
-        );
+        let expected_no_combine = standard.node_digest(&left, &right);
 
         let v = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 0, ForwardFold);
-        let got = <Verifier<'_, mmr::Family, Sha256> as HasherTrait<mmr::Family>>::node_digest(
+        let got = <Verifier<'_, mmr::Family, Sha256> as HasherTrait<mmr::Family>>::node_digest_at(
             &v, pos_at_g, &left, &right,
         );
         assert_eq!(
@@ -592,7 +554,7 @@ mod tests {
         // Sanity: with graftable_chunks=1 the chunk IS combined, so the digest differs.
         let v_graftable = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 1, ForwardFold);
         let got_graftable =
-            <Verifier<'_, mmr::Family, Sha256> as HasherTrait<mmr::Family>>::node_digest(
+            <Verifier<'_, mmr::Family, Sha256> as HasherTrait<mmr::Family>>::node_digest_at(
                 &v_graftable,
                 pos_at_g,
                 &left,
@@ -623,13 +585,8 @@ mod tests {
         chunks: &[sha256::Digest],
         grafting_height: u32,
     ) -> Mmr<sha256::Digest> {
-        let grafted_hasher =
-            GraftedHasher::<mmr::Family, _>::new(standard.clone(), grafting_height);
         let mut grafted_mmr = Mmr::new();
         if !chunks.is_empty() {
-            // Use a separate hasher for leaf digest computation to avoid borrow conflict
-            // with grafted_hasher (which borrows standard via fork()).
-            let leaf_hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let batch = {
                 let mut batch = grafted_mmr.new_batch();
                 for (i, chunk) in chunks.iter().enumerate() {
@@ -638,10 +595,10 @@ mod tests {
                         .get_node(ops_pos)
                         .expect("ops tree missing node at mapped position");
                     batch = batch.add_leaf_digest(
-                        leaf_hasher.hash([chunk.as_ref(), ops_subtree_root.as_ref()]),
+                        standard.hash([chunk.as_ref(), ops_subtree_root.as_ref()]),
                     );
                 }
-                batch.merkleize(&grafted_mmr, &grafted_hasher)
+                batch.merkleize(&grafted_mmr, standard)
             };
             grafted_mmr.apply_batch(&batch).unwrap();
         }
@@ -800,7 +757,7 @@ mod tests {
         let c2 = Sha256::fill(0xF2);
 
         // Build grafted MMR with 2 leaves.
-        let grafted_hasher = GraftedHasher::<mmr::Family, _>::new(standard, grafting_height);
+        let grafted_hasher = standard;
         let mut grafted = Mmr::new();
         let pos0 = chunk_idx_to_ops_pos(0, grafting_height);
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
@@ -1091,7 +1048,7 @@ mod tests {
         // Build a grafted MMR with 2 leaves.
         let d0 = Sha256::fill(0x01);
         let d1 = Sha256::fill(0x02);
-        let grafted_hasher = GraftedHasher::<mmr::Family, _>::new(standard, grafting_height);
+        let grafted_hasher = standard;
         let mut grafted = Mmr::new();
         let batch = grafted
             .new_batch()
@@ -1130,7 +1087,7 @@ mod tests {
 
         // Build a grafted MMR from pruned components + one new leaf.
         let d4 = Sha256::fill(0xBB);
-        let grafted_hasher = GraftedHasher::<mmr::Family, _>::new(standard, grafting_height);
+        let grafted_hasher = standard;
         let mut grafted =
             Mmr::from_components(Vec::new(), grafted_pruning_boundary, vec![pinned_digest])
                 .unwrap();
