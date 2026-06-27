@@ -1914,6 +1914,48 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_fixed_replay_stops_after_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0u64..30 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let (blob, _) = context
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                .await
+                .unwrap();
+            blob.write_at_sync(1, 123456789u32.to_be_bytes().to_vec())
+                .await
+                .unwrap();
+
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            let reader = journal.snapshot().await.unwrap();
+            let stream = reader.replay(0, NZUsize!(1024)).await.unwrap();
+            pin_mut!(stream);
+
+            for i in 0u64..10 {
+                let (pos, item) = stream.next().await.unwrap().unwrap();
+                assert_eq!(pos, i);
+                assert_eq!(item, test_digest(i));
+            }
+            assert!(matches!(stream.next().await.unwrap(), Err(Error::Runtime(_))));
+            assert!(stream.next().await.is_none());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_fixed_journal_replay_with_missing_historical_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

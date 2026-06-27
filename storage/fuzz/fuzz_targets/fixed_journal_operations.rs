@@ -214,7 +214,7 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::Replay { buffer, start_pos } => {
                     let bounds = journal.bounds();
                     let start_pos = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
-                    let replay = journal.replay(NZUsize!(*buffer), start_pos).await;
+                    let replay = journal.replay(start_pos, NZUsize!(*buffer)).await;
 
                     match replay {
                         Ok(stream) => {
