@@ -69,17 +69,6 @@ pub trait Contiguous: Send + Sync {
         None
     }
 
-    /// Read a byte-budgeted batch starting at `start_pos`.
-    ///
-    /// If `start_pos < bounds().end`, the implementation must return at least one item and advance
-    /// to the next unread position, even when the first item exceeds `budget`. `budget` is a byte
-    /// budget, not an item count.
-    fn read_limit(
-        &self,
-        start_pos: u64,
-        budget: NonZeroUsize,
-    ) -> impl Future<Output = Result<(Vec<Self::Item>, u64), Error>> + Send;
-
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
     /// `buffer` controls the replay byte budget for each chunk.

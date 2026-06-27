@@ -754,14 +754,6 @@ where
         self.journal.try_read_sync(position)
     }
 
-    async fn read_limit(
-        &self,
-        start_pos: u64,
-        budget: NonZeroUsize,
-    ) -> Result<(Vec<C::Item>, u64), JournalError> {
-        self.journal.read_limit(start_pos, budget).await
-    }
-
     async fn replay(
         &self,
         buffer: NonZeroUsize,

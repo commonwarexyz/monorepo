@@ -1258,26 +1258,6 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
         )
     }
 
-    /// Convert the byte budget into a fixed-size item range.
-    async fn read_limit(
-        &self,
-        start_pos: u64,
-        budget: NonZeroUsize,
-    ) -> Result<(Vec<A>, u64), Error> {
-        let bounds = self.bounds();
-        if start_pos == bounds.end {
-            return Ok((Vec::new(), start_pos));
-        }
-        self.validate_readable(start_pos)?;
-
-        // Always make progress when the limit is smaller than one item.
-        let items_per_batch = (budget.get() / A::SIZE).max(1) as u64;
-        let end = start_pos.saturating_add(items_per_batch).min(bounds.end);
-        let positions: Vec<_> = (start_pos..end).collect();
-        let items = self.read_many(&positions).await?;
-        Ok((items, end))
-    }
-
     async fn replay(
         &self,
         buffer: NonZeroUsize,
@@ -1310,14 +1290,6 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         self.reader().try_read_sync(pos)
-    }
-
-    async fn read_limit(
-        &self,
-        start_pos: u64,
-        budget: NonZeroUsize,
-    ) -> Result<(Vec<A>, u64), Error> {
-        self.reader().read_limit(start_pos, budget).await
     }
 
     async fn replay(
@@ -1890,36 +1862,6 @@ mod tests {
                 }
                 assert!(error_found); // error should abort replay
             }
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_read_limit_uses_byte_limit() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(10));
-            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
-
-            for i in 0u64..5 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-
-            let reader = journal.snapshot().await.unwrap();
-            let (items, next) = reader
-                .read_limit(0, NZUsize!(64))
-                .await
-                .expect("read limit should succeed");
-            assert_eq!(next, 2);
-            assert_eq!(items, vec![test_digest(0), test_digest(1)]);
-
-            let (items, next) = reader
-                .read_limit(2, NZUsize!(1))
-                .await
-                .expect("read limit should return at least one item");
-            assert_eq!(next, 3);
-            assert_eq!(items, vec![test_digest(2)]);
-
-            journal.destroy().await.unwrap();
         });
     }
 
