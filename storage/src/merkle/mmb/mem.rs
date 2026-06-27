@@ -73,7 +73,7 @@ mod tests {
 
         let leaf_positions = [0u64, 1, 3, 4, 6, 8, 10, 11];
         for (i, pos) in leaf_positions.into_iter().enumerate() {
-            let expected = hasher.leaf_digest(Position::new(pos), &(i as u64).to_be_bytes());
+            let expected = hasher.leaf_digest(Location::new(i as u64), &(i as u64).to_be_bytes());
             assert_eq!(
                 mmb.get_node(Position::new(pos)).unwrap(),
                 expected,
@@ -82,31 +82,27 @@ mod tests {
         }
 
         let digest2 = hasher.node_digest(
-            Position::new(2),
             &mmb.get_node(Position::new(0)).unwrap(),
             &mmb.get_node(Position::new(1)).unwrap(),
         );
         assert_eq!(mmb.get_node(Position::new(2)).unwrap(), digest2);
 
         let digest5 = hasher.node_digest(
-            Position::new(5),
             &mmb.get_node(Position::new(3)).unwrap(),
             &mmb.get_node(Position::new(4)).unwrap(),
         );
         assert_eq!(mmb.get_node(Position::new(5)).unwrap(), digest5);
 
-        let digest7 = hasher.node_digest(Position::new(7), &digest2, &digest5);
+        let digest7 = hasher.node_digest(&digest2, &digest5);
         assert_eq!(mmb.get_node(Position::new(7)).unwrap(), digest7);
 
         let digest9 = hasher.node_digest(
-            Position::new(9),
             &mmb.get_node(Position::new(6)).unwrap(),
             &mmb.get_node(Position::new(8)).unwrap(),
         );
         assert_eq!(mmb.get_node(Position::new(9)).unwrap(), digest9);
 
         let digest12 = hasher.node_digest(
-            Position::new(12),
             &mmb.get_node(Position::new(10)).unwrap(),
             &mmb.get_node(Position::new(11)).unwrap(),
         );

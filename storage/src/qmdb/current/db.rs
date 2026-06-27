@@ -1146,9 +1146,7 @@ pub(super) async fn build_grafted_tree<
         let batch = {
             let batch = grafted_tree.new_batch_with_strategy(strategy.clone());
             let batch = batch.add_leaf_digests(leaves.iter().map(|&(_, digest)| digest));
-            batch.merkleize_reusing_with::<H, _>(&grafted_tree, |pos| {
-                grafting::grafted_to_ops_pos::<F>(pos, grafting_height)
-            })
+            batch.merkleize_reusing::<H>(&grafted_tree)
         };
         grafted_tree.apply_batch(&batch)?;
     }

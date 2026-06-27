@@ -49,6 +49,17 @@ const INITIAL_STATE: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
+/// Initial compression state for [`Sha256::merge_digest_pair`], distinct from [`INITIAL_STATE`] so
+/// that digest-pair hashing is domain-separated from standard hashing. Because the compression
+/// starts from a different state, a `merge_digest_pair` output cannot equal a `hash` output even
+/// when their 64-byte input blocks coincide, so the two digest spaces are separated uniformly
+/// (independent of the hashed input's length). Equals
+/// `SHA256("_COMMONWARE_CRYPTOGRAPHY_MERGE_DIGEST_PAIR")` read as eight big-endian words; the
+/// `merge_iv_matches_domain` test pins this derivation.
+const MERGE_IV: [u32; 8] = [
+    0xcbe2f185, 0x094bef84, 0xdeaef739, 0xee6a5c3d, 0xd66c3491, 0x3734e4f4, 0xc80b471d, 0xfd7501a6,
+];
+
 /// SHA-256 hasher.
 #[derive(Debug)]
 pub struct Sha256 {
@@ -182,24 +193,13 @@ impl Hasher for Sha256 {
         write_scratch(&mut self.scratch[..32], left.as_ref());
         write_scratch(&mut self.scratch[32..64], right.as_ref());
 
-        let mut state = INITIAL_STATE;
+        // Start from MERGE_IV (not INITIAL_STATE) to domain-separate digest-pair hashing from
+        // standard hashing.
+        let mut state = MERGE_IV;
         let (blocks, remainder) = self.scratch[..BLOCK_LENGTH].as_chunks::<BLOCK_LENGTH>();
         debug_assert!(remainder.is_empty());
         compress256(&mut state, blocks);
         digest_from_state(state)
-    }
-
-    #[inline]
-    fn hash_u64_digest_pair(
-        &mut self,
-        prefix: u64,
-        left: &Self::Digest,
-        right: &Self::Digest,
-    ) -> Self::Digest {
-        write_scratch(&mut self.scratch[..8], &prefix.to_be_bytes());
-        write_scratch(&mut self.scratch[8..40], left.as_ref());
-        write_scratch(&mut self.scratch[40..72], right.as_ref());
-        finalize_fixed_72(&mut self.scratch)
     }
 }
 
@@ -221,19 +221,6 @@ fn finalize_fixed_64(scratch: &mut [u8; SCRATCH_LEN]) -> Digest {
     scratch[64] = 0x80;
     scratch[65..120].fill(0);
     write_scratch(&mut scratch[120..128], &[0, 0, 0, 0, 0, 0, 0x02, 0x00]);
-
-    let mut state = INITIAL_STATE;
-    let (blocks, remainder) = scratch[..SCRATCH_LEN].as_chunks::<BLOCK_LENGTH>();
-    debug_assert!(remainder.is_empty());
-    compress256(&mut state, blocks);
-    digest_from_state(state)
-}
-
-#[inline]
-fn finalize_fixed_72(scratch: &mut [u8; SCRATCH_LEN]) -> Digest {
-    scratch[72] = 0x80;
-    scratch[73..120].fill(0);
-    write_scratch(&mut scratch[120..128], &[0, 0, 0, 0, 0, 0, 0x02, 0x40]);
 
     let mut state = INITIAL_STATE;
     let (blocks, remainder) = scratch[..SCRATCH_LEN].as_chunks::<BLOCK_LENGTH>();
@@ -374,6 +361,17 @@ mod tests {
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
     );
+
+    #[test]
+    fn merge_iv_matches_domain() {
+        // MERGE_IV is the domain string's digest read as eight big-endian words.
+        let digest = Sha256::hash(b"_COMMONWARE_CRYPTOGRAPHY_MERGE_DIGEST_PAIR");
+        let mut expected = [0u32; 8];
+        for (word, chunk) in expected.iter_mut().zip(digest.as_ref().chunks_exact(4)) {
+            *word = u32::from_be_bytes(chunk.try_into().unwrap());
+        }
+        assert_eq!(MERGE_IV, expected);
+    }
 
     #[test]
     fn test_sha256() {

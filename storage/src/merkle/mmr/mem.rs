@@ -65,7 +65,7 @@ mod tests {
 
             for leaf in leaves.iter().by_ref() {
                 let pos = Position::try_from(*leaf).unwrap();
-                let digest = hasher.leaf_digest(pos, &element);
+                let digest = hasher.leaf_digest(*leaf, &element);
                 assert_eq!(mmr.get_node(pos).unwrap(), digest);
             }
 

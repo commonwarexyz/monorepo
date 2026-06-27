@@ -588,10 +588,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
         let dirty: Vec<(Location, D)> = self.strategy.map_init_collect_vec(
             &updates,
             || hasher.clone(),
-            |h, &(loc, chunk)| {
-                let pos = Position::try_from(loc).unwrap();
-                (loc, h.leaf_digest(pos, chunk.as_ref()))
-            },
+            |h, &(loc, chunk)| (loc, h.leaf_digest(loc, chunk.as_ref())),
         );
         batch = batch.update_leaf_batched(&dirty)?;
 

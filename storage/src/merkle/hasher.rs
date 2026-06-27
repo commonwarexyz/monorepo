@@ -1,6 +1,6 @@
 //! Shared hasher trait and standard implementation for Merkle-family data structures.
 
-use crate::merkle::{Bagging, Error, Family, Location, Position};
+use crate::merkle::{Bagging, Error, Family, Location};
 use alloc::vec::Vec;
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher as CHasher};
@@ -9,8 +9,8 @@ use core::marker::PhantomData;
 /// A trait for computing the various digests of a Merkle-family structure.
 ///
 /// The type parameter `F` determines which Merkle family (MMR, MMB, etc.) this hasher targets, and
-/// consequently which `Position` and `Location` types appear in method signatures. Default
-/// implementations are provided for all methods except `hash()`.
+/// consequently which `Location` type appears in method signatures. Default implementations are
+/// provided for all methods except `hash()` and `node_digest()`.
 pub trait Hasher<F: Family>: Clone + Send + Sync {
     type Digest: Digest;
 
@@ -24,23 +24,18 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     /// aggregation; `hash`, `leaf_digest`, and `node_digest` are unaffected.
     fn root_bagging(&self) -> Bagging;
 
-    /// Computes the digest for a node given its position and the digests of its children.
-    fn node_digest(
-        &self,
-        pos: Position<F>,
-        left: &Self::Digest,
-        right: &Self::Digest,
-    ) -> Self::Digest {
-        self.hash([
-            (*pos).to_be_bytes().as_slice(),
-            left.as_ref(),
-            right.as_ref(),
-        ])
-    }
+    /// Computes the digest for an internal node from the digests of its children.
+    ///
+    /// Has no default because it cannot be expressed via [`Hasher::hash`]: a node digest must be
+    /// domain-separated from a leaf digest ([`Hasher::leaf_digest`]) so the two can never collide
+    /// even though neither carries an explicit tag. [`Standard`] inherits this separation from the
+    /// underlying hasher's `merge_digest_pair` contract (its output is domain-separated from
+    /// `hash`), which is what lets leaves hash a variable-length element directly.
+    fn node_digest(&self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest;
 
-    /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
-        self.hash([(*pos).to_be_bytes().as_slice(), element])
+    /// Computes the digest for a leaf given its location and the element it represents.
+    fn leaf_digest(&self, loc: Location<F>, element: &[u8]) -> Self::Digest {
+        self.hash([(*loc).to_be_bytes().as_slice(), element])
     }
 
     /// Compute the digest of a byte slice.
@@ -179,6 +174,19 @@ impl<H: CHasher> Standard<H> {
         self.hash(core::iter::once(data))
     }
 
+    /// Compute the digest of an internal node from the digests of its children.
+    ///
+    /// Independent of the node's position, and with no explicit leaf/node domain separator. Omitting
+    /// the separator is safe because of the underlying hasher's `merge_digest_pair` contract: its
+    /// output must be unreachable by the finalized [`Self::hash`] used to compute leaves (SHA-256
+    /// gets this by compressing from a distinct initial state, which a finalized `hash` never
+    /// reaches), so a leaf digest can never equal a node digest absent a collision. A tag byte would
+    /// otherwise be needed here, and would cost the single-block fast path.
+    pub fn node_digest(&self, left: &H::Digest, right: &H::Digest) -> H::Digest {
+        let mut hasher = H::new();
+        hasher.merge_digest_pair(left, right)
+    }
+
     /// Create reusable hashing state for a local batch of Merkle operations.
     pub(crate) fn state(&self) -> StandardState<H> {
         StandardState { hasher: H::new() }
@@ -191,24 +199,22 @@ pub(crate) struct StandardState<H: CHasher> {
 }
 
 impl<H: CHasher> StandardState<H> {
-    /// Hash a fixed-position Merkle node.
-    pub(crate) fn node_digest<F: Family>(
-        &mut self,
-        pos: Position<F>,
-        left: &H::Digest,
-        right: &H::Digest,
-    ) -> H::Digest {
-        self.hasher.hash_u64_digest_pair(*pos, left, right)
+    /// Hash an internal Merkle node from the digests of its children.
+    ///
+    /// Position-free and tag-free; see [`Standard::node_digest`] for why omitting a leaf/node
+    /// domain separator is safe.
+    pub(crate) fn node_digest(&mut self, left: &H::Digest, right: &H::Digest) -> H::Digest {
+        self.hasher.merge_digest_pair(left, right)
     }
 
-    /// Hash a fixed-position leaf from an encoded value.
+    /// Hash a leaf at `loc` from an encoded value.
     pub(crate) fn leaf_encoded<F: Family, E: Encode>(
         &mut self,
-        pos: Position<F>,
+        loc: Location<F>,
         value: &E,
     ) -> H::Digest {
-        let pos = (*pos).to_be_bytes();
-        self.hasher.hash_prefixed(pos.as_slice(), value)
+        let loc = (*loc).to_be_bytes();
+        self.hasher.hash_prefixed(loc.as_slice(), value)
     }
 }
 
@@ -223,14 +229,8 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
         Self::root_bagging(self)
     }
 
-    fn node_digest(
-        &self,
-        pos: Position<F>,
-        left: &Self::Digest,
-        right: &Self::Digest,
-    ) -> Self::Digest {
-        let mut hasher = H::new();
-        hasher.hash_u64_digest_pair(*pos, left, right)
+    fn node_digest(&self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
+        Self::node_digest(self, left, right)
     }
 
     fn fold(&self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
@@ -249,13 +249,17 @@ impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
     fn root_bagging(&self) -> Bagging {
         (**self).root_bagging()
     }
+
+    fn node_digest(&self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
+        (**self).node_digest(left, right)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::merkle::{
-        mmr::{Location, Position, StandardHasher as Standard},
+        mmr::{Location, StandardHasher as Standard},
         Bagging::{BackwardFold, ForwardFold},
     };
     use alloc::vec::Vec;
@@ -328,16 +332,16 @@ mod tests {
         let digest1 = test_digest::<H>(1);
         let digest2 = test_digest::<H>(2);
 
-        let out = mmr_hasher.leaf_digest(Position::new(0), &digest1);
+        let out = mmr_hasher.leaf_digest(Location::new(0), &digest1);
         assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
 
-        let mut out2 = mmr_hasher.leaf_digest(Position::new(0), &digest1);
+        let mut out2 = mmr_hasher.leaf_digest(Location::new(0), &digest1);
         assert_eq!(out, out2, "hash should be re-computed consistently");
 
-        out2 = mmr_hasher.leaf_digest(Position::new(1), &digest1);
-        assert_ne!(out, out2, "hash should change with different pos");
+        out2 = mmr_hasher.leaf_digest(Location::new(1), &digest1);
+        assert_ne!(out, out2, "hash should change with different location");
 
-        out2 = mmr_hasher.leaf_digest(Position::new(0), &digest2);
+        out2 = mmr_hasher.leaf_digest(Location::new(0), &digest2);
         assert_ne!(out, out2, "hash should change with different input digest");
     }
 
@@ -348,28 +352,25 @@ mod tests {
         let d2 = test_digest::<H>(2);
         let d3 = test_digest::<H>(3);
 
-        let out = mmr_hasher.node_digest(Position::new(0), &d1, &d2);
+        let out = mmr_hasher.node_digest(&d1, &d2);
         assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
 
-        let mut out2 = mmr_hasher.node_digest(Position::new(0), &d1, &d2);
+        let mut out2 = mmr_hasher.node_digest(&d1, &d2);
         assert_eq!(out, out2, "hash should be re-computed consistently");
 
-        out2 = mmr_hasher.node_digest(Position::new(1), &d1, &d2);
-        assert_ne!(out, out2, "hash should change with different pos");
-
-        out2 = mmr_hasher.node_digest(Position::new(0), &d3, &d2);
+        out2 = mmr_hasher.node_digest(&d3, &d2);
         assert_ne!(
             out, out2,
             "hash should change with different first input hash"
         );
 
-        out2 = mmr_hasher.node_digest(Position::new(0), &d1, &d3);
+        out2 = mmr_hasher.node_digest(&d1, &d3);
         assert_ne!(
             out, out2,
             "hash should change with different second input hash"
         );
 
-        out2 = mmr_hasher.node_digest(Position::new(0), &d2, &d1);
+        out2 = mmr_hasher.node_digest(&d2, &d1);
         assert_ne!(
             out, out2,
             "hash should change when swapping order of inputs"

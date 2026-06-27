@@ -387,28 +387,28 @@ commonware_macros::stability_scope!(BETA {
             self.hash_parts([left.as_ref(), right.as_ref()])
         }
 
-        /// Merge two Merkle child digests.
+        /// Hash a pair of digests, domain-separated from [`Hasher::hash`].
+        ///
+        /// Unlike [`Hasher::hash_digest_pair`], this carries a security contract: its output must be
+        /// domain-separated from standard hashing, i.e. it must be infeasible to find a byte string
+        /// `x` and digests `(l, r)` such that `hash(x) == merge_digest_pair(l, r)`. This lets a
+        /// caller use digest-pair hashing and standard hashing for distinct roles in one structure
+        /// without an explicit domain tag.
+        ///
+        /// Cryptographic implementations MUST achieve this via a construction `hash` cannot
+        /// reproduce: SHA-256 compresses the 64-byte `l || r` block from a distinct initial state,
+        /// and BLAKE3 uses its key-derivation mode; either output cannot coincide with a finalized
+        /// `hash` except by a generic collision, uniformly for any input length. Non-cryptographic
+        /// hashers (e.g. checksums) cannot offer this separation and may delegate to
+        /// [`Hasher::hash_digest_pair`], but must not be used where it is required (e.g.
+        /// authenticated structures). There is intentionally no default: every hasher states this
+        /// choice explicitly.
         #[doc(hidden)]
-        #[inline]
         fn merge_digest_pair(
             &mut self,
             left: &Self::Digest,
             right: &Self::Digest,
-        ) -> Self::Digest {
-            self.hash_digest_pair(left, right)
-        }
-
-        /// Hash a `u64` followed by two digests.
-        #[doc(hidden)]
-        #[inline]
-        fn hash_u64_digest_pair(
-            &mut self,
-            prefix: u64,
-            left: &Self::Digest,
-            right: &Self::Digest,
-        ) -> Self::Digest {
-            self.hash_parts([prefix.to_be_bytes().as_slice(), left.as_ref(), right.as_ref()])
-        }
+        ) -> Self::Digest;
     }
 });
 

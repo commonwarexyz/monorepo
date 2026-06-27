@@ -27,8 +27,7 @@ where
         || hasher.state(),
         |state, (i, op)| {
             let offset = u64::try_from(i).expect("operation offset exceeds u64");
-            let pos = F::location_to_position(first_leaf + offset);
-            state.leaf_encoded(pos, op)
+            state.leaf_encoded(first_leaf + offset, op)
         },
     );
 

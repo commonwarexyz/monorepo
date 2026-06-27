@@ -30,10 +30,8 @@
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
     merkle::{
-        self,
-        hasher::{Hasher, Standard as StandardHasher},
-        storage::Storage,
-        Family, Graftable, Location, PendingChunk, Position, Proof,
+        self, hasher::Standard as StandardHasher, storage::Storage, Family, Graftable, Location,
+        PendingChunk, Position, Proof,
     },
     qmdb::{
         self,
@@ -417,8 +415,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             }
         }
 
-        let merkle_root = match self.proof.reconstruct_root_inner(
-            &grafting_verifier,
+        let merkle_root = match self.proof.reconstruct_root_with(
+            grafting_verifier.hasher(),
+            &|pos, left, right| grafting_verifier.combine(pos, left, right),
             &elements,
             start_loc,
             collected,
@@ -928,7 +927,7 @@ mod tests {
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let grafted_hasher = hasher.clone();
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -1022,7 +1021,7 @@ mod tests {
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let grafted_hasher = hasher.clone();
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -1125,7 +1124,7 @@ mod tests {
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let grafted_hasher = hasher.clone();
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -1222,7 +1221,7 @@ mod tests {
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let grafted_hasher = hasher.clone();
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -1312,7 +1311,7 @@ mod tests {
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let grafted_hasher = hasher.clone();
         let mut grafted = Mem::<F, sha256::Digest>::new();
         if !leaf_digests.is_empty() {
             let merkleized = {
@@ -1692,7 +1691,7 @@ mod tests {
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let grafted_hasher = hasher.clone();
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
@@ -1824,8 +1823,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let grafted_hasher =
-                grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+            let grafted_hasher = hasher.clone();
             let mut grafted = Mem::<F, sha256::Digest>::new();
             if !leaf_digests.is_empty() {
                 let merkleized = {
@@ -2038,7 +2036,7 @@ mod tests {
             1,
             "post-state must have 1 graftable chunk"
         );
-        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let grafted_hasher = hasher.clone();
         let mut grafted_post = Mem::<F, sha256::Digest>::new();
         let merkleized = grafted_post
             .new_batch()
@@ -2115,7 +2113,7 @@ mod tests {
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
-        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let grafted_hasher = hasher.clone();
         let mut grafted = Mem::<F, sha256::Digest>::new();
         let merkleized = {
             let mut batch = grafted.new_batch();
