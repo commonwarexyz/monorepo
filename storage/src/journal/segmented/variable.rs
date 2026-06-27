@@ -239,6 +239,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         let compressed = self.compression.is_some();
         let mut blobs = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
+            if section == start_section && start_offset > blob.size() {
+                return Err(Error::ItemOutOfRange(start_offset));
+            }
             let replay = blob.replay(buffer).await?;
             blobs.push((section, blob, replay, codec_config.clone(), compressed));
         }
@@ -2147,6 +2150,30 @@ mod tests {
                  {physical_size_after}. Logical valid size was {valid_logical_size}. \
                  This indicates valid_offset was incorrectly initialized to 0 instead of start_offset."
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_replay_rejects_start_offset_past_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .unwrap();
+            journal.append(1, &7i32).await.unwrap();
+
+            let result = journal.replay(1, u64::MAX, NZUsize!(1024)).await;
+            assert!(matches!(result, Err(Error::ItemOutOfRange(u64::MAX))));
+            drop(result);
+
+            journal.destroy().await.unwrap();
         });
     }
 
