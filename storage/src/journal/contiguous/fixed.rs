@@ -909,8 +909,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.bounds.end
     }
 
-    /// Append a new item to the journal. Return the item's position in the journal, or error if the
-    /// operation fails.
+    /// Append a new item to the journal, returning its position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage operation fails.
     pub async fn append(&mut self, item: &A) -> Result<u64, Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();

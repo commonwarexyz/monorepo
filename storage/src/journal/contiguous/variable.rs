@@ -1207,9 +1207,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails or if the item cannot
     /// be encoded.
-    ///
-    /// Errors may leave the journal in an inconsistent state. The journal should be closed and
-    /// reopened to trigger alignment in [Journal::init].
     pub async fn append(&mut self, item: &V) -> Result<u64, Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
@@ -1403,9 +1400,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails.
-    ///
-    /// Errors may leave the journal in an inconsistent state. The journal should be closed and
-    /// reopened to trigger alignment in [Journal::init].
     pub async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
         let items_per_blob = self.items_per_blob.get();
 

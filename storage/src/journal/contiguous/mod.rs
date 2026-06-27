@@ -3,6 +3,9 @@
 //! This module provides position-based journal implementations where items are stored
 //! contiguously and can be accessed by their position (0-indexed). Both [fixed]-size and
 //! [variable]-size item journals are supported.
+//!
+//! Storage errors from mutable operations are considered fatal for the current handle and may
+//! leave its in-memory state inconsistent with the underlying storage.
 
 use super::Error;
 use futures::Stream;
