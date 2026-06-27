@@ -283,7 +283,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             let mut replay = blob.replay(buffer).await?;
             // For the first section, seek to the start position
             let initial_position = if section == start_section {
-                let start = start_position * Self::CHUNK_SIZE_U64;
+                let start = start_position
+                    .checked_mul(Self::CHUNK_SIZE_U64)
+                    .ok_or(Error::ItemOutOfRange(start_position))?;
                 if start > blob_size {
                     return Err(Error::ItemOutOfRange(start_position));
                 }
@@ -679,6 +681,10 @@ mod tests {
             // Replay from position past the end should return ItemOutOfRange error
             let result = journal.replay(1, 100, NZUsize!(1024)).await;
             assert!(matches!(result, Err(Error::ItemOutOfRange(100))));
+            drop(result);
+
+            let result = journal.replay(1, u64::MAX, NZUsize!(1024)).await;
+            assert!(matches!(result, Err(Error::ItemOutOfRange(u64::MAX))));
             drop(result);
 
             journal.destroy().await.expect("failed to destroy");

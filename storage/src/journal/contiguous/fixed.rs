@@ -172,11 +172,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
             } else {
                 blob_first
             };
-            let next_blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
-            let blob_end = next_blob
-                .checked_mul(items_per_blob)
-                .ok_or(Error::OffsetOverflow)?
-                .min(bounds.end);
+            let blob_end = super::blob_end_position(blob, items_per_blob, bounds.end);
             let offset = (first_pos - blob_first)
                 .checked_mul(A::SIZE as u64)
                 .ok_or(Error::OffsetOverflow)?;
@@ -195,13 +191,13 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     }
 
     Ok(stream::unfold(
-        FixedReplayStreamState {
+        ReplayStreamState {
             states: states.into_iter(),
             current: None,
             pending: VecDeque::new(),
             done: false,
         },
-        FixedReplayStreamState::next,
+        ReplayStreamState::next,
     ))
 }
 
@@ -274,7 +270,7 @@ impl<B: RBlob, A: CodecFixedShared> FixedReplayState<'_, B, A> {
 }
 
 /// Stream driver over fixed-size blob replay states.
-struct FixedReplayStreamState<'a, B: RBlob, A> {
+struct ReplayStreamState<'a, B: RBlob, A> {
     /// Remaining blob states, in ascending blob order.
     states: std::vec::IntoIter<FixedReplayState<'a, B, A>>,
     /// State currently being drained.
@@ -285,7 +281,7 @@ struct FixedReplayStreamState<'a, B: RBlob, A> {
     done: bool,
 }
 
-impl<'a, B: RBlob, A: CodecFixedShared> FixedReplayStreamState<'a, B, A> {
+impl<'a, B: RBlob, A: CodecFixedShared> ReplayStreamState<'a, B, A> {
     /// Yield one item, filling `pending` from the current blob when needed.
     async fn next(mut self) -> Option<(Result<(u64, A), Error>, Self)> {
         loop {
@@ -3568,6 +3564,34 @@ mod tests {
                 journal.append(&test_digest(8)).await,
                 Err(Error::SizeOverflow)
             ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_replay_near_max_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(10));
+            cfg.partition = "replay-near-max-size".into();
+
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.child("near_max"), cfg, u64::MAX - 1)
+                    .await
+                    .unwrap();
+            let expected = test_digest(7);
+            assert_eq!(journal.append(&expected).await.unwrap(), u64::MAX - 1);
+
+            {
+                let reader = journal.snapshot().await.unwrap();
+                let stream = reader.replay(u64::MAX - 1, NZUsize!(1024)).await.unwrap();
+                pin_mut!(stream);
+                let (pos, item) = stream.next().await.unwrap().unwrap();
+                assert_eq!(pos, u64::MAX - 1);
+                assert_eq!(item, expected);
+                assert!(stream.next().await.is_none());
+            }
 
             journal.destroy().await.unwrap();
         });

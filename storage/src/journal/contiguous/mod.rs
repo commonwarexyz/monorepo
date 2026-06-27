@@ -25,8 +25,26 @@ mod tests;
 fn batch_count_to_blob_boundary(position: u64, remaining: usize, items_per_blob: u64) -> usize {
     let pos_in_blob = position % items_per_blob;
     let remaining_space = items_per_blob - pos_in_blob;
+
     // Keep the min in u64 so a 2^32-item blob space does not truncate to zero on 32-bit targets.
     remaining_space.min(remaining as u64) as usize
+}
+
+/// Return the exclusive logical end for `blob`, clamped to `end`.
+const fn blob_end_position(blob: u64, items_per_blob: u64, end: u64) -> u64 {
+    // No positions exist, so `end - 1` would underflow
+    if end == 0 {
+        return 0;
+    }
+
+    // This blob contains `end - 1`, so clamp to the journal end
+    let end_blob = (end - 1) / items_per_blob;
+    if blob >= end_blob {
+        return end;
+    }
+
+    // Earlier blobs have a representable natural boundary
+    (blob + 1) * items_per_blob
 }
 
 /// A read-only, position-based view of a contiguous journal.

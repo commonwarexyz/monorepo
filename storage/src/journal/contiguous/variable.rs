@@ -158,7 +158,7 @@ struct BlobScan {
 ///
 /// Unlike fixed replay, each yielded item must first decode a varint frame length. The byte
 /// `budget` caps how much frame data this state emits in one stream batch.
-struct DataReplayState<'a, B: RBlob, V: Codec> {
+struct ReplayState<'a, B: RBlob, V: Codec> {
     /// Blob index, used in corruption messages.
     blob: u64,
     /// Sequential logical bytes for this blob.
@@ -178,7 +178,7 @@ struct DataReplayState<'a, B: RBlob, V: Codec> {
     _marker: PhantomData<V>,
 }
 
-impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
+impl<B: RBlob, V: CodecShared> ReplayState<'_, B, V> {
     /// Decode the next batch of varint-framed items from this blob.
     async fn next_batch(mut self) -> Option<(Vec<Result<(u64, V), Error>>, Self)> {
         if self.pos == self.end_pos {
@@ -303,18 +303,18 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
 }
 
 /// Stream driver over variable-size data-blob replay states.
-struct DataReplayStreamState<'a, B: RBlob, V: Codec> {
+struct ReplayStreamState<'a, B: RBlob, V: Codec> {
     /// Remaining blob states, in ascending blob order.
-    states: std::vec::IntoIter<DataReplayState<'a, B, V>>,
+    states: std::vec::IntoIter<ReplayState<'a, B, V>>,
     /// State currently being drained.
-    current: Option<DataReplayState<'a, B, V>>,
+    current: Option<ReplayState<'a, B, V>>,
     /// Items decoded from the current state but not yet yielded by the stream.
     pending: VecDeque<Result<(u64, V), Error>>,
     /// Set after the first error so the stream terminates cleanly.
     done: bool,
 }
 
-impl<'a, B: RBlob, V: CodecShared> DataReplayStreamState<'a, B, V> {
+impl<'a, B: RBlob, V: CodecShared> ReplayStreamState<'a, B, V> {
     /// Yield one item, filling `pending` from the current blob when needed.
     async fn next(mut self) -> Option<(Result<(u64, V), Error>, Self)> {
         loop {
@@ -337,7 +337,7 @@ impl<'a, B: RBlob, V: CodecShared> DataReplayStreamState<'a, B, V> {
                 None => return None,
             };
 
-            match DataReplayState::next_batch(state).await {
+            match ReplayState::next_batch(state).await {
                 Some((batch, state)) => {
                     self.current = Some(state);
                     self.pending = VecDeque::from(batch);
@@ -351,17 +351,17 @@ impl<'a, B: RBlob, V: CodecShared> DataReplayStreamState<'a, B, V> {
 }
 
 /// Build a stream from per-blob replay states.
-fn data_replay_stream<'a, B: RBlob, V: CodecShared>(
-    states: Vec<DataReplayState<'a, B, V>>,
+fn replay_stream<'a, B: RBlob, V: CodecShared>(
+    states: Vec<ReplayState<'a, B, V>>,
 ) -> impl Stream<Item = Result<(u64, V), Error>> + Send + use<'a, B, V> {
     stream::unfold(
-        DataReplayStreamState {
+        ReplayStreamState {
             states: states.into_iter(),
             current: None,
             pending: VecDeque::new(),
             done: false,
         },
-        DataReplayStreamState::next,
+        ReplayStreamState::next,
     )
 }
 
@@ -718,7 +718,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
-    ) -> Result<Vec<DataReplayState<'a, E::Blob, V>>, Error> {
+    ) -> Result<Vec<ReplayState<'a, E::Blob, V>>, Error> {
         let bounds = self.bounds();
         if start_pos > bounds.end {
             return Err(Error::ItemOutOfRange(start_pos));
@@ -748,12 +748,11 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 } else {
                     blob_first_position(blob, items_per_blob)?
                 };
-                let next_blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
-                let end_pos = blob_first_position(next_blob, items_per_blob)?.min(bounds.end);
+                let end_pos = super::blob_end_position(blob, items_per_blob, bounds.end);
 
                 // Store codec settings in the state because the stream owns states across await
                 // points and cannot borrow `self`.
-                states.push(DataReplayState::<E::Blob, V> {
+                states.push(ReplayState::<E::Blob, V> {
                     blob,
                     replay: blob_handle.replay_from(offset, buffer)?,
                     budget: buffer.get() as u64,
@@ -911,7 +910,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
         let states = self.replay_states(start_pos, buffer).await?;
 
-        Ok(data_replay_stream(states))
+        Ok(replay_stream(states))
     }
 }
 
@@ -1886,8 +1885,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 .await
                 .map_err(Error::Runtime)?;
             let mut scanner = FrameScanner::<E::Blob, V>::new(replay, codec_config, compressed);
-            let next_blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
-            let blob_end_pos = blob_first_position(next_blob, items_per_blob)?;
+            let blob_end_pos = super::blob_end_position(blob, items_per_blob, u64::MAX);
 
             let end = loop {
                 if size == blob_end_pos {
@@ -1991,7 +1989,7 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         let reader = self.reader();
         let states = reader.replay_states(start_pos, buffer).await?;
 
-        Ok(data_replay_stream(states))
+        Ok(replay_stream(states))
     }
 }
 
@@ -2283,6 +2281,39 @@ mod tests {
             // The next append would overflow the size; it must return a recoverable error
             // rather than panicking.
             assert!(matches!(journal.append(&8).await, Err(Error::SizeOverflow)));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_replay_near_max_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "replay-near-max-size".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("near_max"), cfg, u64::MAX - 1)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.append(&7).await.unwrap(), u64::MAX - 1);
+
+            {
+                let reader = journal.snapshot().await.unwrap();
+                let stream = reader.replay(u64::MAX - 1, NZUsize!(20)).await.unwrap();
+                futures::pin_mut!(stream);
+                let (pos, item) = stream.next().await.unwrap().unwrap();
+                assert_eq!(pos, u64::MAX - 1);
+                assert_eq!(item, 7);
+                assert!(stream.next().await.is_none());
+            }
 
             journal.destroy().await.unwrap();
         });
@@ -2638,7 +2669,7 @@ mod tests {
                 let mut states = Vec::new();
                 for (blob_index, writer) in writers.iter().enumerate() {
                     let blob = blob_index as u64;
-                    states.push(DataReplayState::<_, u64> {
+                    states.push(ReplayState::<_, u64> {
                         blob,
                         replay: Blob::Writer(writer).replay_from(0, NZUsize!(1024)).unwrap(),
                         budget: 1024,
@@ -2651,7 +2682,7 @@ mod tests {
                     });
                 }
 
-                let stream = data_replay_stream(states);
+                let stream = replay_stream(states);
                 futures::pin_mut!(stream);
 
                 for i in 0..10u64 {
@@ -5281,6 +5312,40 @@ mod tests {
             assert_eq!(journal.bounds().start, 7);
             assert!(matches!(journal.read(6).await, Err(Error::ItemPruned(6))));
             assert_eq!(journal.read(7).await.unwrap(), 700);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_near_max_data_synced_offsets_not() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "near-max-data-synced-offsets-not".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), u64::MAX - 1)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.append(&7).await.unwrap(), u64::MAX - 1);
+            journal
+                .test_sync_data_blob(position_to_blob(u64::MAX - 1, cfg.items_per_section.get()))
+                .await
+                .unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), (u64::MAX - 1)..u64::MAX);
+            assert_eq!(journal.read(u64::MAX - 1).await.unwrap(), 7);
 
             journal.destroy().await.unwrap();
         });
