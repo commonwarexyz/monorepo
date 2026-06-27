@@ -154,7 +154,6 @@ struct BlobScan {
     torn: bool,
 }
 
-/// State for sequentially replaying variable-size frames from one data blob.
 struct DataReplayState<'a, B: RBlob, V: Codec> {
     blob: u64,
     replay: BlobReplay<'a, B>,

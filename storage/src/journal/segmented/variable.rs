@@ -233,7 +233,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         mut start_offset: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u64, u32, V), Error>> + Send + '_, Error> {
-        // Collect all blobs to replay (keeping blob reference for potential resize)
+        // Collect all blobs to replay. This validates replay setup but does not allocate
+        // `buffer` bytes per blob; page buffers are allocated later by `Replay::ensure`.
         let codec_config = self.codec_config.clone();
         let compressed = self.compression.is_some();
         let mut blobs = Vec::new();

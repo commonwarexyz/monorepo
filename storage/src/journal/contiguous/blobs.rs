@@ -482,6 +482,9 @@ impl<'a, B: RBlob> Blob<'a, B> {
     }
 
     /// Return a sequential replay handle starting at `offset`.
+    ///
+    /// Constructing the handle is cheap: paged replay stores prefetch settings, and writer-view
+    /// replay starts with an empty buffer. Read buffers are allocated later by `Replay::ensure`.
     pub(super) fn replay_from(
         self,
         offset: u64,
@@ -598,7 +601,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
             blob,
             offset,
             buffer_size,
-            buf: Vec::with_capacity(buffer_size.get()),
+            buf: Vec::new(),
             cursor: 0,
             exhausted: false,
         })

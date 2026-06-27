@@ -275,7 +275,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         start_position: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + Send + '_, Error> {
-        // Pre-create readers from blobs (async operation)
+        // Pre-create readers from blobs. This validates replay setup but does not allocate
+        // `buffer` bytes per blob; page buffers are allocated later by `Replay::ensure`.
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
             let blob_size = blob.size();
