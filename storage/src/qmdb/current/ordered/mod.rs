@@ -330,19 +330,18 @@ pub mod tests {
             // Proof should be verifiable against current root.
             let root = db.root();
             assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                &hasher, k, v1, &proof, &root,
+                k, v1, &proof, &root,
             ));
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &hasher, k, v2, &proof, &root,
+                k, v2, &proof, &root,
             ));
             // Proof should not verify against a mangled next_key.
             let mut mangled_proof = proof.clone();
             mangled_proof.next_key = Sha256::fill(0xFF);
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &hasher,
                 k,
                 v1,
                 &mangled_proof,
@@ -361,18 +360,18 @@ pub mod tests {
 
             // New value should not be verifiable against the old proof.
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &hasher, k, v2, &proof, &root,
+                k, v2, &proof, &root,
             ));
 
             // But the new value should verify against a new proof.
             let proof = db.key_value_proof(&hasher, k).await.unwrap();
             assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                &hasher, k, v2, &proof, &root,
+                k, v2, &proof, &root,
             ));
 
             // Old value will not verify against new proof.
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &hasher, k, v1, &proof, &root,
+                k, v1, &proof, &root,
             ));
 
             // Create a proof of the now-inactive update operation assigning v1 to k against the
@@ -394,7 +393,6 @@ pub mod tests {
                 next_key: k,
             });
             assert!(TestDb::<F, C, V>::verify_range_proof(
-                &hasher,
                 &proof_inactive.proof.range_proof,
                 proof_inactive.proof.loc,
                 &[op],
@@ -405,7 +403,6 @@ pub mod tests {
             // But this proof should *not* verify as a key value proof, since verification will see
             // that the operation is inactive.
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &hasher,
                 k,
                 v1,
                 &proof_inactive,
@@ -425,7 +422,6 @@ pub mod tests {
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.loc = active_loc;
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &hasher,
                 k,
                 v1,
                 &fake_proof,
@@ -445,7 +441,6 @@ pub mod tests {
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.chunk = modified_chunk;
             assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                &hasher,
                 k,
                 v1,
                 &fake_proof,
@@ -485,7 +480,6 @@ pub mod tests {
                 ops_root: Digest::EMPTY,
             };
             assert!(!TestDb::<F, C, V>::verify_range_proof(
-                &hasher,
                 &proof,
                 Location::<F>::new(0),
                 &[],
@@ -512,7 +506,7 @@ pub mod tests {
                     db.range_proof(&hasher, loc, NZU64!(max_ops)).await.unwrap();
                 assert!(
                     TestDb::<F, C, V>::verify_range_proof(
-                        &hasher, &proof, loc, &ops, &chunks, &root
+                        &proof, loc, &ops, &chunks, &root
                     ),
                     "failed to verify range at start_loc {start_loc}",
                 );
@@ -520,7 +514,6 @@ pub mod tests {
                 let mut chunks_with_extra = chunks.clone();
                 chunks_with_extra.push(chunks[chunks.len() - 1]);
                 assert!(!TestDb::<F, C, V>::verify_range_proof(
-                    &hasher,
                     &proof,
                     loc,
                     &ops,
@@ -581,24 +574,23 @@ pub mod tests {
 
                 // Proof should validate against the current value and correct root.
                 assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                    &hasher, key, value, &proof, &root
+                    key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
                 let wrong_val = Sha256::hash(&[0xFF]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    &hasher, key, wrong_val, &proof, &root
+                    key, wrong_val, &proof, &root
                 ));
                 // Proof should fail against the wrong key.
                 let wrong_key = Sha256::hash(&[0xEE]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    &hasher, wrong_key, value, &proof, &root
+                    wrong_key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::hash(&[0xDD]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    &hasher,
                     key,
                     value,
                     &proof,
@@ -608,7 +600,7 @@ pub mod tests {
                 let mut bad_proof = proof.clone();
                 bad_proof.next_key = wrong_key;
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    &hasher, key, value, &bad_proof, &root,
+                    key, value, &bad_proof, &root,
                 ));
             }
 
@@ -654,12 +646,12 @@ pub mod tests {
                 // Create a proof for the current value of k.
                 let proof = db.key_value_proof(&hasher, k).await.unwrap();
                 assert!(
-                    TestDb::<F, C, V>::verify_key_value_proof(&hasher, k, v, &proof, &root),
+                    TestDb::<F, C, V>::verify_key_value_proof(k, v, &proof, &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !TestDb::<F, C, V>::verify_key_value_proof(&hasher, k, old_val, &proof, &root,),
+                    !TestDb::<F, C, V>::verify_key_value_proof(k, old_val, &proof, &root,),
                     "proof of update {i} verified when it should not have"
                 );
                 old_val = v;
@@ -696,7 +688,6 @@ pub mod tests {
             let empty_root = db.root();
             let empty_proof = db.exclusion_proof(&hasher, &key_exists_1).await.unwrap();
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &key_exists_1,
                 &empty_proof,
                 &empty_root,
@@ -728,20 +719,17 @@ pub mod tests {
             assert_eq!(proof, proof2);
             // Any key except the one that exists should verify against this proof.
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &greater_key,
                 &proof,
                 &root,
             ));
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &lesser_key,
                 &proof,
                 &root,
             ));
             // Exclusion should fail if we test it on a key that exists.
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &key_exists_1,
                 &proof,
                 &root,
@@ -769,19 +757,16 @@ pub mod tests {
             // Test the "cycle around" span. This should prove exclusion of greater_key & lesser
             // key, but fail on middle_key.
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &greater_key,
                 &proof,
                 &root,
             ));
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &lesser_key,
                 &proof,
                 &root,
             ));
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &middle_key,
                 &proof,
                 &root,
@@ -795,20 +780,17 @@ pub mod tests {
             let proof = db.exclusion_proof(&hasher, &middle_key).await.unwrap();
             // `k` should fail since it's in the db.
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &key_exists_1,
                 &proof,
                 &root,
             ));
             // `middle_key` should succeed since it's in range.
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &middle_key,
                 &proof,
                 &root,
             ));
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &key_exists_2,
                 &proof,
                 &root,
@@ -816,7 +798,6 @@ pub mod tests {
 
             let conflicting_middle_key = Sha256::fill(0x11); // between k1=0x10 and k2=0x30
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &conflicting_middle_key,
                 &proof,
                 &root,
@@ -824,13 +805,11 @@ pub mod tests {
 
             // Using lesser/greater keys for the middle-proof should fail.
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &greater_key,
                 &proof,
                 &root,
             ));
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &lesser_key,
                 &proof,
                 &root,
@@ -856,13 +835,11 @@ pub mod tests {
 
             let proof = db.exclusion_proof(&hasher, &key_exists_1).await.unwrap();
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &key_exists_1,
                 &proof,
                 &root,
             ));
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &key_exists_2,
                 &proof,
                 &root,
@@ -870,13 +847,11 @@ pub mod tests {
 
             // Try fooling the verifier with improper values.
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &key_exists_1,
                 &empty_proof, // wrong proof
                 &root,
             ));
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
-                &hasher,
                 &key_exists_1,
                 &proof,
                 &empty_root, // wrong root

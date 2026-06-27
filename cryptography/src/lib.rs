@@ -274,6 +274,19 @@ commonware_macros::stability_scope!(BETA {
         fn hash(message: &[u8]) -> Self::Digest {
             Self::new().update(message).finalize()
         }
+
+        /// Hash a sequence of byte slices as one contiguous message.
+        ///
+        /// The current hasher state is discarded before hashing, and the hasher is reset before
+        /// returning.
+        #[inline]
+        fn hash_parts<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+            self.reset();
+            for part in parts {
+                self.update(part);
+            }
+            self.finalize()
+        }
     }
 });
 
@@ -596,6 +609,16 @@ mod tests {
         assert!(H::Digest::decode(digest.as_ref()).is_ok());
     }
 
+    fn test_hasher_hash_parts<H: Hasher>() {
+        let mut hasher = H::new();
+        let digest = hasher.hash_parts([b"hello".as_slice(), b" world".as_slice()]);
+        assert_eq!(digest, H::hash(b"hello world"));
+
+        hasher.update(b"discarded");
+        let digest = hasher.hash_parts([b"hello world".as_slice()]);
+        assert_eq!(digest, H::hash(b"hello world"));
+    }
+
     #[test]
     fn test_sha256_hasher_multiple_runs() {
         test_hasher_multiple_runs::<Sha256>();
@@ -614,5 +637,10 @@ mod tests {
     #[test]
     fn test_sha256_hasher_large_input() {
         test_hasher_large_input::<Sha256>();
+    }
+
+    #[test]
+    fn test_sha256_hasher_hash_parts() {
+        test_hasher_hash_parts::<Sha256>();
     }
 }

@@ -107,7 +107,6 @@ where
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(
-        hasher: &StandardHasher<H>,
         key: K,
         value: V::Value,
         proof: &KeyValueProof<F, K, H::Digest, N>,
@@ -119,7 +118,7 @@ where
             next_key: proof.next_key.clone(),
         });
 
-        proof.proof.verify(hasher, op, root)
+        proof.proof.verify::<H, _>(op, root)
     }
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
@@ -143,7 +142,6 @@ where
     /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
     /// provided `root`.
     pub fn verify_exclusion_proof(
-        hasher: &StandardHasher<H>,
         key: &K,
         proof: &super::ExclusionProof<F, K, V, H::Digest, N>,
         root: &H::Digest,
@@ -178,7 +176,7 @@ where
             }
         };
 
-        op_proof.verify(hasher, op, root)
+        op_proof.verify::<H, _>(op, root)
     }
 }
 

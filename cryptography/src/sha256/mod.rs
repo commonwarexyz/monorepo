@@ -35,18 +35,34 @@ use core::{
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
-use sha2::{Digest as _, Sha256 as ISha256};
+use sha2::{block_api::compress256, Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
 pub type CoreSha256 = ISha256;
 
 const DIGEST_LENGTH: usize = 32;
+const BLOCK_LENGTH: usize = 64;
+const SCRATCH_LEN: usize = 2 * BLOCK_LENGTH;
+const MAX_FIXED_PREIMAGE: usize = SCRATCH_LEN - 9;
+const INITIAL_STATE: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
 
 /// SHA-256 hasher.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Sha256 {
     hasher: ISha256,
+    scratch: [u8; SCRATCH_LEN],
+}
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self {
+            hasher: ISha256::new(),
+            scratch: [0u8; SCRATCH_LEN],
+        }
+    }
 }
 
 impl Clone for Sha256 {
@@ -79,9 +95,83 @@ impl Hasher for Sha256 {
     }
 
     fn reset(&mut self) -> &mut Self {
-        self.hasher = ISha256::new();
+        self.hasher.reset();
         self
     }
+
+    #[inline]
+    fn hash_parts<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+        let mut len = 0usize;
+        let mut parts = parts.into_iter();
+        while let Some(part) = parts.next() {
+            let Some(end) = len.checked_add(part.len()) else {
+                self.hasher.reset();
+                self.hasher.update(&self.scratch[..len]);
+                self.hasher.update(part);
+                for part in parts {
+                    self.hasher.update(part);
+                }
+                return digest_from_output(self.hasher.finalize_reset().into());
+            };
+            if end > MAX_FIXED_PREIMAGE {
+                self.hasher.reset();
+                self.hasher.update(&self.scratch[..len]);
+                self.hasher.update(part);
+                for part in parts {
+                    self.hasher.update(part);
+                }
+                return digest_from_output(self.hasher.finalize_reset().into());
+            }
+            write_scratch(&mut self.scratch[len..end], part);
+            len = end;
+        }
+
+        let digest = finalize_fixed(&mut self.scratch, len);
+        self.hasher.reset();
+        digest
+    }
+}
+
+#[inline]
+fn finalize_fixed(scratch: &mut [u8; SCRATCH_LEN], message_len: usize) -> Digest {
+    let bit_len = ((message_len as u64) * 8).to_be_bytes();
+    scratch[message_len] = 0x80;
+
+    let mut state = INITIAL_STATE;
+    if message_len < 56 {
+        scratch[message_len + 1..56].fill(0);
+        write_scratch(&mut scratch[56..64], &bit_len);
+        let (blocks, remainder) = scratch[..BLOCK_LENGTH].as_chunks::<BLOCK_LENGTH>();
+        debug_assert!(remainder.is_empty());
+        compress256(&mut state, blocks);
+    } else {
+        scratch[message_len + 1..120].fill(0);
+        write_scratch(&mut scratch[120..128], &bit_len);
+        let (blocks, remainder) = scratch[..SCRATCH_LEN].as_chunks::<BLOCK_LENGTH>();
+        debug_assert!(remainder.is_empty());
+        compress256(&mut state, blocks);
+    }
+    digest_from_state(state)
+}
+
+#[inline]
+fn write_scratch(dst: &mut [u8], src: &[u8]) {
+    debug_assert_eq!(dst.len(), src.len());
+    dst.copy_from_slice(src);
+}
+
+#[inline]
+fn digest_from_state(state: [u32; 8]) -> Digest {
+    let mut digest = [0u8; DIGEST_LENGTH];
+    for (bytes, word) in digest.chunks_exact_mut(4).zip(state) {
+        bytes.copy_from_slice(&word.to_be_bytes());
+    }
+    Digest(digest)
+}
+
+#[inline]
+fn digest_from_output(output: [u8; DIGEST_LENGTH]) -> Digest {
+    Digest(output)
 }
 
 /// Digest of a SHA-256 hashing operation.
@@ -215,6 +305,45 @@ mod tests {
 
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);
+    }
+
+    fn streaming_hash_parts(parts: &[&[u8]]) -> Digest {
+        let mut hasher = Sha256::new();
+        for part in parts {
+            hasher.update(part);
+        }
+        hasher.finalize()
+    }
+
+    #[test]
+    fn test_hash_parts_matches_streaming() {
+        let left = Sha256::hash(b"left");
+        let right = Sha256::hash(b"right");
+        let mut hasher = Sha256::new();
+
+        for len in [0usize, 1, 54, 55, 56, 63, 64, 71, 72, 118, 119, 120, 200, 1000] {
+            let blob = vec![0xABu8; len];
+            assert_eq!(
+                hasher.hash_parts([blob.as_slice()]),
+                streaming_hash_parts(&[blob.as_slice()]),
+                "hash_parts mismatch for {len} bytes",
+            );
+        }
+
+        assert_eq!(
+            hasher.hash_parts([b"hello".as_slice(), b" ".as_slice(), b"world".as_slice()]),
+            streaming_hash_parts(&[b"hello".as_slice(), b" ".as_slice(), b"world".as_slice()])
+        );
+        assert_eq!(
+            hasher.hash_parts([left.as_ref(), right.as_ref()]),
+            streaming_hash_parts(&[left.as_ref(), right.as_ref()])
+        );
+
+        hasher.update(b"discarded");
+        assert_eq!(
+            hasher.hash_parts([b"fresh".as_slice()]),
+            streaming_hash_parts(&[b"fresh".as_slice()])
+        );
     }
 
     #[cfg(feature = "arbitrary")]

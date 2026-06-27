@@ -149,16 +149,16 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
 /// The `bagging` field selects how peaks are folded into the root.
 #[derive(Clone)]
 pub struct Standard<H: CHasher> {
-    _hasher: PhantomData<H>,
     bagging: Bagging,
+    marker: PhantomData<H>,
 }
 
 impl<H: CHasher> Standard<H> {
     /// Creates a new [Standard] hasher with the given bagging policy.
     pub const fn new(bagging: Bagging) -> Self {
         Self {
-            _hasher: PhantomData,
             bagging,
+            marker: PhantomData,
         }
     }
 
@@ -169,11 +169,8 @@ impl<H: CHasher> Standard<H> {
 
     /// Hash an arbitrary sequence of byte slices into a single digest.
     pub fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        let mut h = H::new();
-        for part in parts {
-            h.update(part);
-        }
-        h.finalize()
+        let mut hasher = H::new();
+        hasher.hash_parts(parts)
     }
 
     /// Compute the digest of a byte slice.

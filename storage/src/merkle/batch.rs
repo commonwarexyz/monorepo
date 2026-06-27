@@ -88,7 +88,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_parallel::{Sequential, Strategy};
 use core::ops::Range;
 
@@ -333,6 +333,49 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<MerkleizedBatch<F, D, S>> {
+        let buckets = self.prepare_dirty_buckets();
+        for (height, positions) in buckets.iter().enumerate() {
+            if positions.is_empty() {
+                continue;
+            }
+            self.merkleize_bucket(base, hasher, positions, height as u32);
+        }
+
+        self.finish_merkleize()
+    }
+
+    /// Consume this batch and produce an immutable [`MerkleizedBatch`] using reusable hash state.
+    #[cfg(feature = "std")]
+    pub(crate) fn merkleize_reusing<H: CHasher<Digest = D>>(
+        self,
+        base: &Mem<F, D>,
+    ) -> Arc<MerkleizedBatch<F, D, S>> {
+        self.merkleize_reusing_with::<H, _>(base, |pos| pos)
+    }
+
+    /// Consume this batch using reusable hash state and a hash-position mapper.
+    #[cfg(feature = "std")]
+    pub(crate) fn merkleize_reusing_with<H, M>(
+        mut self,
+        base: &Mem<F, D>,
+        map_pos: M,
+    ) -> Arc<MerkleizedBatch<F, D, S>>
+    where
+        H: CHasher<Digest = D>,
+        M: Fn(Position<F>) -> Position<F> + Copy + Send + Sync,
+    {
+        let buckets = self.prepare_dirty_buckets();
+        for (height, positions) in buckets.iter().enumerate() {
+            if positions.is_empty() {
+                continue;
+            }
+            self.merkleize_bucket_reusing::<H, M>(base, positions, height as u32, map_pos);
+        }
+
+        self.finish_merkleize()
+    }
+
+    fn prepare_dirty_buckets(&mut self) -> Vec<Vec<Position<F>>> {
         // Each bucket accumulates positions in push order, which for `add_leaf_digest` is
         // already ascending; the stable `sort` is cheap on such near-sorted input. The dedup
         // then collapses any duplicates that slipped past `mark_dirty`'s last-entry check.
@@ -341,13 +384,10 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             bucket.sort();
             bucket.dedup();
         }
-        for (height, positions) in buckets.iter().enumerate() {
-            if positions.is_empty() {
-                continue;
-            }
-            self.merkleize_bucket(base, hasher, positions, height as u32);
-        }
+        buckets
+    }
 
+    fn finish_merkleize(self) -> Arc<MerkleizedBatch<F, D, S>> {
         // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
         let (ancestor_appended, ancestor_overwrites) = collect_ancestor_batches(&self.parent);
 
@@ -375,12 +415,45 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ) {
         let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
             positions,
-            || hasher.clone(),
-            |hasher, &pos| {
+            || (),
+            |_, &pos| {
                 let (left, right) = F::children(pos, height);
                 let left_d = self.get_node(base, left).expect("left child missing");
                 let right_d = self.get_node(base, right).expect("right child missing");
                 let digest = hasher.node_digest(pos, &left_d, &right_d);
+                (pos, digest)
+            },
+        );
+        for (pos, digest) in computed {
+            self.store_node(pos, digest);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn merkleize_bucket_reusing<H, M>(
+        &mut self,
+        base: &Mem<F, D>,
+        positions: &[Position<F>],
+        height: u32,
+        map_pos: M,
+    ) where
+        H: CHasher<Digest = D>,
+        M: Fn(Position<F>) -> Position<F> + Copy + Send + Sync,
+    {
+        let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
+            positions,
+            H::new,
+            |state, &pos| {
+                let (left, right) = F::children(pos, height);
+                let left_d = self.get_node(base, left).expect("left child missing");
+                let right_d = self.get_node(base, right).expect("right child missing");
+                let hash_pos = map_pos(pos);
+                let hash_pos = (*hash_pos).to_be_bytes();
+                let digest = state.hash_parts([
+                    hash_pos.as_slice(),
+                    left_d.as_ref(),
+                    right_d.as_ref(),
+                ]);
                 (pos, digest)
             },
         );

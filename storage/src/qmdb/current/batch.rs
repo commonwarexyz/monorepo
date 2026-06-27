@@ -652,7 +652,6 @@ where
 
     let hasher = qmdb::hasher::<H>();
     let new_leaves = compute_grafted_leaves::<F, H, S, N>(
-        &hasher,
         &ops_tree_adapter,
         chunks_to_update,
         &current_db.strategy,
@@ -672,8 +671,9 @@ where
                 grafted_batch = grafted_batch.add_leaf_digest(digest);
             }
         }
-        let gh = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-        grafted_batch.merkleize(&current_db.grafted_tree, &gh)
+        grafted_batch.merkleize_reusing_with::<H, _>(&current_db.grafted_tree, |pos| {
+            grafting::grafted_to_ops_pos::<F>(pos, grafting_height)
+        })
     };
 
     // Build the layered bitmap (parent + overlay) before computing the canonical root, so that
@@ -710,7 +710,6 @@ where
         }
     };
     let canonical_root = compute_db_root::<F, H, _, _, N>(
-        &hasher,
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,

@@ -131,7 +131,7 @@ where
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         merkle,
         log,
-        hasher,
+        hasher.clone(),
         apply_batch_size as u64,
     )
     .await?;
@@ -178,11 +178,9 @@ where
     };
 
     // Build grafted tree.
-    let hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
-        &hasher,
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
@@ -201,8 +199,7 @@ where
         hasher.clone(),
     );
     let partial = db::partial_chunk(any.bitmap.as_ref());
-    let grafted_root = db::compute_grafted_root(
-        &hasher,
+    let grafted_root = db::compute_grafted_root::<F, H, _, _, N>(
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
@@ -217,8 +214,7 @@ where
     let pending_digest =
         db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
             .map(|chunk| hasher.digest(&chunk));
-    let root = db::combine_roots(
-        &hasher,
+    let root = db::combine_roots::<H>(
         &ops_root,
         &grafted_root,
         pending_digest.as_ref(),

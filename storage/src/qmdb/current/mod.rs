@@ -442,11 +442,9 @@ where
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
 
     // Build the grafted tree from the bitmap and ops tree.
-    let hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = crate::merkle::Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
-        &hasher,
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
@@ -456,6 +454,7 @@ where
     .await?;
 
     // Compute and cache the root.
+    let hasher = qmdb::hasher::<H>();
     let storage = grafting::Storage::new(
         &grafted_tree,
         grafting::height::<N>(),
@@ -464,8 +463,7 @@ where
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.root();
-    let root = db::compute_db_root(
-        &hasher,
+    let root = db::compute_db_root::<F, H, _, _, N>(
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
@@ -1452,7 +1450,7 @@ pub mod tests {
             let kvp = db.key_value_proof(&hasher, b.clone()).await.unwrap();
             let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
             assert!(!ForgedExclusionDb::verify_exclusion_proof(
-                &hasher, &c, &forged, &root
+                &c, &forged, &root
             ));
 
             db.destroy().await.unwrap();
@@ -2190,7 +2188,6 @@ pub mod tests {
             let hasher = qmdb::hasher::<Sha256>();
             let proof = db.key_value_proof(&hasher, k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2213,7 +2210,6 @@ pub mod tests {
             let hasher = qmdb::hasher::<Sha256>();
             let proof = reopened.key_value_proof(&hasher, k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2441,7 +2437,6 @@ pub mod tests {
                 let proof = db.key_value_proof(&hasher, k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -2474,7 +2469,6 @@ pub mod tests {
                 let proof = db.key_value_proof(&hasher, k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,

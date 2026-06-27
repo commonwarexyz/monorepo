@@ -56,7 +56,6 @@ where
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(
-        hasher: &StandardHasher<H>,
         key: K,
         value: V::Value,
         proof: &KeyValueProof<F, H::Digest, N>,
@@ -64,7 +63,7 @@ where
     ) -> bool {
         let op = Operation::Update(UnorderedUpdate(key, value));
 
-        proof.verify(hasher, op, root)
+        proof.verify::<H, _>(op, root)
     }
 }
 
