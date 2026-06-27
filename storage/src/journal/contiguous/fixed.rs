@@ -137,6 +137,11 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
     Ok(pruning_boundary.max(start))
 }
 
+/// Build a replay stream over the retained blob range.
+///
+/// The stream is split into one state per blob so replay can start at a mid-blob pruning boundary,
+/// stop at the journal's logical end, and avoid reading across blob files. `buffer` is a byte
+/// budget for each blob replay, not an item count.
 fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     blobs: &Blobs<'a, B>,
     bounds: Range<u64>,
@@ -159,6 +164,8 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
         let items_per_batch = (buffer.get() / A::SIZE).max(1);
 
         for blob in start_blob..=end_blob {
+            // The oldest retained blob may begin after its natural blob boundary when pruning
+            // kept only a suffix.
             let blob_first = first_in_blob(bounds.start, blob, items_per_blob)?;
             let first_pos = if blob == start_blob {
                 start_pos
@@ -198,20 +205,28 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     ))
 }
 
+/// Replay state for one fixed-size blob.
 struct FixedReplayState<'a, B: RBlob, A> {
+    /// Sequential logical bytes for this blob.
     replay: BlobReplay<'a, B>,
+    /// Next position to yield.
     pos: u64,
+    /// Exclusive end position within this blob.
     end_pos: u64,
+    /// Maximum number of items decoded per stream poll.
     items_per_batch: usize,
     _marker: PhantomData<A>,
 }
 
 impl<B: RBlob, A: CodecFixedShared> FixedReplayState<'_, B, A> {
+    /// Decode the next batch of fixed-size items from this blob.
     async fn next_batch(mut self) -> Option<(Vec<Result<(u64, A), Error>>, Self)> {
         if self.pos == self.end_pos {
             return None;
         }
 
+        // Require at least one whole item so a short blob is reported as corruption at the
+        // current position. Additional already-buffered items are decoded below.
         let mut batch = Vec::new();
         match self.replay.ensure(A::SIZE).await {
             Ok(true) => {}
@@ -230,6 +245,8 @@ impl<B: RBlob, A: CodecFixedShared> FixedReplayState<'_, B, A> {
             }
         }
 
+        // Decode only whole items that are already buffered, capped by the replay byte budget and
+        // this blob's logical end.
         let available = (self.replay.remaining() / A::SIZE) as u64;
         let remaining = self.end_pos - self.pos;
         let count = available.min(self.items_per_batch as u64).min(remaining) as usize;
@@ -256,20 +273,28 @@ impl<B: RBlob, A: CodecFixedShared> FixedReplayState<'_, B, A> {
     }
 }
 
+/// Stream driver over fixed-size blob replay states.
 struct FixedReplayStreamState<'a, B: RBlob, A> {
+    /// Remaining blob states, in ascending blob order.
     states: std::vec::IntoIter<FixedReplayState<'a, B, A>>,
+    /// State currently being drained.
     current: Option<FixedReplayState<'a, B, A>>,
+    /// Items decoded from the current state but not yet yielded by the stream.
     pending: VecDeque<Result<(u64, A), Error>>,
+    /// Set after the first error so the stream terminates cleanly.
     done: bool,
 }
 
 impl<'a, B: RBlob, A: CodecFixedShared> FixedReplayStreamState<'a, B, A> {
+    /// Yield one item, filling `pending` from the current blob when needed.
     async fn next(mut self) -> Option<(Result<(u64, A), Error>, Self)> {
         loop {
             if self.done {
                 return None;
             }
 
+            // After an error, no later blob can be trusted as a continuation of the requested
+            // replay.
             if let Some(item) = self.pending.pop_front() {
                 if item.is_err() {
                     self.done = true;

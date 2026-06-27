@@ -41,6 +41,9 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         type Iter: Iterator<Item = u64>;
 
         /// Convert into selected section indices.
+        ///
+        /// This trait does not impose ordering or uniqueness; each storage operation decides how
+        /// to handle duplicates and missing sections.
         fn sections(self) -> Self::Iter;
     }
 

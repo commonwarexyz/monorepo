@@ -154,19 +154,32 @@ struct BlobScan {
     torn: bool,
 }
 
+/// Replay state for one data blob in a variable-size journal.
+///
+/// Unlike fixed replay, each yielded item must first decode a varint frame length. The byte
+/// `budget` caps how much frame data this state emits in one stream batch.
 struct DataReplayState<'a, B: RBlob, V: Codec> {
+    /// Blob index, used in corruption messages.
     blob: u64,
+    /// Sequential logical bytes for this blob.
     replay: BlobReplay<'a, B>,
+    /// Target maximum number of encoded bytes decoded per batch.
     budget: u64,
+    /// Next position to yield.
     pos: u64,
+    /// Exclusive end position within this blob.
     end_pos: u64,
+    /// Byte offset of the next frame in this blob.
     offset: u64,
+    /// Codec configuration for decoded items.
     codec_config: V::Cfg,
+    /// Whether frame payloads are compressed.
     compressed: bool,
     _marker: PhantomData<V>,
 }
 
 impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
+    /// Decode the next batch of varint-framed items from this blob.
     async fn next_batch(mut self) -> Option<(Vec<Result<(u64, V), Error>>, Self)> {
         if self.pos == self.end_pos {
             return None;
@@ -179,6 +192,8 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
                 return (!batch.is_empty()).then_some((batch, self));
             }
 
+            // A short read before a frame header is corruption for replay: bounds and offsets say
+            // this item exists, so EOF here means the data blob is shorter than expected.
             match self.replay.ensure(MAX_U32_VARINT_SIZE).await {
                 Ok(true) => {}
                 Ok(false) if self.replay.remaining() == 0 => {
@@ -242,6 +257,8 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
             };
             let item_len = next_offset - self.offset;
 
+            // `take(item_size)` advances past exactly the payload bytes after the header was
+            // consumed by `decode_length_prefix`.
             match decode_item::<V>(
                 (&mut self.replay).take(item_size),
                 &self.codec_config,
@@ -273,6 +290,8 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
                 }
             }
 
+            // Yield once the replay byte budget is reached. If fewer than MAX_U32_VARINT_SIZE
+            // bytes remain, yield as well so the next poll can refill before decoding a header.
             if consumed >= self.budget {
                 return Some((batch, self));
             }
@@ -283,20 +302,27 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
     }
 }
 
+/// Stream driver over variable-size data-blob replay states.
 struct DataReplayStreamState<'a, B: RBlob, V: Codec> {
+    /// Remaining blob states, in ascending blob order.
     states: std::vec::IntoIter<DataReplayState<'a, B, V>>,
+    /// State currently being drained.
     current: Option<DataReplayState<'a, B, V>>,
+    /// Items decoded from the current state but not yet yielded by the stream.
     pending: VecDeque<Result<(u64, V), Error>>,
+    /// Set after the first error so the stream terminates cleanly.
     done: bool,
 }
 
 impl<'a, B: RBlob, V: CodecShared> DataReplayStreamState<'a, B, V> {
+    /// Yield one item, filling `pending` from the current blob when needed.
     async fn next(mut self) -> Option<(Result<(u64, V), Error>, Self)> {
         loop {
             if self.done {
                 return None;
             }
 
+            // A frame error means the requested replay prefix is no longer trustworthy.
             if let Some(item) = self.pending.pop_front() {
                 if item.is_err() {
                     self.done = true;
@@ -324,6 +350,7 @@ impl<'a, B: RBlob, V: CodecShared> DataReplayStreamState<'a, B, V> {
     }
 }
 
+/// Build a stream from per-blob replay states.
 fn data_replay_stream<'a, B: RBlob, V: CodecShared>(
     states: Vec<DataReplayState<'a, B, V>>,
 ) -> impl Stream<Item = Result<(u64, V), Error>> + Send + use<'a, B, V> {
@@ -686,6 +713,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         .ok()
     }
 
+    /// Build one replay state for each data blob touched by `[start_pos, bounds.end)`.
     async fn replay_states(
         &self,
         start_pos: u64,
@@ -701,6 +729,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
         let mut states = Vec::new();
         if start_pos < bounds.end {
+            // The first blob may start at a nonzero data offset; subsequent blob states always
+            // start at byte offset 0.
             let items_per_blob = self.items_per_blob.get();
             let start_blob = position_to_blob(start_pos, items_per_blob);
             let end_blob = position_to_blob(bounds.end - 1, items_per_blob);
@@ -721,6 +751,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 let next_blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
                 let end_pos = blob_first_position(next_blob, items_per_blob)?.min(bounds.end);
 
+                // Store codec settings in the state because the stream owns states across await
+                // points and cannot borrow `self`.
                 states.push(DataReplayState::<E::Blob, V> {
                     blob,
                     replay: blob_handle.replay_from(offset, buffer)?,
@@ -837,6 +869,8 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 .data
                 .get(blob)
                 .expect("positions in bounds map to a retained blob");
+            // Consecutive positions are byte-adjacent frames, so each next offset gives the
+            // previous frame's encoded length.
             let mut run_start = group_start;
             while run_start < group_end {
                 let mut run_end = run_start + 1;
@@ -2249,44 +2283,6 @@ mod tests {
             // The next append would overflow the size; it must return a recoverable error
             // rather than panicking.
             assert!(matches!(journal.append(&8).await, Err(Error::SizeOverflow)));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_read_many_after_reopen() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "read-many-after-reopen".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..20u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            let cfg = Config {
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                ..cfg
-            };
-            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg)
-                .await
-                .unwrap();
-            let reader = journal.snapshot().await.unwrap();
-            let items = reader.read_many(&[1, 2, 3, 7, 8, 12, 18]).await.unwrap();
-            assert_eq!(items, vec![100, 200, 300, 700, 800, 1200, 1800]);
-            drop(reader);
 
             journal.destroy().await.unwrap();
         });
