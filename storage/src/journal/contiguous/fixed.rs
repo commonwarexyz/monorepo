@@ -1948,7 +1948,10 @@ mod tests {
                 assert_eq!(pos, i);
                 assert_eq!(item, test_digest(i));
             }
-            assert!(matches!(stream.next().await.unwrap(), Err(Error::Runtime(_))));
+            assert!(matches!(
+                stream.next().await.unwrap(),
+                Err(Error::Runtime(_))
+            ));
             assert!(stream.next().await.is_none());
 
             journal.destroy().await.unwrap();
