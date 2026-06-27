@@ -39,6 +39,10 @@ pub type CoreBlake3 = blake3::Hasher;
 
 const DIGEST_LENGTH: usize = blake3::OUT_LEN;
 
+/// Context string for [`Blake3::merge_digest_pair`]'s key-derivation mode, domain-separating
+/// digest-pair hashing from standard hashing.
+const MERGE_CONTEXT: &str = "_COMMONWARE_CRYPTOGRAPHY_MERGE_DIGEST_PAIR";
+
 /// BLAKE3 hasher.
 #[cfg_attr(
     feature = "blake3-parallel",
@@ -87,6 +91,17 @@ impl Hasher for Blake3 {
     fn reset(&mut self) -> &mut Self {
         self.hasher = CoreBlake3::new();
         self
+    }
+
+    fn merge_digest_pair(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
+        // Domain-separate digest-pair hashing from standard hashing via BLAKE3's key-derivation
+        // mode. Its finalization flags differ from a plain `hash`, so a merge output cannot equal a
+        // `hash` output except by a generic collision, uniformly for any input length.
+        let mut hasher = CoreBlake3::new_derive_key(MERGE_CONTEXT);
+        hasher.update(left.as_ref());
+        hasher.update(right.as_ref());
+        let array: [u8; DIGEST_LENGTH] = hasher.finalize().into();
+        Self::Digest::from(array)
     }
 }
 
@@ -210,6 +225,29 @@ mod tests {
     #[test]
     fn test_blake3_len() {
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
+    }
+
+    #[test]
+    fn merge_digest_pair_domain_separated() {
+        let mut hasher = Blake3::new();
+        let left = Blake3::hash(b"left");
+        let right = Blake3::hash(b"right");
+
+        let merged = hasher.merge_digest_pair(&left, &right);
+
+        // Deterministic and order-sensitive.
+        assert_eq!(merged, hasher.merge_digest_pair(&left, &right));
+        assert_ne!(merged, hasher.merge_digest_pair(&right, &left));
+
+        // Domain-separated from standard hashing: the plain hash of `left || right` must differ.
+        assert_ne!(merged, hasher.hash_digest_pair(&left, &right));
+
+        // Pins the key-derivation construction (and thus the domain context).
+        let mut kd = CoreBlake3::new_derive_key(MERGE_CONTEXT);
+        kd.update(left.as_ref());
+        kd.update(right.as_ref());
+        let expected: [u8; DIGEST_LENGTH] = kd.finalize().into();
+        assert_eq!(merged.as_ref(), expected);
     }
 
     #[test]

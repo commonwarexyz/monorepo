@@ -396,11 +396,13 @@ commonware_macros::stability_scope!(BETA {
         /// without an explicit domain tag.
         ///
         /// Implementations MUST achieve this via a construction `hash` cannot reproduce. SHA-256
-        /// compresses the 64-byte `l || r` block from a distinct initial state, so its output cannot
-        /// coincide with a finalized `hash` (which starts from the standard initial state) except by
-        /// a generic collision, uniformly for any input length. The default below delegates to
-        /// [`Hasher::hash_digest_pair`] and does NOT provide this separation; a hasher that relies on
-        /// the default must not be used where this property is required.
+        /// compresses the 64-byte `l || r` block from a distinct initial state, and BLAKE3 uses its
+        /// key-derivation mode; either output cannot coincide with a finalized `hash` except by a
+        /// generic collision, uniformly for any input length. The default below delegates to
+        /// [`Hasher::hash_digest_pair`] and does NOT provide this separation; it exists only for
+        /// non-cryptographic hashers (e.g. checksums) that make no such guarantee, and a hasher that
+        /// relies on it must not be used where this property is required. Any cryptographic hasher
+        /// intended for use in authenticated structures must override it.
         #[doc(hidden)]
         #[inline]
         fn merge_digest_pair(
