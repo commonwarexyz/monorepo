@@ -395,23 +395,20 @@ commonware_macros::stability_scope!(BETA {
         /// caller use digest-pair hashing and standard hashing for distinct roles in one structure
         /// without an explicit domain tag.
         ///
-        /// Implementations MUST achieve this via a construction `hash` cannot reproduce. SHA-256
-        /// compresses the 64-byte `l || r` block from a distinct initial state, and BLAKE3 uses its
-        /// key-derivation mode; either output cannot coincide with a finalized `hash` except by a
-        /// generic collision, uniformly for any input length. The default below delegates to
-        /// [`Hasher::hash_digest_pair`] and does NOT provide this separation; it exists only for
-        /// non-cryptographic hashers (e.g. checksums) that make no such guarantee, and a hasher that
-        /// relies on it must not be used where this property is required. Any cryptographic hasher
-        /// intended for use in authenticated structures must override it.
+        /// Cryptographic implementations MUST achieve this via a construction `hash` cannot
+        /// reproduce: SHA-256 compresses the 64-byte `l || r` block from a distinct initial state,
+        /// and BLAKE3 uses its key-derivation mode; either output cannot coincide with a finalized
+        /// `hash` except by a generic collision, uniformly for any input length. Non-cryptographic
+        /// hashers (e.g. checksums) cannot offer this separation and may delegate to
+        /// [`Hasher::hash_digest_pair`], but must not be used where it is required (e.g.
+        /// authenticated structures). There is intentionally no default: every hasher states this
+        /// choice explicitly.
         #[doc(hidden)]
-        #[inline]
         fn merge_digest_pair(
             &mut self,
             left: &Self::Digest,
             right: &Self::Digest,
-        ) -> Self::Digest {
-            self.hash_digest_pair(left, right)
-        }
+        ) -> Self::Digest;
     }
 });
 

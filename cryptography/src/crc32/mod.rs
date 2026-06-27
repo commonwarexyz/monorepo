@@ -92,6 +92,13 @@ impl Hasher for Crc32 {
         self.inner = crc_fast::Digest::new(ALGORITHM);
         self
     }
+
+    /// CRC32 is a non-cryptographic checksum and cannot provide the domain separation
+    /// [`Hasher::merge_digest_pair`] requires; this delegates to [`Hasher::hash_digest_pair`] and
+    /// must not be relied upon for authenticated structures.
+    fn merge_digest_pair(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
+        self.hash_digest_pair(left, right)
+    }
 }
 
 /// Digest of a CRC32 hashing operation (4 bytes).
