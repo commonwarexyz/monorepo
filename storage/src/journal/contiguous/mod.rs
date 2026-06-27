@@ -74,8 +74,8 @@ pub trait Contiguous: Send + Sync {
     /// `buffer` controls the replay byte budget for each chunk.
     fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
     > + Send;

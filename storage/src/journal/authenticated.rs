@@ -756,10 +756,10 @@ where
 
     async fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, C::Item), JournalError>> + Send, JournalError> {
-        self.journal.replay(buffer, start_pos).await
+        self.journal.replay(start_pos, buffer).await
     }
 }
 
@@ -2244,13 +2244,13 @@ mod tests {
     async fn test_replay_operations_inner<F: Family + PartialEq>(context: Context) {
         // Test empty journal
         let journal = create_empty_journal::<F>(context.child("empty"), "replay").await;
-        let stream = journal.replay(NZUsize!(10), 0).await.unwrap();
+        let stream = journal.replay(0, NZUsize!(10)).await.unwrap();
         futures::pin_mut!(stream);
         assert!(stream.next().await.is_none());
 
         // Test replaying all operations
         let journal = create_journal_with_ops::<F>(context.child("with_ops"), "replay", 50).await;
-        let stream = journal.replay(NZUsize!(100), 0).await.unwrap();
+        let stream = journal.replay(0, NZUsize!(100)).await.unwrap();
         futures::pin_mut!(stream);
 
         for i in 0..50 {
@@ -2277,7 +2277,7 @@ mod tests {
     /// Verify replay() starting from a middle location.
     async fn test_replay_from_middle_inner<F: Family + PartialEq>(context: Context) {
         let journal = create_journal_with_ops::<F>(context, "replay_middle", 50).await;
-        let stream = journal.replay(NZUsize!(100), 25).await.unwrap();
+        let stream = journal.replay(25, NZUsize!(100)).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut count = 0;

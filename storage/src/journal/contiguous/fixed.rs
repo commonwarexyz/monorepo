@@ -110,9 +110,9 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Writer},
     Blob as RBlob, Buf, IoBuf,
 };
-use futures::{stream, Stream, StreamExt as _};
+use futures::{stream, Stream};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     future::Future,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
@@ -141,8 +141,8 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     blobs: &Blobs<'a, B>,
     bounds: Range<u64>,
     items_per_blob: NonZeroU64,
-    buffer: NonZeroUsize,
     start_pos: u64,
+    buffer: NonZeroUsize,
 ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + use<'a, B, A>, Error> {
     if start_pos > bounds.end {
         return Err(Error::ItemOutOfRange(start_pos));
@@ -187,9 +187,15 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
         }
     }
 
-    Ok(stream::iter(states).flat_map(|state| {
-        stream::unfold(state, FixedReplayState::next_batch).flat_map(stream::iter)
-    }))
+    Ok(stream::unfold(
+        FixedReplayStreamState {
+            states: states.into_iter(),
+            current: None,
+            pending: VecDeque::new(),
+            done: false,
+        },
+        FixedReplayStreamState::next,
+    ))
 }
 
 struct FixedReplayState<'a, B: RBlob, A> {
@@ -247,6 +253,47 @@ impl<B: RBlob, A: CodecFixedShared> FixedReplayState<'_, B, A> {
         }
         self.pos = next_pos;
         Some((batch, self))
+    }
+}
+
+struct FixedReplayStreamState<'a, B: RBlob, A> {
+    states: std::vec::IntoIter<FixedReplayState<'a, B, A>>,
+    current: Option<FixedReplayState<'a, B, A>>,
+    pending: VecDeque<Result<(u64, A), Error>>,
+    done: bool,
+}
+
+impl<'a, B: RBlob, A: CodecFixedShared> FixedReplayStreamState<'a, B, A> {
+    async fn next(mut self) -> Option<(Result<(u64, A), Error>, Self)> {
+        loop {
+            if self.done {
+                return None;
+            }
+
+            if let Some(item) = self.pending.pop_front() {
+                if item.is_err() {
+                    self.done = true;
+                    self.pending.clear();
+                    self.current = None;
+                }
+                return Some((item, self));
+            }
+
+            let state = match self.current.take().or_else(|| self.states.next()) {
+                Some(state) => state,
+                None => return None,
+            };
+
+            match FixedReplayState::next_batch(state).await {
+                Some((batch, state)) => {
+                    self.current = Some(state);
+                    self.pending = VecDeque::from(batch);
+                }
+                None => {
+                    self.current = None;
+                }
+            }
+        }
     }
 }
 
@@ -1260,15 +1307,15 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
 
     async fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
         replay_stream(
             &self.blobs,
             self.bounds.clone(),
             self.items_per_blob,
-            buffer,
             start_pos,
+            buffer,
         )
     }
 }
@@ -1294,16 +1341,16 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 
     async fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
         let blobs = self.blobs.reader();
         replay_stream(
             &blobs,
             self.bounds.clone(),
             self.items_per_blob,
-            buffer,
             start_pos,
+            buffer,
         )
     }
 }
@@ -1687,19 +1734,19 @@ mod tests {
             // Replaying from 0 should fail since all items before bounds.start are pruned
             {
                 let reader = journal.snapshot().await.unwrap();
-                let result = reader.replay(NZUsize!(1024), 0).await;
+                let result = reader.replay(0, NZUsize!(1024)).await;
                 assert!(matches!(result, Err(Error::ItemPruned(0))));
             }
 
             // Replaying from pruning_boundary should return empty stream
             {
                 let reader = journal.snapshot().await.unwrap();
-                let res = reader.replay(NZUsize!(1024), 0).await;
+                let res = reader.replay(0, NZUsize!(1024)).await;
                 assert!(matches!(res, Err(Error::ItemPruned(_))));
 
                 let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), journal.bounds().start)
+                    .replay(journal.bounds().start, NZUsize!(1024))
                     .await
                     .expect("failed to replay journal from pruning boundary");
                 pin_mut!(stream);
@@ -1785,7 +1832,7 @@ mod tests {
             {
                 let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), 0)
+                    .replay(0, NZUsize!(1024))
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -1842,7 +1889,7 @@ mod tests {
                 let mut error_found = false;
                 let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), 0)
+                    .replay(0, NZUsize!(1024))
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -1856,6 +1903,7 @@ mod tests {
                         Err(err) => {
                             error_found = true;
                             assert!(matches!(err, Error::Runtime(_)));
+                            assert!(stream.next().await.is_none());
                             break;
                         }
                     }
@@ -1921,7 +1969,7 @@ mod tests {
             {
                 let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), START_POS)
+                    .replay(START_POS, NZUsize!(1024))
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -3972,7 +4020,7 @@ mod tests {
             {
                 let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), 7)
+                    .replay(7, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -3993,7 +4041,7 @@ mod tests {
             {
                 let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), 12)
+                    .replay(12, NZUsize!(1024))
                     .await
                     .expect("failed to replay from mid-stream");
                 pin_mut!(stream);
@@ -4708,7 +4756,7 @@ mod tests {
             assert!(journal.prune(12).await.unwrap());
 
             {
-                let stream = snapshot.replay(NZUsize!(1024), 0).await.unwrap();
+                let stream = snapshot.replay(0, NZUsize!(1024)).await.unwrap();
                 pin_mut!(stream);
                 let mut expected = 0u64;
                 while let Some(result) = stream.next().await {

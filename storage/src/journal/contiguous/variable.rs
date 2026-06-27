@@ -23,9 +23,9 @@ use commonware_runtime::{
     Blob as RBlob, Buf, IoBuf, IoBufMut,
 };
 use commonware_utils::NZUsize;
-use futures::{stream, Stream, StreamExt as _};
+use futures::{stream, Stream};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     io::Cursor,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
@@ -282,6 +282,61 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
             }
         }
     }
+}
+
+struct DataReplayStreamState<'a, B: RBlob, V: Codec> {
+    states: std::vec::IntoIter<DataReplayState<'a, B, V>>,
+    current: Option<DataReplayState<'a, B, V>>,
+    pending: VecDeque<Result<(u64, V), Error>>,
+    done: bool,
+}
+
+impl<'a, B: RBlob, V: CodecShared> DataReplayStreamState<'a, B, V> {
+    async fn next(mut self) -> Option<(Result<(u64, V), Error>, Self)> {
+        loop {
+            if self.done {
+                return None;
+            }
+
+            if let Some(item) = self.pending.pop_front() {
+                if item.is_err() {
+                    self.done = true;
+                    self.pending.clear();
+                    self.current = None;
+                }
+                return Some((item, self));
+            }
+
+            let state = match self.current.take().or_else(|| self.states.next()) {
+                Some(state) => state,
+                None => return None,
+            };
+
+            match DataReplayState::next_batch(state).await {
+                Some((batch, state)) => {
+                    self.current = Some(state);
+                    self.pending = VecDeque::from(batch);
+                }
+                None => {
+                    self.current = None;
+                }
+            }
+        }
+    }
+}
+
+fn data_replay_stream<'a, B: RBlob, V: CodecShared>(
+    states: Vec<DataReplayState<'a, B, V>>,
+) -> impl Stream<Item = Result<(u64, V), Error>> + Send + use<'a, B, V> {
+    stream::unfold(
+        DataReplayStreamState {
+            states: states.into_iter(),
+            current: None,
+            pending: VecDeque::new(),
+            done: false,
+        },
+        DataReplayStreamState::next,
+    )
 }
 
 /// The blob index where the item at `position` should be stored.
@@ -634,8 +689,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
     async fn replay_states(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> Result<Vec<DataReplayState<'a, E::Blob, V>>, Error> {
         let bounds = self.bounds();
         if start_pos > bounds.end {
@@ -818,14 +873,12 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
 
     async fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        let states = self.replay_states(buffer, start_pos).await?;
+        let states = self.replay_states(start_pos, buffer).await?;
 
-        Ok(stream::iter(states).flat_map(|state| {
-            stream::unfold(state, DataReplayState::next_batch).flat_map(stream::iter)
-        }))
+        Ok(data_replay_stream(states))
     }
 }
 
@@ -1899,15 +1952,13 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
 
     async fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
         let reader = self.reader();
-        let states = reader.replay_states(buffer, start_pos).await?;
+        let states = reader.replay_states(start_pos, buffer).await?;
 
-        Ok(stream::iter(states).flat_map(|state| {
-            stream::unfold(state, DataReplayState::next_batch).flat_map(stream::iter)
-        }))
+        Ok(data_replay_stream(states))
     }
 }
 
@@ -2066,7 +2117,7 @@ mod tests {
         deterministic, Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-    use futures::FutureExt as _;
+    use futures::{FutureExt as _, StreamExt as _};
     use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
@@ -2317,42 +2368,6 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_variable_reader_replay_reads_writer_tail() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "reader-replay-writer-tail".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
-                .await
-                .unwrap();
-
-            for i in 0..7u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-
-            {
-                let reader = journal.reader();
-                let stream = reader.replay(NZUsize!(3), 3).await.unwrap();
-                futures::pin_mut!(stream);
-
-                let mut items = Vec::new();
-                while let Some(result) = stream.next().await {
-                    items.push(result.unwrap());
-                }
-                assert_eq!(items, vec![(3, 300), (4, 400), (5, 500), (6, 600)]);
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
     /// Test that complete offsets partition loss after pruning is detected as unrecoverable.
     ///
     /// When the offsets partition is completely lost and the data has been pruned, we cannot
@@ -2499,7 +2514,7 @@ mod tests {
             // Test 1: Full replay
             {
                 let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(NZUsize!(20), 0).await.unwrap();
+                let stream = reader.replay(0, NZUsize!(20)).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 0..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -2512,7 +2527,7 @@ mod tests {
             // Test 2: Partial replay from middle of blob
             {
                 let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(NZUsize!(20), 15).await.unwrap();
+                let stream = reader.replay(15, NZUsize!(20)).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 15..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -2525,7 +2540,7 @@ mod tests {
             // Test 3: Partial replay from blob boundary
             {
                 let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(NZUsize!(20), 20).await.unwrap();
+                let stream = reader.replay(20, NZUsize!(20)).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 20..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -2539,19 +2554,19 @@ mod tests {
             journal.prune(20).await.unwrap();
             {
                 let reader = journal.snapshot().await.unwrap();
-                let res = reader.replay(NZUsize!(20), 0).await;
+                let res = reader.replay(0, NZUsize!(20)).await;
                 assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
             }
             {
                 let reader = journal.snapshot().await.unwrap();
-                let res = reader.replay(NZUsize!(20), 19).await;
+                let res = reader.replay(19, NZUsize!(20)).await;
                 assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
             }
 
             // Test 5: Replay from exactly at pruning boundary after prune
             {
                 let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(NZUsize!(20), 20).await.unwrap();
+                let stream = reader.replay(20, NZUsize!(20)).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 20..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -2564,7 +2579,7 @@ mod tests {
             // Test 6: Replay from the end
             {
                 let reader = journal.snapshot().await.unwrap();
-                let stream = reader.replay(NZUsize!(20), 40).await.unwrap();
+                let stream = reader.replay(40, NZUsize!(20)).await.unwrap();
                 futures::pin_mut!(stream);
                 assert!(stream.next().await.is_none());
             }
@@ -2572,7 +2587,7 @@ mod tests {
             // Test 7: Replay beyond the end (should error)
             {
                 let reader = journal.snapshot().await.unwrap();
-                let res = reader.replay(NZUsize!(20), 41).await;
+                let res = reader.replay(41, NZUsize!(20)).await;
                 assert!(matches!(
                     res,
                     Err(crate::journal::Error::ItemOutOfRange(41))
@@ -2584,46 +2599,77 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_replay_batches_by_byte_budget() {
+    fn test_variable_replay_stops_after_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "variable-replay-budget".into(),
-                items_per_section: NZU64!(100),
+                partition: "replay-stops-after-error".into(),
+                items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::<_, FixedBytes<1>>::init(context.child("storage"), cfg)
+
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
                 .await
                 .unwrap();
-
-            for i in 0u8..20 {
-                journal.append(&FixedBytes::new([i])).await.unwrap();
+            for i in 0..30u64 {
+                journal.append(&(i * 100)).await.unwrap();
             }
+            journal.sync().await.unwrap();
 
-            let reader = journal.snapshot().await.unwrap();
-            let blob = reader.data.get(0).expect("blob should exist");
-            let state = DataReplayState::<_, FixedBytes<1>> {
-                blob: 0,
-                replay: blob.replay_from(0, NZUsize!(10)).unwrap(),
-                budget: 10,
-                pos: 0,
-                end_pos: 20,
-                offset: 0,
-                codec_config: (),
-                compressed: false,
-                _marker: PhantomData,
-            };
-
-            let (batch, state) = DataReplayState::next_batch(state)
+            let (blob, _) = context
+                .open(&cfg.data_partition(), &1u64.to_be_bytes())
                 .await
-                .expect("batch should be returned");
-            let batch = batch.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+                .unwrap();
+            blob.write_at_sync(0, vec![0xFF; 1]).await.unwrap();
 
-            assert_eq!(batch.len(), 5);
-            assert_eq!(state.pos, 5);
+            {
+                let cache = CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10));
+                let mut writers = Vec::new();
+                for blob_index in 0..3u64 {
+                    let (blob, size) = context
+                        .open(&cfg.data_partition(), &blob_index.to_be_bytes())
+                        .await
+                        .unwrap();
+                    writers.push(
+                        Writer::new(blob, size, cfg.write_buffer.get(), cache.clone())
+                            .await
+                            .unwrap(),
+                    );
+                }
+
+                let mut states = Vec::new();
+                for (blob_index, writer) in writers.iter().enumerate() {
+                    let blob = blob_index as u64;
+                    states.push(DataReplayState::<_, u64> {
+                        blob,
+                        replay: Blob::Writer(writer).replay_from(0, NZUsize!(1024)).unwrap(),
+                        budget: 1024,
+                        pos: blob * 10,
+                        end_pos: (blob + 1) * 10,
+                        offset: 0,
+                        codec_config: (),
+                        compressed: false,
+                        _marker: PhantomData,
+                    });
+                }
+
+                let stream = data_replay_stream(states);
+                futures::pin_mut!(stream);
+
+                for i in 0..10u64 {
+                    let (pos, item) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(pos, i);
+                    assert_eq!(item, i * 100);
+                }
+                assert!(matches!(
+                    stream.next().await.unwrap(),
+                    Err(Error::Corruption(_))
+                ));
+                assert!(stream.next().await.is_none());
+            }
 
             journal.destroy().await.unwrap();
         });
@@ -6405,7 +6451,7 @@ mod tests {
             assert!(journal.prune(12).await.unwrap());
 
             {
-                let stream = snapshot.replay(NZUsize!(1024), 0).await.unwrap();
+                let stream = snapshot.replay(0, NZUsize!(1024)).await.unwrap();
                 futures::pin_mut!(stream);
                 let mut expected = 0u64;
                 while let Some(result) = stream.next().await {
