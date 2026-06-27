@@ -129,10 +129,8 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
             let payload_b = (next_round, parent, self.context.gen::<u64>()).encode();
 
             // Compute digests
-            self.hasher.update(&payload_a);
-            let digest_a = self.hasher.finalize();
-            self.hasher.update(&payload_b);
-            let digest_b = self.hasher.finalize();
+            let digest_a = self.hasher.update(&payload_a).finalize();
+            let digest_b = self.hasher.update(&payload_b).finalize();
 
             let proposal_a = Proposal::new(next_round, view, digest_a);
             let proposal_b = Proposal::new(next_round, view, digest_b);

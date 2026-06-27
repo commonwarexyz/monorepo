@@ -18,13 +18,14 @@ pub struct FuzzInput {
 fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurSha256::new();
     let mut ref_hasher = RefSha256::new();
+    let mut pending = our_hasher.pending();
 
     for chunk in chunks {
-        our_hasher.update(chunk);
+        pending.update(chunk);
         ref_hasher.update(chunk);
     }
 
-    let our_result = our_hasher.finalize();
+    let our_result = pending.finalize();
     let ref_result = ref_hasher.finalize();
     assert_eq!(our_result.as_ref(), ref_result.as_slice());
 }
@@ -33,26 +34,28 @@ fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
 fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurSha256::new();
     let mut ref_hasher = RefSha256::new();
+    let mut pending = our_hasher.pending();
 
     // First round
     for chunk in chunks {
-        our_hasher.update(chunk);
+        pending.update(chunk);
         ref_hasher.update(chunk);
     }
-    let our_result = our_hasher.finalize();
+    let our_result = pending.finalize();
     let ref_result = ref_hasher.finalize();
     assert_eq!(our_result.as_ref(), ref_result.as_slice());
 
     // Reset and second round
     our_hasher.reset();
     let mut ref_hasher = RefSha256::new();
+    let mut pending = our_hasher.pending();
 
     for chunk in chunks {
-        our_hasher.update(chunk);
+        pending.update(chunk);
         ref_hasher.update(chunk);
     }
 
-    let our_result_after_reset = our_hasher.finalize();
+    let our_result_after_reset = pending.finalize();
     let ref_result_after_reset = ref_hasher.finalize();
     assert_eq!(our_result, our_result_after_reset);
     assert_eq!(
@@ -65,13 +68,14 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
 fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurSha256::new();
     let mut all_data = Vec::new();
+    let mut pending = our_hasher.pending();
 
     for chunk in chunks {
         all_data.extend_from_slice(chunk);
-        our_hasher.update(chunk);
+        pending.update(chunk);
     }
 
-    let our_final = our_hasher.finalize();
+    let our_final = pending.finalize();
     let ref_final = RefSha256::digest(&all_data);
     assert_eq!(our_final.as_ref(), ref_final.as_slice());
 }
@@ -86,8 +90,7 @@ fn fuzz_diff_hash(data: &[u8]) {
 // Encode/decode functionality
 fn fuzz_encode_decode(data: &[u8]) {
     let mut hasher = OurSha256::new();
-    hasher.update(data);
-    let digest = hasher.finalize();
+    let digest = hasher.update(data).finalize();
 
     let encoded = digest.encode();
     assert_eq!(encoded.len(), 32); // DIGEST_LENGTH = 32
@@ -103,8 +106,8 @@ fn fuzz_default_clone() {
     let mut hasher2 = hasher1.clone();
 
     // Both should produce the same result for empty input
-    let digest1 = hasher1.finalize();
-    let digest2 = hasher2.finalize();
+    let digest1 = hasher1.pending().finalize();
+    let digest2 = hasher2.pending().finalize();
     assert_eq!(digest1, digest2);
 }
 

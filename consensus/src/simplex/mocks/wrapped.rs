@@ -70,9 +70,9 @@ impl<S> Scheme<S> {
         // Hash the signer and signature bytes to derive a deterministic starting
         // point for the single-bit flip search.
         let mut hasher = Sha256::default();
-        hasher.update(&signer.encode());
-        hasher.update(&encoded);
-        let digest = hasher.finalize();
+        let mut pending = hasher.update(&signer.encode());
+        pending.update(&encoded);
+        let digest = pending.finalize();
 
         // Start from a deterministic but non-trivial bit so tests do not always
         // mutate the same low-order bit first.

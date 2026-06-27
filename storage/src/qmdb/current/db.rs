@@ -914,7 +914,7 @@ pub(super) fn combine_roots<H: Hasher>(
 ) -> H::Digest {
     let mut hasher = H::new();
     match (pending, partial) {
-        (None, None) => hasher.hash_parts([ops_root.as_ref(), grafted_root.as_ref()]),
+        (None, None) => hasher.hash_digest_pair(ops_root, grafted_root),
         (Some(pe), None) => {
             hasher.hash_parts([ops_root.as_ref(), grafted_root.as_ref(), pe.as_ref()])
         }

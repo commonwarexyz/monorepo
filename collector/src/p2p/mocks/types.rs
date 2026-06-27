@@ -41,9 +41,9 @@ impl Digestible for Request {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
         let mut hasher = Sha256::new();
-        hasher.update(&self.id.to_be_bytes());
-        hasher.update(&self.data.to_be_bytes());
-        hasher.finalize()
+        let mut pending = hasher.update(&self.id.to_be_bytes());
+        pending.update(&self.data.to_be_bytes());
+        pending.finalize()
     }
 }
 
@@ -88,8 +88,8 @@ impl Digestible for Response {
 
     fn digest(&self) -> Self::Digest {
         let mut hasher = Sha256::new();
-        hasher.update(&self.id.to_be_bytes());
-        hasher.update(&self.result.to_be_bytes());
-        hasher.finalize()
+        let mut pending = hasher.update(&self.id.to_be_bytes());
+        pending.update(&self.result.to_be_bytes());
+        pending.finalize()
     }
 }

@@ -22,8 +22,8 @@ pub fn genesis<H: Hasher>() -> H::Digest {
     // Since this example does not verify that proposed messages link to a
     // parent, this only seeds the consensus floor.
     let mut hasher = H::default();
-    hasher.update(GENESIS);
-    hasher.finalize()
+    let digest = hasher.update(GENESIS).finalize();
+    digest
 }
 
 /// Configuration for the application.

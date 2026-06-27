@@ -65,9 +65,9 @@ pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec
 
     for i in 0..count {
         let value = {
-            hasher.update(&i.to_be_bytes());
-            hasher.update(&seed.to_be_bytes());
-            hasher.finalize()
+            let mut pending = hasher.update(&i.to_be_bytes());
+            pending.update(&seed.to_be_bytes());
+            pending.finalize()
         };
 
         operations.push(Operation::Append(value));

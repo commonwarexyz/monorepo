@@ -10,11 +10,11 @@
 //! let mut hasher = Blake3::new();
 //!
 //! // Update the hasher with some messages
-//! hasher.update(b"hello,");
-//! hasher.update(b"world!");
+//! let mut pending = hasher.update(b"hello,");
+//! pending.update(b"world!");
 //!
-//! // Finalize the hasher to get the digest
-//! let digest = hasher.finalize();
+//! // Finalize the pending hash to get the digest
+//! let digest = pending.finalize();
 //!
 //! // Print the digest
 //! println!("digest: {:?}", digest);
@@ -59,7 +59,7 @@ impl Clone for Blake3 {
 impl Hasher for Blake3 {
     type Digest = Digest;
 
-    fn update(&mut self, message: &[u8]) -> &mut Self {
+    fn update_inner(&mut self, message: &[u8]) {
         #[cfg(not(feature = "blake3-parallel"))]
         self.hasher.update(message);
 
@@ -75,11 +75,9 @@ impl Hasher for Blake3 {
                 self.hasher.update(message);
             }
         }
-
-        self
     }
 
-    fn finalize(&mut self) -> Self::Digest {
+    fn finalize_inner(&mut self) -> Self::Digest {
         let finalized = self.hasher.finalize();
         self.hasher.reset();
         let array: [u8; DIGEST_LENGTH] = finalized.into();
@@ -195,14 +193,12 @@ mod tests {
 
         // Generate initial hash
         let mut hasher = Blake3::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Reuse hasher
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
@@ -220,8 +216,7 @@ mod tests {
     fn test_codec() {
         let msg = b"hello world";
         let mut hasher = Blake3::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), DIGEST_LENGTH);

@@ -10,11 +10,11 @@
 //! let mut hasher = Sha256::new();
 //!
 //! // Update the hasher with some messages
-//! hasher.update(b"hello,");
-//! hasher.update(b"world!");
+//! let mut pending = hasher.update(b"hello,");
+//! pending.update(b"world!");
 //!
-//! // Finalize the hasher to get the digest
-//! let digest = hasher.finalize();
+//! // Finalize the pending hash to get the digest
+//! let digest = pending.finalize();
 //!
 //! // Print the digest
 //! println!("digest: {:?}", digest);
@@ -83,12 +83,11 @@ impl Sha256 {
 impl Hasher for Sha256 {
     type Digest = Digest;
 
-    fn update(&mut self, message: &[u8]) -> &mut Self {
+    fn update_inner(&mut self, message: &[u8]) {
         self.hasher.update(message);
-        self
     }
 
-    fn finalize(&mut self) -> Self::Digest {
+    fn finalize_inner(&mut self) -> Self::Digest {
         let finalized = self.hasher.finalize_reset();
         let array: [u8; DIGEST_LENGTH] = finalized.into();
         Self::Digest::from(array)
@@ -110,7 +109,6 @@ impl Hasher for Sha256 {
         let mut parts = parts.into_iter();
         while let Some(part) = parts.next() {
             let Some(end) = len.checked_add(part.len()) else {
-                self.hasher.reset();
                 self.hasher.update(&self.scratch[..len]);
                 self.hasher.update(part);
                 for part in parts {
@@ -119,7 +117,6 @@ impl Hasher for Sha256 {
                 return digest_from_output(self.hasher.finalize_reset().into());
             };
             if end > MAX_FIXED_PREIMAGE {
-                self.hasher.reset();
                 self.hasher.update(&self.scratch[..len]);
                 self.hasher.update(part);
                 for part in parts {
@@ -132,7 +129,6 @@ impl Hasher for Sha256 {
         }
 
         let digest = finalize_fixed(&mut self.scratch, len);
-        self.hasher.reset();
         digest
     }
 
@@ -144,13 +140,11 @@ impl Hasher for Sha256 {
     #[inline]
     fn hash_prefixed<E: Encode>(&mut self, prefix: &[u8], value: &E) -> Self::Digest {
         let Some(len) = prefix.len().checked_add(value.encode_size()) else {
-            self.hasher.reset();
             self.hasher.update(prefix);
             self.hasher.update(value.encode().as_ref());
             return digest_from_output(self.hasher.finalize_reset().into());
         };
         if len > MAX_FIXED_PREIMAGE {
-            self.hasher.reset();
             self.hasher.update(prefix);
             self.hasher.update(value.encode().as_ref());
             return digest_from_output(self.hasher.finalize_reset().into());
@@ -161,7 +155,6 @@ impl Hasher for Sha256 {
         value.write(&mut tail);
         assert_eq!(tail.len(), 0, "encode_size() did not match write()");
         let digest = finalize_fixed(&mut self.scratch, len);
-        self.hasher.reset();
         digest
     }
 
@@ -388,14 +381,12 @@ mod tests {
 
         // Generate initial hash
         let mut hasher = Sha256::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Reuse hasher
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
@@ -413,8 +404,7 @@ mod tests {
     fn test_codec() {
         let msg = b"hello world";
         let mut hasher = Sha256::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.update(msg).finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), DIGEST_LENGTH);
@@ -426,10 +416,11 @@ mod tests {
 
     fn streaming_hash_parts(parts: &[&[u8]]) -> Digest {
         let mut hasher = Sha256::new();
+        let mut pending = hasher.pending();
         for part in parts {
-            hasher.update(part);
+            pending.update(part);
         }
-        hasher.finalize()
+        pending.finalize()
     }
 
     #[test]
@@ -456,7 +447,7 @@ mod tests {
             streaming_hash_parts(&[left.as_ref(), right.as_ref()])
         );
 
-        hasher.update(b"discarded");
+        drop(hasher.update(b"discarded"));
         assert_eq!(
             hasher.hash_parts([b"fresh".as_slice()]),
             streaming_hash_parts(&[b"fresh".as_slice()])

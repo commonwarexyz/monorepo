@@ -124,9 +124,9 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
         if let Some(seed) = &self.seed {
             let mut hasher = H::new();
             permutation.sort_by_key(|&index| {
-                hasher.update(seed);
-                hasher.update(&index.get().encode());
-                hasher.finalize()
+                let mut pending = hasher.update(seed);
+                pending.update(&index.get().encode());
+                pending.finalize()
             });
         }
 

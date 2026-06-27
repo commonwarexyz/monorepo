@@ -222,6 +222,21 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     fn root_bagging(&self) -> Bagging {
         Self::root_bagging(self)
     }
+
+    fn node_digest(
+        &self,
+        pos: Position<F>,
+        left: &Self::Digest,
+        right: &Self::Digest,
+    ) -> Self::Digest {
+        let mut hasher = H::new();
+        hasher.hash_u64_digest_pair(*pos, left, right)
+    }
+
+    fn fold(&self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
+        let mut hasher = H::new();
+        hasher.hash_digest_pair(acc, peak)
+    }
 }
 
 impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
