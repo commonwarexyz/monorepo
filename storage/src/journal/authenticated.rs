@@ -13,7 +13,7 @@ use crate::{
     merkle::{
         self, batch,
         full::Merkle,
-        hasher::{Hasher as _, Standard as StandardHasher},
+        hasher::Standard as StandardHasher,
         mem::Mem,
         Bagging, Family, Location, Position, Proof, Readable,
     },
@@ -66,8 +66,9 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     /// Add an item to the batch.
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, item: Item) -> Self {
-        let encoded = item.encode();
-        self.inner = self.inner.add(&self.hasher, &encoded);
+        let mut state = self.hasher.state();
+        let digest = state.leaf_encoded(self.inner.size(), &item);
+        self.inner = self.inner.add_leaf_digest(digest);
         self.items.push(item);
         self
     }
@@ -105,7 +106,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         } = self;
 
         let items = Arc::new(items);
-        let merkle = inner.merkleize(base, &hasher);
+        let merkle = inner.merkleize_reusing::<H>(base);
         let ancestor_items = Self::collect_ancestor_items(&parent);
         Arc::new(MerkleizedBatch {
             inner: merkle,
@@ -128,15 +129,12 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         );
 
         let first = self.inner.leaves();
-        let hasher = &self.hasher;
         let digests = self.inner.strategy().map_init_collect_vec(
             items.iter().enumerate(),
-            Vec::new,
-            |buf, (i, item)| {
+            || self.hasher.state(),
+            |state, (i, item)| {
                 let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                buf.clear();
-                item.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
+                state.leaf_encoded(pos, item)
             },
         );
 

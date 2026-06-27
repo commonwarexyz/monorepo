@@ -2,6 +2,7 @@
 
 use crate::merkle::{Bagging, Error, Family, Location, Position};
 use alloc::vec::Vec;
+use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::marker::PhantomData;
 
@@ -176,6 +177,38 @@ impl<H: CHasher> Standard<H> {
     /// Compute the digest of a byte slice.
     pub fn digest(&self, data: &[u8]) -> H::Digest {
         self.hash(core::iter::once(data))
+    }
+
+    /// Create reusable hashing state for a local batch of Merkle operations.
+    pub(crate) fn state(&self) -> StandardState<H> {
+        StandardState { hasher: H::new() }
+    }
+}
+
+/// Reusable hashing state for a local run of Merkle operations.
+pub(crate) struct StandardState<H: CHasher> {
+    hasher: H,
+}
+
+impl<H: CHasher> StandardState<H> {
+    /// Hash a fixed-position Merkle node.
+    pub(crate) fn node_digest<F: Family>(
+        &mut self,
+        pos: Position<F>,
+        left: &H::Digest,
+        right: &H::Digest,
+    ) -> H::Digest {
+        self.hasher.hash_u64_digest_pair(*pos, left, right)
+    }
+
+    /// Hash a fixed-position leaf from an encoded value.
+    pub(crate) fn leaf_encoded<F: Family, E: Encode>(
+        &mut self,
+        pos: Position<F>,
+        value: &E,
+    ) -> H::Digest {
+        let pos = (*pos).to_be_bytes();
+        self.hasher.hash_prefixed(pos.as_slice(), value)
     }
 }
 

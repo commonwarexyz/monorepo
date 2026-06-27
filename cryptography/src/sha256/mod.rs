@@ -25,7 +25,7 @@ use crate::Hasher;
 use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    DecodeExt, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
+    DecodeExt, Encode, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -100,6 +100,11 @@ impl Hasher for Sha256 {
     }
 
     #[inline]
+    fn hash(message: &[u8]) -> Self::Digest {
+        digest_from_output(ISha256::digest(message).into())
+    }
+
+    #[inline]
     fn hash_parts<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
         let mut len = 0usize;
         let mut parts = parts.into_iter();
@@ -130,6 +135,118 @@ impl Hasher for Sha256 {
         self.hasher.reset();
         digest
     }
+
+    #[inline]
+    fn hash_encoded<E: Encode>(&mut self, value: &E) -> Self::Digest {
+        self.hash_prefixed(&[], value)
+    }
+
+    #[inline]
+    fn hash_prefixed<E: Encode>(&mut self, prefix: &[u8], value: &E) -> Self::Digest {
+        let Some(len) = prefix.len().checked_add(value.encode_size()) else {
+            self.hasher.reset();
+            self.hasher.update(prefix);
+            self.hasher.update(value.encode().as_ref());
+            return digest_from_output(self.hasher.finalize_reset().into());
+        };
+        if len > MAX_FIXED_PREIMAGE {
+            self.hasher.reset();
+            self.hasher.update(prefix);
+            self.hasher.update(value.encode().as_ref());
+            return digest_from_output(self.hasher.finalize_reset().into());
+        }
+
+        write_scratch(&mut self.scratch[..prefix.len()], prefix);
+        let mut tail: &mut [u8] = &mut self.scratch[prefix.len()..len];
+        value.write(&mut tail);
+        assert_eq!(tail.len(), 0, "encode_size() did not match write()");
+        let digest = finalize_fixed(&mut self.scratch, len);
+        self.hasher.reset();
+        digest
+    }
+
+    #[inline]
+    fn hash_empty(&mut self) -> Self::Digest {
+        finalize_fixed(&mut self.scratch, 0)
+    }
+
+    #[inline]
+    fn hash_u32_digest(&mut self, prefix: u32, digest: &Self::Digest) -> Self::Digest {
+        write_scratch(&mut self.scratch[..4], &prefix.to_be_bytes());
+        write_scratch(&mut self.scratch[4..36], digest.as_ref());
+        finalize_fixed_36(&mut self.scratch)
+    }
+
+    #[inline]
+    fn hash_digest_pair(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
+        write_scratch(&mut self.scratch[..32], left.as_ref());
+        write_scratch(&mut self.scratch[32..64], right.as_ref());
+        finalize_fixed_64(&mut self.scratch)
+    }
+
+    #[inline]
+    fn merge_digest_pair(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
+        write_scratch(&mut self.scratch[..32], left.as_ref());
+        write_scratch(&mut self.scratch[32..64], right.as_ref());
+
+        let mut state = INITIAL_STATE;
+        let (blocks, remainder) = self.scratch[..BLOCK_LENGTH].as_chunks::<BLOCK_LENGTH>();
+        debug_assert!(remainder.is_empty());
+        compress256(&mut state, blocks);
+        digest_from_state(state)
+    }
+
+    #[inline]
+    fn hash_u64_digest_pair(
+        &mut self,
+        prefix: u64,
+        left: &Self::Digest,
+        right: &Self::Digest,
+    ) -> Self::Digest {
+        write_scratch(&mut self.scratch[..8], &prefix.to_be_bytes());
+        write_scratch(&mut self.scratch[8..40], left.as_ref());
+        write_scratch(&mut self.scratch[40..72], right.as_ref());
+        finalize_fixed_72(&mut self.scratch)
+    }
+}
+
+#[inline]
+fn finalize_fixed_36(scratch: &mut [u8; SCRATCH_LEN]) -> Digest {
+    scratch[36] = 0x80;
+    scratch[37..56].fill(0);
+    write_scratch(&mut scratch[56..64], &[0, 0, 0, 0, 0, 0, 0x01, 0x20]);
+
+    let mut state = INITIAL_STATE;
+    let (blocks, remainder) = scratch[..BLOCK_LENGTH].as_chunks::<BLOCK_LENGTH>();
+    debug_assert!(remainder.is_empty());
+    compress256(&mut state, blocks);
+    digest_from_state(state)
+}
+
+#[inline]
+fn finalize_fixed_64(scratch: &mut [u8; SCRATCH_LEN]) -> Digest {
+    scratch[64] = 0x80;
+    scratch[65..120].fill(0);
+    write_scratch(&mut scratch[120..128], &[0, 0, 0, 0, 0, 0, 0x02, 0x00]);
+
+    let mut state = INITIAL_STATE;
+    let (blocks, remainder) = scratch[..SCRATCH_LEN].as_chunks::<BLOCK_LENGTH>();
+    debug_assert!(remainder.is_empty());
+    compress256(&mut state, blocks);
+    digest_from_state(state)
+}
+
+#[inline]
+fn finalize_fixed_72(scratch: &mut [u8; SCRATCH_LEN]) -> Digest {
+    scratch[72] = 0x80;
+    scratch[73..120].fill(0);
+    write_scratch(&mut scratch[120..128], &[0, 0, 0, 0, 0, 0, 0x02, 0x40]);
+
+    let mut state = INITIAL_STATE;
+    let (blocks, remainder) = scratch[..SCRATCH_LEN].as_chunks::<BLOCK_LENGTH>();
+    debug_assert!(remainder.is_empty());
+    compress256(&mut state, blocks);
+    digest_from_state(state)
 }
 
 #[inline]
@@ -344,6 +461,18 @@ mod tests {
             hasher.hash_parts([b"fresh".as_slice()]),
             streaming_hash_parts(&[b"fresh".as_slice()])
         );
+    }
+
+    #[test]
+    fn test_hash_encoded_matches_streaming() {
+        let mut hasher = Sha256::new();
+        let value = (7u32, Sha256::hash(b"leaf"));
+        let prefix = 42u64.to_be_bytes();
+        let mut encoded = prefix.to_vec();
+        encoded.extend_from_slice(value.encode().as_ref());
+
+        assert_eq!(hasher.hash_encoded(&value), Sha256::hash(value.encode().as_ref()));
+        assert_eq!(hasher.hash_prefixed(&prefix, &value), Sha256::hash(&encoded));
     }
 
     #[cfg(feature = "arbitrary")]

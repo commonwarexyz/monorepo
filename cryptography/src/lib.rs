@@ -287,6 +287,68 @@ commonware_macros::stability_scope!(BETA {
             }
             self.finalize()
         }
+
+        /// Hash an encoded value as one contiguous message.
+        #[inline]
+        fn hash_encoded<E: Encode>(&mut self, value: &E) -> Self::Digest {
+            let encoded = value.encode();
+            self.hash_parts([encoded.as_ref()])
+        }
+
+        /// Hash a byte prefix followed by an encoded value as one contiguous message.
+        #[inline]
+        fn hash_prefixed<E: Encode>(&mut self, prefix: &[u8], value: &E) -> Self::Digest {
+            let encoded = value.encode();
+            self.hash_parts([prefix, encoded.as_ref()])
+        }
+
+        /// Hash an empty message.
+        #[doc(hidden)]
+        #[inline]
+        fn hash_empty(&mut self) -> Self::Digest {
+            self.hash_parts(core::iter::empty::<&[u8]>())
+        }
+
+        /// Hash a `u32` followed by a digest.
+        #[doc(hidden)]
+        #[inline]
+        fn hash_u32_digest(&mut self, prefix: u32, digest: &Self::Digest) -> Self::Digest {
+            self.hash_parts([prefix.to_be_bytes().as_slice(), digest.as_ref()])
+        }
+
+        /// Hash two digests.
+        #[doc(hidden)]
+        #[inline]
+        fn hash_digest_pair(
+            &mut self,
+            left: &Self::Digest,
+            right: &Self::Digest,
+        ) -> Self::Digest {
+            self.hash_parts([left.as_ref(), right.as_ref()])
+        }
+
+        /// Merge two Merkle child digests.
+        #[doc(hidden)]
+        #[inline]
+        fn merge_digest_pair(
+            &mut self,
+            left: &Self::Digest,
+            right: &Self::Digest,
+        ) -> Self::Digest {
+            self.hash_digest_pair(left, right)
+        }
+
+        /// Hash a `u64` followed by two digests.
+        #[doc(hidden)]
+        #[inline]
+        fn hash_u64_digest_pair(
+            &mut self,
+            prefix: u64,
+            left: &Self::Digest,
+            right: &Self::Digest,
+        ) -> Self::Digest {
+            self.hash_parts([prefix.to_be_bytes().as_slice(), left.as_ref(), right.as_ref()])
+        }
     }
 });
 
@@ -619,6 +681,20 @@ mod tests {
         assert_eq!(digest, H::hash(b"hello world"));
     }
 
+    fn test_hasher_hash_encoded<H: Hasher>() {
+        let mut hasher = H::new();
+        let value = (1u32, 2u64);
+        assert_eq!(
+            hasher.hash_encoded(&value),
+            H::hash(value.encode().as_ref())
+        );
+
+        let prefix = b"prefix";
+        let mut encoded = prefix.to_vec();
+        encoded.extend_from_slice(value.encode().as_ref());
+        assert_eq!(hasher.hash_prefixed(prefix, &value), H::hash(&encoded));
+    }
+
     #[test]
     fn test_sha256_hasher_multiple_runs() {
         test_hasher_multiple_runs::<Sha256>();
@@ -642,5 +718,10 @@ mod tests {
     #[test]
     fn test_sha256_hasher_hash_parts() {
         test_hasher_hash_parts::<Sha256>();
+    }
+
+    #[test]
+    fn test_sha256_hasher_hash_encoded() {
+        test_hasher_hash_encoded::<Sha256>();
     }
 }

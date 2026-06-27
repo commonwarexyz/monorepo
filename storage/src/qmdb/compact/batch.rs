@@ -18,6 +18,7 @@ where
     S: Strategy,
     Op: EncodeShared,
 {
+    let hasher = crate::qmdb::hasher::<H>();
     let first_leaf = batch.leaves();
 
     // Hash before `with_mem` borrows committed Merkle state under its read lock.
@@ -26,15 +27,11 @@ where
             .strategy()
             .map_init_collect_vec(
                 ops.iter().enumerate(),
-                || (Vec::new(), H::new()),
+                || hasher.state(),
                 |state, (i, op)| {
-                    let (buf, state) = state;
                     let offset = u64::try_from(i).expect("operation offset exceeds u64");
                     let pos = F::location_to_position(first_leaf + offset);
-                    let pos = (*pos).to_be_bytes();
-                    buf.clear();
-                    op.write(buf);
-                    state.hash_parts([pos.as_slice(), buf.as_slice()])
+                    state.leaf_encoded(pos, op)
                 },
             );
 

@@ -81,7 +81,11 @@
 //! ```
 
 use crate::merkle::{
-    hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
+    hasher::{Hasher, Standard},
+    mem::Mem,
+    path,
+    proof::Proof,
+    Bagging, Error, Family, Location, Position, Readable,
 };
 use ahash::RandomState;
 use alloc::{
@@ -94,6 +98,8 @@ use core::ops::Range;
 
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
+
+const SEQUENTIAL_BUCKET_THRESHOLD: usize = 128;
 
 /// Push a dirty node position into its height bucket, growing the outer Vec as needed.
 fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
@@ -413,6 +419,17 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         positions: &[Position<F>],
         height: u32,
     ) {
+        if positions.len() < SEQUENTIAL_BUCKET_THRESHOLD {
+            for &pos in positions {
+                let (left, right) = F::children(pos, height);
+                let left_d = self.get_node(base, left).expect("left child missing");
+                let right_d = self.get_node(base, right).expect("right child missing");
+                let digest = hasher.node_digest(pos, &left_d, &right_d);
+                self.store_node(pos, digest);
+            }
+            return;
+        }
+
         let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
             positions,
             || (),
@@ -440,20 +457,26 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         H: CHasher<Digest = D>,
         M: Fn(Position<F>) -> Position<F> + Copy + Send + Sync,
     {
+        if positions.len() < SEQUENTIAL_BUCKET_THRESHOLD {
+            let mut state = Standard::<H>::new(Bagging::ForwardFold).state();
+            for &pos in positions {
+                let (left, right) = F::children(pos, height);
+                let left_d = self.get_node(base, left).expect("left child missing");
+                let right_d = self.get_node(base, right).expect("right child missing");
+                let digest = state.node_digest(map_pos(pos), &left_d, &right_d);
+                self.store_node(pos, digest);
+            }
+            return;
+        }
+
         let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
             positions,
-            H::new,
+            || Standard::<H>::new(Bagging::ForwardFold).state(),
             |state, &pos| {
                 let (left, right) = F::children(pos, height);
                 let left_d = self.get_node(base, left).expect("left child missing");
                 let right_d = self.get_node(base, right).expect("right child missing");
-                let hash_pos = map_pos(pos);
-                let hash_pos = (*hash_pos).to_be_bytes();
-                let digest = state.hash_parts([
-                    hash_pos.as_slice(),
-                    left_d.as_ref(),
-                    right_d.as_ref(),
-                ]);
+                let digest = state.node_digest(map_pos(pos), &left_d, &right_d);
                 (pos, digest)
             },
         );
