@@ -2164,9 +2164,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("storage"), cfg)
-                .await
-                .unwrap();
+            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
             journal.append(1, &7i32).await.unwrap();
 
             let result = journal.replay(1, u64::MAX, NZUsize!(1024)).await;
