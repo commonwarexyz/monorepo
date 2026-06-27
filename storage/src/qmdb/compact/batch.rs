@@ -22,18 +22,15 @@ where
     let first_leaf = batch.leaves();
 
     // Hash before `with_mem` borrows committed Merkle state under its read lock.
-    let leaf_digests =
-        merkle
-            .strategy()
-            .map_init_collect_vec(
-                ops.iter().enumerate(),
-                || hasher.state(),
-                |state, (i, op)| {
-                    let offset = u64::try_from(i).expect("operation offset exceeds u64");
-                    let pos = F::location_to_position(first_leaf + offset);
-                    state.leaf_encoded(pos, op)
-                },
-            );
+    let leaf_digests = merkle.strategy().map_init_collect_vec(
+        ops.iter().enumerate(),
+        || hasher.state(),
+        |state, (i, op)| {
+            let offset = u64::try_from(i).expect("operation offset exceeds u64");
+            let pos = F::location_to_position(first_leaf + offset);
+            state.leaf_encoded(pos, op)
+        },
+    );
 
     let batch = batch.add_leaf_digests(leaf_digests);
     merkle.with_mem(|mem| batch.merkleize_reusing::<H>(mem))

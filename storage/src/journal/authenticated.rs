@@ -11,11 +11,8 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self, batch,
-        full::Merkle,
-        hasher::Standard as StandardHasher,
-        mem::Mem,
-        Bagging, Family, Location, Position, Proof, Readable,
+        self, batch, full::Merkle, hasher::Standard as StandardHasher, mem::Mem, Bagging, Family,
+        Location, Position, Proof, Readable,
     },
     Context,
 };

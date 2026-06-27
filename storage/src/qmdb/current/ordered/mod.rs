@@ -505,9 +505,7 @@ pub mod tests {
                 let (proof, ops, chunks) =
                     db.range_proof(&hasher, loc, NZU64!(max_ops)).await.unwrap();
                 assert!(
-                    TestDb::<F, C, V>::verify_range_proof(
-                        &proof, loc, &ops, &chunks, &root
-                    ),
+                    TestDb::<F, C, V>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
                 );
                 // Proof should not verify if we include extra chunks.

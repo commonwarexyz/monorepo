@@ -922,13 +922,10 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
         let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
@@ -1019,13 +1016,10 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
         let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
@@ -1125,13 +1119,10 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
         let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
@@ -1225,13 +1216,10 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
         let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
@@ -1318,13 +1306,10 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
         let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
@@ -1385,9 +1370,14 @@ mod tests {
         let (hasher, proof, operations, chunks, root, ops) =
             current_range_proof_fixture::<F, N>(18, start..end).await;
 
-        let extracted =
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(&proof, start, &operations, &chunks, &root)
-                .unwrap();
+        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            &proof,
+            start,
+            &operations,
+            &chunks,
+            &root,
+        )
+        .unwrap();
         assert!(!extracted.is_empty());
 
         // The extractor should return the authenticated digest for every proven leaf.
@@ -1448,9 +1438,14 @@ mod tests {
         let (_, proof, operations, chunks, root, _ops) =
             current_range_proof_fixture::<F, N>(6, start..end).await;
 
-        let extracted =
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(&proof, start, &operations, &chunks, &root)
-                .unwrap();
+        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            &proof,
+            start,
+            &operations,
+            &chunks,
+            &root,
+        )
+        .unwrap();
 
         assert!(!extracted.is_empty());
     }
@@ -1691,13 +1686,10 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
         let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
@@ -2117,13 +2109,10 @@ mod tests {
                 )
             })
             .collect();
-        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-            &ops,
-            chunk_inputs,
-            &Sequential,
-        )
-        .await
-        .unwrap();
+        let mut leaf_digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                .await
+                .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
 
         let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);

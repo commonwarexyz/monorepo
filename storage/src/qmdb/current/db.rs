@@ -965,7 +965,8 @@ pub(super) async fn compute_db_root<
     ops_root: &H::Digest,
 ) -> Result<H::Digest, Error<F>> {
     let grafted_root =
-        compute_grafted_root::<F, H, B, S, N>(status, storage, ops_leaves, inactivity_floor).await?;
+        compute_grafted_root::<F, H, B, S, N>(status, storage, ops_leaves, inactivity_floor)
+            .await?;
     let mut hasher = H::new();
     let pending = pending_chunk::<F, B, N>(status, ops_leaves, grafting::height::<N>())?
         .map(|chunk| hasher.hash_parts([chunk.as_slice()]));
@@ -1309,7 +1310,8 @@ mod tests {
         let only_pending = combine_roots::<Sha256>(&ops, &grafted, Some(&pending_digest), None);
         let only_partial =
             combine_roots::<Sha256>(&ops, &grafted, None, Some((5, &partial_digest)));
-        let both = combine_roots::<Sha256>(&ops,
+        let both = combine_roots::<Sha256>(
+            &ops,
             &grafted,
             Some(&pending_digest),
             Some((5, &partial_digest)),
@@ -1367,11 +1369,7 @@ mod tests {
 
         // Both: pending precedes partial.
         assert_eq!(
-            combine_roots::<Sha256>(&ops,
-                &grafted,
-                Some(&pending),
-                Some((next_bit, &partial))
-            ),
+            combine_roots::<Sha256>(&ops, &grafted, Some(&pending), Some((next_bit, &partial))),
             hasher.hash([
                 ops.as_ref(),
                 grafted.as_ref(),

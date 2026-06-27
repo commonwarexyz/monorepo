@@ -91,7 +91,8 @@ impl<H: Hasher> Builder<H> {
     /// When added, the leaf is hashed with its position.
     pub fn add(&mut self, leaf: &H::Digest) -> u32 {
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
-        self.leaves.push(self.hasher.hash_u32_digest(position, leaf));
+        self.leaves
+            .push(self.hasher.hash_u32_digest(position, leaf));
         position
     }
 
@@ -1008,8 +1009,7 @@ mod tests {
         for (i, digest) in digests.iter().enumerate() {
             let range_proof = tree.range_proof(i as u32, i as u32).unwrap();
 
-            let result =
-                range_proof.verify_range_inclusion::<Sha256>(i as u32, &[*digest], &root);
+            let result = range_proof.verify_range_inclusion::<Sha256>(i as u32, &[*digest], &root);
             assert!(result.is_ok());
         }
     }

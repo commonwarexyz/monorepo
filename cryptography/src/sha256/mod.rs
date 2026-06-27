@@ -429,7 +429,9 @@ mod tests {
         let right = Sha256::hash(b"right");
         let mut hasher = Sha256::new();
 
-        for len in [0usize, 1, 54, 55, 56, 63, 64, 71, 72, 118, 119, 120, 200, 1000] {
+        for len in [
+            0usize, 1, 54, 55, 56, 63, 64, 71, 72, 118, 119, 120, 200, 1000,
+        ] {
             let blob = vec![0xABu8; len];
             assert_eq!(
                 hasher.hash_parts([blob.as_slice()]),
@@ -462,8 +464,14 @@ mod tests {
         let mut encoded = prefix.to_vec();
         encoded.extend_from_slice(value.encode().as_ref());
 
-        assert_eq!(hasher.hash_encoded(&value), Sha256::hash(value.encode().as_ref()));
-        assert_eq!(hasher.hash_prefixed(&prefix, &value), Sha256::hash(&encoded));
+        assert_eq!(
+            hasher.hash_encoded(&value),
+            Sha256::hash(value.encode().as_ref())
+        );
+        assert_eq!(
+            hasher.hash_prefixed(&prefix, &value),
+            Sha256::hash(&encoded)
+        );
     }
 
     #[cfg(feature = "arbitrary")]
