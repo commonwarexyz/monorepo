@@ -322,7 +322,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                     .await
                     .expect("proof generation should not fail for committed key");
                 assert!(
-                    Db::<F>::verify_key_value_proof(&hasher, k, v, &proof, &root),
+                    Db::<F>::verify_key_value_proof(k, v, &proof, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
@@ -337,7 +337,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                     .await
                     .expect("range proof should not fail after recovery");
                 assert!(
-                    Db::<F>::verify_range_proof(&hasher, &proof, loc, &ops, &chunks, &root),
+                    Db::<F>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }
