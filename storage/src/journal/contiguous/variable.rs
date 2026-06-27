@@ -191,7 +191,7 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
                 }
                 Ok(false) => {}
                 Err(err) => {
-                    batch.push(Err(err.into()));
+                    batch.push(Err(err));
                     self.pos = self.end_pos;
                     return Some((batch, self));
                 }
@@ -225,7 +225,7 @@ impl<B: RBlob, V: CodecShared> DataReplayState<'_, B, V> {
                     return Some((batch, self));
                 }
                 Err(err) => {
-                    batch.push(Err(err.into()));
+                    batch.push(Err(err));
                     self.pos = self.end_pos;
                     return Some((batch, self));
                 }

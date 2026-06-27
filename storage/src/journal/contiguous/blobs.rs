@@ -543,7 +543,7 @@ impl<'a, B: RBlob> Replay<'a, B> {
         })
     }
 
-    pub(super) fn is_exhausted(&self) -> bool {
+    pub(super) const fn is_exhausted(&self) -> bool {
         match &self.inner {
             ReplayInner::Paged(replay) => replay.is_exhausted(),
             ReplayInner::View(replay) => replay.is_exhausted(),
