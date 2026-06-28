@@ -294,9 +294,11 @@ impl Checksum {
 
     /// Returns one checksum slot in its storage representation.
     fn slot_bytes(len: u16, crc: u32) -> [u8; CHECKSUM_SLOT_SIZE] {
-        Self::new(len, crc).to_bytes()[..CHECKSUM_SLOT_SIZE]
-            .try_into()
-            .expect("checksum slot size is fixed")
+        let mut bytes = [0; CHECKSUM_SLOT_SIZE];
+        let mut buf = bytes.as_mut_slice();
+        len.write(&mut buf);
+        crc.write(&mut buf);
+        bytes
     }
 }
 
