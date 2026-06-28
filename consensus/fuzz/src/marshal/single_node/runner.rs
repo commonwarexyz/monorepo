@@ -228,11 +228,16 @@ fn shadow_repair(
 /// sync with what marshal actually delivered, rather than treating the resolution
 /// as speculative forever.
 ///
+/// A delivery can also be a backward-repaired ancestor of a higher finalized
+/// anchor. Publishing the ancestor into the variant cache does not itself wake
+/// marshal repair, so the driver reconciles that case lazily only after marshal
+/// actually delivers the ancestor. `shadow_repair` must then prove the
+/// contiguous path from the higher anchor is locally available.
+///
 /// Marshal delivers in order, so the next legitimate delivery is always
-/// `ready_prefix + 1`; we materialize that height (when witnessed) and let
-/// `shadow_repair` extend through the already-available run. A delivery with no
-/// finalization or no fetch witness is rejected, so a marshal that dispatched
-/// through a genuinely unresolved height is still caught.
+/// `ready_prefix + 1`. A delivery with no finalization, no fetch witness, and no
+/// repairable higher anchor is rejected, so a marshal that dispatched through a
+/// genuinely unresolved height is still caught.
 #[allow(clippy::too_many_arguments)]
 fn observe_ready_delivery(
     height: Height,
@@ -246,23 +251,34 @@ fn observe_ready_delivery(
     processed_height: u64,
 ) {
     let h = height.get();
-    if h == *ready_prefix + 1
-        && finalization_reported.contains(&h)
-        && (block_available(durable_available, variant_available, h)
-            || network_available.contains(&h))
-    {
-        durable_available.insert(h);
-        finalized_available.insert(h);
-        if *pending_floor == Some(h) {
-            *pending_floor = None;
+    if h == *ready_prefix + 1 {
+        if finalization_reported.contains(&h)
+            && (block_available(durable_available, variant_available, h)
+                || network_available.contains(&h))
+        {
+            durable_available.insert(h);
+            finalized_available.insert(h);
+            if *pending_floor == Some(h) {
+                *pending_floor = None;
+            }
+            shadow_repair(
+                processed_height,
+                durable_available,
+                variant_available,
+                finalized_available,
+                ready_prefix,
+            );
+        } else if block_available(durable_available, variant_available, h)
+            && finalized_available.iter().any(|&anchor| anchor > h)
+        {
+            shadow_repair(
+                processed_height,
+                durable_available,
+                variant_available,
+                finalized_available,
+                ready_prefix,
+            );
         }
-        shadow_repair(
-            processed_height,
-            durable_available,
-            variant_available,
-            finalized_available,
-            ready_prefix,
-        );
     }
     assert!(
         h <= *ready_prefix,
