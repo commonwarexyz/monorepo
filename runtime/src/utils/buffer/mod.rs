@@ -8,6 +8,58 @@ mod write;
 pub use read::Read;
 pub use write::Write;
 
+/// Tracks whether plain blob mutations still need a full durability barrier.
+struct SyncState {
+    needs_sync: bool,
+}
+
+impl SyncState {
+    const fn new(needs_sync: bool) -> Self {
+        Self { needs_sync }
+    }
+
+    fn mark_unsynced(&mut self) {
+        self.needs_sync = true;
+    }
+
+    async fn write_at(
+        &mut self,
+        blob: &impl crate::Blob,
+        offset: u64,
+        bufs: impl Into<crate::IoBufs> + Send,
+    ) -> Result<(), crate::Error> {
+        blob.write_at(offset, bufs).await?;
+        self.needs_sync = true;
+        Ok(())
+    }
+
+    async fn write_at_sync(
+        &mut self,
+        blob: &impl crate::Blob,
+        offset: u64,
+        bufs: impl Into<crate::IoBufs> + Send,
+    ) -> Result<(), crate::Error> {
+        if self.needs_sync {
+            self.write_at(blob, offset, bufs).await?;
+            self.sync(blob).await
+        } else {
+            self.needs_sync = true;
+            blob.write_at_sync(offset, bufs).await?;
+            self.needs_sync = false;
+            Ok(())
+        }
+    }
+
+    async fn sync(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
+        if !self.needs_sync {
+            return Ok(());
+        }
+        blob.sync().await?;
+        self.needs_sync = false;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

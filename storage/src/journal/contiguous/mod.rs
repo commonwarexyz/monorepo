@@ -8,8 +8,8 @@
 //! leave its in-memory state inconsistent with the underlying storage.
 
 use super::Error;
-use futures::Stream;
-use std::{future::Future, num::NonZeroUsize, ops::Range};
+use futures::{stream, Stream};
+use std::{collections::VecDeque, future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
 mod blobs;
@@ -33,6 +33,17 @@ fn batch_count_to_blob_boundary(position: u64, remaining: usize, items_per_blob:
     remaining_space.min(remaining as u64) as usize
 }
 
+/// Return the blob containing `position`.
+const fn position_to_blob(position: u64, items_per_blob: u64) -> u64 {
+    position / items_per_blob
+}
+
+/// Return the first position stored in `blob`.
+fn blob_first_position(blob: u64, items_per_blob: u64) -> Result<u64, Error> {
+    blob.checked_mul(items_per_blob)
+        .ok_or(Error::OffsetOverflow)
+}
+
 /// Return the exclusive logical end for `blob`, clamped to `end`.
 const fn blob_end_position(blob: u64, items_per_blob: u64, end: u64) -> u64 {
     // No positions exist, so `end - 1` would underflow
@@ -48,6 +59,86 @@ const fn blob_end_position(blob: u64, items_per_blob: u64, end: u64) -> u64 {
 
     // Earlier blobs have a representable natural boundary
     (blob + 1) * items_per_blob
+}
+
+/// Per-blob replay state that yields decoded item batches.
+trait ReplayBatchState: Sized {
+    /// The decoded item type.
+    type Item;
+
+    /// Decode the next batch from this blob state.
+    fn next_batch(
+        self,
+    ) -> impl Future<Output = Option<(Vec<Result<(u64, Self::Item), Error>>, Self)>> + Send;
+}
+
+/// Stream driver over per-blob replay states.
+struct ReplayStreamState<S: ReplayBatchState> {
+    /// Remaining blob states, in ascending blob order.
+    states: std::vec::IntoIter<S>,
+    /// State currently being drained.
+    current: Option<S>,
+    /// Items decoded from the current state but not yet yielded by the stream.
+    pending: VecDeque<Result<(u64, S::Item), Error>>,
+    /// Set after the first error so the stream terminates cleanly.
+    done: bool,
+}
+
+impl<S: ReplayBatchState + Send> ReplayStreamState<S>
+where
+    S::Item: Send,
+{
+    /// Yield one item, filling `pending` from the current blob when needed.
+    async fn next(mut self) -> Option<(Result<(u64, S::Item), Error>, Self)> {
+        loop {
+            if self.done {
+                return None;
+            }
+
+            if let Some(item) = self.pending.pop_front() {
+                if item.is_err() {
+                    self.done = true;
+                    self.pending.clear();
+                    self.current = None;
+                }
+                return Some((item, self));
+            }
+
+            let state = match self.current.take().or_else(|| self.states.next()) {
+                Some(state) => state,
+                None => return None,
+            };
+
+            match state.next_batch().await {
+                Some((batch, state)) => {
+                    self.current = Some(state);
+                    self.pending = VecDeque::from(batch);
+                }
+                None => {
+                    self.current = None;
+                }
+            }
+        }
+    }
+}
+
+/// Build a stream from per-blob replay states.
+fn replay_stream_from_states<S>(
+    states: Vec<S>,
+) -> impl Stream<Item = Result<(u64, S::Item), Error>> + Send
+where
+    S: ReplayBatchState + Send,
+    S::Item: Send,
+{
+    stream::unfold(
+        ReplayStreamState {
+            states: states.into_iter(),
+            current: None,
+            pending: VecDeque::new(),
+            done: false,
+        },
+        ReplayStreamState::next,
+    )
 }
 
 /// A read-only, position-based view of a contiguous journal.

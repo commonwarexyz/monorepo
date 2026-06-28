@@ -291,6 +291,13 @@ impl Checksum {
     fn to_bytes(&self) -> [u8; CHECKSUM_SIZE as usize] {
         self.encode_fixed()
     }
+
+    /// Returns one checksum slot in its storage representation.
+    fn slot_bytes(len: u16, crc: u32) -> [u8; CHECKSUM_SLOT_SIZE] {
+        Self::new(len, crc).to_bytes()[..CHECKSUM_SLOT_SIZE]
+            .try_into()
+            .expect("checksum slot size is fixed")
+    }
 }
 
 impl Write for Checksum {

@@ -110,9 +110,9 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Writer},
     Blob as RBlob, Buf, IoBuf,
 };
-use futures::{stream, Stream};
+use futures::Stream;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     future::Future,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
@@ -131,9 +131,7 @@ pub struct PreparedAppend<A> {
 /// Return the first retained logical position in `blob`.
 #[inline]
 fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Result<u64, Error> {
-    let start = blob
-        .checked_mul(items_per_blob)
-        .ok_or(Error::OffsetOverflow)?;
+    let start = super::blob_first_position(blob, items_per_blob)?;
     Ok(pruning_boundary.max(start))
 }
 
@@ -159,8 +157,8 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     let mut states = Vec::new();
     if start_pos < bounds.end {
         let items_per_blob = items_per_blob.get();
-        let start_blob = start_pos / items_per_blob;
-        let end_blob = (bounds.end - 1) / items_per_blob;
+        let start_blob = super::position_to_blob(start_pos, items_per_blob);
+        let end_blob = super::position_to_blob(bounds.end - 1, items_per_blob);
         let items_per_batch = (buffer.get() / A::SIZE).max(1);
 
         for blob in start_blob..=end_blob {
@@ -190,15 +188,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
         }
     }
 
-    Ok(stream::unfold(
-        ReplayStreamState {
-            states: states.into_iter(),
-            current: None,
-            pending: VecDeque::new(),
-            done: false,
-        },
-        ReplayStreamState::next,
-    ))
+    Ok(super::replay_stream_from_states(states))
 }
 
 /// Replay state for one fixed-size blob.
@@ -214,7 +204,9 @@ struct FixedReplayState<'a, B: RBlob, A> {
     _marker: PhantomData<A>,
 }
 
-impl<B: RBlob, A: CodecFixedShared> FixedReplayState<'_, B, A> {
+impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState<'_, B, A> {
+    type Item = A;
+
     /// Decode the next batch of fixed-size items from this blob.
     async fn next_batch(mut self) -> Option<(Vec<Result<(u64, A), Error>>, Self)> {
         if self.pos == self.end_pos {
@@ -266,55 +258,6 @@ impl<B: RBlob, A: CodecFixedShared> FixedReplayState<'_, B, A> {
         }
         self.pos = next_pos;
         Some((batch, self))
-    }
-}
-
-/// Stream driver over fixed-size blob replay states.
-struct ReplayStreamState<'a, B: RBlob, A> {
-    /// Remaining blob states, in ascending blob order.
-    states: std::vec::IntoIter<FixedReplayState<'a, B, A>>,
-    /// State currently being drained.
-    current: Option<FixedReplayState<'a, B, A>>,
-    /// Items decoded from the current state but not yet yielded by the stream.
-    pending: VecDeque<Result<(u64, A), Error>>,
-    /// Set after the first error so the stream terminates cleanly.
-    done: bool,
-}
-
-impl<'a, B: RBlob, A: CodecFixedShared> ReplayStreamState<'a, B, A> {
-    /// Yield one item, filling `pending` from the current blob when needed.
-    async fn next(mut self) -> Option<(Result<(u64, A), Error>, Self)> {
-        loop {
-            if self.done {
-                return None;
-            }
-
-            // After an error, no later blob can be trusted as a continuation of the requested
-            // replay.
-            if let Some(item) = self.pending.pop_front() {
-                if item.is_err() {
-                    self.done = true;
-                    self.pending.clear();
-                    self.current = None;
-                }
-                return Some((item, self));
-            }
-
-            let state = match self.current.take().or_else(|| self.states.next()) {
-                Some(state) => state,
-                None => return None,
-            };
-
-            match FixedReplayState::next_batch(state).await {
-                Some((batch, state)) => {
-                    self.current = Some(state);
-                    self.pending = VecDeque::from(batch);
-                }
-                None => {
-                    self.current = None;
-                }
-            }
-        }
     }
 }
 
@@ -627,7 +570,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             }
             // Legacy journals have no watermark. Under the old rollover-sync invariant, all
             // non-tail blobs are durable; only the tail may have unfsynced data.
-            None => first_in_blob(pruning_boundary, size / items_per_blob, items_per_blob)?,
+            None => first_in_blob(
+                pruning_boundary,
+                super::position_to_blob(size, items_per_blob),
+                items_per_blob,
+            )?,
         };
 
         Ok(RecoveredBounds {
@@ -649,9 +596,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         items_per_blob: u64,
     ) -> Result<u64, Error> {
         let blob_boundary = match oldest_blob {
-            Some(oldest) => oldest
-                .checked_mul(items_per_blob)
-                .ok_or(Error::OffsetOverflow)?,
+            Some(oldest) => super::blob_first_position(oldest, items_per_blob)?,
             None => 0,
         };
 
@@ -662,7 +607,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok(blob_boundary);
         }
 
-        let hint_blob = boundary_hint / items_per_blob;
+        let hint_blob = super::position_to_blob(boundary_hint, items_per_blob);
         match oldest_blob {
             Some(oldest_blob) if hint_blob == oldest_blob => Ok(boundary_hint),
             Some(oldest_blob) if hint_blob < oldest_blob => {
@@ -704,9 +649,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             .map_or(0, |writer| writer.size() / Self::CHUNK_SIZE_U64);
         // A blob's capacity is `items_per_blob`, unless the pruning boundary falls mid-blob
         // (from `init_at_size`), in which case the skipped prefix reduces it.
-        let start = blob
-            .checked_mul(items_per_blob)
-            .ok_or(Error::OffsetOverflow)?;
+        let start = super::blob_first_position(blob, items_per_blob)?;
         let skipped = pruning_boundary.saturating_sub(start).min(items_per_blob);
         let capacity = items_per_blob - skipped;
         Ok(match len.cmp(&capacity) {
@@ -1211,7 +1154,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     fn locate(&self, pos: u64) -> Result<(Blob<'_, E::Blob>, u64), Error> {
         self.validate_readable(pos)?;
         let items_per_blob = self.items_per_blob.get();
-        let blob = pos / items_per_blob;
+        let blob = super::position_to_blob(pos, items_per_blob);
         let pos_in_blob = pos - first_in_blob(self.bounds.start, blob, items_per_blob)?;
         let offset = Journal::<E, A>::items_to_bytes(pos_in_blob)?;
         let blob = self
@@ -1284,8 +1227,11 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for
         let mut result: Vec<A> = Vec::with_capacity(positions.len());
         let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
         let mut hits = 0u64;
-        for group in positions.chunk_by(|a, b| a / items_per_blob == b / items_per_blob) {
-            let blob = group[0] / items_per_blob;
+        for group in positions.chunk_by(|a, b| {
+            super::position_to_blob(*a, items_per_blob)
+                == super::position_to_blob(*b, items_per_blob)
+        }) {
+            let blob = super::position_to_blob(group[0], items_per_blob);
             let first_position = first_in_blob(pruning_boundary, blob, items_per_blob)?;
             let blob_offsets: Vec<u64> = group
                 .iter()

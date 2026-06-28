@@ -43,6 +43,7 @@ use crate::{
     buffer::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
         tip::Buffer,
+        SyncState,
     },
     Blob, Error, IoBuf, IoBufMut, IoBufs,
 };
@@ -112,8 +113,8 @@ pub struct Writer<B: Blob> {
     /// will contain its CRC record.
     partial_page_state: Option<Checksum>,
 
-    /// Whether prior plain writes or resizes must be made durable by a full sync.
-    needs_sync: bool,
+    /// Durability state for plain writes, resizes, and range-sync writes.
+    sync_state: SyncState,
 
     /// Unique id assigned to this blob by the page cache.
     id: u64,
@@ -129,9 +130,7 @@ pub struct Writer<B: Blob> {
 impl<B: Blob> Writer<B> {
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.blob.write_at(offset, bufs).await?;
-        self.needs_sync = true;
-        Ok(())
+        self.sync_state.write_at(&self.blob, offset, bufs).await
     }
 
     /// Write bytes to the underlying blob and make them durable.
@@ -143,17 +142,9 @@ impl<B: Blob> Writer<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        if self.needs_sync {
-            self.write_at(offset, bufs).await?;
-            self.sync_inner().await
-        } else {
-            // If `write_at_sync` fails, a later sync must not treat the drained
-            // buffer as durable.
-            self.needs_sync = true;
-            self.blob.write_at_sync(offset, bufs).await?;
-            self.needs_sync = false;
-            Ok(())
-        }
+        self.sync_state
+            .write_at_sync(&self.blob, offset, bufs)
+            .await
     }
 
     /// Write bytes to the underlying blob, optionally making them durable.
@@ -172,12 +163,7 @@ impl<B: Blob> Writer<B> {
 
     /// Sync the underlying blob if there are unsynced mutations.
     async fn sync_inner(&mut self) -> Result<(), Error> {
-        if !self.needs_sync {
-            return Ok(());
-        }
-        self.blob.sync().await?;
-        self.needs_sync = false;
-        Ok(())
+        self.sync_state.sync(&self.blob).await
     }
 
     /// Wrap `blob` in a [Writer]. `blob` must already hold `original_blob_size` physical bytes;
@@ -221,7 +207,7 @@ impl<B: Blob> Writer<B> {
             blob,
             current_page,
             partial_page_state,
-            needs_sync,
+            sync_state: SyncState::new(needs_sync),
             id: cache_ref.next_id(),
             cache_ref,
             buffer,
@@ -801,14 +787,6 @@ impl<B: Blob> Writer<B> {
         }
     }
 
-    /// Encode one checksum slot as `[len: u16][crc: u32]`, matching `Checksum::write`.
-    fn checksum_slot_bytes(len: u16, crc: u32) -> [u8; CHECKSUM_SLOT_SIZE] {
-        let mut bytes = [0u8; CHECKSUM_SLOT_SIZE];
-        bytes[..2].copy_from_slice(&len.to_be_bytes());
-        bytes[2..].copy_from_slice(&crc.to_be_bytes());
-        bytes
-    }
-
     /// Build a CRC record that preserves the old CRC in its original slot and places the new CRC
     /// in the other slot.
     ///
@@ -871,14 +849,18 @@ impl<B: Blob> Writer<B> {
         let new_slot_offset = crc_start
             .checked_add(new_slot_start as u64)
             .ok_or(Error::OffsetOverflow)?;
-        let staged_slot = Self::checksum_slot_bytes(0, new_crc);
+        let staged_slot = Checksum::slot_bytes(0, new_crc);
         self.write_at_sync(new_slot_offset, staged_slot.to_vec())
             .await?;
 
         // Publish the new shrunken length. If a crash happens before the old slot is invalidated,
         // both slots may be valid, but recovery still chooses the old longer length.
-        self.write_at_sync(new_slot_offset, new_len.to_be_bytes().to_vec())
-            .await?;
+        let published_slot = Checksum::slot_bytes(new_len, new_crc);
+        self.write_at_sync(
+            new_slot_offset,
+            published_slot[..std::mem::size_of::<u16>()].to_vec(),
+        )
+        .await?;
 
         // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across
         // both slots and lose the already-durable shorter checksum. Once this lands, length 0 is
@@ -1054,7 +1036,7 @@ impl<B: Blob> Writer<B> {
         // resizes need to create a pending sync.
         if new_physical_size != current_physical_size {
             self.blob.resize(new_physical_size).await?;
-            self.needs_sync = true;
+            self.sync_state.mark_unsynced();
         }
 
         // Evict cached pages at or beyond the new full-page boundary. The page at

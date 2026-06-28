@@ -4,14 +4,18 @@
 //! the preferred recovery point for replaying data to rebuild offset entries.
 
 use super::{
+    blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     fixed,
     metrics::VariableMetrics as Metrics,
-    Contiguous, Many, Mutable,
+    position_to_blob, Contiguous, Many, Mutable,
 };
 use crate::{
     journal::{
-        frame::{decode_item, decode_length_prefix, encode_frame_into, find_frame, FrameInfo},
+        frame::{
+            decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
+            FrameInfo,
+        },
         Error,
     },
     Context,
@@ -20,12 +24,12 @@ use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_macros::boxed;
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay, Writer},
-    Blob as RBlob, Buf, IoBuf, IoBufMut,
+    Blob as RBlob, Buf, IoBuf,
 };
 use commonware_utils::NZUsize;
-use futures::{stream, Stream};
+use futures::Stream;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     io::Cursor,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
@@ -178,7 +182,9 @@ struct ReplayState<'a, B: RBlob, V: Codec> {
     _marker: PhantomData<V>,
 }
 
-impl<B: RBlob, V: CodecShared> ReplayState<'_, B, V> {
+impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V> {
+    type Item = V;
+
     /// Decode the next batch of varint-framed items from this blob.
     async fn next_batch(mut self) -> Option<(Vec<Result<(u64, V), Error>>, Self)> {
         if self.pos == self.end_pos {
@@ -300,91 +306,6 @@ impl<B: RBlob, V: CodecShared> ReplayState<'_, B, V> {
             }
         }
     }
-}
-
-/// Stream driver over variable-size data-blob replay states.
-struct ReplayStreamState<'a, B: RBlob, V: Codec> {
-    /// Remaining blob states, in ascending blob order.
-    states: std::vec::IntoIter<ReplayState<'a, B, V>>,
-    /// State currently being drained.
-    current: Option<ReplayState<'a, B, V>>,
-    /// Items decoded from the current state but not yet yielded by the stream.
-    pending: VecDeque<Result<(u64, V), Error>>,
-    /// Set after the first error so the stream terminates cleanly.
-    done: bool,
-}
-
-impl<'a, B: RBlob, V: CodecShared> ReplayStreamState<'a, B, V> {
-    /// Yield one item, filling `pending` from the current blob when needed.
-    async fn next(mut self) -> Option<(Result<(u64, V), Error>, Self)> {
-        loop {
-            if self.done {
-                return None;
-            }
-
-            // A frame error means the requested replay prefix is no longer trustworthy.
-            if let Some(item) = self.pending.pop_front() {
-                if item.is_err() {
-                    self.done = true;
-                    self.pending.clear();
-                    self.current = None;
-                }
-                return Some((item, self));
-            }
-
-            let state = match self.current.take().or_else(|| self.states.next()) {
-                Some(state) => state,
-                None => return None,
-            };
-
-            match ReplayState::next_batch(state).await {
-                Some((batch, state)) => {
-                    self.current = Some(state);
-                    self.pending = VecDeque::from(batch);
-                }
-                None => {
-                    self.current = None;
-                }
-            }
-        }
-    }
-}
-
-/// Build a stream from per-blob replay states.
-fn replay_stream<'a, B: RBlob, V: CodecShared>(
-    states: Vec<ReplayState<'a, B, V>>,
-) -> impl Stream<Item = Result<(u64, V), Error>> + Send + use<'a, B, V> {
-    stream::unfold(
-        ReplayStreamState {
-            states: states.into_iter(),
-            current: None,
-            pending: VecDeque::new(),
-            done: false,
-        },
-        ReplayStreamState::next,
-    )
-}
-
-/// The blob index where the item at `position` should be stored.
-///
-/// # Examples
-///
-/// ```ignore
-/// // With 10 items per blob:
-/// assert_eq!(position_to_blob(0, 10), 0);   // position 0 -> blob 0
-/// assert_eq!(position_to_blob(9, 10), 0);   // position 9 -> blob 0
-/// assert_eq!(position_to_blob(10, 10), 1);  // position 10 -> blob 1
-/// assert_eq!(position_to_blob(25, 10), 2);  // position 25 -> blob 2
-/// assert_eq!(position_to_blob(30, 10), 3);  // position 30 -> blob 3
-/// ```
-const fn position_to_blob(position: u64, items_per_blob: u64) -> u64 {
-    position / items_per_blob
-}
-
-/// The first position stored in `blob`.
-fn blob_first_position(blob: u64, items_per_blob: u64) -> Result<u64, Error> {
-    blob.checked_mul(items_per_blob)
-        .ok_or(Error::OffsetOverflow)
 }
 
 /// Configuration for a [Journal].
@@ -535,43 +456,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
     /// Read the varint-framed item at byte `offset` via `blob`.
     async fn read_at_offset(&self, blob: &Blob<'_, E::Blob>, offset: u64) -> Result<V, Error> {
-        // Read the varint header (max 5 bytes for u32).
-        let (buf, available) = blob
-            .read_up_to(
-                offset,
-                MAX_U32_VARINT_SIZE,
-                IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
-            )
-            .await?;
-        let buf = buf.freeze();
-        let mut cursor = Cursor::new(buf.slice(..available));
-        let (_, item_info) = find_frame(&mut cursor, offset)?;
-
-        // Decode the item, either directly from the buffer or by chaining the prefix with the
-        // remainder.
-        match item_info {
-            FrameInfo::Complete {
-                varint_len,
-                data_len,
-            } => decode_item::<V>(
-                buf.slice(varint_len..varint_len + data_len),
-                &self.codec_config,
-                self.compressed,
-            ),
-            FrameInfo::Incomplete {
-                varint_len,
-                prefix_len,
-                total_len,
-            } => {
-                let prefix = buf.slice(varint_len..varint_len + prefix_len);
-                let read_offset = offset
-                    .checked_add(varint_len as u64)
-                    .and_then(|offset| offset.checked_add(prefix_len as u64))
-                    .ok_or(Error::OffsetOverflow)?;
-                let remainder = blob.read_at(read_offset, total_len - prefix_len).await?;
-                decode_item::<V>(prefix.chain(remainder), &self.codec_config, self.compressed)
-            }
-        }
+        read_frame_at(blob, offset, &self.codec_config, self.compressed)
+            .await
+            .map(|(_, _, item)| item)
     }
 
     /// Read consecutive items in one blob. `offsets` must be strictly increasing byte offsets of
@@ -910,7 +797,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
         let states = self.replay_states(start_pos, buffer).await?;
 
-        Ok(replay_stream(states))
+        Ok(super::replay_stream_from_states(states))
     }
 }
 
@@ -1983,7 +1870,7 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         let reader = self.reader();
         let states = reader.replay_states(start_pos, buffer).await?;
 
-        Ok(replay_stream(states))
+        Ok(super::replay_stream_from_states(states))
     }
 }
 
@@ -2223,6 +2110,53 @@ mod tests {
             for (pos, item) in items.iter().enumerate() {
                 assert_eq!(journal.read(pos as u64).await.unwrap(), *item);
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_append_many_exceeding_write_buffer_reopens_across_sections() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "append-many-exceeds-buffer".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(512),
+            };
+            let items = (0..13)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+
+            let mut journal =
+                Journal::<_, FixedBytes<300>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(journal.append_many(Many::Flat(&items)).await.unwrap(), 12);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, FixedBytes<300>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..13);
+            for (pos, item) in items.iter().enumerate() {
+                assert_eq!(journal.read(pos as u64).await.unwrap(), *item);
+            }
+            assert_eq!(
+                journal.read_many(&[0, 4, 5, 9, 10, 12]).await.unwrap(),
+                vec![
+                    items[0].clone(),
+                    items[4].clone(),
+                    items[5].clone(),
+                    items[9].clone(),
+                    items[10].clone(),
+                    items[12].clone(),
+                ]
+            );
 
             journal.destroy().await.unwrap();
         });
@@ -2676,7 +2610,7 @@ mod tests {
                     });
                 }
 
-                let stream = replay_stream(states);
+                let stream = crate::journal::contiguous::replay_stream_from_states(states);
                 futures::pin_mut!(stream);
 
                 for i in 0..10u64 {

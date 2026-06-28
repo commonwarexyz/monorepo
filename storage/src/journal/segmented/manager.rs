@@ -14,7 +14,12 @@ use commonware_runtime::{
     Blob, BufferPool, Error as RError, Metrics, Storage,
 };
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    mem::take,
+    num::NonZeroUsize,
+};
 use tracing::debug;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
@@ -217,18 +222,20 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Sync the given `sections` to storage.
     pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
-        let sections = sections.sections().collect::<Vec<_>>();
+        let sections = sections.sections().collect::<BTreeSet<_>>();
         for &section in &sections {
             self.prune_guard(section)?;
         }
-        let futures: Vec<_> = self
-            .blobs
-            .iter_mut()
-            .filter(|(section, _)| sections.contains(section))
-            .map(|(_, blob)| blob.sync())
-            .collect();
-        let count = futures.len() as u64;
-        try_join_all(futures).await.map_err(Error::Runtime)?;
+        let mut dirty = Vec::new();
+        for section in sections {
+            if let Some(blob) = self.blobs.remove(&section) {
+                dirty.push((section, blob));
+            }
+        }
+        let count = dirty.len() as u64;
+        let result = try_join_all(dirty.iter_mut().map(|(_, blob)| blob.sync())).await;
+        self.blobs.extend(dirty);
+        result.map_err(Error::Runtime)?;
         self.synced.inc_by(count);
         Ok(())
     }

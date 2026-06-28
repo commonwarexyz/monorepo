@@ -4,9 +4,50 @@
 //! zstd-compressed) encoded item.
 
 use super::Error;
-use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt as _, Write as _};
-use commonware_runtime::Buf;
+use commonware_codec::{
+    varint::{UInt, MAX_U32_VARINT_SIZE},
+    Codec, EncodeSize, ReadExt as _, Write as _,
+};
+use commonware_runtime::{Blob, Buf, IoBufMut, IoBufs};
+use std::{future::Future, io::Cursor};
 use zstd::{bulk::compress, decode_all};
+
+/// Read access needed to decode a frame at a known offset.
+pub(super) trait FrameReader {
+    /// Read up to `len` bytes at `offset`.
+    fn read_up_to(
+        &self,
+        offset: u64,
+        len: usize,
+        buf: impl Into<IoBufMut> + Send,
+    ) -> impl Future<Output = Result<(IoBufMut, usize), Error>> + Send;
+
+    /// Read exactly `len` bytes at `offset`.
+    fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+    ) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+}
+
+impl<B: Blob> FrameReader for commonware_runtime::buffer::paged::Writer<B> {
+    async fn read_up_to(
+        &self,
+        offset: u64,
+        len: usize,
+        buf: impl Into<IoBufMut> + Send,
+    ) -> Result<(IoBufMut, usize), Error> {
+        Self::read_up_to(self, offset, len, buf)
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        Self::read_at(self, offset, len)
+            .await
+            .map_err(Error::Runtime)
+    }
+}
 
 /// Decodes a varint length prefix from a buffer.
 /// Returns (item_size, varint_len).
@@ -80,6 +121,55 @@ pub(super) fn decode_item<V: Codec>(
     } else {
         V::decode_cfg(item_data, cfg).map_err(Error::Codec)
     }
+}
+
+/// Read and decode the frame at `offset`.
+pub(super) async fn read_frame_at<V: Codec>(
+    reader: &impl FrameReader,
+    offset: u64,
+    cfg: &V::Cfg,
+    compressed: bool,
+) -> Result<(u64, u32, V), Error> {
+    let (buf, available) = reader
+        .read_up_to(
+            offset,
+            MAX_U32_VARINT_SIZE,
+            IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
+        )
+        .await?;
+    let buf = buf.freeze();
+    let mut cursor = Cursor::new(buf.slice(..available));
+    let (next_offset, item_info) = find_frame(&mut cursor, offset)?;
+
+    let (item_size, decoded) = match item_info {
+        FrameInfo::Complete {
+            varint_len,
+            data_len,
+        } => {
+            let decoded = decode_item::<V>(
+                buf.slice(varint_len..varint_len + data_len),
+                cfg,
+                compressed,
+            )?;
+            (data_len as u32, decoded)
+        }
+        FrameInfo::Incomplete {
+            varint_len,
+            prefix_len,
+            total_len,
+        } => {
+            let prefix = buf.slice(varint_len..varint_len + prefix_len);
+            let read_offset = offset
+                .checked_add(varint_len as u64)
+                .and_then(|offset| offset.checked_add(prefix_len as u64))
+                .ok_or(Error::OffsetOverflow)?;
+            let remainder = reader.read_at(read_offset, total_len - prefix_len).await?;
+            let decoded = decode_item::<V>(prefix.chain(remainder), cfg, compressed)?;
+            (total_len as u32, decoded)
+        }
+    };
+
+    Ok((next_offset, item_size, decoded))
 }
 
 /// Encode an item as a frame (length prefix plus payload), appending the bytes to `buf`.

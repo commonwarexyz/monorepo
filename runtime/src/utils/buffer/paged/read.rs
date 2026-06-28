@@ -48,7 +48,7 @@ impl<B: Blob> PageReader<B> {
     /// The last page may be logically partial (CRC length < logical page size), but
     /// all preceding pages must be logically full. A logically partial non-last page
     /// indicates corruption and will cause an `Error::InvalidChecksum`.
-    pub(super) const fn new(
+    pub(super) fn new(
         blob: B,
         physical_blob_size: u64,
         logical_blob_size: u64,
@@ -57,6 +57,14 @@ impl<B: Blob> PageReader<B> {
     ) -> Self {
         let logical_page_size = logical_page_size.get() as usize;
         let page_size = logical_page_size + Checksum::SIZE;
+        let physical_pages = physical_blob_size / page_size as u64;
+        let logical_pages = if logical_blob_size == 0 {
+            0
+        } else {
+            ((logical_blob_size - 1) / logical_page_size as u64) + 1
+        };
+        assert_eq!(physical_blob_size % page_size as u64, 0);
+        assert_eq!(physical_pages, logical_pages);
 
         Self {
             blob,
