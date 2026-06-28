@@ -141,8 +141,16 @@ impl<B: Blob> PageReader<B> {
                 return Err(Error::InvalidChecksum);
             }
 
-            total_logical += len;
-            last_len = len;
+            let logical_start = (self.blob_page + page_idx as u64)
+                .checked_mul(self.logical_page_size as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            let logical_remaining = self.logical_blob_size.saturating_sub(logical_start);
+            let logical_remaining_in_page =
+                logical_remaining.min(self.logical_page_size as u64) as usize;
+            let exposed_len = len.min(logical_remaining_in_page);
+
+            total_logical += exposed_len;
+            last_len = exposed_len;
         }
         self.blob_page += pages_to_read as u64;
 

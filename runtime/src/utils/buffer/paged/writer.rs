@@ -969,7 +969,7 @@ impl<B: Blob> Writer<B> {
     /// handle may observe unspecified contents.
     pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
         self.flush_internal(true, false).await?;
-        Ok(self.sealed_handle())
+        Ok(self.sealed_handle(self.cache_ref.next_id()))
     }
 
     /// Flushes buffered data and makes all pending mutations durable.
@@ -1127,7 +1127,7 @@ impl<B: Blob> Writer<B> {
     }
 
     /// Construct an immutable read handle for the current blob state.
-    fn sealed_handle(&self) -> super::Sealed<B> {
+    fn sealed_handle(&self, id: u64) -> super::Sealed<B> {
         let logical_page_size = self.cache_ref.page_size();
         let full_pages = self.current_page;
         assert_eq!(
@@ -1145,7 +1145,7 @@ impl<B: Blob> Writer<B> {
             self.buffer.size(),
             partial_page,
             self.cache_ref.clone(),
-            self.id,
+            id,
         )
     }
 
@@ -1156,7 +1156,8 @@ impl<B: Blob> Writer<B> {
     /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
     /// [`super::Sealed::sync`].
     pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
-        self.snapshot().await
+        self.flush_internal(true, false).await?;
+        Ok(self.sealed_handle(self.id))
     }
 }
 
@@ -1165,11 +1166,12 @@ mod tests {
     use super::*;
     use crate::{
         buffer::tests::SyncTrackingBlob, deterministic, telemetry::metrics::Registry, Buf,
-        BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Storage as _,
+        BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _, Storage as _,
+        Supervisor as _,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, NZU16, NZU32};
+    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16, NZU32};
     use std::{
         num::NonZeroU16,
         sync::{
@@ -2557,6 +2559,121 @@ mod tests {
         }
     }
 
+    /// Blob wrapper that delays one selected read after capturing its current bytes.
+    #[derive(Clone)]
+    struct DelayedReadBlob<B: Blob> {
+        inner: B,
+        offset: u64,
+        len: usize,
+        reads: Arc<AtomicUsize>,
+        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    }
+
+    impl<B: Blob> DelayedReadBlob<B> {
+        fn new(
+            inner: B,
+            offset: u64,
+            len: usize,
+            started: oneshot::Sender<()>,
+            release: oneshot::Receiver<()>,
+        ) -> Self {
+            Self {
+                inner,
+                offset,
+                len,
+                reads: Arc::new(AtomicUsize::new(0)),
+                started: Arc::new(Mutex::new(Some(started))),
+                release: Arc::new(Mutex::new(Some(release))),
+            }
+        }
+    }
+
+    impl<B: Blob> crate::Blob for DelayedReadBlob<B> {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            if offset == self.offset
+                && len == self.len
+                && self.reads.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                let bytes = self.inner.read_at(offset, len).await?;
+
+                let sender = self
+                    .started
+                    .lock()
+                    .take()
+                    .expect("delayed read start signal consumed more than once");
+                let _ = sender.send(());
+
+                let release = self
+                    .release
+                    .lock()
+                    .take()
+                    .expect("delayed read release receiver consumed more than once");
+                release.await.expect("release signal dropped");
+
+                return Ok(bytes);
+            }
+
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            if offset == self.offset
+                && len == self.len
+                && self.reads.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                let bytes = self.inner.read_at_buf(offset, len, bufs).await?;
+
+                let sender = self
+                    .started
+                    .lock()
+                    .take()
+                    .expect("delayed read start signal consumed more than once");
+                let _ = sender.send(());
+
+                let release = self
+                    .release
+                    .lock()
+                    .take()
+                    .expect("delayed read release receiver consumed more than once");
+                release.await.expect("release signal dropped");
+
+                return Ok(bytes);
+            }
+
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
+        }
+    }
+
     /// Dummy marker bytes with len=0 so the mangled slot is never authoritative.
     /// Format: [len_hi=0, len_lo=0, 0xDE, 0xAD, 0xBE, 0xEF]
     const DUMMY_MARKER: [u8; 6] = [0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
@@ -3575,6 +3692,63 @@ mod tests {
                 !hit || probe == new_bytes,
                 "try_read_sync served stale pre-resize bytes: {probe:?}"
             );
+        });
+    }
+
+    #[test]
+    fn test_snapshot_fetch_cannot_repopulate_live_cache_after_resize() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size = PAGE_SIZE.get() as usize;
+            let physical_page_size = page_size + CHECKSUM_SIZE as usize;
+            let (inner, blob_size) = context
+                .open("test_partition", b"snapshot_resize_cache")
+                .await
+                .unwrap();
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let blob = DelayedReadBlob::new(
+                inner,
+                physical_page_size as u64,
+                physical_page_size,
+                started_tx,
+                release_rx,
+            );
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let old_page0 = vec![0x11u8; page_size];
+            let old_page1 = vec![0x22u8; page_size];
+            writer.append(&old_page0).await.unwrap();
+            writer.append(&old_page1).await.unwrap();
+            writer.sync().await.unwrap();
+
+            writer.cache_ref.invalidate_from(writer.id, 1);
+
+            let snapshot = writer.snapshot().await.unwrap();
+            let snapshot_task = context
+                .child("snapshot")
+                .spawn(move |_| async move { snapshot.read_at(page_size as u64, page_size).await });
+            started_rx.await.expect("snapshot read never started");
+
+            writer.resize(page_size as u64).await.unwrap();
+            let new_page1 = vec![0x33u8; page_size];
+            writer.append(&new_page1).await.unwrap();
+            writer.sync().await.unwrap();
+
+            let _ = release_tx.send(());
+            let stale = snapshot_task
+                .await
+                .expect("snapshot task failed")
+                .expect("snapshot read failed")
+                .coalesce();
+            assert_eq!(stale.as_ref(), old_page1.as_slice());
+
+            let mut probe = vec![0u8; page_size];
+            assert!(writer.try_read_sync(page_size as u64, &mut probe));
+            assert_eq!(probe, new_page1);
         });
     }
 

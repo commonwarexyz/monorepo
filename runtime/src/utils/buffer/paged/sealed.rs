@@ -51,8 +51,9 @@ struct SealedInner<B: Blob> {
     /// Reference to the page cache used for reads of full pages.
     cache_ref: CacheRef,
 
-    /// Page-cache id. Inherited from the originating [`super::Writer`] when constructed via
-    /// [`super::Writer::seal`], so hot full pages remain valid across the transition.
+    /// Page-cache id. [`super::Writer::seal`] preserves the writer id so hot full pages remain
+    /// valid across the transition. [`super::Writer::snapshot`] uses a fresh id because the writer
+    /// can keep mutating its own cache namespace.
     id: u64,
 }
 
@@ -748,6 +749,53 @@ mod tests {
                 replay.advance(copy_len);
             }
             assert_eq!(out, data);
+        });
+    }
+
+    /// Replaying a snapshot must stop at the snapshot's logical boundary, even if the live writer
+    /// later extends the same physical page.
+    #[test_traced("DEBUG")]
+    fn test_snapshot_replay_stays_frozen_after_writer_growth() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"snapshot_replay_growth")
+                .await
+                .unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let mut original = vec![0xAA; page_size];
+            original.extend_from_slice(b"old");
+            writer.append(&original).await.unwrap();
+            writer.sync().await.unwrap();
+
+            let snapshot = writer.snapshot().await.unwrap();
+            let snapshot_bytes = snapshot
+                .read_at(0, snapshot.size() as usize)
+                .await
+                .unwrap()
+                .coalesce();
+            let mut replay = snapshot.replay(NZUsize!(BUFFER_SIZE)).unwrap();
+            assert_eq!(replay.blob_size(), original.len() as u64);
+
+            writer.append(b"newtail").await.unwrap();
+            writer.sync().await.unwrap();
+
+            let mut out = Vec::new();
+            while replay.ensure(1).await.unwrap() {
+                let chunk = replay.chunk();
+                let copy_len = chunk.len();
+                out.extend_from_slice(chunk);
+                replay.advance(copy_len);
+            }
+
+            assert_eq!(out.as_slice(), snapshot_bytes.as_ref());
+            assert_eq!(out, original);
         });
     }
 
