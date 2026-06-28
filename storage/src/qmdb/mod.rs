@@ -575,14 +575,11 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
                 let mut aborted = false;
                 while let Some(result) = stream.next().await {
                     let (loc, op) = result?;
-                    let Some(key) = op.key() else { continue };
                     let is_delete = op.is_delete();
-                    if !is_delete && !op.is_update() {
-                        continue;
-                    }
+                    let Some(key) = op.into_key() else { continue };
                     let (p, _) = partition_index_and_sub_key::<P>(key.as_ref());
                     let w = p / range_size;
-                    batches[w].push((key.clone(), loc, is_delete));
+                    batches[w].push((key, loc, is_delete));
                     if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
                         let batch = std::mem::replace(
                             &mut batches[w],

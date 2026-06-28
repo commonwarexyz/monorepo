@@ -40,6 +40,10 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
         &self.0
     }
 
+    fn into_key(self) -> K {
+        self.0
+    }
+
     fn value(&self) -> &V::Value {
         &self.1
     }

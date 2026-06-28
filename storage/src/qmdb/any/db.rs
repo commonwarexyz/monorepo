@@ -535,7 +535,7 @@ where
                 match op {
                     Operation::CommitFloor(_, _) => {}
                     Operation::Update(update) => {
-                        let key = update.key().clone();
+                        let key = update.into_key();
                         let previous_loc = prior_state_by_key.get(&key).copied().flatten();
 
                         if loc >= rewind_size {
