@@ -41,7 +41,7 @@ use super::{
 };
 use crate::{
     buffer::{
-        paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
+        paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_LEN_SIZE, CHECKSUM_SLOT_SIZE},
         tip::Buffer,
         SyncState,
     },
@@ -855,12 +855,9 @@ impl<B: Blob> Writer<B> {
 
         // Publish the new shrunken length. If a crash happens before the old slot is invalidated,
         // both slots may be valid, but recovery still chooses the old longer length.
-        let published_slot = Checksum::slot_bytes(new_len, new_crc);
-        self.write_at_sync(
-            new_slot_offset,
-            published_slot[..std::mem::size_of::<u16>()].to_vec(),
-        )
-        .await?;
+        let published_len = Checksum::slot_len_bytes(new_len);
+        self.write_at_sync(new_slot_offset, published_len.to_vec())
+            .await?;
 
         // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across
         // both slots and lose the already-durable shorter checksum. Once this lands, length 0 is
@@ -868,8 +865,7 @@ impl<B: Blob> Writer<B> {
         let old_slot_offset = crc_start
             .checked_add(old_slot_start as u64)
             .ok_or(Error::OffsetOverflow)?;
-        let len_size = std::mem::size_of::<u16>();
-        self.write_at_sync(old_slot_offset, vec![0u8; len_size])
+        self.write_at_sync(old_slot_offset, vec![0u8; CHECKSUM_SLOT_LEN_SIZE])
             .await?;
 
         let final_record = if new_slot_start == 0 {
@@ -4227,10 +4223,7 @@ mod tests {
                 "old-slot length invalidation should fail"
             );
             assert_eq!(write_count.load(Ordering::SeqCst), 3);
-            assert_eq!(
-                failed_write_len.load(Ordering::SeqCst),
-                std::mem::size_of::<u16>()
-            );
+            assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_LEN_SIZE);
             drop(append);
 
             let (blob, size) = context

@@ -42,7 +42,8 @@ pub use writer::Writer;
 
 // A checksum record contains two slots. Each slot stores one u16 length and one CRC.
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
-const CHECKSUM_SLOT_SIZE: usize = u16::SIZE + crc32::Digest::SIZE;
+const CHECKSUM_SLOT_LEN_SIZE: usize = u16::SIZE;
+const CHECKSUM_SLOT_SIZE: usize = CHECKSUM_SLOT_LEN_SIZE + crc32::Digest::SIZE;
 
 /// Ensure `buf` has one `item_size` slot per offset, offsets are sorted and non-overlapping, and
 /// every requested range lies within the blob's size.
@@ -298,6 +299,14 @@ impl Checksum {
         let mut buf = bytes.as_mut_slice();
         len.write(&mut buf);
         crc.write(&mut buf);
+        bytes
+    }
+
+    /// Returns a checksum slot's length field in its storage representation.
+    fn slot_len_bytes(len: u16) -> [u8; CHECKSUM_SLOT_LEN_SIZE] {
+        let mut bytes = [0; CHECKSUM_SLOT_LEN_SIZE];
+        let mut buf = bytes.as_mut_slice();
+        len.write(&mut buf);
         bytes
     }
 }

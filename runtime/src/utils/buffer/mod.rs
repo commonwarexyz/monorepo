@@ -14,6 +14,11 @@ struct SyncState {
 }
 
 impl SyncState {
+    /// Create a new sync state.
+    ///
+    /// Use `needs_sync = true` when wrapping an existing blob because prior plain mutations may
+    /// still need a full [`crate::Blob::sync`] barrier. [`Self::write_at_sync`] can use
+    /// [`crate::Blob::write_at_sync`] only when this is false.
     const fn new(needs_sync: bool) -> Self {
         Self { needs_sync }
     }
