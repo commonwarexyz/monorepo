@@ -214,8 +214,7 @@ impl<B: Blob> Write<B> {
         }
 
         // Resize the underlying blob.
-        self.blob.resize(len).await?;
-        self.sync_state.mark_unsynced();
+        self.sync_state.resize(&self.blob, len).await?;
 
         Ok(())
     }

@@ -1113,8 +1113,9 @@ impl<B: Blob> Writer<B> {
         // A logical shrink can leave the physical page count unchanged. Only real physical
         // resizes need to create a pending sync.
         if new_physical_size != current_physical_size {
-            self.blob.resize(new_physical_size).await?;
-            self.sync_state.mark_unsynced();
+            self.sync_state
+                .resize(&self.blob, new_physical_size)
+                .await?;
         }
 
         // Evict cached pages at or beyond the new full-page boundary. The page at
