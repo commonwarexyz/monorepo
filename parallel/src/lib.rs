@@ -27,7 +27,8 @@
 //! Two implementations are provided:
 //!
 //! - [`Sequential`]: Executes operations sequentially on the current thread (works in `no_std`)
-//! - [`Rayon`]: Executes operations in parallel using a [`rayon`] thread pool (requires `std`)
+//! - [`Rayon`]: Adaptively executes operations serially or with a [`rayon`] thread pool (requires
+//!   `std`)
 //!
 //! # Features
 //!
@@ -457,7 +458,8 @@ commonware_macros::stability_scope!(BETA {
         /// Executes two closures, potentially in parallel, and returns both results.
         ///
         /// For [`Sequential`], this executes `a` then `b` on the current thread.
-        /// For [`Rayon`], this executes `a` and `b` in parallel using the thread pool.
+        /// For [`Rayon`], this adaptively executes `a` and `b` serially or in parallel using the
+        /// thread pool.
         ///
         /// # Arguments
         ///
@@ -762,8 +764,8 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
     /// A parallel execution strategy backed by a rayon thread pool.
     ///
-    /// This strategy executes fold operations in parallel across multiple threads.
-    /// It wraps a rayon [`ThreadPool`] and uses it to schedule work.
+    /// This strategy adaptively executes operations serially or across multiple threads.
+    /// It wraps a rayon [`ThreadPool`] and uses it to schedule parallel work.
     ///
     /// # Thread Pool Ownership
     ///
