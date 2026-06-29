@@ -71,7 +71,11 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+    async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn commit(&self) -> Result<(), Self::Error> {
         Ok(())
     }
 

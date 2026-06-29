@@ -239,8 +239,11 @@ where
         batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner)?;
+    async fn apply_batch(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
+        self.apply_batch(batch.inner).map(|_| ())
+    }
+
+    async fn commit(&self) -> Result<(), Error<F>> {
         self.sync().await
     }
 
@@ -298,8 +301,11 @@ where
         batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner)?;
+    async fn apply_batch(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
+        self.apply_batch(batch.inner).map(|_| ())
+    }
+
+    async fn commit(&self) -> Result<(), Error<F>> {
         self.sync().await
     }
 

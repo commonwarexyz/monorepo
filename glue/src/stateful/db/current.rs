@@ -377,8 +377,11 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
+    async fn apply_batch(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
+        self.apply_batch(batch.inner).await.map(|_| ())
+    }
+
+    async fn commit(&self) -> Result<(), Error<F>> {
         self.sync().await
     }
 
@@ -471,8 +474,11 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
+    async fn apply_batch(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
+        self.apply_batch(batch.inner).await.map(|_| ())
+    }
+
+    async fn commit(&self) -> Result<(), Error<F>> {
         self.sync().await
     }
 
@@ -642,8 +648,11 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
+    async fn apply_batch(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
+        self.apply_batch(batch.inner).await.map(|_| ())
+    }
+
+    async fn commit(&self) -> Result<(), Error<F>> {
         self.sync().await
     }
 
@@ -741,8 +750,11 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
+    async fn apply_batch(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
+        self.apply_batch(batch.inner).await.map(|_| ())
+    }
+
+    async fn commit(&self) -> Result<(), Error<F>> {
         self.sync().await
     }
 

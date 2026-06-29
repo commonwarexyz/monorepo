@@ -194,15 +194,54 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Return true if a merkleized batch matches a committed sync target.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
 
-    /// Apply a merkleized batch's changeset to the underlying database.
+    /// Apply a merkleized batch's changeset to the underlying database's
+    /// in-memory index/bitmap.
     ///
-    /// In QMDB, this encapsulates calling `merkleized.finalize()` to produce
-    /// a `Changeset`, then `db.apply_batch(changeset)` and the database's
-    /// durable finalize step.
-    fn finalize(
+    /// In QMDB, this maps to `db.apply_batch(changeset)` — the in-place
+    /// index/bitmap mutation that *publishes* the new logical state. It is
+    /// **not** durable until [`commit`](Self::commit) runs; a crash before
+    /// `commit` loses the batch, exactly as it did before `commit` split out
+    /// of `finalize`.
+    ///
+    /// Held under the exclusive write lock by [`DatabaseSet::finalize`], so it
+    /// must stay short (no fsync).
+    fn apply_batch(
         &mut self,
         batch: Self::Merkleized,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Flush previously [applied](Self::apply_batch) state to durable storage.
+    ///
+    /// In QMDB this maps to `db.sync()` — the *full* fsync of both the
+    /// operations journal and the merkle/MMR. It is deliberately **not** QMDB's
+    /// narrower inherent `db.commit()`, which flushes only the operations
+    /// journal; a finalized block must durably commit the merkle state too.
+    ///
+    /// Takes `&self` because the flush is read-only with respect to the logical
+    /// state a reader observes: it reads the already-published index/bitmap and
+    /// pushes bytes to disk (journal + merkle), mutating no read-visible state.
+    /// That is what makes it sound to run under a *shared* lock concurrently
+    /// with readers, letting reads proceed during the per-block fsync. (Anything
+    /// added here that mutates read-visible state would break that and must not
+    /// be introduced without re-taking the exclusive lock.)
+    fn commit(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Apply a merkleized batch's changeset and make it durable.
+    ///
+    /// Default combinator over [`apply_batch`](Self::apply_batch) +
+    /// [`commit`](Self::commit). Backends should implement those two primitives
+    /// rather than overriding this; [`DatabaseSet::finalize`] deliberately runs
+    /// the two halves under different lock scopes (exclusive for `apply_batch`,
+    /// shared for `commit`) and so does not route through this method.
+    fn finalize(
+        &mut self,
+        batch: Self::Merkleized,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        async move {
+            self.apply_batch(batch).await?;
+            self.commit().await
+        }
+    }
 
     /// Prune the database to a previously finalized sync target.
     ///
@@ -453,8 +492,27 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     }
 
     async fn finalize(&self, batches: Self::Merkleized) {
-        let mut database = self.write().await;
-        finalize_or_panic(&mut *database, batches, None).await;
+        // Split the lock so the durability fsync does not block readers.
+        //
+        // `apply_batch` is the in-place index/bitmap mutation: brief, and it
+        // publishes the new logical state, so it must hold the exclusive write
+        // lock. `commit` (fsync) is the long, variable pole and only touches
+        // interior-mutable state, so it runs under a *shared* lock — letting
+        // `QmdbReadStore` reads proceed concurrently with the flush.
+        //
+        // Sound under the single-writer invariant: consensus serializes
+        // finalizes, so no other writer can race into the apply→commit gap. A
+        // reader taking the lock in that gap observes the logically-committed
+        // (applied) state; durability lags by design, exactly as `apply_batch`
+        // was never durable before `sync`/`commit` ran.
+        {
+            let mut database = self.write().await;
+            apply_batch_or_panic(&mut *database, batches, None).await;
+        }
+        {
+            let database = self.read().await;
+            commit_or_panic(&*database, None).await;
+        }
     }
 
     async fn prune(&self, target: &Self::SyncTargets) {
@@ -682,10 +740,21 @@ macro_rules! impl_database_set {
             }
 
             async fn finalize(&self, batches: Self::Merkleized) {
+                // Two lock scopes per database: brief exclusive `apply_batch`,
+                // then shared `commit` (fsync off readers). See the single-DB
+                // impl for the soundness argument. Each database splits its own
+                // lock independently; `join!` still applies every batch and
+                // flushes every database before returning.
                 join!($(
                     async {
-                        let mut database = self.$idx.write().await;
-                        finalize_or_panic(&mut *database, batches.$idx, Some($idx)).await;
+                        {
+                            let mut database = self.$idx.write().await;
+                            apply_batch_or_panic(&mut *database, batches.$idx, Some($idx)).await;
+                        }
+                        {
+                            let database = self.$idx.read().await;
+                            commit_or_panic(&*database, Some($idx)).await;
+                        }
                     },
                 )+);
             }
@@ -1334,22 +1403,41 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     }
 }
 
-#[tracing::instrument(name = "stateful.db.finalize_or_panic", level = "info", skip_all, fields(index = index))]
-async fn finalize_or_panic<E, T: ManagedDb<E>>(
+#[tracing::instrument(name = "stateful.db.apply_batch_or_panic", level = "info", skip_all, fields(index = index))]
+async fn apply_batch_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     batch: T::Merkleized,
     index: Option<usize>,
 ) {
-    // Mutable finalize failures are fatal by design because other databases in
-    // the same set may already have committed, leaving partially applied state.
-    if let Err(err) = database.finalize(batch).await {
+    // Apply failures are fatal by design because other databases in the same
+    // set may already have applied, leaving partially applied state.
+    if let Err(err) = database.apply_batch(batch).await {
         match index {
             Some(index) => panic!(
-                "database finalize failed (index {index}, type {}): {err:?}",
+                "database apply_batch failed (index {index}, type {}): {err:?}",
                 core::any::type_name::<T>(),
             ),
             None => panic!(
-                "database finalize failed (type {}): {err:?}",
+                "database apply_batch failed (type {}): {err:?}",
+                core::any::type_name::<T>(),
+            ),
+        }
+    }
+}
+
+#[tracing::instrument(name = "stateful.db.commit_or_panic", level = "info", skip_all, fields(index = index))]
+async fn commit_or_panic<E, T: ManagedDb<E>>(database: &T, index: Option<usize>) {
+    // Commit (fsync) failures are fatal by design: the batch is already applied
+    // in memory, so a failed durability flush leaves the database ahead of disk
+    // with no safe way to continue.
+    if let Err(err) = database.commit().await {
+        match index {
+            Some(index) => panic!(
+                "database commit failed (index {index}, type {}): {err:?}",
+                core::any::type_name::<T>(),
+            ),
+            None => panic!(
+                "database commit failed (type {}): {err:?}",
                 core::any::type_name::<T>(),
             ),
         }
@@ -1535,7 +1623,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1565,7 +1657,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1599,7 +1695,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1625,6 +1725,25 @@ mod tests {
             Self {
                 started: Some(started),
                 release: Some(release),
+            }
+        }
+    }
+
+    /// Mock whose `commit` (the durability fsync) signals when it begins and
+    /// then blocks until released. `apply_batch` is instant. Used to prove
+    /// `DatabaseSet::finalize` runs `commit` under a *shared* lock so readers
+    /// proceed during the fsync. `commit` takes `&self`, so the started/release
+    /// channels live behind interior-mutable `Mutex`es.
+    struct BlockingCommitDb {
+        commit_started: commonware_utils::sync::Mutex<Option<oneshot::Sender<()>>>,
+        release: commonware_utils::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl BlockingCommitDb {
+        fn new(commit_started: oneshot::Sender<()>, release: oneshot::Receiver<()>) -> Self {
+            Self {
+                commit_started: commonware_utils::sync::Mutex::new(Some(commit_started)),
+                release: commonware_utils::sync::Mutex::new(Some(release)),
             }
         }
     }
@@ -1704,8 +1823,12 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
             Err(TestFinalizeError)
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
+            Ok(())
         }
 
         async fn sync_target(&self) -> Self::SyncTarget {}
@@ -1786,11 +1909,59 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
             if let Some(started) = self.started.take() {
                 let _ = started.send(());
             }
             if let Some(release) = self.release.take() {
+                let _ = release.await;
+            }
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {}
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for BlockingCommitDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = ();
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!("BlockingCommitDb is constructed directly in tests")
+        }
+
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
+            // Announce the fsync has started, then block until the test releases
+            // it. Take both handles out of their mutexes so no guard is held
+            // across the await point.
+            if let Some(started) = self.commit_started.lock().take() {
+                let _ = started.send(());
+            }
+            let release = self.release.lock().take();
+            if let Some(release) = release {
                 let _ = release.await;
             }
             Ok(())
@@ -1822,7 +1993,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1856,7 +2031,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1888,7 +2067,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1920,7 +2103,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1952,7 +2139,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1984,7 +2175,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2016,7 +2211,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2048,7 +2247,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2080,7 +2283,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2114,7 +2321,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2255,7 +2466,11 @@ mod tests {
             true
         }
 
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        async fn apply_batch(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn commit(&self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2761,9 +2976,62 @@ mod tests {
         });
     }
 
+    /// Regression test for #998: `DatabaseSet::finalize` must run the durability
+    /// `commit` (fsync) under a *shared* lock, not the exclusive write lock, so
+    /// that readers (`QmdbReadStore` / state-proof RPCs) proceed concurrently
+    /// with the per-block flush.
+    ///
+    /// Under the old single-write-lock finalize the concurrent `read()` below
+    /// would block for the entire duration of the fsync and this assertion would
+    /// fail (the future stays pending).
+    #[test]
+    fn finalize_runs_commit_under_shared_lock_so_readers_proceed() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (commit_started_tx, commit_started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+
+            let database = Arc::new(TracedAsyncRwLock::new(
+                "test",
+                BlockingCommitDb::new(commit_started_tx, release_rx),
+            ));
+
+            let finalize = <Shared<BlockingCommitDb> as DatabaseSet<
+                deterministic::Context,
+            >>::finalize(&database, TestMerkleized);
+            pin_mut!(finalize);
+
+            // `apply_batch` completes immediately; `commit` then blocks on
+            // `release`, so finalize is pending.
+            assert!(finalize.as_mut().now_or_never().is_none());
+
+            // The fsync (`commit`) has begun — meaning the exclusive `apply_batch`
+            // scope has already been released.
+            let commit_started = commit_started_rx;
+            pin_mut!(commit_started);
+            assert!(matches!(
+                commit_started.as_mut().now_or_never(),
+                Some(Ok(())),
+            ));
+
+            // A reader acquires the shared lock WHILE the fsync is in flight.
+            // This is the behavior the split unlocks; it would deadlock under an
+            // exclusive-across-commit finalize.
+            let reader = database.read();
+            pin_mut!(reader);
+            assert!(
+                reader.as_mut().now_or_never().is_some(),
+                "reader must acquire the shared lock while commit/fsync runs",
+            );
+
+            // Release the fsync; finalize completes.
+            let _ = release_tx.send(());
+            finalize.await;
+        });
+    }
+
     #[test]
     #[should_panic(
-        expected = "database finalize failed (index 1, type commonware_glue::stateful::db::tests::FailingFinalizeDb)"
+        expected = "database apply_batch failed (index 1, type commonware_glue::stateful::db::tests::FailingFinalizeDb)"
     )]
     fn tuple_finalize_panic_identifies_failing_database() {
         deterministic::Runner::default().start(|_context| async move {
