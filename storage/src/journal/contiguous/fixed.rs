@@ -100,10 +100,11 @@ use super::{
 };
 use crate::{
     journal::{
+        authenticated,
         contiguous::{metrics::FixedMetrics as Metrics, Many, Mutable},
         Error,
     },
-    Context,
+    merkle, Context,
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
@@ -1175,7 +1176,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     }
 }
 
-impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Contiguous for Reader<'_, E, A> {
+impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     type Item = A;
 
     fn bounds(&self) -> Range<u64> {
@@ -1356,24 +1357,21 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> for Journal<E, A> {
+impl<E: Context, A: CodecFixedShared> authenticated::Inner<E> for Journal<E, A> {
     type Config = Config;
 
     async fn init<
-        F: crate::merkle::Family,
+        F: merkle::Family,
         H: commonware_cryptography::Hasher,
         S: commonware_parallel::Strategy,
     >(
         context: E,
-        merkle_cfg: crate::merkle::full::Config<S>,
+        merkle_cfg: merkle::full::Config<S>,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&A) -> bool,
-        bagging: crate::merkle::Bagging,
-    ) -> Result<
-        crate::journal::authenticated::Journal<F, E, Self, H, S>,
-        crate::journal::authenticated::Error<F>,
-    > {
-        crate::journal::authenticated::Journal::<F, E, Self, H, S>::new(
+        bagging: merkle::Bagging,
+    ) -> Result<authenticated::Journal<F, E, Self, H, S>, authenticated::Error<F>> {
+        authenticated::Journal::<F, E, Self, H, S>::new(
             context,
             merkle_cfg,
             journal_cfg,

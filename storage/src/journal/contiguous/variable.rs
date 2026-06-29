@@ -12,13 +12,14 @@ use super::{
 };
 use crate::{
     journal::{
+        authenticated,
         frame::{
             decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
             FrameInfo,
         },
         Error,
     },
-    Context,
+    merkle, Context,
 };
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_macros::boxed;
@@ -1905,24 +1906,21 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<E: Context, V: CodecShared> crate::journal::authenticated::Inner<E> for Journal<E, V> {
+impl<E: Context, V: CodecShared> authenticated::Inner<E> for Journal<E, V> {
     type Config = Config<V::Cfg>;
 
     async fn init<
-        F: crate::merkle::Family,
+        F: merkle::Family,
         H: commonware_cryptography::Hasher,
         S: commonware_parallel::Strategy,
     >(
         context: E,
-        merkle_cfg: crate::merkle::full::Config<S>,
+        merkle_cfg: merkle::full::Config<S>,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&V) -> bool,
-        bagging: crate::merkle::Bagging,
-    ) -> Result<
-        crate::journal::authenticated::Journal<F, E, Self, H, S>,
-        crate::journal::authenticated::Error<F>,
-    > {
-        crate::journal::authenticated::Journal::<F, E, Self, H, S>::new(
+        bagging: merkle::Bagging,
+    ) -> Result<authenticated::Journal<F, E, Self, H, S>, authenticated::Error<F>> {
+        authenticated::Journal::<F, E, Self, H, S>::new(
             context,
             merkle_cfg,
             journal_cfg,
