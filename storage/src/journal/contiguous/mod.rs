@@ -8,8 +8,8 @@
 //! leave its in-memory state inconsistent with the underlying storage.
 
 use super::Error;
-use futures::{stream, Stream};
-use std::{collections::VecDeque, future::Future, num::NonZeroUsize, ops::Range};
+use futures::{stream, Stream, StreamExt as _};
+use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
 mod blobs;
@@ -91,8 +91,6 @@ struct ReplayStreamState<S: ReplayBatchState> {
     states: std::vec::IntoIter<S>,
     /// State currently being drained.
     current: Option<S>,
-    /// Items decoded from the current state but not yet yielded by the stream.
-    pending: VecDeque<Result<(u64, S::Item), Error>>,
     /// Set after the first error so the stream terminates cleanly.
     done: bool,
 }
@@ -101,20 +99,11 @@ impl<S: ReplayBatchState + Send> ReplayStreamState<S>
 where
     S::Item: Send,
 {
-    /// Yield one item, filling `pending` from the current blob when needed.
-    async fn next(mut self) -> Option<(Result<(u64, S::Item), Error>, Self)> {
+    /// Yield the next decoded batch.
+    async fn next(mut self) -> Option<(Vec<Result<(u64, S::Item), Error>>, Self)> {
         loop {
             if self.done {
                 return None;
-            }
-
-            if let Some(item) = self.pending.pop_front() {
-                if item.is_err() {
-                    self.done = true;
-                    self.pending.clear();
-                    self.current = None;
-                }
-                return Some((item, self));
             }
 
             let state = match self.current.take().or_else(|| self.states.next()) {
@@ -124,8 +113,13 @@ where
 
             match state.next_batch().await {
                 Some((batch, state)) => {
-                    self.current = Some(state);
-                    self.pending = VecDeque::from(batch);
+                    if batch.iter().any(Result::is_err) {
+                        self.done = true;
+                        self.current = None;
+                    } else {
+                        self.current = Some(state);
+                    }
+                    return Some((batch, self));
                 }
                 None => {
                     self.current = None;
@@ -147,11 +141,11 @@ where
         ReplayStreamState {
             states: states.into_iter(),
             current: None,
-            pending: VecDeque::new(),
             done: false,
         },
         ReplayStreamState::next,
     )
+    .flat_map(stream::iter)
 }
 
 /// A read-only, position-based view of a contiguous journal.
