@@ -27,8 +27,8 @@
 //! Two implementations are provided:
 //!
 //! - [`Sequential`]: Executes operations sequentially on the current thread (works in `no_std`)
-//! - [`Rayon`]: Adaptively executes operations serially or with a [`rayon`] thread pool (requires
-//!   `std`)
+//! - [`Rayon`]: Adaptively executes collection operations serially or with a [`rayon`] thread pool
+//!   (requires `std`)
 //!
 //! # Features
 //!
@@ -458,8 +458,7 @@ commonware_macros::stability_scope!(BETA {
         /// Executes two closures, potentially in parallel, and returns both results.
         ///
         /// For [`Sequential`], this executes `a` then `b` on the current thread.
-        /// For [`Rayon`], this adaptively executes `a` and `b` serially or in parallel using the
-        /// thread pool.
+        /// For [`Rayon`], this executes `a` and `b` using `rayon::join`.
         ///
         /// # Arguments
         ///
@@ -481,7 +480,6 @@ commonware_macros::stability_scope!(BETA {
         /// assert_eq!(sum, 15);
         /// assert_eq!(product, 120);
         /// ```
-        #[track_caller]
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where
             A: FnOnce() -> RA + Send,
@@ -605,8 +603,11 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
     const PREFERRED_SAMPLE_INTERVAL: u32 = 8;
     const RESAMPLE_INTERVAL: u32 = 64;
-    const EWMA_ALPHA: f64 = 0.2;
-    const SERIAL_WIN_MARGIN: f64 = 0.95;
+    const EWMA_PREVIOUS_WEIGHT: u64 = 4;
+    const EWMA_NEXT_WEIGHT: u64 = 1;
+    const EWMA_WEIGHT: u64 = EWMA_PREVIOUS_WEIGHT + EWMA_NEXT_WEIGHT;
+    const SERIAL_WIN_NUMERATOR: u64 = 95;
+    const SERIAL_WIN_DENOMINATOR: u64 = 100;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
     enum OperationKind {
@@ -617,7 +618,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         TryMapCollect,
         MapInitCollect,
         MapPartitionCollect,
-        Join,
         Sort,
     }
 
@@ -639,8 +639,8 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
     #[derive(Clone, Copy, Debug, Default)]
     struct PolicyEntry {
-        serial_ns: f64,
-        parallel_ns: f64,
+        serial_ns: u64,
+        parallel_ns: u64,
         serial_samples: u32,
         parallel_samples: u32,
         since_probe: u32,
@@ -657,7 +657,9 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
                 return (Execution::Serial, true);
             }
 
-            let preferred = if self.serial_ns < self.parallel_ns * SERIAL_WIN_MARGIN {
+            let serial = u128::from(self.serial_ns) * u128::from(SERIAL_WIN_DENOMINATOR);
+            let parallel = u128::from(self.parallel_ns) * u128::from(SERIAL_WIN_NUMERATOR);
+            let preferred = if serial < parallel {
                 Execution::Serial
             } else {
                 Execution::Parallel
@@ -679,7 +681,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         }
 
         fn record(&mut self, execution: Execution, elapsed: Duration) {
-            let elapsed_ns = elapsed.as_secs_f64() * 1_000_000_000.0;
+            let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
             match execution {
                 Execution::Serial => {
                     self.serial_ns = update_ewma(self.serial_ns, self.serial_samples, elapsed_ns);
@@ -694,11 +696,15 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         }
     }
 
-    fn update_ewma(current: f64, samples: u32, next: f64) -> f64 {
+    fn update_ewma(current: u64, samples: u32, next: u64) -> u64 {
         if samples == 0 {
             next
         } else {
-            current.mul_add(1.0 - EWMA_ALPHA, next * EWMA_ALPHA)
+            let weighted = u128::from(current) * u128::from(EWMA_PREVIOUS_WEIGHT)
+                + u128::from(next) * u128::from(EWMA_NEXT_WEIGHT);
+            (weighted / u128::from(EWMA_WEIGHT))
+                .try_into()
+                .unwrap_or(u64::MAX)
         }
     }
 
@@ -760,8 +766,8 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
     /// A parallel execution strategy backed by a rayon thread pool.
     ///
-    /// This strategy adaptively executes operations serially or across multiple threads.
-    /// It wraps a rayon [`ThreadPool`] and uses it to schedule parallel work.
+    /// This strategy adaptively executes collection operations serially or across multiple
+    /// threads. It wraps a rayon [`ThreadPool`] and uses it to schedule parallel work.
     ///
     /// # Thread Pool Ownership
     ///
@@ -819,12 +825,13 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             }
         }
 
-        fn choose(
+        fn execute<R>(
             &self,
             kind: OperationKind,
             caller: &'static Location<'static>,
             len: usize,
-        ) -> (PolicyKey, Execution, Option<Instant>) {
+            run: impl FnOnce(Execution) -> R,
+        ) -> R {
             let (key, execution, measure) = choose_execution(
                 &self.policy,
                 kind,
@@ -832,13 +839,12 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
                 len,
                 self.thread_pool.current_num_threads(),
             );
-            (key, execution, measure.then(Instant::now))
-        }
-
-        fn record(&self, key: PolicyKey, execution: Execution, start: Option<Instant>) {
+            let start = measure.then(Instant::now);
+            let result = run(execution);
             if let Some(start) = start {
                 record_execution(&self.policy, key, execution, start.elapsed());
             }
+            result
         }
 
         fn fold_init_with<I, INIT, T, R, ID, F, RD>(
@@ -861,8 +867,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            let (key, execution, start) = self.choose(kind, caller, items.len());
-            let result = match execution {
+            self.execute(kind, caller, items.len(), |execution| match execution {
                 Execution::Serial => Sequential.fold_init(items, init, identity, fold_op, reduce_op),
                 Execution::Parallel => self.thread_pool.install(|| {
                     items
@@ -877,9 +882,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
                         .map(|(_, acc)| acc)
                         .reduce(&identity, reduce_op)
                 }),
-            };
-            self.record(key, execution, start);
-            result
+            })
         }
 
         fn try_fold_with<I, R, E, ID, F, RD>(
@@ -900,8 +903,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            let (key, execution, start) = self.choose(kind, caller, items.len());
-            let result = match execution {
+            self.execute(kind, caller, items.len(), |execution| match execution {
                 Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
                 Execution::Parallel => self.thread_pool.install(|| {
                     items
@@ -909,9 +911,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
                         .try_fold(&identity, &fold_op)
                         .try_reduce(&identity, |a, b| Ok(reduce_op(a, b)))
                 }),
-            };
-            self.record(key, execution, start);
-            result
+            })
         }
     }
 
@@ -973,16 +973,19 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             T: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            let (key, execution, start) =
-                self.choose(OperationKind::MapCollect, Location::caller(), items.len());
-            let result = match execution {
-                Execution::Serial => Sequential.map_collect_vec(items, map_op),
-                Execution::Parallel => self
-                    .thread_pool
-                    .install(|| items.into_par_iter().map(map_op).collect()),
-            };
-            self.record(key, execution, start);
-            result
+            self.execute(
+                OperationKind::MapCollect,
+                Location::caller(),
+                items.len(),
+                |execution| {
+                    match execution {
+                        Execution::Serial => Sequential.map_collect_vec(items, map_op),
+                        Execution::Parallel => self
+                            .thread_pool
+                            .install(|| items.into_par_iter().map(map_op).collect()),
+                    }
+                },
+            )
         }
 
         #[track_caller]
@@ -994,16 +997,19 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             E: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            let (key, execution, start) =
-                self.choose(OperationKind::TryMapCollect, Location::caller(), items.len());
-            let result = match execution {
-                Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
-                Execution::Parallel => self
-                    .thread_pool
-                    .install(|| items.into_par_iter().map(map_op).collect()),
-            };
-            self.record(key, execution, start);
-            result
+            self.execute(
+                OperationKind::TryMapCollect,
+                Location::caller(),
+                items.len(),
+                |execution| {
+                    match execution {
+                        Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
+                        Execution::Parallel => self
+                            .thread_pool
+                            .install(|| items.into_par_iter().map(map_op).collect()),
+                    }
+                },
+            )
         }
 
         #[track_caller]
@@ -1016,16 +1022,19 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             R: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            let (key, execution, start) =
-                self.choose(OperationKind::MapInitCollect, Location::caller(), items.len());
-            let result = match execution {
-                Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                Execution::Parallel => self
-                    .thread_pool
-                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
-            };
-            self.record(key, execution, start);
-            result
+            self.execute(
+                OperationKind::MapInitCollect,
+                Location::caller(),
+                items.len(),
+                |execution| {
+                    match execution {
+                        Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                        Execution::Parallel => self
+                            .thread_pool
+                            .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+                    }
+                },
+            )
         }
 
         #[track_caller]
@@ -1084,7 +1093,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             )
         }
 
-        #[track_caller]
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where
             A: FnOnce() -> RA + Send,
@@ -1092,13 +1100,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             RA: Send,
             RB: Send,
         {
-            let (key, execution, start) = self.choose(OperationKind::Join, Location::caller(), 2);
-            let result = match execution {
-                Execution::Serial => (a(), b()),
-                Execution::Parallel => self.thread_pool.install(|| rayon::join(a, b)),
-            };
-            self.record(key, execution, start);
-            result
+            self.thread_pool.install(|| rayon::join(a, b))
         }
 
         #[track_caller]
@@ -1107,13 +1109,15 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            let (key, execution, start) =
-                self.choose(OperationKind::Sort, Location::caller(), items.len());
-            match execution {
-                Execution::Serial => Sequential.sort_by(items, compare),
-                Execution::Parallel => self.thread_pool.install(|| items.par_sort_by(compare)),
-            }
-            self.record(key, execution, start);
+            self.execute(
+                OperationKind::Sort,
+                Location::caller(),
+                items.len(),
+                |execution| match execution {
+                    Execution::Serial => Sequential.sort_by(items, compare),
+                    Execution::Parallel => self.thread_pool.install(|| items.par_sort_by(compare)),
+                },
+            );
         }
 
         fn parallelism_hint(&self) -> usize {
@@ -1191,6 +1195,16 @@ mod test {
     }
 
     #[test]
+    fn adaptive_policy_updates_ewma_with_integer_math() {
+        let mut entry = super::PolicyEntry::default();
+
+        entry.record(super::Execution::Parallel, Duration::from_nanos(100));
+        entry.record(super::Execution::Parallel, Duration::from_nanos(200));
+
+        assert_eq!(entry.parallel_ns, 120);
+    }
+
+    #[test]
     fn adaptive_policy_resamples_other_execution() {
         let mut entry = super::PolicyEntry::default();
         entry.record(super::Execution::Parallel, Duration::from_micros(100));
@@ -1245,7 +1259,7 @@ mod test {
     }
 
     #[test]
-    fn adaptive_policy_records_all_parallel_operations() {
+    fn adaptive_policy_records_all_adaptive_operations() {
         let strategy = parallel_strategy();
 
         let _: Vec<_> = strategy.fold_init(
@@ -1285,7 +1299,17 @@ mod test {
         strategy.sort_by(&mut sortable, |a, b| a.cmp(b));
 
         assert_eq!(sortable, vec![1, 2, 3]);
-        assert_eq!(policy_len(&strategy), 9);
+        assert_eq!(policy_len(&strategy), 8);
+    }
+
+    #[test]
+    fn join_does_not_use_adaptive_policy() {
+        let strategy = parallel_strategy();
+
+        let result = strategy.join(|| 1, || 2);
+
+        assert_eq!(result, (1, 2));
+        assert_eq!(policy_len(&strategy), 0);
     }
 
     proptest! {
