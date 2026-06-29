@@ -85,12 +85,28 @@ commonware_macros::stability_scope!(BETA {
             use alloc::vec::Vec;
         }
     }
+
+    /// A strategy wrapper for manually partitioned work.
+    ///
+    /// This disables adaptive serial-vs-parallel policy decisions for operations that callers have
+    /// already split into partitions.
+    #[derive(Clone, Debug)]
+    pub struct Manual<S>(S);
+
     /// A strategy for executing fold operations.
     ///
     /// This trait abstracts over sequential and parallel execution, allowing algorithms
     /// to be written generically and then executed with different strategies depending
     /// on the use case (e.g., sequential for testing/debugging, parallel for production).
     pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
+        /// Returns a strategy wrapper for manually partitioned work.
+        fn manual(&self) -> Manual<Self>
+        where
+            Self: Sized,
+        {
+            Manual(self.clone())
+        }
+
         /// Reduces a collection to a single value with per-partition initialization.
         ///
         /// Similar to [`fold`](Self::fold), but provides a separate initialization value
@@ -505,6 +521,115 @@ commonware_macros::stability_scope!(BETA {
         fn parallelism_hint(&self) -> usize;
     }
 
+    impl<S: Strategy> Strategy for Manual<S> {
+        #[track_caller]
+        fn fold_init<I, INIT, T, R, ID, F, RD>(
+            &self,
+            iter: I,
+            init: INIT,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> R
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            R: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            self.0.fold_init(iter, init, identity, fold_op, reduce_op)
+        }
+
+        #[track_caller]
+        fn try_fold<I, R, E, ID, F, RD>(
+            &self,
+            iter: I,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> Result<R, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            R: Send,
+            E: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            self.0.try_fold(iter, identity, fold_op, reduce_op)
+        }
+
+        #[track_caller]
+        fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> T + Send + Sync,
+            T: Send,
+        {
+            self.0.map_collect_vec(iter, map_op)
+        }
+
+        #[track_caller]
+        fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> Result<T, E> + Send + Sync,
+            T: Send,
+            E: Send,
+        {
+            self.0.try_map_collect_vec(iter, map_op)
+        }
+
+        #[track_caller]
+        fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            F: Fn(&mut T, I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            self.0.map_init_collect_vec(iter, init, map_op)
+        }
+
+        #[track_caller]
+        fn map_partition_collect_vec<I, F, K, U>(&self, iter: I, map_op: F) -> (Vec<U>, Vec<K>)
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> (K, Option<U>) + Send + Sync,
+            K: Send,
+            U: Send,
+        {
+            self.0.map_partition_collect_vec(iter, map_op)
+        }
+
+        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+        where
+            A: FnOnce() -> RA + Send,
+            B: FnOnce() -> RB + Send,
+            RA: Send,
+            RB: Send,
+        {
+            self.0.join(a, b)
+        }
+
+        #[track_caller]
+        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            self.0.sort_by(items, compare)
+        }
+
+        fn parallelism_hint(&self) -> usize {
+            self.0.parallelism_hint()
+        }
+    }
+
     /// A sequential execution strategy.
     ///
     /// This strategy executes all operations on the current thread without any
@@ -639,6 +764,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     pub struct Rayon {
         thread_pool: ThreadPool,
         policy: policy::Policy,
+        adaptive: bool,
     }
 
     impl Rayon {
@@ -656,21 +782,40 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             Self {
                 thread_pool,
                 policy: policy::Policy::default(),
+                adaptive: true,
             }
         }
 
         #[track_caller]
         fn execute<R>(&self, len: usize, run: impl FnOnce(policy::Execution) -> R) -> R {
+            let threads = self.thread_pool.current_num_threads();
+            if !self.adaptive {
+                let execution = if threads <= 1 {
+                    policy::Execution::Serial
+                } else {
+                    policy::Execution::Parallel
+                };
+                return run(execution);
+            }
+
             self.policy.run(
                 Location::caller(),
                 len,
-                self.thread_pool.current_num_threads(),
+                threads,
                 run,
             )
         }
     }
 
     impl Strategy for Rayon {
+        fn manual(&self) -> Manual<Self> {
+            Manual(Self {
+                thread_pool: self.thread_pool.clone(),
+                policy: policy::Policy::default(),
+                adaptive: false,
+            })
+        }
+
         #[track_caller]
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
@@ -927,6 +1072,17 @@ mod test {
         map_from_same_callsite(&strategy, 3);
 
         assert_eq!(policy_len(&strategy), 2);
+    }
+
+    #[test]
+    fn manual_strategy_does_not_use_adaptive_policy() {
+        let strategy = parallel_strategy();
+        let manual = strategy.manual();
+
+        let _: usize = manual.fold(0..4, || 0, |acc, x| acc + x, |a, b| a + b);
+
+        assert_eq!(policy_len(&strategy), 0);
+        assert_eq!(policy_len(&manual.0), 0);
     }
 
     #[test]

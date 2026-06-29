@@ -154,7 +154,7 @@ fn bisect<V: Variant>(
     }
 
     // Multiple chunks: verify each chunk root (may be valid or invalid).
-    let mut out = strategy.fold(
+    let mut out = strategy.manual().fold(
         entries.chunks(chunk_size).enumerate(),
         || Vec::with_capacity(entries.len()),
         |mut acc, (i, chunk)| {

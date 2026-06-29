@@ -144,7 +144,7 @@ impl Verifier {
             shards.push((shard, seed));
         }
 
-        strategy.fold(
+        strategy.manual().fold(
             shards,
             || Ok(()),
             |result, (shard, seed)| {
