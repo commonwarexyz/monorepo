@@ -403,10 +403,6 @@ const SNAPSHOT_CHANNEL_DEPTH: usize = 4;
 /// Build one parallel-init worker's partial snapshot: apply the routed operations (streamed in log
 /// order over `rx`) to `index`, resolving translated-key collisions with the worker's own log
 /// `reader` and `(location -> key)` cache. Returns the populated worker index.
-///
-/// Correct in isolation because the build routes every operation that can collide in the index
-/// (same partition prefix and same translated sub-key) to the same worker, so this worker has
-/// already seen (and cached) the earlier op of any key it must disambiguate.
 #[allow(clippy::type_complexity)]
 async fn build_snapshot_worker<F, C, T, const P: usize>(
     log: Arc<C>,
@@ -427,6 +423,7 @@ where
             } else {
                 let new_loc = Location::new(loc);
                 update_key::<F, _, _>(&mut index, &*log, &key, new_loc, cache.as_mut()).await?;
+
                 // This update op is now a `find_update_op` candidate for later ops of its key.
                 // `key` is owned by this batch and unused after `update_key`, so move it in.
                 if let Some(cache) = cache.as_mut() {
@@ -452,10 +449,10 @@ pub enum InitParallelism {
     Auto,
 }
 
-/// Builds a database's snapshot index from the operations log. Implemented per snapshot-index type so
-/// the ordered partitioned index can build its partitions in parallel across async worker tasks,
-/// while other index types use the serial replay. The default is the serial replay
-/// (`build_snapshot_from_log`); the ordered partitioned index overrides it.
+/// Builds a database's snapshot index from the operations log.
+///
+/// Generic over the `Index` type to allow for custom (e.g. parallel) implementations. Default
+/// implementation is the serial replay.
 pub trait SnapshotBuild<F: Family>: Index<Value = Location<F>> + Sized {
     /// Replay `log` from `inactivity_floor_loc`, populating `self` and invoking `callback` for each
     /// operation (its activity status and the location it inactivates, if any). Returns the number of
@@ -549,6 +546,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
 
             let floor = *inactivity_floor_loc;
             let range_size = count.div_ceil(workers);
+
             // `range_size` rounds up, so `range_size * workers` can exceed `count`, leaving trailing
             // ranges empty (and a naive `count - lo` would underflow). Reduce to the number of
             // non-empty ranges; routing (`p / range_size`) then stays in `[0, workers)`.
@@ -562,6 +560,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
                 let (tx, rx) = mpsc::channel(SNAPSHOT_CHANNEL_DEPTH);
                 senders.push(tx);
                 let log = log.clone();
+
                 // This worker owns the contiguous partition range [lo, lo + range_len); it allocates
                 // only that many slots, so per-worker memory is the range, not the full partition set.
                 let lo = w * range_size;
@@ -591,6 +590,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
                     ..workers)
                     .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
                     .collect();
+
                 // A closed channel means a worker terminated early (e.g. returned an `Error<F>`
                 // while resolving a collision). Stop routing on the first such send failure and let
                 // the join below surface that worker's error, rather than panicking on the send.
@@ -613,6 +613,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
                         }
                     }
                 }
+
                 // Flush remaining batches before the channels close (skip if a worker already died;
                 // the join surfaces its error).
                 if !aborted {
@@ -624,6 +625,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
                 }
                 (end, last_commit)
             };
+
             // Close the channels so each worker's stream terminates and it returns its index.
             drop(senders);
 
