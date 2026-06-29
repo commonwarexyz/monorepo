@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::{
-        dkg::feldman_desmedt::{deal, Dealer, Info, Logs, Player},
+        dkg::feldman_desmedt::{deal, Dealer, Info, Logs, Player, Verdict},
         primitives::variant::MinSig,
     },
     ed25519::{Batch, PrivateKey, PublicKey},
@@ -83,9 +83,8 @@ impl Bench {
             for (target_pk, priv_msg) in priv_msgs {
                 // The only missing player should be ourselves.
                 if let Some(player) = player_states.get_mut(&target_pk) {
-                    if let Some(ack) = player
-                        .dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
-                        .valid()
+                    if let Verdict::Valid(ack) =
+                        player.dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
                     {
                         dealer.receive_player_ack(target_pk.clone(), ack).unwrap();
                     }

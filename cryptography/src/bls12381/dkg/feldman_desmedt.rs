@@ -901,22 +901,6 @@ pub enum Verdict<T> {
     Fault,
 }
 
-impl<T> Verdict<T> {
-    /// Returns the validated artifact, discarding skip and fault verdicts.
-    pub fn valid(self) -> Option<T> {
-        match self {
-            Self::Valid(value) => Some(value),
-            Self::Skip | Self::Fault => None,
-        }
-    }
-
-    /// Returns whether the message validated.
-    #[must_use]
-    pub const fn is_valid(&self) -> bool {
-        matches!(self, Self::Valid(_))
-    }
-}
-
 #[derive(Clone, PartialEq)]
 enum AckOrReveal<P: PublicKey> {
     Ack(PlayerAck<P>),
@@ -2508,9 +2492,14 @@ mod test_plan {
                         let player = &mut players.values_mut()[usize::from(i_player)];
                         let persisted = priv_msg.clone();
 
-                        let ack = player
-                            .dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
-                            .valid();
+                        let ack = match player.dealer_message::<N3f1>(
+                            pk.clone(),
+                            pub_msg.clone(),
+                            priv_msg,
+                        ) {
+                            Verdict::Valid(ack) => Some(ack),
+                            Verdict::Skip | Verdict::Fault => None,
+                        };
                         assert_eq!(ack, ReadExt::read(&mut ack.encode())?);
                         if let Some(ack) = ack {
                             acked_dealings
@@ -3118,12 +3107,13 @@ mod test {
                     Dealer::start::<QuorumTwo>(&mut rng, info.clone(), dealer_sk, None)
                         .expect("dealer initialization must succeed");
                 for (player_pk, priv_msg) in priv_msgs {
-                    let ack = players
+                    let Verdict::Valid(ack) = players
                         .get_mut(&player_pk)
                         .expect("player should exist")
                         .dealer_message::<QuorumTwo>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
-                        .valid()
-                        .expect("dealer message must succeed");
+                    else {
+                        panic!("dealer message must succeed");
+                    };
                     dealer
                         .receive_player_ack(player_pk, ack)
                         .expect("ack handling must succeed");
@@ -3581,10 +3571,11 @@ mod test {
             let (mut dealer, pub_msg, priv_msgs) =
                 Dealer::start::<N3f1>(&mut test_rng(), info.clone(), sk.clone(), None)?;
             let mut player = Player::new(info.clone(), sk)?;
-            let ack = player
-                .dealer_message::<N3f1>(pk.clone(), pub_msg, priv_msgs[0].1.clone())
-                .valid()
-                .unwrap();
+            let Verdict::Valid(ack) =
+                player.dealer_message::<N3f1>(pk.clone(), pub_msg, priv_msgs[0].1.clone())
+            else {
+                panic!("dealer message must succeed");
+            };
             dealer.receive_player_ack(pk, ack)?;
             dealer.finalize::<N3f1>()
         };
@@ -3640,9 +3631,10 @@ mod test {
         ));
 
         // A correct dealing validates.
-        assert!(player
-            .dealer_message::<N3f1>(a_pk, pub_msg, priv_for_b)
-            .is_valid());
+        assert!(matches!(
+            player.dealer_message::<N3f1>(a_pk, pub_msg, priv_for_b),
+            Verdict::Valid(_)
+        ));
 
         Ok(())
     }
@@ -3665,10 +3657,11 @@ mod test {
         let (mut dealer, pub_msg, priv_msgs) =
             Dealer::start::<N3f1>(&mut test_rng(), info.clone(), a.clone(), None)?;
         let mut player = Player::new(info, a.clone())?;
-        let ack = player
-            .dealer_message::<N3f1>(a_pk.clone(), pub_msg, priv_msgs[0].1.clone())
-            .valid()
-            .expect("valid ack");
+        let Verdict::Valid(ack) =
+            player.dealer_message::<N3f1>(a_pk.clone(), pub_msg, priv_msgs[0].1.clone())
+        else {
+            panic!("valid ack");
+        };
 
         // An ack signature that does not verify is a provable fault.
         let forged = PlayerAck {

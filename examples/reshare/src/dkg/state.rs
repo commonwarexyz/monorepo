@@ -838,16 +838,22 @@ mod tests {
 
             let mut crypto_player =
                 CryptoPlayer::new(round_info, player_signer).expect("valid player");
-            let ack = crypto_player
-                .dealer_message::<N3f1>(dealer_signer.public_key(), pub_msg, player_priv_msg)
-                .valid()
-                .expect("valid ack");
+            let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
+                dealer_signer.public_key(),
+                pub_msg,
+                player_priv_msg,
+            ) else {
+                panic!("valid ack");
+            };
 
             let result = dealer
                 .handle(&mut storage, Epoch::zero(), player_pk, ack)
                 .await;
 
-            assert!(result.is_valid(), "handle should accept a valid ack");
+            assert!(
+                matches!(result, Verdict::Valid(())),
+                "handle should accept a valid ack"
+            );
         });
     }
 
@@ -889,16 +895,22 @@ mod tests {
 
             let mut crypto_player =
                 CryptoPlayer::new(round_info, player_signer).expect("valid player");
-            let ack = crypto_player
-                .dealer_message::<N3f1>(dealer_signer.public_key(), pub_msg, player_priv_msg)
-                .valid()
-                .expect("valid ack");
+            let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
+                dealer_signer.public_key(),
+                pub_msg,
+                player_priv_msg,
+            ) else {
+                panic!("valid ack");
+            };
 
             // First ack should succeed
             let result = dealer
                 .handle(&mut storage, Epoch::zero(), player_pk.clone(), ack.clone())
                 .await;
-            assert!(result.is_valid(), "first ack should succeed");
+            assert!(
+                matches!(result, Verdict::Valid(())),
+                "first ack should succeed"
+            );
 
             // Second ack from same player should skip (player removed from unsent)
             let result = dealer
