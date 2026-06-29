@@ -9,11 +9,8 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self,
-        hasher::Hasher as _,
-        mem::Mem,
-        storage::Storage as MerkleStorage,
-        Graftable, Location, Position,
+        self, hasher::Hasher as _, mem::Mem, storage::Storage as MerkleStorage, Graftable,
+        Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{

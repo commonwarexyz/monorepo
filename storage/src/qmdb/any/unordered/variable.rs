@@ -36,8 +36,15 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Key, V: VariableValue, H: CodecHasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
+impl<
+        F: Family,
+        E: Context,
+        K: Key,
+        V: VariableValue,
+        H: CodecHasher,
+        T: Translator,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, S>
 where
     Operation<F, K, V>: Codec,
 {

@@ -180,7 +180,8 @@ mod tests {
         );
 
         // Verify the proof
-        assert!(verify_proof::<Sha256, _, _>(&proof,
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
             Location::<F>::new(0), // start_loc
             &operations,
             &root
@@ -188,7 +189,8 @@ mod tests {
 
         // Verify the proof with the wrong root
         let wrong_root = test_digest(99);
-        assert!(!verify_proof::<Sha256, _, _>(&proof,
+        assert!(!verify_proof::<Sha256, _, _>(
+            &proof,
             Location::<F>::new(0),
             &operations,
             &wrong_root
@@ -196,7 +198,8 @@ mod tests {
 
         // Verify the proof with the wrong operations
         let wrong_operations = vec![9, 10, 11];
-        assert!(!verify_proof::<Sha256, _, _>(&proof,
+        assert!(!verify_proof::<Sha256, _, _>(
+            &proof,
             Location::<F>::new(0),
             &wrong_operations,
             &root
@@ -245,10 +248,16 @@ mod tests {
         );
 
         // Verify with correct start location
-        assert!(verify_proof::<Sha256, _, _>(&proof, start_loc, &operations, &root));
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
+            start_loc,
+            &operations,
+            &root
+        ));
 
         // Verify fails with wrong start location
-        assert!(!verify_proof::<Sha256, _, _>(&proof,
+        assert!(!verify_proof::<Sha256, _, _>(
+            &proof,
             Location::<F>::new(0), // wrong start_loc
             &operations,
             &root
@@ -287,7 +296,8 @@ mod tests {
         let proof = qmdb_range_proof(&hasher, &merkle, 0, range.clone());
 
         // Verify and extract digests for subset of operations
-        let result = verify_proof_and_extract_digests::<Sha256, _, _>(&proof,
+        let result = verify_proof_and_extract_digests::<Sha256, _, _>(
+            &proof,
             Location::<F>::new(1), // start_loc
             &operations[range.to_usize_range()],
             &root,
@@ -298,7 +308,8 @@ mod tests {
 
         // Should fail with wrong root
         let wrong_root = test_digest(99);
-        assert!(verify_proof_and_extract_digests::<Sha256, _, _>(&proof,
+        assert!(verify_proof_and_extract_digests::<Sha256, _, _>(
+            &proof,
             Location::<F>::new(1),
             &operations[range.to_usize_range()],
             &wrong_root
@@ -339,7 +350,8 @@ mod tests {
         let proof = qmdb_range_proof(&hasher, &merkle, 0, range.clone());
 
         // Create proof store
-        let result = create_proof_store::<Sha256, _, _>(&proof,
+        let result = create_proof_store::<Sha256, _, _>(
+            &proof,
             range.start,                         // start_loc
             &operations[range.to_usize_range()], // Only the first 3 operations covered by the proof
             &root,
@@ -352,7 +364,8 @@ mod tests {
         let sub_proof = proof_store.range_proof(&hasher, range.clone()).unwrap();
 
         // Verify the sub-proof
-        assert!(verify_proof::<Sha256, _, _>(&sub_proof,
+        assert!(verify_proof::<Sha256, _, _>(
+            &sub_proof,
             range.start,
             &operations[range.to_usize_range()],
             &root
@@ -391,7 +404,8 @@ mod tests {
 
         // Should fail with invalid root
         let wrong_root = test_digest(99);
-        assert!(create_proof_store::<Sha256, _, _>(&proof,
+        assert!(create_proof_store::<Sha256, _, _>(
+            &proof,
             Location::<F>::new(0),
             &operations,
             &wrong_root
@@ -438,7 +452,8 @@ mod tests {
 
         // Create proof store
         let proof_store =
-            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root).unwrap();
+            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root)
+                .unwrap();
 
         // Generate multi-proof for specific locations
         let target_locations = vec![
@@ -457,7 +472,8 @@ mod tests {
             .collect();
 
         // Verify the multi-proof
-        assert!(verify_multi_proof::<Sha256, _, _>(&multi_proof,
+        assert!(verify_multi_proof::<Sha256, _, _>(
+            &multi_proof,
             &selected_ops,
             &root
         ));
@@ -495,7 +511,8 @@ mod tests {
         // Proof store starts at 32, so the first peak is folded into the proof prefix.
         let range = Location::<F>::new(32)..Location::<F>::new(49);
         let proof = qmdb_range_proof(&hasher, &merkle, inactive_peaks, range.clone());
-        let proof_store = create_proof_store::<Sha256, _, _>(&proof,
+        let proof_store = create_proof_store::<Sha256, _, _>(
+            &proof,
             range.start,
             &operations[range.to_usize_range()],
             &root,
@@ -505,12 +522,14 @@ mod tests {
 
         let mut tampered = proof.clone();
         tampered.inactive_peaks = 0;
-        assert!(!verify_proof::<Sha256, _, _>(&tampered,
+        assert!(!verify_proof::<Sha256, _, _>(
+            &tampered,
             range.start,
             &operations[range.to_usize_range()],
             &root
         ));
-        assert!(create_proof_store::<Sha256, _, _>(&tampered,
+        assert!(create_proof_store::<Sha256, _, _>(
+            &tampered,
             range.start,
             &operations[range.to_usize_range()],
             &root
@@ -519,12 +538,14 @@ mod tests {
 
         let mut tampered = proof;
         tampered.inactive_peaks = inactive_peaks + 1;
-        assert!(!verify_proof::<Sha256, _, _>(&tampered,
+        assert!(!verify_proof::<Sha256, _, _>(
+            &tampered,
             range.start,
             &operations[range.to_usize_range()],
             &root
         ));
-        assert!(create_proof_store::<Sha256, _, _>(&tampered,
+        assert!(create_proof_store::<Sha256, _, _>(
+            &tampered,
             range.start,
             &operations[range.to_usize_range()],
             &root
@@ -562,14 +583,16 @@ mod tests {
             .iter()
             .map(|&loc| (loc, operations[*loc as usize]))
             .collect();
-        assert!(verify_multi_proof::<Sha256, _, _>(&multi_proof,
+        assert!(verify_multi_proof::<Sha256, _, _>(
+            &multi_proof,
             &selected_ops,
             &root
         ));
 
         let mut tampered = multi_proof;
         tampered.inactive_peaks = 0;
-        assert!(!verify_multi_proof::<Sha256, _, _>(&tampered,
+        assert!(!verify_multi_proof::<Sha256, _, _>(
+            &tampered,
             &selected_ops,
             &root
         ));
@@ -616,7 +639,8 @@ mod tests {
         ];
         let proof = qmdb_range_proof(&hasher, &merkle, 0, Location::<F>::new(0)..merkle.leaves());
         let proof_store =
-            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root).unwrap();
+            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root)
+                .unwrap();
         let multi_proof = create_multi_proof(&proof_store, &target_locations, &[]).unwrap();
 
         // Verify with correct operations
@@ -625,7 +649,8 @@ mod tests {
             (Location::<F>::new(4), operations[4]),
             (Location::<F>::new(7), operations[7]),
         ];
-        assert!(verify_multi_proof::<Sha256, _, _>(&multi_proof,
+        assert!(verify_multi_proof::<Sha256, _, _>(
+            &multi_proof,
             &selected_ops,
             &root
         ));
@@ -636,7 +661,8 @@ mod tests {
             (Location::<F>::new(4), operations[4]),
             (Location::<F>::new(7), operations[7]),
         ];
-        assert!(!verify_multi_proof::<Sha256, _, _>(&multi_proof,
+        assert!(!verify_multi_proof::<Sha256, _, _>(
+            &multi_proof,
             &wrong_ops,
             &root
         ));
@@ -647,7 +673,8 @@ mod tests {
             (Location::<F>::new(4), operations[4]),
             (Location::<F>::new(7), operations[7]),
         ];
-        assert!(!verify_multi_proof::<Sha256, _, _>(&multi_proof,
+        assert!(!verify_multi_proof::<Sha256, _, _>(
+            &multi_proof,
             &wrong_locations,
             &root
         ));
@@ -672,7 +699,8 @@ mod tests {
 
         // Empty proof should verify against an empty merkle structure.
         let empty_proof = Proof::default();
-        assert!(verify_multi_proof::<Sha256, _, _>(&empty_proof,
+        assert!(verify_multi_proof::<Sha256, _, _>(
+            &empty_proof,
             &[] as &[(Location<F>, u64)],
             &empty_root
         ));
@@ -691,7 +719,8 @@ mod tests {
         let root = merkle.root(&hasher, 0).unwrap();
         let proof = qmdb_range_proof(&hasher, &merkle, 0, Location::<F>::new(0)..merkle.leaves());
         let proof_store =
-            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root).unwrap();
+            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root)
+                .unwrap();
         assert!(matches!(
             create_multi_proof(&proof_store, &[], &[]),
             Err(crate::merkle::Error::Empty)
@@ -735,13 +764,15 @@ mod tests {
             Location::<F>::new(0)..Location::<F>::new(3),
         );
         let proof_store =
-            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root).unwrap();
+            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root)
+                .unwrap();
 
         // Generate multi-proof for single element
         let multi_proof = create_multi_proof(&proof_store, &[Location::<F>::new(1)], &[]).unwrap();
 
         // Verify single element
-        assert!(verify_multi_proof::<Sha256, _, _>(&multi_proof,
+        assert!(verify_multi_proof::<Sha256, _, _>(
+            &multi_proof,
             &[(Location::<F>::new(1), operations[1])],
             &root
         ));

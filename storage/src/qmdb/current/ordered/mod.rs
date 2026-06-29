@@ -500,8 +500,7 @@ pub mod tests {
 
             for loc in *start_loc..*end_loc {
                 let loc = Location::<F>::new(loc);
-                let (proof, ops, chunks) =
-                    db.range_proof(loc, NZU64!(max_ops)).await.unwrap();
+                let (proof, ops, chunks) = db.range_proof(loc, NZU64!(max_ops)).await.unwrap();
                 assert!(
                     TestDb::<F, C, V>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",

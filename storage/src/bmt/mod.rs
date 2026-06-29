@@ -689,7 +689,10 @@ impl<D: Digest> Proof<D> {
 mod tests {
     use super::*;
     use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::{Hasher as _, sha256::{Digest, Sha256}};
+    use commonware_cryptography::{
+        sha256::{Digest, Sha256},
+        Hasher as _,
+    };
     use rstest::rstest;
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2837

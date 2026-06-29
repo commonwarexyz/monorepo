@@ -31,8 +31,15 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Array, V: FixedValue, H: CodecHasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
+impl<
+        F: Family,
+        E: Context,
+        K: Array,
+        V: FixedValue,
+        H: CodecHasher,
+        T: Translator,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -124,7 +131,8 @@ pub(crate) mod test {
             mmr::{self, Location},
             Location as GenericLocation,
         },
-        qmdb::{any::{
+        qmdb::{
+            any::{
                 test::fixed_db_config,
                 unordered::{fixed::Operation, Update},
             },
@@ -869,7 +877,8 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof::<Sha256, _, _>(&historical_proof,
+            assert!(verify_proof::<Sha256, _, _>(
+                &historical_proof,
                 Location::new(6),
                 &historical_ops,
                 &root_hash
@@ -890,7 +899,8 @@ pub(crate) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof::<Sha256, _, _>(&historical_proof,
+            assert!(verify_proof::<Sha256, _, _>(
+                &historical_proof,
                 Location::new(6),
                 &historical_ops,
                 &root_hash
@@ -1006,7 +1016,8 @@ pub(crate) mod test {
                 assert_eq!(historical_proof.leaves, reference_proof.leaves);
                 assert_eq!(historical_proof.digests, reference_proof.digests);
                 assert_eq!(historical_ops, reference_ops);
-                assert!(verify_proof::<Sha256, _, _>(&historical_proof,
+                assert!(verify_proof::<Sha256, _, _>(
+                    &historical_proof,
                     start_loc,
                     &historical_ops,
                     &root
@@ -1016,7 +1027,8 @@ pub(crate) mod test {
             // Verify the current full-size proof against the current root as a final sanity check.
             let full_root = db.root();
             let (full_proof, full_ops) = db.proof(start_loc, max_ops).await.unwrap();
-            assert!(verify_proof::<Sha256, _, _>(&full_proof,
+            assert!(verify_proof::<Sha256, _, _>(
+                &full_proof,
                 start_loc,
                 &full_ops,
                 &full_root

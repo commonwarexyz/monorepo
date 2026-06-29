@@ -20,7 +20,7 @@ hash = "6d6382956289a2f706581a4b1afa08c5cd8e8a4f55b11d454425333b6537cc17"
 
 ["commonware_storage::bmt::tests::conformance::RootConformance"]
 n_cases = 200
-hash = "d69c21fb12b6510115afc547263eabe543cfdae6bb7952b43df57b41337339a4"
+hash = "18b1108f18520078e2eb5bb29c6a4cdf3bded6b52d8efda19d45c0f10be27207"
 
 ["commonware_storage::cache::storage::conformance::CodecConformance<Record<u64>>"]
 n_cases = 65536

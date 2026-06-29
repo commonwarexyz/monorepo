@@ -35,8 +35,15 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Array, V: FixedValue, H: CodecHasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
+impl<
+        F: Family,
+        E: Context,
+        K: Array,
+        V: FixedValue,
+        H: CodecHasher,
+        T: Translator,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -131,7 +138,8 @@ pub(crate) mod test {
             mmr::{self, Location},
             Location as GenericLocation,
         },
-        qmdb::{any::{
+        qmdb::{
+            any::{
                 ordered::{
                     test::{
                         test_ordered_any_db_basic, test_ordered_any_db_empty,
@@ -911,7 +919,8 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof::<Sha256, _, _>(&historical_proof,
+            assert!(verify_proof::<Sha256, _, _>(
+                &historical_proof,
                 Location::new(5),
                 &historical_ops,
                 &root_hash
@@ -932,7 +941,8 @@ pub(crate) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof::<Sha256, _, _>(&historical_proof,
+            assert!(verify_proof::<Sha256, _, _>(
+                &historical_proof,
                 Location::new(5),
                 &historical_ops,
                 &root_hash
@@ -1036,7 +1046,8 @@ pub(crate) mod test {
                 assert_eq!(proof.digests, historical_proof.digests);
 
                 // Verify proof against reference root
-                assert!(verify_proof::<Sha256, _, _>(&historical_proof,
+                assert!(verify_proof::<Sha256, _, _>(
+                    &historical_proof,
                     start_loc,
                     &historical_ops,
                     &root

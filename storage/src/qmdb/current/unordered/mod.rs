@@ -232,8 +232,7 @@ pub mod tests {
 
             // Create a proof of the now-inactive update operation assigning v1 to k against the
             // current root.
-            let (range_proof, _, chunks) =
-                db.range_proof(op_loc, NZU64!(1)).await.unwrap();
+            let (range_proof, _, chunks) = db.range_proof(op_loc, NZU64!(1)).await.unwrap();
             let proof_inactive = db::KeyValueProof {
                 loc: op_loc,
                 chunk: chunks[0],
@@ -352,8 +351,7 @@ pub mod tests {
 
             for loc in *start_loc..*end_loc {
                 let loc = Location::<F>::new(loc);
-                let (proof, ops, chunks) =
-                    db.range_proof(loc, NZU64!(max_ops)).await.unwrap();
+                let (proof, ops, chunks) = db.range_proof(loc, NZU64!(max_ops)).await.unwrap();
                 assert!(
                     TestDb::<F, C, V>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",

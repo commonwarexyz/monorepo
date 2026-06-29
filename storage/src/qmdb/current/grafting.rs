@@ -365,11 +365,7 @@ impl<
     > Storage<'a, F, H, G, S>
 {
     /// Creates a new [Storage] instance.
-    pub(super) const fn new(
-        grafted_tree: &'a G,
-        grafting_height: u32,
-        ops_tree: &'a S,
-    ) -> Self {
+    pub(super) const fn new(grafted_tree: &'a G, grafting_height: u32, ops_tree: &'a S) -> Self {
         Self {
             grafted_tree,
             grafting_height,
@@ -864,7 +860,8 @@ mod tests {
             let ops_root = ops_mmr.root(&hasher, 0).unwrap();
 
             {
-                let combined = Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
+                let combined =
+                    Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
                 assert_eq!(combined.size().await, ops_mmr.size());
 
                 // Compute the grafted root by iterating ops peaks.
@@ -1031,7 +1028,8 @@ mod tests {
 
             ops_mmr.apply_batch(&batch).unwrap();
 
-            let combined = Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
+            let combined =
+                Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
             assert_eq!(combined.size().await, ops_mmr.size());
 
             // Compute the grafted root.

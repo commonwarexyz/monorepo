@@ -64,8 +64,14 @@ impl<
     }
 }
 
-impl<F: Family, E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: CodecHasher, S: Strategy>
-    CompactDb<F, E, K, V, H, S>
+impl<
+        F: Family,
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: CodecHasher,
+        S: Strategy,
+    > CompactDb<F, E, K, V, H, S>
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {

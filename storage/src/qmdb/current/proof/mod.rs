@@ -30,10 +30,8 @@
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
     merkle::{
-        self,
-        hasher::Hasher as _,
-        storage::Storage,
-        Family, Graftable, Location, PendingChunk, Position, Proof,
+        self, hasher::Hasher as _, storage::Storage, Family, Graftable, Location, PendingChunk,
+        Position, Proof,
     },
     qmdb::{
         self,
@@ -567,14 +565,9 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
         if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
             return Err(Error::OperationPruned(loc));
         }
-        let range_proof = RangeProof::new::<H, S, N>(
-            status,
-            storage,
-            inactivity_floor,
-            loc..loc + 1,
-            ops_root,
-        )
-        .await?;
+        let range_proof =
+            RangeProof::new::<H, S, N>(status, storage, inactivity_floor, loc..loc + 1, ops_root)
+                .await?;
         let chunk = status.get_chunk(BitMap::<N>::to_chunk_index(*loc));
         Ok(Self {
             loc,
@@ -1828,7 +1821,8 @@ mod tests {
                 };
                 grafted.apply_batch(&merkleized).unwrap();
             }
-            let storage = grafting::Storage::<F, Sha256, _, _>::new(&grafted, grafting_height, &ops);
+            let storage =
+                grafting::Storage::<F, Sha256, _, _>::new(&grafted, grafting_height, &ops);
 
             let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
             let canonical_root = db::compute_db_root::<F, Sha256, _, _, N>(

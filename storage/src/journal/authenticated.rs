@@ -204,7 +204,9 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     ///
     /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
     /// fork has been applied.
-    pub fn new_batch<H: CodecHasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, Item, S>
+    pub fn new_batch<H: CodecHasher<Digest = D>>(
+        self: &Arc<Self>,
+    ) -> UnmerkleizedBatch<F, H, Item, S>
     where
         Item: Encode,
     {

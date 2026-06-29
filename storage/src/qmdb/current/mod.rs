@@ -504,7 +504,8 @@ pub mod tests {
     use super::{ordered, unordered, FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig};
     use crate::{
         merkle::{self, mmb, mmr},
-        qmdb::{any::{
+        qmdb::{
+            any::{
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
@@ -3888,7 +3889,8 @@ pub mod tests {
                 .unwrap();
 
             // Verifies under the QMDB ops-tree hasher configuration.
-            assert!(verify_proof::<Sha256, _, _>(&proof,
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof,
                 Location::new(0),
                 &ops,
                 &ops_root
