@@ -4223,7 +4223,10 @@ mod tests {
                 "old-slot length invalidation should fail"
             );
             assert_eq!(write_count.load(Ordering::SeqCst), 3);
-            assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_LEN_SIZE);
+            assert_eq!(
+                failed_write_len.load(Ordering::SeqCst),
+                CHECKSUM_SLOT_LEN_SIZE
+            );
             drop(append);
 
             let (blob, size) = context

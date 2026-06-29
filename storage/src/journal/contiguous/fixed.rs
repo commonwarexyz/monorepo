@@ -457,7 +457,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // Apply repair (if any). The short blob becomes the new tail; blobs strictly newer
         // than it are removed (newest-first) and the truncation is synced, so the repair is
         // durable before sealing.
-        let tail_blob = size / cfg.items_per_blob.get();
+        let tail_blob = super::position_to_blob(size, cfg.items_per_blob.get());
         if let Some(truncate_to) = repair {
             while let Some((&newest, _)) = pending.last_key_value() {
                 if newest <= tail_blob {
@@ -479,8 +479,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         // Bytes beyond the persisted recovery watermark may be readable after reopen without
         // being crash-durable, so the next commit/sync must force a data sync before advancing it.
-        let dirty_from_blob =
-            (recovery_watermark < size).then(|| recovery_watermark / cfg.items_per_blob.get());
+        let dirty_from_blob = (recovery_watermark < size)
+            .then(|| super::position_to_blob(recovery_watermark, cfg.items_per_blob.get()));
 
         let metrics = Metrics::new(context);
         metrics.update(size, pruning_boundary, cfg.items_per_blob.get());
@@ -513,7 +513,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             cfg.page_cache,
             cfg.write_buffer,
         );
-        let tail_blob = clear_target / cfg.items_per_blob.get();
+        let tail_blob = super::position_to_blob(clear_target, cfg.items_per_blob.get());
         let blobs = Writable::recover(partition, BTreeMap::new(), tail_blob).await?;
         checkpoint
             .finish_clear(cfg.items_per_blob.get(), clear_target)
@@ -933,7 +933,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             .checked_add(items_count as u64)
             .ok_or(Error::SizeOverflow)?;
 
-        let first_dirty_blob = self.bounds.end / self.items_per_blob.get();
+        let first_dirty_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
         self.mark_dirty_from(first_dirty_blob);
         let mut written = 0;
         while written < items_count {
@@ -993,7 +993,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Err(Error::ItemPruned(size));
         }
 
-        let blob = size / self.items_per_blob.get();
+        let blob = super::position_to_blob(size, self.items_per_blob.get());
         let pos_in_blob = size - first_in_blob(self.bounds.start, blob, self.items_per_blob.get())?;
         let byte_offset = Self::items_to_bytes(pos_in_blob)?;
 
@@ -1036,8 +1036,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     pub async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
         // Calculate the blob that would contain min_item_pos, capped to the tail (which is
         // guaranteed to exist by our invariant).
-        let target_blob = min_item_pos / self.items_per_blob.get();
-        let tail_blob = self.bounds.end / self.items_per_blob.get();
+        let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
+        let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
         let min_blob = std::cmp::min(target_blob, tail_blob);
 
         if min_blob <= self.blobs.oldest_blob_index() {
@@ -1095,7 +1095,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         // Remove every blob, then start fresh at the new size.
         self.blobs
-            .clear(new_size / self.items_per_blob.get())
+            .clear(super::position_to_blob(new_size, self.items_per_blob.get()))
             .await?;
         self.bounds = new_size..new_size;
         self.dirty_from_blob = None;

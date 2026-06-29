@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Sealed, Writer},
+    buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
     Blob as RBlob, Buf, Error as RError, IoBufMut, IoBufs,
 };
@@ -221,7 +221,7 @@ impl<E: Context> Writable<E> {
     }
 
     /// Index of the newest blob.
-    pub(super) fn tail_blob_index(&self) -> u64 {
+    pub(super) const fn tail_blob_index(&self) -> u64 {
         self.oldest_blob_index + self.sealed.len() as u64
     }
 
@@ -272,8 +272,9 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
-    /// Drop every blob below `min_blob` and remove its file, oldest-first. Readers holding
-    /// the old slice keep reading the removed blobs.
+    /// Drop every blob below `min_blob` and remove its file, oldest-first. Safe with live readers:
+    /// snapshot readers keep their own handles, which the runtime's read-after-remove contract keeps
+    /// valid.
     ///
     /// # Invariants
     ///
@@ -435,98 +436,6 @@ impl<B: RBlob> SealedBlobs<'_, B> {
     }
 }
 
-/// Shared read surface for writable and sealed blobs.
-trait BlobReader {
-    /// Return the blob's logical size.
-    fn size(&self) -> u64;
-
-    /// Read into `buf` if the data is already cached.
-    fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool;
-
-    /// Read exactly `len` bytes at `offset`.
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, RError>;
-
-    /// Read up to `len` bytes at `offset`.
-    async fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), RError>;
-
-    /// Read fixed-size items at sorted byte offsets into `buf`.
-    async fn read_many_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Result<usize, RError>;
-}
-
-impl<B: RBlob> BlobReader for Writer<B> {
-    fn size(&self) -> u64 {
-        Self::size(self)
-    }
-
-    fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        Self::try_read_sync(self, offset, buf)
-    }
-
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, RError> {
-        Self::read_at(self, offset, len).await
-    }
-
-    async fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), RError> {
-        Self::read_up_to(self, offset, len, bufs).await
-    }
-
-    async fn read_many_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Result<usize, RError> {
-        Self::read_many_into(self, buf, offsets, item_size).await
-    }
-}
-
-impl<B: RBlob> BlobReader for Sealed<B> {
-    fn size(&self) -> u64 {
-        Self::size(self)
-    }
-
-    fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        Self::try_read_sync(self, offset, buf)
-    }
-
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, RError> {
-        Self::read_at(self, offset, len).await
-    }
-
-    async fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), RError> {
-        Self::read_up_to(self, offset, len, bufs).await
-    }
-
-    async fn read_many_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Result<usize, RError> {
-        Self::read_many_into(self, buf, offsets, item_size).await
-    }
-}
-
 /// A read handle for one journal blob.
 pub(super) enum Blob<'a, B: RBlob> {
     /// Writable tail, read through the writer's cache-aware logical view.
@@ -548,28 +457,24 @@ impl<'a, B: RBlob> Blob<'a, B> {
     /// Return the blob's logical size.
     pub(super) fn size(&self) -> u64 {
         match self {
-            Self::Writer(writer) => BlobReader::size(*writer),
-            Self::Sealed(sealed) => BlobReader::size(sealed),
+            Self::Writer(writer) => writer.size(),
+            Self::Sealed(sealed) => sealed.size(),
         }
     }
 
     /// Read into `buf` if the data is already cached.
     pub(super) fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
         match self {
-            Self::Writer(writer) => BlobReader::try_read_sync(*writer, offset, buf),
-            Self::Sealed(sealed) => BlobReader::try_read_sync(sealed, offset, buf),
+            Self::Writer(writer) => writer.try_read_sync(offset, buf),
+            Self::Sealed(sealed) => sealed.try_read_sync(offset, buf),
         }
     }
 
     /// Read exactly `len` bytes at `offset`.
     pub(super) async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         match self {
-            Self::Writer(writer) => BlobReader::read_at(*writer, offset, len)
-                .await
-                .map_err(Error::Runtime),
-            Self::Sealed(sealed) => BlobReader::read_at(sealed, offset, len)
-                .await
-                .map_err(Error::Runtime),
+            Self::Writer(writer) => writer.read_at(offset, len).await.map_err(Error::Runtime),
+            Self::Sealed(sealed) => sealed.read_at(offset, len).await.map_err(Error::Runtime),
         }
     }
 
@@ -581,22 +486,38 @@ impl<'a, B: RBlob> Blob<'a, B> {
         bufs: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
         match self {
-            Self::Writer(writer) => BlobReader::read_up_to(*writer, offset, len, bufs)
+            Self::Writer(writer) => writer
+                .read_up_to(offset, len, bufs)
                 .await
                 .map_err(Error::Runtime),
-            Self::Sealed(sealed) => BlobReader::read_up_to(sealed, offset, len, bufs)
+            Self::Sealed(sealed) => sealed
+                .read_up_to(offset, len, bufs)
                 .await
                 .map_err(Error::Runtime),
         }
     }
 
     /// Return a sequential replay handle starting at `offset`.
+    ///
+    /// Constructing the handle is cheap: paged replay stores prefetch settings, and writer-view
+    /// replay starts with an empty buffer. Read buffers are allocated later by `Replay::ensure`.
+    ///
+    /// Sealed blobs can use paged replay directly because their bytes are already fixed. The
+    /// writable tail is replayed through a live view so replay observes logical bytes without
+    /// mutating or flushing the writer.
     pub(super) fn replay_from(
         self,
         offset: u64,
         buffer_size: NonZeroUsize,
     ) -> Result<Replay<'a, B>, Error> {
-        Replay::new(self, offset, buffer_size)
+        match self {
+            Self::Writer(writer) => Replay::view(Self::Writer(writer), offset, buffer_size),
+            Self::Sealed(sealed) => {
+                let mut replay = sealed.replay(buffer_size).map_err(Error::Runtime)?;
+                replay.seek_to(offset).map_err(Error::Runtime)?;
+                Ok(Replay::paged(replay))
+            }
+        }
     }
 
     /// Read fixed-size items at sorted byte offsets into `buf`.
@@ -607,10 +528,12 @@ impl<'a, B: RBlob> Blob<'a, B> {
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
         match self {
-            Self::Writer(writer) => BlobReader::read_many_into(*writer, buf, offsets, item_size)
+            Self::Writer(writer) => writer
+                .read_many_into(buf, offsets, item_size)
                 .await
                 .map_err(Error::Runtime),
-            Self::Sealed(sealed) => BlobReader::read_many_into(sealed, buf, offsets, item_size)
+            Self::Sealed(sealed) => sealed
+                .read_many_into(buf, offsets, item_size)
                 .await
                 .map_err(Error::Runtime),
         }
@@ -632,16 +555,31 @@ impl<B: RBlob> FrameReader for Blob<'_, B> {
     }
 }
 
-/// Sequential replay over a journal blob view.
+/// Sequential replay over either a sealed paged blob or a live writer view.
 pub(super) struct Replay<'a, B: RBlob> {
-    inner: ViewReplay<'a, B>,
+    inner: ReplayInner<'a, B>,
+}
+
+/// Backing strategy for sequential blob replay.
+enum ReplayInner<'a, B: RBlob> {
+    /// Paged replay over sealed data. CRC bytes are validated and skipped by the runtime buffer.
+    Paged(PagedReplay<B>),
+    /// Logical replay over a live writer or any other blob view.
+    View(ViewReplay<'a, B>),
 }
 
 impl<'a, B: RBlob> Replay<'a, B> {
+    /// Wrap a paged replay handle.
+    const fn paged(replay: PagedReplay<B>) -> Self {
+        Self {
+            inner: ReplayInner::Paged(replay),
+        }
+    }
+
     /// Build a replay handle over a logical blob view.
-    fn new(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
+    fn view(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
         Ok(Self {
-            inner: ViewReplay::new(blob, offset, buffer_size)?,
+            inner: ReplayInner::View(ViewReplay::new(blob, offset, buffer_size)?),
         })
     }
 
@@ -649,26 +587,41 @@ impl<'a, B: RBlob> Replay<'a, B> {
     ///
     /// The replay buffer may still hold bytes after this becomes true.
     pub(super) const fn is_exhausted(&self) -> bool {
-        self.inner.is_exhausted()
+        match &self.inner {
+            ReplayInner::Paged(replay) => replay.is_exhausted(),
+            ReplayInner::View(replay) => replay.is_exhausted(),
+        }
     }
 
     /// Ensure at least `n` logical bytes are buffered unless EOF is reached first.
     pub(super) async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
-        self.inner.ensure(n).await
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => replay.ensure(n).await.map_err(Error::Runtime),
+            ReplayInner::View(replay) => replay.ensure(n).await,
+        }
     }
 }
 
 impl<B: RBlob> Buf for Replay<'_, B> {
     fn remaining(&self) -> usize {
-        self.inner.remaining()
+        match &self.inner {
+            ReplayInner::Paged(replay) => replay.remaining(),
+            ReplayInner::View(replay) => replay.remaining(),
+        }
     }
 
     fn chunk(&self) -> &[u8] {
-        self.inner.chunk()
+        match &self.inner {
+            ReplayInner::Paged(replay) => replay.chunk(),
+            ReplayInner::View(replay) => replay.chunk(),
+        }
     }
 
     fn advance(&mut self, cnt: usize) {
-        self.inner.advance(cnt)
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => replay.advance(cnt),
+            ReplayInner::View(replay) => replay.advance(cnt),
+        }
     }
 }
 

@@ -23,7 +23,7 @@ impl SyncState {
         Self { needs_sync }
     }
 
-    fn mark_unsynced(&mut self) {
+    const fn mark_unsynced(&mut self) {
         self.needs_sync = true;
     }
 
@@ -48,6 +48,7 @@ impl SyncState {
             self.write_at(blob, offset, bufs).await?;
             self.sync(blob).await
         } else {
+            // If `write_at_sync` fails, a later sync must not treat the drained buffer as durable.
             self.needs_sync = true;
             blob.write_at_sync(offset, bufs).await?;
             self.needs_sync = false;
