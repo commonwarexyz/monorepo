@@ -275,6 +275,7 @@ where
                 if old_loc.is_none() {
                     active_keys += 1;
                 }
+
                 // This update op is now a `find_update_op` candidate for later ops of its key.
                 if let Some(cache) = cache.as_mut() {
                     cache.put(loc, key.clone());
