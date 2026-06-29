@@ -120,17 +120,18 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
 /// A background receiver that receives raw bytes from a [`Receiver`] and spawns concurrent
 /// decode tasks using a [`Codec`].
 ///
-/// This pipelines network I/O (receiving bytes) with CPU work (decoding messages) by spawning
-/// a separate task for each decode operation, rather than decoding sequentially on the receive
-/// loop. This is particularly useful when decoding large messages that would otherwise create
-/// backpressure on the event loop, such as signature verification, decryption, or intensive
-/// validity checks.
+/// Decode work is submitted to the provided [`Strategy`]. A multi-worker [`Rayon`](commonware_parallel::Rayon)
+/// strategy runs each decode on a pool worker, pipelining network I/O (receiving bytes) with CPU
+/// work (decoding messages) so the receive loop keeps draining the network buffer; this is
+/// particularly useful for expensive decodes such as signature verification or decryption. Note
+/// that decode then shares the strategy's thread pool with the rest of that strategy's work.
+/// Strategies that execute inline ([`Sequential`](commonware_parallel::Sequential) or a
+/// single-worker pool) decode synchronously on the receive loop, with no pipelining.
 ///
-/// Decode work is submitted to the provided [`Strategy`]. The receiver bounds in-flight decode
-/// jobs to the strategy's manual parallelism hint before reading more bytes. Successfully decoded
-/// messages are forwarded through a bounded mailbox; if the consumer falls behind and the mailbox
-/// fills, additional decoded messages are dropped (they would likely no longer be useful by the
-/// time we get back to them).
+/// The receiver bounds in-flight decode jobs to the strategy's manual parallelism hint before
+/// reading more bytes. Successfully decoded messages are forwarded through a bounded mailbox; if
+/// the consumer falls behind and the mailbox fills, additional decoded messages are dropped (they
+/// would likely no longer be useful by the time we get back to them).
 struct Decoded<P: PublicKey, V>(P, V);
 
 impl<P: PublicKey, V> mailbox::UnreliablePolicy for Decoded<P, V> {
@@ -217,9 +218,9 @@ where
 
     /// Run the background receiver's event loop.
     ///
-    /// Each incoming message is decoded in a separate spawned task, allowing the receive loop to
-    /// continue draining the network buffer while decodes proceed on the provided strategy, up to
-    /// the in-flight decode limit.
+    /// Each incoming message is decoded via the provided strategy, up to the in-flight decode
+    /// limit. With a multi-worker strategy this lets the receive loop continue draining the network
+    /// buffer while decodes proceed on pool workers; inline strategies decode on the receive loop.
     async fn run(mut self) {
         let decode_queue_capacity = self.strategy.manual().parallelism_hint();
         let mut decode_pool = Pool::default();

@@ -81,7 +81,10 @@ commonware_macros::stability_scope!(BETA {
                 slice::ParallelSliceMut,
                 ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
             };
-            use std::{panic::Location, sync::Arc};
+            use std::{
+                panic::{self, AssertUnwindSafe, Location},
+                sync::Arc,
+            };
 
             mod policy;
         } else {
@@ -128,7 +131,13 @@ commonware_macros::stability_scope!(BETA {
 
         /// Submit one CPU-bound job to this strategy.
         ///
-        /// The returned future resolves when the submitted job completes.
+        /// The returned future resolves when the submitted job completes. Depending on the
+        /// strategy, the job may run eagerly and inline on the calling thread when this method is
+        /// called (e.g. [`Sequential`] or a single-worker [`Rayon`] pool) or be deferred to a
+        /// worker thread and run while the returned future is awaited.
+        ///
+        /// If the job panics, the panic is propagated to the caller (at the call site for the
+        /// inline case, or at the future's await point otherwise); it never aborts the process.
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
         where
             F: FnOnce() -> T + Send + 'static,
@@ -806,8 +815,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     #[derive(Debug, Clone)]
     pub struct Rayon {
         thread_pool: ThreadPool,
-        policy: policy::Policy,
-        adaptive: bool,
+        // `Some` enables adaptive serial-vs-parallel decisions; `None` (used by `manual`) runs the
+        // parallel body whenever the pool has more than one thread and allocates no policy state.
+        policy: Option<policy::Policy>,
     }
 
     impl Rayon {
@@ -824,29 +834,23 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         pub fn with_pool(thread_pool: ThreadPool) -> Self {
             Self {
                 thread_pool,
-                policy: policy::Policy::default(),
-                adaptive: true,
+                policy: Some(policy::Policy::default()),
             }
         }
 
         #[track_caller]
         fn execute<R>(&self, len: usize, run: impl FnOnce(policy::Execution) -> R) -> R {
             let threads = self.thread_pool.current_num_threads();
-            if !self.adaptive {
+            let Some(policy) = &self.policy else {
                 let execution = if threads <= 1 {
                     policy::Execution::Serial
                 } else {
                     policy::Execution::Parallel
                 };
                 return run(execution);
-            }
+            };
 
-            self.policy.run(
-                Location::caller(),
-                len,
-                threads,
-                run,
-            )
+            policy.run(Location::caller(), len, threads, run)
         }
     }
 
@@ -857,8 +861,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             Manual::new(
                 Self {
                     thread_pool: self.thread_pool.clone(),
-                    policy: policy::Policy::default(),
-                    adaptive: false,
+                    policy: None,
                 },
                 parallelism,
             )
@@ -875,10 +878,18 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
             let (tx, rx) = oneshot::channel();
             self.thread_pool.spawn(move || {
-                let result = f();
+                // Catch the panic so a panicking job propagates to the awaiting task rather than
+                // aborting the process (rayon aborts on an uncaught panic in a spawned job).
+                let result = panic::catch_unwind(AssertUnwindSafe(f));
                 let _ = tx.send(result);
             });
-            Either::Right(async move { rx.await.expect("strategy job failed") })
+            Either::Right(async move {
+                match rx.await {
+                    Ok(Ok(value)) => value,
+                    Ok(Err(payload)) => panic::resume_unwind(payload),
+                    Err(_) => panic!("strategy job dropped before completion"),
+                }
+            })
         }
 
         #[track_caller]
@@ -1057,7 +1068,7 @@ mod test {
     }
 
     fn policy_len(strategy: &Rayon) -> usize {
-        strategy.policy.len()
+        strategy.policy.as_ref().map_or(0, |policy| policy.len())
     }
 
     fn map_from_same_callsite(strategy: &Rayon, len: usize) {
@@ -1208,6 +1219,21 @@ mod test {
 
         assert_eq!(result, Some(7));
         assert_eq!(policy_len(&strategy), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "boom")]
+    fn rayon_spawn_propagates_job_panic() {
+        // A panic on a pool worker must surface at the await point, not abort the process.
+        let strategy = parallel_strategy();
+
+        let _: () = futures::executor::block_on(strategy.spawn(|| panic!("boom")));
+    }
+
+    #[test]
+    #[should_panic(expected = "boom")]
+    fn sequential_spawn_propagates_job_panic() {
+        let _: () = futures::executor::block_on(Sequential.spawn(|| panic!("boom")));
     }
 
     proptest! {

@@ -5,6 +5,12 @@
 //! samples and prefers parallel unless serial is clearly faster. It re-times the preferred path
 //! every [`PREFERRED_SAMPLE_INTERVAL`] calls to keep its estimate current, and probes the
 //! non-preferred path every [`RESAMPLE_INTERVAL`] calls in case the faster path has changed.
+//!
+//! Timing is coarse by design: each measured call records a single wall-clock sample, and the
+//! parallel sample also captures any time the job waits for a pool worker. On a shared pool under
+//! load this can bias the parallel estimate upward and lean toward serial, but the periodic
+//! resample bounds how long a stale decision persists, and both paths produce identical results,
+//! so a misjudged call only costs throughput, never correctness.
 
 use parking_lot::Mutex;
 use std::{
