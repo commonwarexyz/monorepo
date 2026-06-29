@@ -65,11 +65,10 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     /// Translates the prefix-stripped key bytes into a partition-local key.
     translator: T,
 
-    /// Global index of the first partition this instance covers; `0` for a normal full index. A
-    /// parallel snapshot-build worker (see [`Self::new_range`]) sets this so it can allocate only its
-    /// range of partitions yet still be addressed by the global partition index a key maps to. The
-    /// build maps `global -> global - offset` in `get_mut`/`get_mut_or_insert`; ordered queries are
-    /// only valid on a full (`offset == 0`) index.
+    /// Index of the first partition this instance covers, `0` for a full index. A parallel
+    /// snapshot-build worker (see [`Self::new_range`]) allocates only a contiguous sub-range of
+    /// partitions and sets `offset`, so it can be indexed by a key's global partition number while
+    /// holding just its range.
     offset: usize,
 
     /// The partitions this instance covers, indexed by `global_partition - offset`. A full index
@@ -327,9 +326,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     }
 
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
-        let (i, sub) = partition_index_and_sub_key::<P>(key);
         // Map the global partition index to this instance's local slot (`offset == 0` for a full
         // index, so this is a no-op there; a build worker covers only `[offset, offset + len)`).
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
         let i = i - self.offset;
         let k = self.translator.transform(sub);
         if !self.partitions[i].is_empty() {

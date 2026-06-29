@@ -26,7 +26,7 @@
 //! reporting the total build time.
 //!
 //! `bench` reopens it (read-only) and reports init time two ways: a cache sweep (off / a quarter of
-//! the replay region / the whole region) on the serial path, then a parallelism sweep (1/2/4/8/auto
+//! the replay region / the whole region) on the serial path, then a parallelism sweep (1/2/4/auto
 //! workers) at a full-coverage cache, isolating the parallel-build speedup from the cache effect. It
 //! also reports the replay-region size `R`, and uses the P=3 partitioned ordered index (the inline-SoA
 //! config for large key sets) so the parallel `build_snapshot` override is exercised; `flat` reopens
@@ -50,7 +50,10 @@ use commonware_runtime::{
     tokio::{Config, Runner},
     Runner as _, Supervisor as _,
 };
-use commonware_storage::{merkle::mmr::Family as Mmr, qmdb::any::traits::DbAny as _};
+use commonware_storage::{
+    merkle::mmr::Family as Mmr,
+    qmdb::{any::traits::DbAny as _, InitParallelism},
+};
 use commonware_utils::{NZUsize, NZU64};
 use std::{
     io::Write as _,
@@ -81,10 +84,18 @@ const PRUNE_FREQUENCY: u32 = 100;
 /// workloads. Higher = more skew; ~1.0 is classic Zipf (near YCSB's 0.99).
 const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
-/// Worker counts to sweep when timing the parallel snapshot build. `1` is the serial path (the
-/// in-override fast path that calls `build_snapshot_from_log` directly); higher values fan out across
-/// that many async worker tasks. `0` (auto, from the runtime's parallelism) is reported separately.
-const PARALLELISM: [usize; 4] = [1, 2, 4, 8];
+/// Worker counts to sweep when timing the snapshot build. `0` is the serial build (on the replay
+/// task itself); `1` still de-interleaves the build onto a single worker task; higher values fan out
+/// across that many worker tasks. Auto (from the runtime's parallelism) is reported separately.
+const PARALLELISM: [usize; 4] = [0, 1, 2, 4];
+
+/// Map a worker count to an [InitParallelism]: `0` is the serial build, `n` spawns `n` worker tasks.
+const fn workers(n: usize) -> InitParallelism {
+    match n {
+        0 => InitParallelism::Serial,
+        n => InitParallelism::Workers(NonZeroUsize::new(n).unwrap()),
+    }
+}
 
 fn usage() {
     eprintln!(
@@ -204,7 +215,7 @@ fn bench(folder: &str) {
 
     // No-cache, serial baseline; also learn the replay region R (ops above the inactivity floor) --
     // what the location cache must cover to avoid eviction (a key-cache would need only the key count).
-    let (baseline, region) = time_init(&cfg, None, 1);
+    let (baseline, region) = time_init(&cfg, None, workers(0));
     if region == 0 {
         eprintln!(
             "database at {folder} is empty; run `generate {folder} <keyspace> <num_updates>` first"
@@ -213,14 +224,14 @@ fn bench(folder: &str) {
     }
     println!("init_scale: {folder}  (any::ordered::fixed::p3::mmr)");
     println!("  replay region R = {region} ops");
-    println!("  cache sweep (serial, parallelism=1):");
+    println!("  cache sweep (serial):");
     println!("    cache=off          : {baseline:?}");
     let _ = std::io::stdout().flush();
     for cache_size in [
         NonZeroUsize::new((region / 4) as usize),
         NonZeroUsize::new(region as usize),
     ] {
-        let (elapsed, _) = time_init(&cfg, cache_size, 1);
+        let (elapsed, _) = time_init(&cfg, cache_size, workers(0));
         println!("    cache={cache_size:?}: {elapsed:?}");
         let _ = std::io::stdout().flush();
     }
@@ -228,12 +239,20 @@ fn bench(folder: &str) {
     // Parallelism sweep at a full-coverage cache (so per-worker cache misses don't dominate).
     println!("  parallelism sweep (cache=R):");
     for parallelism in PARALLELISM {
-        let (elapsed, _) = time_init(&cfg, NonZeroUsize::new(region as usize), parallelism);
+        let (elapsed, _) = time_init(
+            &cfg,
+            NonZeroUsize::new(region as usize),
+            workers(parallelism),
+        );
         println!("    parallelism={parallelism:>2}     : {elapsed:?}");
         let _ = std::io::stdout().flush();
     }
     // Auto worker count (derived from the runtime's available parallelism).
-    let (elapsed, _) = time_init(&cfg, NonZeroUsize::new(region as usize), 0);
+    let (elapsed, _) = time_init(
+        &cfg,
+        NonZeroUsize::new(region as usize),
+        InitParallelism::Auto,
+    );
     println!("    parallelism=auto   : {elapsed:?}");
     let _ = std::io::stdout().flush();
 }
@@ -246,7 +265,7 @@ fn bench_parallel(folder: &str) {
     let cfg = Config::default().with_storage_directory(folder);
 
     // Serial, cache-off init just to learn the replay region R (so the sweep can size cache=R).
-    let (_, region) = time_init(&cfg, None, 1);
+    let (_, region) = time_init(&cfg, None, workers(0));
     if region == 0 {
         eprintln!("no database at {folder}; run `generate {folder} <elements>` first");
         return;
@@ -256,11 +275,19 @@ fn bench_parallel(folder: &str) {
     println!("  parallelism sweep (cache=R):");
     let _ = std::io::stdout().flush();
     for parallelism in PARALLELISM {
-        let (elapsed, _) = time_init(&cfg, NonZeroUsize::new(region as usize), parallelism);
+        let (elapsed, _) = time_init(
+            &cfg,
+            NonZeroUsize::new(region as usize),
+            workers(parallelism),
+        );
         println!("    parallelism={parallelism:>2}     : {elapsed:?}");
         let _ = std::io::stdout().flush();
     }
-    let (elapsed, _) = time_init(&cfg, NonZeroUsize::new(region as usize), 0);
+    let (elapsed, _) = time_init(
+        &cfg,
+        NonZeroUsize::new(region as usize),
+        InitParallelism::Auto,
+    );
     println!("    parallelism=auto   : {elapsed:?}");
     let _ = std::io::stdout().flush();
 }
@@ -270,7 +297,7 @@ fn bench_parallel(folder: &str) {
 /// external driver can `purge` between invocations to measure cold-cache init.
 fn bench_one(folder: &str, cache_size: usize, parallelism: usize) {
     let cfg = Config::default().with_storage_directory(folder);
-    let (elapsed, region) = time_init(&cfg, NonZeroUsize::new(cache_size), parallelism);
+    let (elapsed, region) = time_init(&cfg, NonZeroUsize::new(cache_size), workers(parallelism));
     if region == 0 {
         eprintln!("no database at {folder}; run `generate {folder} <elements>` first");
         return;
@@ -325,7 +352,7 @@ fn destroy(folder: &str) {
 fn time_init(
     cfg: &Config,
     cache_size: Option<NonZeroUsize>,
-    parallelism: usize,
+    parallelism: InitParallelism,
 ) -> (Duration, u64) {
     Runner::new(cfg.clone()).start(|ctx| async move {
         let mut config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE);

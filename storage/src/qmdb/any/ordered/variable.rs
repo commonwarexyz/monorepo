@@ -150,12 +150,15 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::any::{
-            ordered::test::{
-                test_ordered_any_db_basic, test_ordered_any_db_empty,
-                test_ordered_any_update_collision_edge_case,
+        qmdb::{
+            any::{
+                ordered::test::{
+                    test_ordered_any_db_basic, test_ordered_any_db_empty,
+                    test_ordered_any_update_collision_edge_case,
+                },
+                test::variable_db_config,
             },
-            test::variable_db_config,
+            InitParallelism,
         },
         translator::TwoCap,
     };
@@ -185,7 +188,7 @@ pub(crate) mod test {
         let page_cache =
             CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         VariableConfig {
-            init_parallelism: 0,
+            init_parallelism: InitParallelism::Serial,
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
                 metadata_partition: format!("mmr-metadata-{seed}"),

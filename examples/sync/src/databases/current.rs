@@ -27,6 +27,7 @@ use commonware_storage::{
         any::unordered::{fixed::Operation as FixedOperation, Update},
         current::{self, FixedConfig as Config},
         operation::Committable,
+        InitParallelism,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -55,7 +56,7 @@ pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequential> {
     let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     Config {
-        init_parallelism: 0,
+        init_parallelism: InitParallelism::Serial,
         merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),

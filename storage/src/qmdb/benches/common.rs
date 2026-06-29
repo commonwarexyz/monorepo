@@ -27,6 +27,7 @@ use commonware_storage::{
         },
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
+        InitParallelism,
     },
     translator::EightCap,
 };
@@ -156,7 +157,7 @@ pub fn any_fix_cfg_with(
 ) -> AnyFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, page_cache_size);
     AnyFixedConfig {
-        init_parallelism: 0,
+        init_parallelism: InitParallelism::Serial,
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
@@ -189,7 +190,7 @@ pub fn cur_fix_cfg_with(
 ) -> CurrentFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentFixedConfig {
-        init_parallelism: 0,
+        init_parallelism: InitParallelism::Serial,
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
@@ -210,7 +211,7 @@ pub fn any_var_digest_cfg_with(
 ) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        init_parallelism: 0,
+        init_parallelism: InitParallelism::Serial,
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
@@ -230,7 +231,7 @@ pub fn cur_var_digest_cfg_with(
 ) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        init_parallelism: 0,
+        init_parallelism: InitParallelism::Serial,
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
@@ -254,7 +255,7 @@ pub fn any_var_vec_cfg_with(
 ) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        init_parallelism: 0,
+        init_parallelism: InitParallelism::Serial,
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(
             PARTITION_VAR,
@@ -279,7 +280,7 @@ pub fn cur_var_vec_cfg_with(
 ) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        init_parallelism: 0,
+        init_parallelism: InitParallelism::Serial,
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(
             PARTITION_VAR,

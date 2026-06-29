@@ -594,10 +594,10 @@ pub(crate) mod test {
     }
 
     /// Build a `P`-partitioned ordered db with churny ops, then assert that reopening it with a range
-    /// of `init_parallelism` worker counts (including the serial `1` path, counts that leave trailing
-    /// partition ranges empty, and counts above the partition count that clamp) all reconstruct the
-    /// identical root -- the parallel build replays the same immutable log, just split across workers
-    /// owning disjoint partition ranges (with non-zero offsets for `parallelism > 1`).
+    /// of worker counts (`0` for the serial path, `1` for the single-worker de-interleave, counts that
+    /// leave trailing partition ranges empty, and counts above the partition count that clamp) all
+    /// reconstruct the identical root -- the parallel build replays the same immutable log, just split
+    /// across workers owning disjoint partition ranges (with non-zero offsets for `workers > 1`).
     async fn check_parallel_init_equivalence<const P: usize>(
         context: deterministic::Context,
         partition: &'static str,
@@ -633,17 +633,22 @@ pub(crate) mod test {
         drop(db);
 
         // Reopen with a range of worker counts; all rebuild from the same log and must match.
-        for &parallelism in parallelisms {
+        for &workers in parallelisms {
             let mut cfg = fixed_db_config::<OneCap>(partition, &context);
-            cfg.init_parallelism = parallelism;
+            cfg.init_parallelism = match workers {
+                0 => crate::qmdb::InitParallelism::Serial,
+                n => {
+                    crate::qmdb::InitParallelism::Workers(core::num::NonZeroUsize::new(n).unwrap())
+                }
+            };
             let ctx = context
                 .child("reopen")
-                .with_attribute("parallelism", parallelism);
+                .with_attribute("parallelism", workers);
             let db = PartDb::<P>::init(ctx, cfg).await.unwrap();
             assert_eq!(
                 db.root(),
                 root,
-                "root mismatch at P={P} init_parallelism={parallelism}"
+                "root mismatch at P={P} init_parallelism={workers}"
             );
             drop(db);
         }
@@ -657,7 +662,7 @@ pub(crate) mod test {
             check_parallel_init_equivalence::<1>(
                 context,
                 "parallel_equiv_p1",
-                &[1, 2, 4, 8, 200, 300],
+                &[0, 1, 2, 4, 8, 200, 300],
             )
             .await;
         });
@@ -666,20 +671,24 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_ordered_partitioned_p2_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            check_parallel_init_equivalence::<2>(context, "parallel_equiv_p2", &[1, 2, 4, 8, 200])
-                .await;
+            check_parallel_init_equivalence::<2>(
+                context,
+                "parallel_equiv_p2",
+                &[0, 1, 2, 4, 8, 200],
+            )
+            .await;
         });
     }
 
     /// P=3 allocates `2^24` partition slots (~800 MB per index), so it is too memory-heavy for the
-    /// default suite; run explicitly with `--ignored` (and ideally `--release`). Only serial vs one
-    /// offset-parallel reopen is checked -- enough to validate the offset-based range build and merge
-    /// at the largest prefix width without the full worker-count sweep.
+    /// default suite; run explicitly with `--ignored` (and ideally `--release`). Only serial,
+    /// single-worker, and one offset-parallel reopen are checked -- enough to validate the offset-based
+    /// range build and merge at the largest prefix width without the full worker-count sweep.
     #[test_traced("WARN")]
     #[ignore]
     fn test_ordered_partitioned_p3_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            check_parallel_init_equivalence::<3>(context, "parallel_equiv_p3", &[1, 2]).await;
+            check_parallel_init_equivalence::<3>(context, "parallel_equiv_p3", &[0, 1, 2]).await;
         });
     }
 

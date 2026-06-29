@@ -117,12 +117,11 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
-    /// Number of parallel worker tasks the ordered-partitioned snapshot build uses during init;
-    /// `0` derives it from the runtime's available parallelism. Other index types ignore it. Each
-    /// worker holds its own log reader and its own share (`init_cache_size / workers`) of the init
-    /// cache. Returns can diminish once the main replay/routing task becomes the bottleneck; benchmark
-    /// representative workloads before configuring more than two workers.
-    pub init_parallelism: usize,
+    /// How the ordered-partitioned snapshot build parallelizes during init (other index types ignore
+    /// it). Each worker holds its own log reader and its own share (`init_cache_size / workers`) of the
+    /// init cache. Returns can diminish once the main replay/routing task becomes the bottleneck;
+    /// benchmark representative workloads before configuring more than two workers.
+    pub init_parallelism: super::InitParallelism,
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
@@ -211,6 +210,7 @@ pub(crate) mod test {
         qmdb::{
             self,
             any::{FixedConfig, MerkleConfig, VariableConfig},
+            InitParallelism,
         },
         translator::OneCap,
     };
@@ -243,7 +243,7 @@ pub(crate) mod test {
     ) -> FixedConfig<T, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            init_parallelism: 0,
+            init_parallelism: InitParallelism::Serial,
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
@@ -269,7 +269,7 @@ pub(crate) mod test {
     ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            init_parallelism: 0,
+            init_parallelism: InitParallelism::Serial,
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),

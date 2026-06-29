@@ -383,11 +383,10 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
-    /// Number of parallel worker tasks the ordered-partitioned snapshot build uses during init;
-    /// `0` derives it from the runtime's available parallelism. Other index types ignore it. Returns
-    /// can diminish once the main replay/routing task becomes the bottleneck; benchmark
+    /// How the ordered-partitioned snapshot build parallelizes during init (other index types ignore
+    /// it). Returns can diminish once the main replay/routing task becomes the bottleneck; benchmark
     /// representative workloads before configuring more than two workers.
-    pub init_parallelism: usize,
+    pub init_parallelism: super::InitParallelism,
 }
 
 impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
@@ -531,6 +530,7 @@ pub mod tests {
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
+            InitParallelism,
         },
         translator::Translator,
     };
@@ -566,7 +566,7 @@ pub mod tests {
     ) -> FixedConfig<T, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            init_parallelism: 0,
+            init_parallelism: InitParallelism::Serial,
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -594,7 +594,7 @@ pub mod tests {
     ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            init_parallelism: 0,
+            init_parallelism: InitParallelism::Serial,
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -1397,7 +1397,7 @@ pub mod tests {
             let hasher = qmdb::hasher::<Sha256>();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
-                init_parallelism: 0,
+                init_parallelism: InitParallelism::Serial,
                 merkle_config: MerkleConfig {
                     journal_partition: "forged-exclusion-journal".to_string(),
                     metadata_partition: "forged-exclusion-metadata".to_string(),

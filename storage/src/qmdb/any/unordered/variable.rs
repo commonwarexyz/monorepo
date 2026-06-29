@@ -142,7 +142,7 @@ pub mod partitioned {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::{index::Unordered as _, mmr, translator::TwoCap};
+    use crate::{index::Unordered as _, mmr, qmdb::InitParallelism, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
@@ -165,7 +165,7 @@ pub(crate) mod test {
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            init_parallelism: 0,
+            init_parallelism: InitParallelism::Serial,
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("journal-{seed}"),
                 metadata_partition: format!("metadata-{seed}"),

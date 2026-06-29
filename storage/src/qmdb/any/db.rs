@@ -672,7 +672,7 @@ where
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
         cache_size: Option<NonZeroUsize>,
-        parallelism: usize,
+        parallelism: crate::qmdb::InitParallelism,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
