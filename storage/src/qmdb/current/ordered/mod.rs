@@ -309,7 +309,6 @@ pub mod tests {
     {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = crate::qmdb::hasher::<Sha256>();
             let partition = "build-small".to_string();
             let mut db = open_db(context.child("db"), partition.clone()).await;
 
@@ -325,7 +324,7 @@ pub mod tests {
             db.apply_batch(merkleized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
-            let proof = db.key_value_proof(&hasher, k).await.unwrap();
+            let proof = db.key_value_proof(k).await.unwrap();
 
             // Proof should be verifiable against current root.
             let root = db.root();
@@ -364,7 +363,7 @@ pub mod tests {
             ));
 
             // But the new value should verify against a new proof.
-            let proof = db.key_value_proof(&hasher, k).await.unwrap();
+            let proof = db.key_value_proof(k).await.unwrap();
             assert!(TestDb::<F, C, V>::verify_key_value_proof(
                 k, v2, &proof, &root,
             ));
@@ -376,7 +375,7 @@ pub mod tests {
 
             // Create a proof of the now-inactive update operation assigning v1 to k against the
             // current root.
-            let (p, _, chunks) = db.range_proof(&hasher, op_loc, NZU64!(1)).await.unwrap();
+            let (p, _, chunks) = db.range_proof(op_loc, NZU64!(1)).await.unwrap();
             let proof_inactive = db::KeyValueProof {
                 proof: crate::qmdb::current::proof::OperationProof {
                     loc: op_loc,
@@ -468,7 +467,6 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
-            let hasher = crate::qmdb::hasher::<Sha256>();
             let db = open_db(context.child("db"), partition.clone()).await;
             let root = db.root();
 
@@ -503,7 +501,7 @@ pub mod tests {
             for loc in *start_loc..*end_loc {
                 let loc = Location::<F>::new(loc);
                 let (proof, ops, chunks) =
-                    db.range_proof(&hasher, loc, NZU64!(max_ops)).await.unwrap();
+                    db.range_proof(loc, NZU64!(max_ops)).await.unwrap();
                 assert!(
                     TestDb::<F, C, V>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
@@ -541,7 +539,6 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
-            let hasher = crate::qmdb::hasher::<Sha256>();
             let db = open_db(context.child("db"), partition.clone()).await;
             let mut db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
                 .await
@@ -552,7 +549,7 @@ pub mod tests {
 
             // Confirm bad keys produce the expected error.
             let bad_key = Sha256::fill(0xAA);
-            let res = db.key_value_proof(&hasher, bad_key).await;
+            let res = db.key_value_proof(bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = *db.inactivity_floor_loc();
@@ -568,7 +565,7 @@ pub mod tests {
                     Operation::CommitFloor(_, _) => continue,
                     _ => unreachable!("expected update or commit floor operation"),
                 };
-                let proof = db.key_value_proof(&hasher, key).await.unwrap();
+                let proof = db.key_value_proof(key).await.unwrap();
 
                 // Proof should validate against the current value and correct root.
                 assert!(TestDb::<F, C, V>::verify_key_value_proof(
@@ -622,7 +619,6 @@ pub mod tests {
     {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = crate::qmdb::hasher::<Sha256>();
             let partition = "build-small".to_string();
             let mut db = open_db(context.child("db"), partition.clone()).await;
 
@@ -642,7 +638,7 @@ pub mod tests {
                 let root = db.root();
 
                 // Create a proof for the current value of k.
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
                     TestDb::<F, C, V>::verify_key_value_proof(k, v, &proof, &root),
                     "proof of update {i} failed to verify"
@@ -676,7 +672,6 @@ pub mod tests {
     {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = crate::qmdb::hasher::<Sha256>();
             let partition = "exclusion-proofs".to_string();
             let mut db = open_db(context.child("db"), partition.clone()).await;
 
@@ -684,7 +679,7 @@ pub mod tests {
 
             // We should be able to prove exclusion for any key against an empty db.
             let empty_root = db.root();
-            let empty_proof = db.exclusion_proof(&hasher, &key_exists_1).await.unwrap();
+            let empty_proof = db.exclusion_proof(&key_exists_1).await.unwrap();
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
                 &key_exists_1,
                 &empty_proof,
@@ -703,14 +698,14 @@ pub mod tests {
             let root = db.root();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
-            let result = db.exclusion_proof(&hasher, &key_exists_1).await;
+            let result = db.exclusion_proof(&key_exists_1).await;
             assert!(matches!(result, Err(Error::KeyExists)));
 
             // Generate some valid exclusion proofs for keys on either side.
             let greater_key = Sha256::fill(0xFF);
             let lesser_key = Sha256::fill(0x00);
-            let proof = db.exclusion_proof(&hasher, &greater_key).await.unwrap();
-            let proof2 = db.exclusion_proof(&hasher, &lesser_key).await.unwrap();
+            let proof = db.exclusion_proof(&greater_key).await.unwrap();
+            let proof2 = db.exclusion_proof(&lesser_key).await.unwrap();
 
             // Since there's only one span in the DB, the two exclusion proofs should be identical,
             // and the proof should verify any key but the one that exists in the db.
@@ -751,7 +746,7 @@ pub mod tests {
             let lesser_key = Sha256::fill(0x0F); // < k1=0x10
             let greater_key = Sha256::fill(0x31); // > k2=0x30
             let middle_key = Sha256::fill(0x20); // between k1=0x10 and k2=0x30
-            let proof = db.exclusion_proof(&hasher, &greater_key).await.unwrap();
+            let proof = db.exclusion_proof(&greater_key).await.unwrap();
             // Test the "cycle around" span. This should prove exclusion of greater_key & lesser
             // key, but fail on middle_key.
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
@@ -771,11 +766,11 @@ pub mod tests {
             ));
 
             // Due to the cycle, lesser & greater keys should produce the same proof.
-            let new_proof = db.exclusion_proof(&hasher, &lesser_key).await.unwrap();
+            let new_proof = db.exclusion_proof(&lesser_key).await.unwrap();
             assert_eq!(proof, new_proof);
 
             // Test the inner span [k, k2).
-            let proof = db.exclusion_proof(&hasher, &middle_key).await.unwrap();
+            let proof = db.exclusion_proof(&middle_key).await.unwrap();
             // `k` should fail since it's in the db.
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
                 &key_exists_1,
@@ -831,7 +826,7 @@ pub mod tests {
             assert_ne!(db.bounds().await.end, 0);
             assert_ne!(root, empty_root);
 
-            let proof = db.exclusion_proof(&hasher, &key_exists_1).await.unwrap();
+            let proof = db.exclusion_proof(&key_exists_1).await.unwrap();
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
                 &key_exists_1,
                 &proof,

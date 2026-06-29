@@ -6,7 +6,7 @@
 use crate::{
     index::Ordered as OrderedIndex,
     journal::contiguous::{Contiguous, Mutable, Reader},
-    merkle::{self, hasher::Standard as StandardHasher, Location},
+    merkle::{self, Location},
     qmdb::{
         any::{
             ordered::{Operation, Update},
@@ -203,14 +203,13 @@ where
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
-        hasher: &StandardHasher<H>,
         key: K,
     ) -> Result<KeyValueProof<F, K, H::Digest, N>, Error<F>> {
         let op_loc = self.any.get_with_loc(&key).await?;
         let Some((data, loc)) = op_loc else {
             return Err(Error::<F>::KeyNotFound);
         };
-        let proof = self.operation_proof(hasher, loc).await?;
+        let proof = self.operation_proof(loc).await?;
 
         Ok(KeyValueProof {
             proof,
@@ -225,7 +224,6 @@ where
     /// Returns [Error::KeyExists] if the key exists in the db.
     pub async fn exclusion_proof(
         &self,
-        hasher: &StandardHasher<H>,
         key: &K,
     ) -> Result<super::ExclusionProof<F, K, V, H::Digest, N>, Error<F>> {
         match self.any.get_span(key).await? {
@@ -234,7 +232,7 @@ where
                     // Cannot prove exclusion of a key that exists in the db.
                     return Err(Error::<F>::KeyExists);
                 }
-                let op_proof = self.operation_proof(hasher, loc).await?;
+                let op_proof = self.operation_proof(loc).await?;
                 Ok(super::ExclusionProof::KeyValue(op_proof, key_data))
             }
             None => {
@@ -256,9 +254,7 @@ where
                     "inconsistent commit floor: expected last_commit_loc={}, got floor={}",
                     self.any.last_commit_loc, floor
                 );
-                let op_proof = self
-                    .operation_proof(hasher, self.any.last_commit_loc)
-                    .await?;
+                let op_proof = self.operation_proof(self.any.last_commit_loc).await?;
                 Ok(super::ExclusionProof::Commit(op_proof, value))
             }
         }

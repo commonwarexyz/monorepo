@@ -1373,7 +1373,6 @@ pub mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
@@ -1440,14 +1439,14 @@ pub mod tests {
 
             // Honest exclusion proving refuses a live key.
             assert!(matches!(
-                db.exclusion_proof(&hasher, &c).await,
+                db.exclusion_proof(&c).await,
                 Err(Error::KeyExists)
             ));
 
             // Forge attempt: package `b`'s authenticated update as an exclusion proof for `c`. The
             // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
             // [b, a), which cyclically covered `c` and verified).
-            let kvp = db.key_value_proof(&hasher, b.clone()).await.unwrap();
+            let kvp = db.key_value_proof(b.clone()).await.unwrap();
             let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
             assert!(!ForgedExclusionDb::verify_exclusion_proof(
                 &c, &forged, &root
@@ -1944,8 +1943,7 @@ pub mod tests {
             assert_eq!(reopened.get(&k).await.unwrap(), expected);
 
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
-            let hasher = qmdb::hasher::<Sha256>();
-            let _proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let _proof = reopened.key_value_proof(k).await.unwrap();
 
             reopened.destroy().await.unwrap();
         });
@@ -2185,8 +2183,7 @@ pub mod tests {
                 mmb_commit(&mut db, [(key(1), Some(val(round)))]).await;
             }
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = db.key_value_proof(&hasher, k).await.unwrap();
+            let proof = db.key_value_proof(k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
                 k,
                 val(60_000 + 199),
@@ -2207,8 +2204,7 @@ pub mod tests {
 
             assert_eq!(reopened.root(), target_root);
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let proof = reopened.key_value_proof(k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
                 k,
                 val(60_000 + 199),
@@ -2433,8 +2429,7 @@ pub mod tests {
                     "root mismatch after prune at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
                         k,
@@ -2465,8 +2460,7 @@ pub mod tests {
                     "value mismatch after reopen at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
                         k,

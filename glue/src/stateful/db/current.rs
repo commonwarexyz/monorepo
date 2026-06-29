@@ -1151,10 +1151,8 @@ mod tests {
             assert_eq!(guard.root(), expected_root);
             assert_eq!(guard.get(&key).await.unwrap(), Some(value));
 
-            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-            let proof = guard.exclusion_proof(&hasher, &missing).await.unwrap();
+            let proof = guard.exclusion_proof(&missing).await.unwrap();
             assert!(OrderedFixedDb::verify_exclusion_proof(
-                &hasher,
                 &missing,
                 &proof,
                 &guard.root(),
@@ -1195,10 +1193,8 @@ mod tests {
             assert_eq!(guard.root(), expected_root);
             assert_eq!(guard.get(&key).await.unwrap(), Some(value));
 
-            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-            let proof = guard.exclusion_proof(&hasher, &missing).await.unwrap();
+            let proof = guard.exclusion_proof(&missing).await.unwrap();
             assert!(OrderedVariableDb::verify_exclusion_proof(
-                &hasher,
                 &missing,
                 &proof,
                 &guard.root(),

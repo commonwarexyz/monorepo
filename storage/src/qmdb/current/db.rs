@@ -10,7 +10,7 @@ use crate::{
     },
     merkle::{
         self,
-        hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
+        hasher::Hasher as _,
         mem::Mem,
         storage::Storage as MerkleStorage,
         Graftable, Location, Position,
@@ -269,10 +269,7 @@ where
     /// Returns a witness that this database's canonical root commits to its ops root.
     ///
     /// This can be used to authenticate an ops root against a trusted canonical `current` root.
-    pub async fn ops_root_witness(
-        &self,
-        hasher: &StandardHasher<H>,
-    ) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
+    pub async fn ops_root_witness(&self) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
         let ops_size = storage.size().await;
         let ops_leaves = Location::<F>::try_from(ops_size)?;
@@ -283,14 +280,15 @@ where
             self.any.inactivity_floor_loc,
         )
         .await?;
+        let mut scratch = H::new();
         let partial_chunk = partial_chunk::<_, N>(self.any.bitmap.as_ref())
-            .map(|(chunk, next_bit)| (next_bit, hasher.digest(&chunk)));
+            .map(|(chunk, next_bit)| (next_bit, scratch.hash_parts([chunk.as_slice()])));
         let pending_chunk_digest: F::PendingChunk<H::Digest> = pending_chunk::<F, _, N>(
             self.any.bitmap.as_ref(),
             ops_leaves,
             grafting::height::<N>(),
         )?
-        .map(|chunk| hasher.digest(&chunk))
+        .map(|chunk| scratch.hash_parts([chunk.as_slice()]))
         .try_into()
         .expect("pending_chunk must be consistent with family");
         Ok(OpsRootWitness {
@@ -320,13 +318,11 @@ where
     /// Returns a proof for the operation at `loc`.
     pub(super) async fn operation_proof(
         &self,
-        hasher: &StandardHasher<H>,
         loc: Location<F>,
     ) -> Result<OperationProof<F, H::Digest, N>, Error<F>> {
         let storage = self.grafted_storage();
         let ops_root = self.any.root();
-        OperationProof::new(
-            hasher,
+        OperationProof::new::<H, _>(
             self.any.bitmap.as_ref(),
             &storage,
             self.any.inactivity_floor_loc,
@@ -359,14 +355,12 @@ where
     )]
     pub async fn range_proof(
         &self,
-        hasher: &StandardHasher<H>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<F, H::Digest>, Vec<Operation<F, U>>, Vec<[u8; N]>), Error<F>> {
         let storage = self.grafted_storage();
         let ops_root = self.any.root();
-        RangeProof::new_with_ops(
-            hasher,
+        RangeProof::new_with_ops::<H, _, _, N>(
             self.any.bitmap.as_ref(),
             &storage,
             &self.any.log,
@@ -1221,7 +1215,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
 mod tests {
     use super::*;
     use crate::{
-        merkle::{mmb, mmr, Bagging::ForwardFold},
+        merkle::{hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold},
         qmdb::{
             any::traits::{DbAny, UnmerkleizedBatch as _},
             current::{tests::fixed_config, unordered::fixed},
@@ -1434,9 +1428,7 @@ mod tests {
                 populate_fixed_db::<mmr::Family, _>(&mut db, next_idx, 1).await;
                 next_idx += 1;
             }
-
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let witness = db.ops_root_witness().await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
@@ -1466,9 +1458,7 @@ mod tests {
             .await
             .unwrap();
             populate_fixed_db::<mmb::Family, _>(&mut db, 0, 260).await;
-
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let witness = db.ops_root_witness().await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
@@ -1515,9 +1505,7 @@ mod tests {
                 db.any.bitmap.pruned_chunks() > 0,
                 "test requires at least one pruned chunk to exercise the zero-chunk path"
             );
-
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let witness = db.ops_root_witness().await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
@@ -1542,9 +1530,7 @@ mod tests {
             )
             .await
             .unwrap();
-
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let witness = db.ops_root_witness().await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 

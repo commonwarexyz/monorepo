@@ -6,7 +6,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
-    merkle::{self, hasher::Standard as StandardHasher, Location},
+    merkle::{self, Location},
     qmdb::{
         any::{
             operation::update::Unordered as UnorderedUpdate,
@@ -88,15 +88,11 @@ where
     /// # Errors
     ///
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
-    pub async fn key_value_proof(
-        &self,
-        hasher: &StandardHasher<H>,
-        key: K,
-    ) -> Result<KeyValueProof<F, H::Digest, N>, Error<F>> {
+    pub async fn key_value_proof(&self, key: K) -> Result<KeyValueProof<F, H::Digest, N>, Error<F>> {
         let op_loc = self.any.get_with_loc(&key).await?;
         let Some((_, loc)) = op_loc else {
             return Err(Error::<F>::KeyNotFound);
         };
-        self.operation_proof(hasher, loc).await
+        self.operation_proof(loc).await
     }
 }

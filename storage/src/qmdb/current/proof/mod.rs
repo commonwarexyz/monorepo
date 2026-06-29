@@ -31,7 +31,7 @@ use crate::{
     journal::contiguous::{Contiguous, Reader as _},
     merkle::{
         self,
-        hasher::{Hasher, Standard as StandardHasher},
+        hasher::Hasher as _,
         storage::Storage,
         Family, Graftable, Location, PendingChunk, Position, Proof,
     },
@@ -184,7 +184,6 @@ pub struct RangeProofSpec<F: Family, D: Digest> {
 impl<F: Graftable, D: Digest> RangeProof<F, D> {
     /// Create a new range proof for the provided `range` of operations.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<F, Digest = D>, const N: usize>(
-        hasher: &StandardHasher<H>,
         status: &impl BitmapReadable<N>,
         storage: &S,
         inactivity_floor: Location<F>,
@@ -201,8 +200,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             grafting_height,
         )?;
 
+        let hasher = qmdb::hasher::<H>();
         let proof = merkle::verification::historical_range_proof(
-            hasher,
+            &hasher,
             storage,
             ops_leaves,
             range,
@@ -210,12 +210,13 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         )
         .await?;
 
+        let mut scratch = H::new();
         let partial_chunk_digest =
-            partial_chunk::<_, N>(status).map(|(chunk, _)| hasher.digest(&chunk));
+            partial_chunk::<_, N>(status).map(|(chunk, _)| scratch.hash_parts([chunk.as_slice()]));
 
         let pending_chunk_digest: F::PendingChunk<D> =
             pending_chunk::<_, _, N>(status, ops_leaves, grafting_height)?
-                .map(|chunk| hasher.digest(&chunk))
+                .map(|chunk| scratch.hash_parts([chunk.as_slice()]))
                 .try_into()
                 .expect("pending_chunk must be consistent with family");
 
@@ -242,7 +243,6 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         S: Storage<F, Digest = D>,
         const N: usize,
     >(
-        hasher: &StandardHasher<H>,
         status: &impl BitmapReadable<N>,
         storage: &S,
         log: &C,
@@ -265,8 +265,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let end_loc = core::cmp::min(max_loc, leaves);
 
         // Generate the proof from the grafted storage.
-        let proof = Self::new(
-            hasher,
+        let proof = Self::new::<H, S, N>(
             status,
             storage,
             request.inactivity_floor,
@@ -558,7 +557,6 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     ///
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<F, Digest = D>>(
-        hasher: &StandardHasher<H>,
         status: &impl BitmapReadable<N>,
         storage: &S,
         inactivity_floor: Location<F>,
@@ -569,8 +567,7 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
         if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
             return Err(Error::OperationPruned(loc));
         }
-        let range_proof = RangeProof::new(
-            hasher,
+        let range_proof = RangeProof::new::<H, S, N>(
             status,
             storage,
             inactivity_floor,
@@ -658,7 +655,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mem, mem::Mem},
+        merkle::{conformance::build_test_mem, hasher::Standard as StandardHasher, mem::Mem},
         mmb, mmr,
         qmdb::current::{db, grafting},
     };
@@ -953,8 +950,7 @@ mod tests {
         .unwrap();
 
         let loc = mmb::Location::new(BitMap::<N>::CHUNK_SIZE_BITS + 4);
-        let proof = RangeProof::new(
-            &hasher,
+        let proof = RangeProof::new::<Sha256, _, N>(
             &status,
             &storage,
             Location::new(0),
@@ -1049,8 +1045,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let proof = RangeProof::new(
-            &hasher,
+        let proof = RangeProof::new::<Sha256, _, N>(
             &status,
             &storage,
             Location::new(0),
@@ -1154,8 +1149,7 @@ mod tests {
         .unwrap();
 
         let leaves_loc = mmb::Location::new(leaf_count);
-        let proof = RangeProof::new(
-            &hasher,
+        let proof = RangeProof::new::<Sha256, _, N>(
             &status,
             &storage,
             Location::new(0),
@@ -1247,8 +1241,7 @@ mod tests {
         .unwrap();
 
         let loc = mmb::Location::new(0);
-        let mut proof = RangeProof::new(
-            &hasher,
+        let mut proof = RangeProof::new::<Sha256, _, N>(
             &status,
             &storage,
             Location::new(0),
@@ -1337,8 +1330,7 @@ mod tests {
         .await
         .unwrap();
 
-        let proof = RangeProof::new(
-            &hasher,
+        let proof = RangeProof::new::<Sha256, _, N>(
             &status,
             &storage,
             Location::new(0),
@@ -1715,8 +1707,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let proof = RangeProof::new(
-            &hasher,
+        let proof = RangeProof::new::<Sha256, _, N>(
             &status,
             &storage,
             Location::new(0),
@@ -1887,8 +1878,7 @@ mod tests {
             // Range proof spanning the pending chunk into the partial bits
             let start = mmb::Location::new(0);
             let end = mmb::Location::new(leaf_count);
-            let proof = RangeProof::new(
-                &hasher,
+            let proof = RangeProof::new::<Sha256, _, N>(
                 &status,
                 &storage,
                 Location::new(0),
@@ -1919,8 +1909,7 @@ mod tests {
             );
 
             let pending_loc = mmb::Location::new(3);
-            let pending_proof = RangeProof::new(
-                &hasher,
+            let pending_proof = RangeProof::new::<Sha256, _, N>(
                 &status,
                 &storage,
                 Location::new(0),
@@ -2140,8 +2129,7 @@ mod tests {
         .unwrap();
 
         let loc = mmb::Location::new(chunk_bits - 1);
-        let proof = RangeProof::new(
-            &hasher,
+        let proof = RangeProof::new::<Sha256, _, N>(
             &status,
             &storage,
             inactivity_floor,
