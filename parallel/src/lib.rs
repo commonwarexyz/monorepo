@@ -72,14 +72,14 @@ commonware_macros::stability_scope!(BETA {
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
-            mod policy;
-
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
                 slice::ParallelSliceMut,
                 ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
             };
             use std::{num::NonZeroUsize, panic::Location, sync::Arc};
+
+            mod policy;
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
