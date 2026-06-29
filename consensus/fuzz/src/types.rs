@@ -45,7 +45,7 @@ pub struct ProposalData {
 
 /// Deep per-replica state extracted from a reporter for state-coverage feedback.
 ///
-/// View-keyed certificate sets, per-view signer sets, and the replica's
+/// View-keyed certificate sets, per-view signature counts, and the replica's
 /// finalized frontier. This is the input to the state-coverage abstraction
 /// (`state_cov::alpha`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -60,15 +60,10 @@ pub struct ReporterReplicaStateData {
     pub certified: BTreeSet<u64>,
     /// Views with a proposal certificate usable for parent selection.
     pub successful_certifications: BTreeSet<u64>,
-    pub notarize_signers: BTreeMap<u64, BTreeSet<String>>,
-    pub nullify_signers: BTreeMap<u64, BTreeSet<String>>,
-    pub finalize_signers: BTreeMap<u64, BTreeSet<String>>,
     /// Max view with a finalization certificate.
     pub last_finalized: u64,
     /// Max view this replica has notarized (notarize vote or notarization certificate).
     pub last_notarized: u64,
     /// Max view this replica has nullified (nullify vote or nullification certificate).
     pub last_nullified: u64,
-    pub invalid_votes: usize,
-    pub invalid_certificates: usize,
 }

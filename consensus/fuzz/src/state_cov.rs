@@ -14,9 +14,9 @@
 //! is retained for protocol-state novelty even when it lights no new code edge.
 //!
 //! Tokens are structural and `(view, payload)`-aware: payloads are interned to
-//! dense class ids so *relationships* between proposals (agreement, equivocation,
-//! finalization without a matching notarization) are captured, while the random
-//! digest bytes that would prevent saturation are abstracted away.
+//! dense class ids so *relationships* between proposals (agreement and
+//! equivocation across replicas) are captured, while the random digest bytes
+//! that would prevent saturation are abstracted away.
 //!
 //! `alpha` is a pure function of the run's own state. The deterministic runtime
 //! makes that state a deterministic function of the fuzz input, which is what
@@ -24,27 +24,23 @@
 use crate::{
     invariants::get_signature_count,
     types::{ProposalData, ReporterReplicaStateData},
-    utils::{fnv1a_hash, fnv1a_hash_slices},
+    utils::fnv1a_hash,
 };
 use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme::Scheme,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use commonware_utils::ordered::Quorum;
 use rand_core::CryptoRngCore;
 use sancov::Counters;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Write,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 fn lower_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Projects each replica reporter data into a [`ReporterReplicaStateData`], keyed by
-/// replica index. Retains per-view signer sets and the finalized frontier so the
-/// abstraction below can read deeper structure than the safety oracle needs.
+/// replica index. Retains per-view certificate facts, signature counts, and the
+/// finalized frontier for the state-coverage abstraction below.
 pub fn encode_reporter_states<E, S, L>(
     reporters: &[Reporter<E, S, L, Sha256Digest>],
     max_participants: usize,
@@ -59,16 +55,10 @@ where
         .enumerate()
         .map(|(idx, reporter)| {
             let mut data = ReporterReplicaStateData::default();
-            // Payload of each recovered certificate, used to attribute signers to
-            // the certified payload instead of unioning across the conflicting
-            // votes the reporter observed.
-            let mut recovered_not: BTreeMap<u64, Sha256Digest> = BTreeMap::new();
-            let mut recovered_fin: BTreeMap<u64, Sha256Digest> = BTreeMap::new();
 
             let notarizations = reporter.notarizations.lock();
             for (view, cert) in notarizations.iter() {
                 let v = view.get();
-                recovered_not.insert(v, cert.proposal.payload);
                 data.notarizations.insert(
                     v,
                     ProposalData {
@@ -99,7 +89,6 @@ where
             let finalizations = reporter.finalizations.lock();
             for (view, cert) in finalizations.iter() {
                 let v = view.get();
-                recovered_fin.insert(v, cert.proposal.payload);
                 data.finalizations.insert(
                     v,
                     ProposalData {
@@ -126,55 +115,19 @@ where
                 .copied()
                 .collect();
 
-            // Signers are recorded as participant indices, not public-key hex.
-            // The mock schemes regenerate keys from the fuzz RNG, so the same
-            // signer set would otherwise produce a different token per input and
-            // fake state novelty. Notarize/finalize signers are scoped to the
-            // certified payload to keep the attribution payload-correct.
+            // Vote maps advance the frontier past the recovered certificates: a
+            // replica may have voted in a view that never formed a certificate.
             let notarizes = reporter.notarizes.lock();
-            for (view, by_digest) in notarizes.iter() {
-                let v = view.get();
-                data.last_notarized = data.last_notarized.max(v);
-                let entry = data.notarize_signers.entry(v).or_default();
-                if let Some(signers) = recovered_not.get(&v).and_then(|d| by_digest.get(d)) {
-                    for pk in signers {
-                        if let Some(index) = reporter.participants.index(pk) {
-                            entry.insert(usize::from(index).to_string());
-                        }
-                    }
-                }
+            for view in notarizes.keys() {
+                data.last_notarized = data.last_notarized.max(view.get());
             }
             drop(notarizes);
 
             let nullifies = reporter.nullifies.lock();
-            for (view, signers) in nullifies.iter() {
-                let v = view.get();
-                data.last_nullified = data.last_nullified.max(v);
-                let entry = data.nullify_signers.entry(v).or_default();
-                for pk in signers {
-                    if let Some(index) = reporter.participants.index(pk) {
-                        entry.insert(usize::from(index).to_string());
-                    }
-                }
+            for view in nullifies.keys() {
+                data.last_nullified = data.last_nullified.max(view.get());
             }
             drop(nullifies);
-
-            let finalizes = reporter.finalizes.lock();
-            for (view, by_digest) in finalizes.iter() {
-                let v = view.get();
-                let entry = data.finalize_signers.entry(v).or_default();
-                if let Some(signers) = recovered_fin.get(&v).and_then(|d| by_digest.get(d)) {
-                    for pk in signers {
-                        if let Some(index) = reporter.participants.index(pk) {
-                            entry.insert(usize::from(index).to_string());
-                        }
-                    }
-                }
-            }
-            drop(finalizes);
-
-            data.invalid_votes = *reporter.invalid_votes.lock();
-            data.invalid_certificates = *reporter.invalid_certificates.lock();
 
             (idx.to_string(), data)
         })
@@ -261,11 +214,12 @@ pub fn alpha(states: &BTreeMap<String, ReporterReplicaStateData>) -> Vec<String>
 
     let mut tokens: BTreeSet<String> = BTreeSet::new();
 
-    // Per-replica local state shape (identity-independent: a shape reached by any
-    // replica is the same token). Carries payload class, signers, and signature
-    // counts, so replica-local distributions are not collapsed.
+    // Per-replica facts as independent tokens (identity-independent: a fact
+    // reached by any replica is the same token). One token per fact, rather than a
+    // concatenated per-replica string, keeps the token space a sum of per-fact
+    // cardinalities instead of their product.
     for replica in states.values() {
-        tokens.insert(local_token(replica, &class));
+        local_tokens(replica, &class, &mut tokens);
     }
 
     // Cross-replica certificate facts, keyed by (view, payload-class).
@@ -297,27 +251,9 @@ pub fn alpha(states: &BTreeMap<String, ReporterReplicaStateData>) -> Vec<String>
         tokens.insert(format!("nul:{view}"));
     }
 
-    // Anomalies, (view, payload)-aware where the certificate carries a payload: a
-    // finalization for (view, class) with no notarization for that same class is
-    // the interesting mismatch, even if some other class was notarized in the
-    // view. (Nullifications carry no payload, so `cert_and_nul` is view-level.)
-    for (view, fin_classes) in &finalized {
-        let not_classes = notarized.get(view);
-        for class in fin_classes {
-            if not_classes.is_none_or(|n| !n.contains(class)) {
-                tokens.insert(format!("fin_wo_not:{view}:{class}"));
-            }
-        }
-    }
-    for view in &nullified {
-        if notarized.contains_key(view) || finalized.contains_key(view) {
-            tokens.insert(format!("cert_and_nul:{view}"));
-        }
-    }
-
     // System-wide frontiers: the max over replicas of each per-replica frontier.
     // These expose "the network has reached view X" as coverage, which the
-    // per-replica `local:` tokens do not.
+    // per-replica `rfront:` tokens do not.
     if let Some(view) = states.values().map(|r| r.last_finalized).max() {
         tokens.insert(format!("max_finalized:{view}"));
     }
@@ -328,51 +264,23 @@ pub fn alpha(states: &BTreeMap<String, ReporterReplicaStateData>) -> Vec<String>
         tokens.insert(format!("max_nullified:{view}"));
     }
 
-    // Whole-state token: one token derived from the full sorted token set, so a
-    // new *combination* of already-seen tokens is itself new coverage. Without
-    // it, libFuzzer rewards new individual tokens but not a novel token-set
-    // state built from tokens it has each seen before.
-    let mut result: Vec<String> = tokens.into_iter().collect();
-    let mut slices: Vec<&[u8]> = Vec::with_capacity(result.len() * 2);
-    for token in &result {
-        slices.push(token.as_bytes());
-        slices.push(b"\n");
-    }
-    let digest = fnv1a_hash_slices(&slices);
-    result.push(format!("state:{digest:016x}"));
-    result
+    tokens.into_iter().collect()
 }
 
-/// Log-scale bucket for a count that grows with run length (invalid votes /
-/// certificates). Bucketing keeps the token space bounded so longer runs do not
-/// manufacture endless novelty and prevent saturation.
-fn bucket(count: usize) -> u64 {
-    match count {
-        0 => 0,
-        1 => 1,
-        2..=3 => 2,
-        4..=7 => 3,
-        8..=15 => 4,
-        16..=31 => 5,
-        _ => 6,
-    }
-}
-
-/// Canonical token for a single replica's local state. Identity-independent so a
-/// shape reached by any replica is the same token.
-fn local_token(replica: &ReporterReplicaStateData, class: &BTreeMap<&str, usize>) -> String {
-    let mut token = format!(
-        "local:lf{}:ln{}:lu{}:iv{}:ic{}",
-        replica.last_finalized,
-        replica.last_notarized,
-        replica.last_nullified,
-        bucket(replica.invalid_votes),
-        bucket(replica.invalid_certificates),
-    );
+/// Emits a replica's local state as independent, bounded tokens (one per fact),
+/// identity-independent so a fact reached by any replica is the same token.
+fn local_tokens(
+    replica: &ReporterReplicaStateData,
+    class: &BTreeMap<&str, usize>,
+    tokens: &mut BTreeSet<String>,
+) {
+    tokens.insert(format!(
+        "rfront:{}:{}:{}",
+        replica.last_finalized, replica.last_notarized, replica.last_nullified,
+    ));
     for (view, proposal) in &replica.notarizations {
-        let _ = write!(
-            token,
-            "|N{view}:{}:p{}:{:?}:{:?}",
+        tokens.insert(format!(
+            "rnot:{view}:{}:p{}:{:?}",
             class[proposal.payload.as_str()],
             proposal.parent,
             replica
@@ -380,13 +288,11 @@ fn local_token(replica: &ReporterReplicaStateData, class: &BTreeMap<&str, usize>
                 .get(view)
                 .copied()
                 .flatten(),
-            replica.notarize_signers.get(view),
-        );
+        ));
     }
     for (view, proposal) in &replica.finalizations {
-        let _ = write!(
-            token,
-            "|F{view}:{}:p{}:{:?}:{:?}",
+        tokens.insert(format!(
+            "rfin:{view}:{}:p{}:{:?}",
             class[proposal.payload.as_str()],
             proposal.parent,
             replica
@@ -394,22 +300,18 @@ fn local_token(replica: &ReporterReplicaStateData, class: &BTreeMap<&str, usize>
                 .get(view)
                 .copied()
                 .flatten(),
-            replica.finalize_signers.get(view),
-        );
+        ));
     }
     for view in &replica.nullifications {
-        let _ = write!(
-            token,
-            "|U{view}:{:?}:{:?}",
+        tokens.insert(format!(
+            "rnul:{view}:{:?}",
             replica
                 .nullification_signature_counts
                 .get(view)
                 .copied()
                 .flatten(),
-            replica.nullify_signers.get(view),
-        );
+        ));
     }
-    token
 }
 
 #[cfg(test)]
@@ -463,14 +365,13 @@ mod tests {
         let mut states = BTreeMap::new();
         states.insert("0".into(), replica(&[(1, "aa")], &[(1, "aa")], &[], 1));
         let tokens = alpha(&states);
-        // One payload class ("aa" -> 0), parent 0, no signers / signature counts.
+        // One payload class ("aa" -> 0), parent 0, no signature counts.
         assert!(tokens.contains(&"not:1:{0}".to_string()));
         assert!(tokens.contains(&"fin:1:{0}".to_string()));
-        assert!(tokens.contains(
-            &"local:lf1:ln0:lu0:iv0:ic0|N1:0:p0:None:None|F1:0:p0:None:None".to_string()
-        ));
+        assert!(tokens.contains(&"rfront:1:0:0".to_string()));
+        assert!(tokens.contains(&"rnot:1:0:p0:None".to_string()));
+        assert!(tokens.contains(&"rfin:1:0:p0:None".to_string()));
         assert!(tokens.contains(&"max_finalized:1".to_string()));
-        assert_eq!(tokens.iter().filter(|t| t.starts_with("state:")).count(), 1);
     }
 
     #[test]
@@ -499,29 +400,6 @@ mod tests {
         assert!(tokens.contains(&"max_finalized:5".to_string()));
         assert!(tokens.contains(&"max_notarized:9".to_string()));
         assert!(tokens.contains(&"max_nullified:6".to_string()));
-    }
-
-    #[test]
-    fn invalid_counts_are_part_of_state() {
-        let with_invalid = |votes, certs| {
-            let mut data = ReporterReplicaStateData {
-                invalid_votes: votes,
-                invalid_certificates: certs,
-                ..Default::default()
-            };
-            data.notarizations.insert(
-                1,
-                ProposalData {
-                    parent: 0,
-                    payload: "aa".into(),
-                },
-            );
-            BTreeMap::from([("0".to_string(), data)])
-        };
-        // A different invalid-vote bucket is a different abstract state.
-        assert_ne!(alpha(&with_invalid(0, 0)), alpha(&with_invalid(5, 0)));
-        // Counts in the same bucket (2 and 3 both fall in 2..=3) collapse.
-        assert_eq!(alpha(&with_invalid(2, 0)), alpha(&with_invalid(3, 0)));
     }
 
     #[test]
@@ -556,21 +434,6 @@ mod tests {
     }
 
     #[test]
-    fn whole_state_token_distinguishes_token_sets() {
-        let state_token = |s: &BTreeMap<String, ReporterReplicaStateData>| {
-            alpha(s)
-                .into_iter()
-                .find(|t| t.starts_with("state:"))
-                .unwrap()
-        };
-        let mut a = BTreeMap::new();
-        a.insert("0".into(), replica(&[(1, "aa")], &[(1, "aa")], &[], 1));
-        let mut b = BTreeMap::new();
-        b.insert("0".into(), replica(&[(1, "aa")], &[], &[2], 0));
-        assert_ne!(state_token(&a), state_token(&b));
-    }
-
-    #[test]
     fn alpha_emits_cross_replica_facts() {
         let mut states = BTreeMap::new();
         states.insert("0".into(), replica(&[(1, "aa")], &[(1, "aa")], &[2], 1));
@@ -580,39 +443,11 @@ mod tests {
         assert!(tokens.contains(&"fin:1:{0}".to_string()));
         assert!(tokens.contains(&"nul:2".to_string()));
         assert!(tokens.contains(&"nul:3".to_string()));
-        // Honest agreement: finalized class matches a notarized class, no anomaly.
-        assert!(!tokens.iter().any(|t| t.starts_with("fin_wo_not")));
     }
 
     #[test]
-    fn fin_without_notarization_is_payload_aware() {
-        // View 1 is finalized with payload "bb" but only "aa" is notarized there.
-        // View-level differencing (old behavior) sees finalized{1} \ notarized{1}
-        // = {} and reports nothing; the (view, payload) token catches the
-        // mismatch on the unbacked class.
-        let mut states = BTreeMap::new();
-        states.insert("0".into(), replica(&[(1, "aa")], &[(1, "bb")], &[], 1));
-        let tokens = alpha(&states);
-        // Classes: "aa" -> 0, "bb" -> 1.
-        assert!(tokens.contains(&"fin_wo_not:1:1".to_string()));
-    }
-
-    #[test]
-    fn cert_and_nullified_view() {
-        // A view that is both finalized (by one replica) and nullified (by
-        // another) is an anomaly token.
-        let mut states = BTreeMap::new();
-        states.insert("0".into(), replica(&[(1, "aa")], &[(1, "aa")], &[], 1));
-        states.insert("1".into(), replica(&[], &[], &[1], 0));
-        let tokens = alpha(&states);
-        assert!(tokens.contains(&"cert_and_nul:1".to_string()));
-    }
-
-    #[test]
-    fn alpha_empty_has_only_whole_state_token() {
+    fn alpha_empty_has_no_tokens() {
         let states = BTreeMap::new();
-        let tokens = alpha(&states);
-        assert_eq!(tokens.len(), 1);
-        assert!(tokens[0].starts_with("state:"));
+        assert!(alpha(&states).is_empty());
     }
 }
