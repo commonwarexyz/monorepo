@@ -2,11 +2,17 @@
 //!
 //! Entries are keyed by callsite, input-size bucket, and thread count so a decision learned for
 //! one workload does not leak into another. The policy compares recent serial and parallel timing
-//! samples, prefers parallel unless serial is clearly faster, and periodically refreshes both
-//! samples.
+//! samples and prefers parallel unless serial is clearly faster. It re-times the preferred path
+//! every [`PREFERRED_SAMPLE_INTERVAL`] calls to keep its estimate current, and probes the
+//! non-preferred path every [`RESAMPLE_INTERVAL`] calls in case the faster path has changed.
 
-use parking_lot::{Mutex, MutexGuard};
-use std::{collections::HashMap, panic::Location, time::Duration};
+use parking_lot::Mutex;
+use std::{
+    collections::HashMap,
+    panic::Location,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 // Refresh the preferred path periodically so its EWMA does not go stale.
 const PREFERRED_SAMPLE_INTERVAL: u32 = 8;
@@ -20,11 +26,59 @@ const EWMA_WEIGHT: u64 = EWMA_PREVIOUS_WEIGHT + EWMA_NEXT_WEIGHT;
 const SERIAL_WIN_NUMERATOR: u64 = 95;
 const SERIAL_WIN_DENOMINATOR: u64 = 100;
 
-pub(super) type Entries = HashMap<Key, Entry>;
+type Entries = HashMap<Key, Entry>;
+
+/// The path the policy chose for a call: the strategy runs the matching serial or parallel body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Execution {
+    Serial,
+    Parallel,
+}
+
+/// Adaptive serial-vs-parallel decisions, shared cheaply across [`super::Rayon`] clones.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Policy {
+    entries: Arc<Mutex<Entries>>,
+}
+
+impl Policy {
+    /// Runs `run` on the execution path preferred for this callsite and input size, occasionally
+    /// timing the call so the decision tracks recent performance.
+    pub(super) fn run<R>(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        parallelism: usize,
+        run: impl FnOnce(Execution) -> R,
+    ) -> R {
+        // A single-threaded pool cannot benefit from rayon scheduling, so always run serial and
+        // never spend a measurement on it.
+        if parallelism <= 1 {
+            return run(Execution::Serial);
+        }
+        let key = Key::new(caller, len, parallelism);
+        let (execution, measure) = self.entries.lock().entry(key).or_default().choose();
+        let start = measure.then(Instant::now);
+        let result = run(execution);
+        if let Some(start) = start {
+            self.entries
+                .lock()
+                .entry(key)
+                .or_default()
+                .record(execution, start.elapsed());
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries.lock().len()
+    }
+}
 
 /// Identifies a stream of similar calls.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(super) struct Key {
+struct Key {
     file: &'static str,
     line: u32,
     column: u32,
@@ -32,15 +86,21 @@ pub(super) struct Key {
     parallelism: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Execution {
-    Serial,
-    Parallel,
+impl Key {
+    const fn new(caller: &'static Location<'static>, len: usize, parallelism: usize) -> Self {
+        Self {
+            file: caller.file(),
+            line: caller.line(),
+            column: caller.column(),
+            bucket: len_bucket(len),
+            parallelism,
+        }
+    }
 }
 
 /// Timing state for one [`Key`].
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct Entry {
+struct Entry {
     serial_ns: u64,
     parallel_ns: u64,
     serial_samples: u32,
@@ -49,6 +109,8 @@ pub(super) struct Entry {
 }
 
 impl Entry {
+    // Returns the path to run and whether the caller should time it and feed the elapsed duration
+    // back to [`record`](Self::record).
     fn choose(&mut self) -> (Execution, bool) {
         // Seed both sides before trusting the comparison.
         if self.parallel_samples == 0 {
@@ -70,8 +132,7 @@ impl Entry {
         if self.since_probe < RESAMPLE_INTERVAL {
             return (
                 preferred,
-                self.since_probe
-                    .is_multiple_of(PREFERRED_SAMPLE_INTERVAL),
+                self.since_probe.is_multiple_of(PREFERRED_SAMPLE_INTERVAL),
             );
         }
         self.since_probe = 0;
@@ -112,15 +173,6 @@ fn update_ewma(current: u64, samples: u32, next: u64) -> u64 {
     }
 }
 
-fn entries(policy: &Mutex<Entries>) -> MutexGuard<'_, Entries> {
-    policy.lock()
-}
-
-#[cfg(test)]
-pub(super) fn len(policy: &Mutex<Entries>) -> usize {
-    entries(policy).len()
-}
-
 // Exact lengths are grouped into powers-of-two buckets to bound policy growth and avoid
 // overfitting to tiny input differences.
 const fn len_bucket(len: usize) -> u8 {
@@ -129,41 +181,6 @@ const fn len_bucket(len: usize) -> u8 {
     } else {
         (usize::BITS - len.leading_zeros()) as u8
     }
-}
-
-const fn key(caller: &'static Location<'static>, len: usize, parallelism: usize) -> Key {
-    Key {
-        file: caller.file(),
-        line: caller.line(),
-        column: caller.column(),
-        bucket: len_bucket(len),
-        parallelism,
-    }
-}
-
-pub(super) fn choose(
-    policy: &Mutex<Entries>,
-    caller: &'static Location<'static>,
-    len: usize,
-    parallelism: usize,
-) -> (Key, Execution, bool) {
-    let key = key(caller, len, parallelism);
-    // A single-threaded pool cannot benefit from rayon scheduling.
-    if parallelism <= 1 {
-        return (key, Execution::Serial, false);
-    }
-    let mut entries = entries(policy);
-    let (execution, measure) = entries.entry(key).or_default().choose();
-    (key, execution, measure)
-}
-
-pub(super) fn record(
-    policy: &Mutex<Entries>,
-    key: Key,
-    execution: Execution,
-    elapsed: Duration,
-) {
-    entries(policy).entry(key).or_default().record(execution, elapsed);
 }
 
 #[cfg(test)]

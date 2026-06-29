@@ -74,18 +74,12 @@ commonware_macros::stability_scope!(BETA {
         if #[cfg(any(feature = "std", test))] {
             mod policy;
 
-            use parking_lot::Mutex;
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
                 slice::ParallelSliceMut,
                 ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
             };
-            use std::{
-                num::NonZeroUsize,
-                panic::Location,
-                sync::Arc,
-                time::Instant,
-            };
+            use std::{num::NonZeroUsize, panic::Location, sync::Arc};
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
@@ -644,7 +638,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     #[derive(Debug, Clone)]
     pub struct Rayon {
         thread_pool: ThreadPool,
-        policy: Arc<Mutex<policy::Entries>>,
+        policy: policy::Policy,
     }
 
     impl Rayon {
@@ -661,28 +655,24 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         pub fn with_pool(thread_pool: ThreadPool) -> Self {
             Self {
                 thread_pool,
-                policy: Arc::new(Mutex::new(policy::Entries::new())),
+                policy: policy::Policy::default(),
             }
         }
 
         #[track_caller]
         fn execute<R>(&self, len: usize, run: impl FnOnce(policy::Execution) -> R) -> R {
-            let (key, execution, measure) = policy::choose(
-                &self.policy,
+            self.policy.run(
                 Location::caller(),
                 len,
                 self.thread_pool.current_num_threads(),
-            );
-            let start = measure.then(Instant::now);
-            let result = run(execution);
-            if let Some(start) = start {
-                policy::record(&self.policy, key, execution, start.elapsed());
-            }
-            result
+                run,
+            )
         }
+    }
 
+    impl Strategy for Rayon {
         #[track_caller]
-        fn fold_init_with<I, INIT, T, R, ID, F, RD>(
+        fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
             init: INIT,
@@ -716,81 +706,6 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         .reduce(&identity, reduce_op)
                 }),
             })
-        }
-
-        #[track_caller]
-        fn try_fold_with<I, R, E, ID, F, RD>(
-            &self,
-            iter: I,
-            identity: ID,
-            fold_op: F,
-            reduce_op: RD,
-        ) -> Result<R, E>
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            R: Send,
-            E: Send,
-            ID: Fn() -> R + Send + Sync,
-            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), |execution| match execution {
-                policy::Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
-                policy::Execution::Parallel => self.thread_pool.install(|| {
-                    items
-                        .into_par_iter()
-                        .try_fold(&identity, &fold_op)
-                        .try_reduce(&identity, |a, b| Ok(reduce_op(a, b)))
-                }),
-            })
-        }
-    }
-
-    impl Strategy for Rayon {
-        #[track_caller]
-        fn fold_init<I, INIT, T, R, ID, F, RD>(
-            &self,
-            iter: I,
-            init: INIT,
-            identity: ID,
-            fold_op: F,
-            reduce_op: RD,
-        ) -> R
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            INIT: Fn() -> T + Send + Sync,
-            T: Send,
-            R: Send,
-            ID: Fn() -> R + Send + Sync,
-            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            self.fold_init_with(
-                iter,
-                init,
-                identity,
-                fold_op,
-                reduce_op,
-            )
-        }
-
-        #[track_caller]
-        fn fold<I, R, ID, F, RD>(&self, iter: I, identity: ID, fold_op: F, reduce_op: RD) -> R
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            R: Send,
-            ID: Fn() -> R + Send + Sync,
-            F: Fn(R, I::Item) -> R + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            self.fold_init_with(
-                iter,
-                || (),
-                identity,
-                |acc, _, item| fold_op(acc, item),
-                reduce_op,
-            )
         }
 
         #[track_caller]
@@ -875,40 +790,16 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
             RD: Fn(R, R) -> R + Send + Sync,
         {
-            self.try_fold_with(
-                iter,
-                identity,
-                fold_op,
-                reduce_op,
-            )
-        }
-
-        #[track_caller]
-        fn map_partition_collect_vec<I, F, K, U>(&self, iter: I, map_op: F) -> (Vec<U>, Vec<K>)
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            F: Fn(I::Item) -> (K, Option<U>) + Send + Sync,
-            K: Send,
-            U: Send,
-        {
-            self.fold_init_with(
-                iter,
-                || (),
-                || (Vec::new(), Vec::new()),
-                |(mut results, mut filtered), _, item| {
-                    let (key, value) = map_op(item);
-                    match value {
-                        Some(v) => results.push(v),
-                        None => filtered.push(key),
-                    }
-                    (results, filtered)
-                },
-                |(mut r1, mut f1), (r2, f2)| {
-                    r1.extend(r2);
-                    f1.extend(f2);
-                    (r1, f1)
-                },
-            )
+            let items: Vec<I::Item> = iter.into_iter().collect();
+            self.execute(items.len(), |execution| match execution {
+                policy::Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
+                policy::Execution::Parallel => self.thread_pool.install(|| {
+                    items
+                        .into_par_iter()
+                        .try_fold(&identity, &fold_op)
+                        .try_reduce(&identity, |a, b| Ok(reduce_op(a, b)))
+                }),
+            })
         }
 
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
@@ -954,7 +845,7 @@ mod test {
     }
 
     fn policy_len(strategy: &Rayon) -> usize {
-        super::policy::len(&strategy.policy)
+        strategy.policy.len()
     }
 
     fn map_from_same_callsite(strategy: &Rayon, len: usize) {
@@ -1034,6 +925,19 @@ mod test {
         map_from_same_callsite(&strategy, 1);
         map_from_same_callsite(&strategy, 2);
         map_from_same_callsite(&strategy, 3);
+
+        assert_eq!(policy_len(&strategy), 2);
+    }
+
+    #[test]
+    fn adaptive_policy_keys_default_methods_by_external_callsite() {
+        let strategy = parallel_strategy();
+
+        // `fold` uses the trait's default body (no `Rayon` override), so this also guards that
+        // `#[track_caller]` still attributes the policy key to the caller's line rather than the
+        // default method body: two calls from distinct callsites must yield two distinct entries.
+        let _: i32 = strategy.fold(0..16, || 0, |acc, x| acc + x, |a, b| a + b);
+        let _: i32 = strategy.fold(0..16, || 0, |acc, x| acc + x, |a, b| a + b);
 
         assert_eq!(policy_len(&strategy), 2);
     }
