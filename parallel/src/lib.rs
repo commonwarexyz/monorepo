@@ -72,18 +72,19 @@ commonware_macros::stability_scope!(BETA {
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
-            use parking_lot::{Mutex, MutexGuard};
+            mod policy;
+
+            use parking_lot::Mutex;
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
                 slice::ParallelSliceMut,
                 ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
             };
             use std::{
-                collections::HashMap,
                 num::NonZeroUsize,
                 panic::Location,
                 sync::Arc,
-                time::{Duration, Instant},
+                time::Instant,
             };
         } else {
             extern crate alloc;
@@ -602,154 +603,6 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// A clone-able wrapper around a [rayon]-compatible thread pool.
     pub type ThreadPool = Arc<RThreadPool>;
 
-    const PREFERRED_SAMPLE_INTERVAL: u32 = 8;
-    const RESAMPLE_INTERVAL: u32 = 64;
-    const EWMA_PREVIOUS_WEIGHT: u64 = 4;
-    const EWMA_NEXT_WEIGHT: u64 = 1;
-    const EWMA_WEIGHT: u64 = EWMA_PREVIOUS_WEIGHT + EWMA_NEXT_WEIGHT;
-    const SERIAL_WIN_NUMERATOR: u64 = 95;
-    const SERIAL_WIN_DENOMINATOR: u64 = 100;
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-    struct PolicyKey {
-        file: &'static str,
-        line: u32,
-        column: u32,
-        bucket: u8,
-        parallelism: usize,
-    }
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum Execution {
-        Serial,
-        Parallel,
-    }
-
-    #[derive(Clone, Copy, Debug, Default)]
-    struct PolicyEntry {
-        serial_ns: u64,
-        parallel_ns: u64,
-        serial_samples: u32,
-        parallel_samples: u32,
-        since_probe: u32,
-    }
-
-    type PolicyEntries = HashMap<PolicyKey, PolicyEntry>;
-
-    impl PolicyEntry {
-        fn choose(&mut self) -> (Execution, bool) {
-            if self.parallel_samples == 0 {
-                return (Execution::Parallel, true);
-            }
-            if self.serial_samples == 0 {
-                return (Execution::Serial, true);
-            }
-
-            let serial = u128::from(self.serial_ns) * u128::from(SERIAL_WIN_DENOMINATOR);
-            let parallel = u128::from(self.parallel_ns) * u128::from(SERIAL_WIN_NUMERATOR);
-            let preferred = if serial < parallel {
-                Execution::Serial
-            } else {
-                Execution::Parallel
-            };
-
-            self.since_probe = self.since_probe.saturating_add(1);
-            if self.since_probe < RESAMPLE_INTERVAL {
-                return (
-                    preferred,
-                    self.since_probe
-                        .is_multiple_of(PREFERRED_SAMPLE_INTERVAL),
-                );
-            }
-            self.since_probe = 0;
-
-            match preferred {
-                Execution::Serial => (Execution::Parallel, true),
-                Execution::Parallel => (Execution::Serial, true),
-            }
-        }
-
-        fn record(&mut self, execution: Execution, elapsed: Duration) {
-            let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-            match execution {
-                Execution::Serial => {
-                    self.serial_ns = update_ewma(self.serial_ns, self.serial_samples, elapsed_ns);
-                    self.serial_samples = self.serial_samples.saturating_add(1);
-                }
-                Execution::Parallel => {
-                    self.parallel_ns =
-                        update_ewma(self.parallel_ns, self.parallel_samples, elapsed_ns);
-                    self.parallel_samples = self.parallel_samples.saturating_add(1);
-                }
-            }
-        }
-    }
-
-    fn update_ewma(current: u64, samples: u32, next: u64) -> u64 {
-        if samples == 0 {
-            next
-        } else {
-            let weighted = u128::from(current) * u128::from(EWMA_PREVIOUS_WEIGHT)
-                + u128::from(next) * u128::from(EWMA_NEXT_WEIGHT);
-            (weighted / u128::from(EWMA_WEIGHT))
-                .try_into()
-                .unwrap_or(u64::MAX)
-        }
-    }
-
-    fn policy_entries(policy: &Mutex<PolicyEntries>) -> MutexGuard<'_, PolicyEntries> {
-        policy.lock()
-    }
-
-    const fn len_bucket(len: usize) -> u8 {
-        if len == 0 {
-            0
-        } else {
-            (usize::BITS - len.leading_zeros()) as u8
-        }
-    }
-
-    const fn policy_key(
-        caller: &'static Location<'static>,
-        len: usize,
-        parallelism: usize,
-    ) -> PolicyKey {
-        PolicyKey {
-            file: caller.file(),
-            line: caller.line(),
-            column: caller.column(),
-            bucket: len_bucket(len),
-            parallelism,
-        }
-    }
-
-    fn choose_execution(
-        policy: &Mutex<PolicyEntries>,
-        caller: &'static Location<'static>,
-        len: usize,
-        parallelism: usize,
-    ) -> (PolicyKey, Execution, bool) {
-        let key = policy_key(caller, len, parallelism);
-        if parallelism <= 1 {
-            return (key, Execution::Serial, false);
-        }
-        let mut entries = policy_entries(policy);
-        let (execution, measure) = entries.entry(key).or_default().choose();
-        (key, execution, measure)
-    }
-
-    fn record_execution(
-        policy: &Mutex<PolicyEntries>,
-        key: PolicyKey,
-        execution: Execution,
-        elapsed: Duration,
-    ) {
-        policy_entries(policy)
-            .entry(key)
-            .or_default()
-            .record(execution, elapsed);
-    }
-
     /// A parallel execution strategy backed by a rayon thread pool.
     ///
     /// This strategy adaptively executes collection operations serially or across multiple
@@ -791,7 +644,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     #[derive(Debug, Clone)]
     pub struct Rayon {
         thread_pool: ThreadPool,
-        policy: Arc<Mutex<PolicyEntries>>,
+        policy: Arc<Mutex<policy::Entries>>,
     }
 
     impl Rayon {
@@ -808,13 +661,13 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         pub fn with_pool(thread_pool: ThreadPool) -> Self {
             Self {
                 thread_pool,
-                policy: Arc::new(Mutex::new(HashMap::new())),
+                policy: Arc::new(Mutex::new(policy::Entries::new())),
             }
         }
 
         #[track_caller]
-        fn execute<R>(&self, len: usize, run: impl FnOnce(Execution) -> R) -> R {
-            let (key, execution, measure) = choose_execution(
+        fn execute<R>(&self, len: usize, run: impl FnOnce(policy::Execution) -> R) -> R {
+            let (key, execution, measure) = policy::choose(
                 &self.policy,
                 Location::caller(),
                 len,
@@ -823,7 +676,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let start = measure.then(Instant::now);
             let result = run(execution);
             if let Some(start) = start {
-                record_execution(&self.policy, key, execution, start.elapsed());
+                policy::record(&self.policy, key, execution, start.elapsed());
             }
             result
         }
@@ -848,8 +701,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), |execution| match execution {
-                Execution::Serial => Sequential.fold_init(items, init, identity, fold_op, reduce_op),
-                Execution::Parallel => self.thread_pool.install(|| {
+                policy::Execution::Serial => Sequential.fold_init(items, init, identity, fold_op, reduce_op),
+                policy::Execution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
                         .fold(
@@ -883,8 +736,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), |execution| match execution {
-                Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
-                Execution::Parallel => self.thread_pool.install(|| {
+                policy::Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
+                policy::Execution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
                         .try_fold(&identity, &fold_op)
@@ -952,8 +805,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 items.len(),
                 |execution| {
                     match execution {
-                        Execution::Serial => Sequential.map_collect_vec(items, map_op),
-                        Execution::Parallel => self
+                        policy::Execution::Serial => Sequential.map_collect_vec(items, map_op),
+                        policy::Execution::Parallel => self
                             .thread_pool
                             .install(|| items.into_par_iter().map(map_op).collect()),
                     }
@@ -974,8 +827,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 items.len(),
                 |execution| {
                     match execution {
-                        Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
-                        Execution::Parallel => self
+                        policy::Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
+                        policy::Execution::Parallel => self
                             .thread_pool
                             .install(|| items.into_par_iter().map(map_op).collect()),
                     }
@@ -997,8 +850,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 items.len(),
                 |execution| {
                     match execution {
-                        Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                        Execution::Parallel => self
+                        policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                        policy::Execution::Parallel => self
                             .thread_pool
                             .install(|| items.into_par_iter().map_init(init, map_op).collect()),
                     }
@@ -1077,8 +930,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self.execute(
                 items.len(),
                 |execution| match execution {
-                    Execution::Serial => Sequential.sort_by(items, compare),
-                    Execution::Parallel => self.thread_pool.install(|| items.par_sort_by(compare)),
+                    policy::Execution::Serial => Sequential.sort_by(items, compare),
+                    policy::Execution::Parallel => self.thread_pool.install(|| items.par_sort_by(compare)),
                 },
             );
         }
@@ -1094,17 +947,14 @@ mod test {
     use crate::{Rayon, Sequential, Strategy};
     use core::num::NonZeroUsize;
     use proptest::prelude::*;
-    use std::{
-        sync::atomic::{AtomicUsize, Ordering},
-        time::Duration,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn parallel_strategy() -> Rayon {
         Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
     }
 
     fn policy_len(strategy: &Rayon) -> usize {
-        super::policy_entries(&strategy.policy).len()
+        super::policy::len(&strategy.policy)
     }
 
     fn map_from_same_callsite(strategy: &Rayon, len: usize) {
@@ -1131,98 +981,6 @@ mod test {
 
         assert_eq!(policy_len(&strategy), 1);
         assert_eq!(policy_len(&clone), 1);
-    }
-
-    #[test]
-    fn adaptive_policy_starts_parallel_then_probes_serial() {
-        let mut entry = super::PolicyEntry::default();
-
-        assert_eq!(entry.choose(), (super::Execution::Parallel, true));
-        entry.record(super::Execution::Parallel, Duration::from_micros(100));
-
-        assert_eq!(entry.choose(), (super::Execution::Serial, true));
-    }
-
-    #[test]
-    fn adaptive_policy_prefers_serial_with_margin() {
-        let mut entry = super::PolicyEntry::default();
-        entry.record(super::Execution::Parallel, Duration::from_micros(100));
-        entry.record(super::Execution::Serial, Duration::from_micros(80));
-
-        assert_eq!(entry.choose(), (super::Execution::Serial, false));
-    }
-
-    #[test]
-    fn adaptive_policy_keeps_parallel_without_serial_margin() {
-        let mut entry = super::PolicyEntry::default();
-        entry.record(super::Execution::Parallel, Duration::from_micros(100));
-        entry.record(super::Execution::Serial, Duration::from_micros(98));
-
-        assert_eq!(entry.choose(), (super::Execution::Parallel, false));
-    }
-
-    #[test]
-    fn adaptive_policy_updates_ewma_with_integer_math() {
-        let mut entry = super::PolicyEntry::default();
-
-        entry.record(super::Execution::Parallel, Duration::from_nanos(100));
-        entry.record(super::Execution::Parallel, Duration::from_nanos(200));
-
-        assert_eq!(entry.parallel_ns, 120);
-    }
-
-    #[test]
-    fn adaptive_policy_resamples_other_execution() {
-        let mut entry = super::PolicyEntry::default();
-        entry.record(super::Execution::Parallel, Duration::from_micros(100));
-        entry.record(super::Execution::Serial, Duration::from_micros(50));
-
-        for i in 1..super::RESAMPLE_INTERVAL {
-            assert_eq!(
-                entry.choose(),
-                (
-                    super::Execution::Serial,
-                    i % super::PREFERRED_SAMPLE_INTERVAL == 0
-                )
-            );
-        }
-        assert_eq!(entry.choose(), (super::Execution::Parallel, true));
-    }
-
-    #[test]
-    fn adaptive_policy_resamples_serial_when_parallel_wins() {
-        let mut entry = super::PolicyEntry::default();
-        entry.record(super::Execution::Parallel, Duration::from_micros(100));
-        entry.record(super::Execution::Serial, Duration::from_micros(110));
-
-        for i in 1..super::RESAMPLE_INTERVAL {
-            assert_eq!(
-                entry.choose(),
-                (
-                    super::Execution::Parallel,
-                    i % super::PREFERRED_SAMPLE_INTERVAL == 0
-                )
-            );
-        }
-        assert_eq!(entry.choose(), (super::Execution::Serial, true));
-    }
-
-    #[test]
-    fn adaptive_policy_refreshes_preferred_parallel_sample() {
-        let mut entry = super::PolicyEntry::default();
-        entry.record(super::Execution::Parallel, Duration::from_micros(100));
-        entry.record(super::Execution::Serial, Duration::from_micros(110));
-
-        for i in 1..super::PREFERRED_SAMPLE_INTERVAL {
-            assert_eq!(
-                entry.choose(),
-                (
-                    super::Execution::Parallel,
-                    i % super::PREFERRED_SAMPLE_INTERVAL == 0
-                )
-            );
-        }
-        assert_eq!(entry.choose(), (super::Execution::Parallel, true));
     }
 
     #[test]
