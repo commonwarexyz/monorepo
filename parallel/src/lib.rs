@@ -573,11 +573,7 @@ commonware_macros::stability_scope!(BETA {
             F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
             RD: Fn(R, R) -> R + Send + Sync,
         {
-            let mut acc = identity();
-            for item in iter {
-                acc = fold_op(acc, item)?;
-            }
-            Ok(acc)
+            iter.into_iter().try_fold(identity(), fold_op)
         }
 
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
@@ -867,12 +863,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             let items: Vec<I::Item> = iter.into_iter().collect();
             let (key, execution, start) = self.choose(kind, caller, items.len());
             let result = match execution {
-                Execution::Serial => {
-                    let mut init_val = init();
-                    items
-                        .into_iter()
-                        .fold(identity(), |acc, item| fold_op(acc, &mut init_val, item))
-                }
+                Execution::Serial => Sequential.fold_init(items, init, identity, fold_op, reduce_op),
                 Execution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
@@ -911,19 +902,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             let items: Vec<I::Item> = iter.into_iter().collect();
             let (key, execution, start) = self.choose(kind, caller, items.len());
             let result = match execution {
-                Execution::Serial => {
-                    let mut acc = identity();
-                    let mut items = items.into_iter();
-                    loop {
-                        match items.next() {
-                            Some(item) => match fold_op(acc, item) {
-                                Ok(next) => acc = next,
-                                Err(error) => break Err(error),
-                            },
-                            None => break Ok(acc),
-                        }
-                    }
-                }
+                Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
                 Execution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
@@ -997,7 +976,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             let (key, execution, start) =
                 self.choose(OperationKind::MapCollect, Location::caller(), items.len());
             let result = match execution {
-                Execution::Serial => items.into_iter().map(map_op).collect(),
+                Execution::Serial => Sequential.map_collect_vec(items, map_op),
                 Execution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map(map_op).collect()),
@@ -1018,7 +997,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             let (key, execution, start) =
                 self.choose(OperationKind::TryMapCollect, Location::caller(), items.len());
             let result = match execution {
-                Execution::Serial => items.into_iter().map(map_op).collect(),
+                Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
                 Execution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map(map_op).collect()),
@@ -1040,13 +1019,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             let (key, execution, start) =
                 self.choose(OperationKind::MapInitCollect, Location::caller(), items.len());
             let result = match execution {
-                Execution::Serial => {
-                    let mut init_val = init();
-                    items
-                        .into_iter()
-                        .map(|item| map_op(&mut init_val, item))
-                        .collect()
-                }
+                Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
                 Execution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map_init(init, map_op).collect()),
@@ -1137,7 +1110,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             let (key, execution, start) =
                 self.choose(OperationKind::Sort, Location::caller(), items.len());
             match execution {
-                Execution::Serial => items.sort_by(compare),
+                Execution::Serial => Sequential.sort_by(items, compare),
                 Execution::Parallel => self.thread_pool.install(|| items.par_sort_by(compare)),
             }
             self.record(key, execution, start);
