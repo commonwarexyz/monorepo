@@ -235,7 +235,7 @@ impl<B: Blob> Writer<B> {
 
         Ok(Self {
             blob,
-            gate: SyncGate::new(!invalid_data_found),
+            gate: SyncGate::new(!invalid_data_found), // ensure pending writes on the wrapped blob are synced
             current_page,
             partial_page_state,
             id: cache_ref.next_id(),
