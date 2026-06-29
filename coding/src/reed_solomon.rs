@@ -758,12 +758,10 @@ fn verify_root<H: Hasher, S: Strategy>(
         .collect::<Vec<_>>();
 
     let manual = strategy.manual();
-    for (i, digest) in
-        manual.map_init_collect_vec(missing_shards, H::new, |hasher, (i, shard)| {
-            hasher.update(shard);
-            (i, hasher.finalize())
-        })
-    {
+    for (i, digest) in manual.map_init_collect_vec(missing_shards, H::new, |hasher, (i, shard)| {
+        hasher.update(shard);
+        (i, hasher.finalize())
+    }) {
         shard_digests[i] = Some(digest);
     }
 
