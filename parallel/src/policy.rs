@@ -31,7 +31,7 @@ const EWMA_WEIGHT: u64 = EWMA_PREVIOUS_WEIGHT + EWMA_NEXT_WEIGHT;
 // Serial must take at most 90% of parallel's time before it becomes preferred.
 const SERIAL_WIN_NUMERATOR: u64 = 90;
 const SERIAL_WIN_DENOMINATOR: u64 = 100;
-const SERIAL_SAMPLE_LIMIT_NS: u64 = 50_000_000;
+const SERIAL_SAMPLE_LIMIT_NS: u64 = 10_000_000;
 
 type Entries = HashMap<Key, Entry>;
 
@@ -221,7 +221,7 @@ mod tests {
     fn skips_initial_serial_probe_when_parallel_is_slow() {
         let mut entry = Entry::default();
 
-        entry.record(Execution::Parallel, Duration::from_millis(50));
+        entry.record(Execution::Parallel, Duration::from_millis(10));
 
         for i in 1..PREFERRED_SAMPLE_INTERVAL {
             assert_eq!(
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn skips_serial_resample_when_parallel_is_slow() {
         let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_millis(50));
+        entry.record(Execution::Parallel, Duration::from_millis(10));
         entry.record(Execution::Serial, Duration::from_millis(60));
 
         for i in 1..RESAMPLE_INTERVAL {
