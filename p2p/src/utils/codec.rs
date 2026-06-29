@@ -5,6 +5,7 @@ use commonware_actor::{mailbox, Feedback, Unreliable};
 use commonware_codec::{Codec, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     iobuf::EncodeExt, spawn_cell, BufferPool, ContextCell, Handle, Metrics, Spawner,
 };
@@ -125,11 +126,10 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
 /// backpressure on the event loop, such as signature verification, decryption, or intensive
 /// validity checks.
 ///
-/// Decode parallelism is bounded by configuration. When the queue is full, the receiver stops
-/// accepting new messages until an in-flight task completes, bounding CPU work. Successfully
-/// decoded messages are forwarded through a bounded mailbox; if the consumer falls behind and the
-/// mailbox fills, additional decoded messages are dropped (they would likely no longer be useful by
-/// the time we get back to them).
+/// Decode work is submitted to the provided [`Strategy`]. Successfully decoded messages are
+/// forwarded through a bounded mailbox; if the consumer falls behind and the mailbox fills,
+/// additional decoded messages are dropped (they would likely no longer be useful by the time we
+/// get back to them).
 struct Decoded<P: PublicKey, V>(P, V);
 
 impl<P: PublicKey, V> mailbox::UnreliablePolicy for Decoded<P, V> {
@@ -157,19 +157,13 @@ impl<P: PublicKey, V> BackgroundReceiver<P, V> {
 
 struct DecodeQueue<T> {
     pool: Pool<T>,
-    capacity: usize,
 }
 
 impl<T: Send> DecodeQueue<T> {
-    fn new(capacity: usize) -> Self {
+    fn new() -> Self {
         Self {
             pool: Pool::default(),
-            capacity,
         }
-    }
-
-    fn needs_drain(&self, receiver_closed: bool) -> bool {
-        self.pool.len() >= self.capacity || (receiver_closed && !self.pool.is_empty())
     }
 
     fn is_empty(&self) -> bool {
@@ -185,41 +179,42 @@ impl<T: Send> DecodeQueue<T> {
     }
 }
 
-pub struct WrappedBackgroundReceiver<E, P, B, R, V>
+pub struct WrappedBackgroundReceiver<E, P, B, R, V, T>
 where
     E: Spawner,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     R: Receiver<PublicKey = P>,
     V: Codec + Send,
+    T: Strategy,
 {
     context: ContextCell<E>,
     receiver: R,
     codec_config: V::Cfg,
     blocker: B,
     sender: mailbox::UnreliableSender<Decoded<P, V>>,
-    decode_queue_capacity: usize,
+    strategy: T,
 }
 
-impl<E, P, B, R, V> WrappedBackgroundReceiver<E, P, B, R, V>
+impl<E, P, B, R, V, T> WrappedBackgroundReceiver<E, P, B, R, V, T>
 where
     E: Spawner + Metrics,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     R: Receiver<PublicKey = P>,
     V: Codec + Send + 'static,
+    T: Strategy,
 {
     /// Create a new [`WrappedBackgroundReceiver`].
     ///
     /// `channel_capacity` controls the size of the internal channel to the consumer.
-    /// `decode_concurrency` controls the number of in-flight decode tasks.
     pub fn new(
         context: E,
         receiver: R,
         codec_config: V::Cfg,
         blocker: B,
         channel_capacity: NonZeroUsize,
-        decode_concurrency: NonZeroUsize,
+        strategy: T,
     ) -> (Self, BackgroundReceiver<P, V>) {
         let (tx, rx) = mailbox::new_unreliable(context.child("mailbox"), channel_capacity);
         (
@@ -229,7 +224,7 @@ where
                 codec_config,
                 blocker,
                 sender: tx,
-                decode_queue_capacity: decode_concurrency.get(),
+                strategy,
             },
             BackgroundReceiver { receiver: rx },
         )
@@ -246,48 +241,37 @@ where
     /// Run the background receiver's event loop.
     ///
     /// Each incoming message is decoded in a separate spawned task, allowing the receive loop to
-    /// continue draining the network buffer while decodes proceed concurrently.
+    /// continue draining the network buffer while decodes proceed on the provided strategy.
     async fn run(mut self) {
-        let mut decode_queue = DecodeQueue::new(self.decode_queue_capacity);
+        let mut decode_queue = DecodeQueue::new();
         let mut receiver_closed = false;
 
         select_loop! {
             self.context,
             on_start => {
-                // Drain completed decode tasks when:
-                // - the pool is at capacity (backpressure), or
-                // - the network receiver closed and we're flushing remaining tasks
-                let mut saw_error = false;
-                while decode_queue.needs_drain(receiver_closed) {
-                    let Ok(result) = decode_queue.next_completed().await else {
-                        saw_error = true;
-                        break;
-                    };
+                while receiver_closed && !decode_queue.is_empty() {
+                    let result = decode_queue.next_completed().await;
                     Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
                 }
-                if saw_error || (receiver_closed && decode_queue.is_empty()) {
+                if receiver_closed && decode_queue.is_empty() {
                     break;
                 }
             },
             on_stopped => {},
             // Process decode completions as they arrive
-            Ok(result) = decode_queue.next_completed() else break => {
+            result = decode_queue.next_completed() => {
                 Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
             },
-            // Receive raw bytes and spawn a decode task on a shared (CPU) thread
+            // Receive raw bytes and submit decode work to the strategy.
             Ok((peer, bytes)) = self.receiver.recv() else {
                 receiver_closed = true;
                 continue;
             } => {
                 let config = self.codec_config.clone();
-                let handle = self
-                    .context
-                    .child("decode")
-                    .shared(true)
-                    .spawn(|_| async move {
-                        let result = V::decode_cfg(bytes.as_ref(), &config);
-                        (peer, result)
-                    });
+                let handle = self.strategy.spawn(move || {
+                    let result = V::decode_cfg(bytes.as_ref(), &config);
+                    (peer, result)
+                });
                 decode_queue.push(handle);
             },
         }
@@ -324,6 +308,7 @@ mod tests {
         Signer,
     };
     use commonware_macros::test_traced;
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{deterministic, Clock as _, IoBuf, Quota, Runner, Supervisor as _};
     use commonware_utils::{channel::mpsc, ordered::Set, NZUsize};
     use std::{io, num::NonZeroU32, time::Duration};
@@ -413,13 +398,13 @@ mod tests {
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
             let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
 
-            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
+            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
                 receiver2,
                 (),
                 control2.clone(),
                 NZUsize!(16),
-                NZUsize!(1),
+                Sequential,
             );
             let _handle = bg.start();
 
@@ -449,13 +434,13 @@ mod tests {
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
             let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
 
-            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
+            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
                 receiver2,
                 (),
                 control2.clone(),
                 NZUsize!(16),
-                NZUsize!(1),
+                Sequential,
             );
             let _handle = bg.start();
 
@@ -505,13 +490,13 @@ mod tests {
             let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
 
             let count = 20;
-            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
+            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
                 receiver2,
                 (),
                 control2.clone(),
                 NZUsize!(20),
-                NZUsize!(1),
+                Sequential,
             );
             let _handle = bg.start();
 
@@ -532,7 +517,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_decode_concurrency_bound() {
+    fn test_decode_with_strategy() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut oracle = start_network(context.child("network"));
@@ -550,13 +535,13 @@ mod tests {
             // Give the decoded mailbox enough capacity for all messages so this test only
             // exercises the decode concurrency bound.
             let count = 50u32;
-            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
+            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
                 receiver2,
                 (),
                 control2.clone(),
                 NZUsize!(50),
-                NZUsize!(4),
+                Rayon::new(NZUsize!(4)).unwrap(),
             );
             let _handle = bg.start();
 
@@ -595,13 +580,13 @@ mod tests {
             let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
             let (mut sender3, _) = control3.register(0, TEST_QUOTA).await.unwrap();
 
-            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
+            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
                 receiver2,
                 (),
                 control2.clone(),
                 NZUsize!(16),
-                NZUsize!(1),
+                Sequential,
             );
             let _handle = bg.start();
 
@@ -650,13 +635,13 @@ mod tests {
             }
             drop(tx);
 
-            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
+            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
                 MockReceiver { receiver },
                 (),
                 NoopBlocker,
                 NZUsize!(1),
-                NZUsize!(1),
+                Sequential,
             );
             let handle = bg.start();
             handle.await.expect("background receiver should complete");
@@ -682,13 +667,13 @@ mod tests {
             }
             drop(tx);
 
-            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
+            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
                 MockReceiver { receiver },
                 (),
                 NoopBlocker,
                 NZUsize!(64),
-                NZUsize!(8),
+                Rayon::new(NZUsize!(8)).unwrap(),
             );
             let _handle = bg.start();
 

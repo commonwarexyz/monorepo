@@ -72,6 +72,7 @@ commonware_macros::stability_scope!(BETA {
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
+            use futures::channel::oneshot;
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
                 slice::ParallelSliceMut,
@@ -121,6 +122,14 @@ commonware_macros::stability_scope!(BETA {
         fn manual(&self) -> Manual<Self>
         where
             Self: Sized;
+
+        /// Submit one CPU-bound job to this strategy.
+        ///
+        /// The returned future resolves when the submitted job completes.
+        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        where
+            F: FnOnce() -> T + Send + 'static,
+            T: Send + 'static;
 
         /// Reduces a collection to a single value with per-partition initialization.
         ///
@@ -538,6 +547,14 @@ commonware_macros::stability_scope!(BETA {
             Manual::new(self.clone(), self.parallelism)
         }
 
+        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        where
+            F: FnOnce() -> T + Send + 'static,
+            T: Send + 'static,
+        {
+            self.strategy.spawn(f)
+        }
+
         #[track_caller]
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
@@ -670,6 +687,15 @@ commonware_macros::stability_scope!(BETA {
     impl Strategy for Sequential {
         fn manual(&self) -> Manual<Self> {
             Manual::new(Self, NonZeroUsize::new(1).unwrap())
+        }
+
+        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        where
+            F: FnOnce() -> T + Send + 'static,
+            T: Send + 'static,
+        {
+            let result = f();
+            async move { result }
         }
 
         fn fold_init<I, INIT, T, R, ID, F, RD>(
@@ -833,6 +859,19 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 },
                 parallelism,
             )
+        }
+
+        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        where
+            F: FnOnce() -> T + Send + 'static,
+            T: Send + 'static,
+        {
+            let (tx, rx) = oneshot::channel();
+            self.thread_pool.spawn(move || {
+                let result = f();
+                let _ = tx.send(result);
+            });
+            async move { rx.await.expect("strategy job failed") }
         }
 
         #[track_caller]
@@ -1121,6 +1160,26 @@ mod test {
         let result = strategy.join(|| 1, || 2);
 
         assert_eq!(result, (1, 2));
+        assert_eq!(policy_len(&strategy), 0);
+    }
+
+    #[test]
+    fn sequential_spawn_runs_job() {
+        let result = futures::executor::block_on(Sequential.spawn(|| 7));
+
+        assert_eq!(result, 7);
+    }
+
+    #[test]
+    fn rayon_spawn_runs_job_on_pool() {
+        let strategy = parallel_strategy();
+
+        let result = futures::executor::block_on(strategy.spawn(|| {
+            assert!(rayon::current_thread_index().is_some());
+            7
+        }));
+
+        assert_eq!(result, 7);
         assert_eq!(policy_len(&strategy), 0);
     }
 

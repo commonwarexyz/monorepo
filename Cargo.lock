@@ -1620,6 +1620,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-math",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
@@ -1659,6 +1660,7 @@ version = "2026.5.0"
 dependencies = [
  "cfg-if",
  "commonware-macros",
+ "futures",
  "parking_lot",
  "proptest",
  "rayon",
