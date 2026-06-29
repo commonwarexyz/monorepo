@@ -1045,9 +1045,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok(false);
         }
 
-        let new_boundary = min_blob
-            .checked_mul(self.items_per_blob.get())
-            .ok_or(Error::OffsetOverflow)?;
+        let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
