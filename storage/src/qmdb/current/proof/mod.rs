@@ -28,7 +28,7 @@
 //! pending hashes in before partial.
 
 use crate::{
-    journal::contiguous::{Contiguous, Reader as _},
+    journal::contiguous::Contiguous,
     merkle::{
         self,
         hasher::{Hasher, Standard as StandardHasher},
@@ -282,9 +282,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         .await?;
 
         // Collect the operations necessary to verify the proof.
-        let reader = log.reader().await;
         let futures = (*request.start_loc..*end_loc)
-            .map(|i| reader.read(i))
+            .map(|i| log.read(i))
             .collect::<Vec<_>>();
         let ops = try_join_all(futures).await?;
 

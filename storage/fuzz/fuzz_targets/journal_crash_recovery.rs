@@ -47,7 +47,7 @@ use commonware_storage::journal::{
     contiguous::{
         fixed::{Config as FixedConfig, Journal as FixedJournal},
         variable::{Config as VariableConfig, Journal as VariableJournal},
-        Reader,
+        Contiguous,
     },
     Error,
 };
@@ -288,7 +288,7 @@ trait FuzzJournal: Sized {
     ) -> impl Future<Output = Result<Self, Error>> + Send;
 
     fn size(&self) -> impl Future<Output = u64> + Send;
-    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send;
+    fn bounds(&self) -> Range<u64>;
 
     fn append(&mut self, item: Item) -> impl Future<Output = Result<u64, Error>> + Send;
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send;
@@ -299,20 +299,20 @@ trait FuzzJournal: Sized {
 
     fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> impl Future<Output = Result<Vec<(u64, Item)>, Error>> + Send;
 
     fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Drain a reader's replay stream into a `(position, item)` vector.
-async fn collect_replay<R: Reader<Item = Item>>(
-    reader: R,
-    buffer: NonZeroUsize,
+async fn collect_replay<C: Contiguous<Item = Item>>(
+    reader: &C,
     start_pos: u64,
+    buffer: NonZeroUsize,
 ) -> Result<Vec<(u64, Item)>, Error> {
-    let stream = reader.replay(buffer, start_pos).await?;
+    let stream = reader.replay(start_pos, buffer).await?;
     futures::pin_mut!(stream);
     let mut out = Vec::new();
     while let Some(result) = stream.next().await {
@@ -342,23 +342,19 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     }
 
     async fn size(&self) -> u64 {
-        FixedJournal::size(self).await
+        FixedJournal::size(self)
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
-        async { self.reader().await.bounds() }
+    fn bounds(&self) -> Range<u64> {
+        Contiguous::bounds(self)
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, Error> {
         FixedJournal::append(self, &item).await
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send {
-        async move { self.reader().await.read(pos).await }
+    async fn read(&self, pos: u64) -> Result<Item, Error> {
+        Contiguous::read(self, pos).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -377,14 +373,12 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         FixedJournal::prune(self, min_pos).await
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn replay(
+    async fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
-    ) -> impl Future<Output = Result<Vec<(u64, Item)>, Error>> + Send {
-        async move { collect_replay(self.reader().await, buffer, start_pos).await }
+        buffer: NonZeroUsize,
+    ) -> Result<Vec<(u64, Item)>, Error> {
+        collect_replay(self, start_pos, buffer).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -415,23 +409,19 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     }
 
     async fn size(&self) -> u64 {
-        VariableJournal::size(self).await
+        VariableJournal::size(self)
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
-        async { self.reader().await.bounds() }
+    fn bounds(&self) -> Range<u64> {
+        Contiguous::bounds(self)
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, Error> {
         VariableJournal::append(self, &item).await
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send {
-        async move { self.reader().await.read(pos).await }
+    async fn read(&self, pos: u64) -> Result<Item, Error> {
+        Contiguous::read(self, pos).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -446,14 +436,12 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         VariableJournal::prune(self, min_pos).await
     }
 
-    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
-    #[allow(clippy::manual_async_fn)]
-    fn replay(
+    async fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
-    ) -> impl Future<Output = Result<Vec<(u64, Item)>, Error>> + Send {
-        async move { collect_replay(self.reader().await, buffer, start_pos).await }
+        buffer: NonZeroUsize,
+    ) -> Result<Vec<(u64, Item)>, Error> {
+        collect_replay(self, start_pos, buffer).await
     }
 
     async fn commit(&mut self) -> Result<(), Error> {
@@ -470,7 +458,7 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
     let Range {
         start: boundary,
         end: size,
-    } = journal.bounds().await;
+    } = journal.bounds();
     assert!(size >= boundary, "size {size} < boundary {boundary}");
 
     // Size and boundary fall within the expected bounds.
@@ -522,7 +510,7 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
 
     // Replay must yield exactly [boundary, size) contiguously and agree with `read()` everywhere.
     let items = journal
-        .replay(NZUsize!(VERIFY_REPLAY_BUF), boundary)
+        .replay(boundary, NZUsize!(VERIFY_REPLAY_BUF))
         .await
         .expect("replay during recovery verification");
     assert_eq!(
@@ -543,9 +531,9 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
 
 /// Read the recovered journal back into an `Expected` pinned to exactly that state.
 async fn to_expected<J: FuzzJournal>(journal: &J) -> Expected {
-    let bounds = journal.bounds().await;
+    let bounds = journal.bounds();
     let items = journal
-        .replay(NZUsize!(VERIFY_REPLAY_BUF), bounds.start)
+        .replay(bounds.start, NZUsize!(VERIFY_REPLAY_BUF))
         .await
         .expect("to_expected replay");
     let mut values = vec![Item::from([0u8; ITEM_SIZE]); bounds.end as usize];
@@ -649,7 +637,7 @@ async fn run_ops<J: FuzzJournal>(
             }
 
             JournalOperation::Read { pos } => {
-                let bounds = journal.bounds().await;
+                let bounds = journal.bounds();
                 if !bounds.is_empty() {
                     let target = bounds.start + (*pos % (bounds.end - bounds.start));
                     assert_read(journal.read(target).await, target, &bounds);
@@ -660,7 +648,7 @@ async fn run_ops<J: FuzzJournal>(
 
             JournalOperation::Sync => match journal.sync().await {
                 Ok(()) => {
-                    expected.synced(journal.bounds().await);
+                    expected.synced(journal.bounds());
                     true
                 }
                 Err(_) => false,
@@ -675,7 +663,7 @@ async fn run_ops<J: FuzzJournal>(
             },
 
             JournalOperation::Rewind { size } => {
-                let bounds = journal.bounds().await;
+                let bounds = journal.bounds();
                 if bounds.is_empty() {
                     true
                 } else {
@@ -719,7 +707,7 @@ async fn run_ops<J: FuzzJournal>(
                 let size = journal.size().await;
                 match journal.prune(*min_pos).await {
                     Ok(_) => {
-                        expected.pruned(journal.bounds().await.start);
+                        expected.pruned(journal.bounds().start);
                         true
                     }
                     Err(_) => {
@@ -736,9 +724,9 @@ async fn run_ops<J: FuzzJournal>(
             JournalOperation::Replay { buffer, start_pos } => {
                 // The clamped replay must return the full suffix matching `read()`, or hit a
                 // tail-repair I/O fault.
-                let bounds = journal.bounds().await;
+                let bounds = journal.bounds();
                 let clamped = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
-                let clamped_ok = match journal.replay(NZUsize!(*buffer), clamped).await {
+                let clamped_ok = match journal.replay(clamped, NZUsize!(*buffer)).await {
                     Ok(items) => {
                         assert_replay_suffix(&items, clamped, &bounds);
                         for (pos, item) in &items {
@@ -759,7 +747,7 @@ async fn run_ops<J: FuzzJournal>(
                 };
                 clamped_ok
                     && should_continue_raw_replay(
-                        journal.replay(NZUsize!(*buffer), *start_pos).await,
+                        journal.replay(*start_pos, NZUsize!(*buffer)).await,
                         *start_pos,
                         &bounds,
                     )
@@ -886,7 +874,7 @@ where
         assert_eq!(pos, size);
         expected.appended(sentinel.clone());
         journal.sync().await.expect("final sync");
-        expected.synced(journal.bounds().await);
+        expected.synced(journal.bounds());
         drop(journal);
 
         // Reopen and confirm the synced sentinel survived the restart.

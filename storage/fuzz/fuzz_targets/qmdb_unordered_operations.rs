@@ -150,7 +150,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     }
 
                     QmdbOperation::OpCount => {
-                        let _ = db.bounds().await.end;
+                        let _ = db.bounds().end;
                     }
 
                     QmdbOperation::Commit => {
@@ -163,14 +163,14 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     }
 
                     QmdbOperation::Proof { start_loc, max_ops } => {
-                        let actual_op_count = db.bounds().await.end;
+                        let actual_op_count = db.bounds().end;
                         if actual_op_count == 0 || *max_ops == 0 {
                             continue;
                         }
 
                         commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
                         let current_root = db.root();
-                        let actual_op_count = db.bounds().await.end;
+                        let actual_op_count = db.bounds().end;
                         let adjusted_start = Location::<F>::new(*start_loc % *actual_op_count);
                         let adjusted_max_ops = (*max_ops % 100).max(1);
 

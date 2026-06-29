@@ -88,11 +88,11 @@ pub trait DbAny<F: Family>:
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    fn bounds(&self) -> impl Future<Output = Range<Location<F>>> + Send;
+    fn bounds(&self) -> Range<Location<F>>;
 
     /// Return the Location of the next operation appended to this db.
-    fn size(&self) -> impl Future<Output = Location<F>> + Send {
-        async { self.bounds().await.end }
+    fn size(&self) -> Location<F> {
+        self.bounds().end
     }
 
     /// Get the metadata associated with the last commit.
@@ -106,13 +106,13 @@ pub trait DbAny<F: Family>:
     /// Durably persist the database, guaranteeing the current state will survive a crash.
     ///
     /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-    fn commit(&self) -> impl Future<Output = Result<(), Error<F>>> + Send;
+    fn commit(&mut self) -> impl Future<Output = Result<(), Error<F>>> + Send;
 
     /// Durably persist the database, guaranteeing the current state will survive a crash, and that
     /// no recovery will be needed on startup.
     ///
     /// This provides a stronger guarantee than [Self::commit] but may be slower.
-    fn sync(&self) -> impl Future<Output = Result<(), Error<F>>> + Send;
+    fn sync(&mut self) -> impl Future<Output = Result<(), Error<F>>> + Send;
 
     /// Destroy the database, removing all data from disk.
     fn destroy(self) -> impl Future<Output = Result<(), Error<F>>> + Send
@@ -145,7 +145,7 @@ pub trait Provable<F: Family>: DbAny<F> {
     ) -> impl Future<Output = Result<(Proof<F, Self::Digest>, Vec<Self::Operation>), Error<F>>> + Send
     {
         async move {
-            self.historical_proof(self.bounds().await.end, start_loc, max_ops)
+            self.historical_proof(self.bounds().end, start_loc, max_ops)
                 .await
         }
     }
@@ -192,8 +192,8 @@ macro_rules! impl_db_any {
                 <$ty>::root(self)
             }
 
-            async fn bounds(&self) -> ::std::ops::Range<$crate::merkle::Location<$fam>> {
-                <$ty>::bounds(self).await
+            fn bounds(&self) -> ::std::ops::Range<$crate::merkle::Location<$fam>> {
+                <$ty>::bounds(self)
             }
 
             async fn get_metadata(
@@ -209,11 +209,11 @@ macro_rules! impl_db_any {
                 <$ty>::prune(self, loc).await
             }
 
-            async fn commit(&self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
+            async fn commit(&mut self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
                 <$ty>::commit(self).await
             }
 
-            async fn sync(&self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
+            async fn sync(&mut self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
                 <$ty>::sync(self).await
             }
 

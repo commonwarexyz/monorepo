@@ -186,8 +186,8 @@ async fn apply_pending(db: &mut Db, writes: &[(Key, Option<Value>)]) {
 
 async fn assert_matches_reference(db: &Db, reference_db: &Db, context: &str) {
     assert_eq!(
-        db.bounds().await.end,
-        reference_db.bounds().await.end,
+        db.bounds().end,
+        reference_db.bounds().end,
         "op count mismatch after {context}"
     );
     assert_eq!(
@@ -237,7 +237,7 @@ async fn reopen_pruned_db(
 ) -> Db {
     let root_before = db.root();
     let ops_root_before = db.ops_root();
-    let bounds_before = db.bounds().await;
+    let bounds_before = db.bounds();
     let pruned_bits_before = db.pruned_bits();
     drop(db);
 
@@ -258,7 +258,7 @@ async fn reopen_pruned_db(
         "ops root changed after reopen"
     );
     assert_eq!(
-        reopened.bounds().await,
+        reopened.bounds(),
         bounds_before,
         "bounds changed after reopen"
     );
@@ -522,8 +522,8 @@ fn fuzz(data: FuzzInput) {
 
         prune_to_floor(&mut db, &reference_db, "final").await;
         assert_eq!(
-            db.bounds().await.end,
-            reference_db.bounds().await.end,
+            db.bounds().end,
+            reference_db.bounds().end,
             "final op count mismatch"
         );
 

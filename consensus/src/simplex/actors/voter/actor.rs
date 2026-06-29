@@ -898,7 +898,7 @@ impl<
         let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
 
         // Initialize journal
-        let journal = Journal::<_, Artifact<S, D>>::init(
+        let mut journal = Journal::<_, Artifact<S, D>>::init(
             self.context.child("journal"),
             JConfig {
                 partition: self.partition.clone(),

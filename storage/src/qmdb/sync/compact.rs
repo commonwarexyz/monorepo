@@ -342,7 +342,7 @@ pub trait Database: Sized + Send {
 
     /// Persist the compact-initialized state once the caller has verified its root.
     fn persist_compact_state(
-        &self,
+        &mut self,
     ) -> impl Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
 }
 
@@ -414,7 +414,7 @@ where
         // The peer response has already authenticated the final commit and frontier. From here,
         // construction should only fail for local database/storage reasons; a root mismatch is a
         // bug in this path.
-        let db = DB::from_validated_state(
+        let mut db = DB::from_validated_state(
             config.context.child("compact"),
             config.db_config.clone(),
             validated_state,
@@ -518,7 +518,7 @@ where
     })
 }
 
-async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistFut, Pins, PinsFut>(
+async fn fetch_state_from_full_source<F, Op, D, Current, Hist, HistFut, Pins, PinsFut>(
     target: Target<F, D>,
     current_target: Current,
     historical_proof: Hist,
@@ -527,8 +527,7 @@ async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistF
 where
     F: Family,
     D: Digest,
-    Current: FnOnce() -> CurrentFut,
-    CurrentFut: Future<Output = Target<F, D>>,
+    Current: FnOnce() -> Target<F, D>,
     Hist: FnOnce(Location<F>, Location<F>) -> HistFut,
     HistFut: Future<Output = Result<(Proof<F, D>, Vec<Op>), qmdb::Error<F>>>,
     Pins: FnOnce(Location<F>) -> PinsFut,
@@ -537,7 +536,7 @@ where
     // Full sources do not cache a compact witness. Instead, derive the compact payload on demand
     // from the current tip commit plus the frontier pins at the requested tree size.
     target.validate().map_err(ServeError::InvalidTarget)?;
-    let current = current_target().await;
+    let current = current_target();
     if target.root != current.root || target.leaf_count != current.leaf_count {
         return Err(ServeError::StaleTarget {
             requested: target,
@@ -590,7 +589,7 @@ macro_rules! impl_compact_resolver_keyless {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(self.root(), self.bounds().await.end) },
+                    || Target::new(self.root(), self.bounds().end),
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -629,7 +628,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || Target::new(db.root(), db.bounds().end),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -665,7 +664,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || Target::new(db.root(), db.bounds().end),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -708,7 +707,7 @@ macro_rules! impl_compact_resolver_immutable {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(self.root(), self.bounds().await.end) },
+                    || Target::new(self.root(), self.bounds().end),
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -750,7 +749,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || Target::new(db.root(), db.bounds().end),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -789,7 +788,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || Target::new(db.root(), db.bounds().end),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -1041,7 +1040,7 @@ mod tests {
             self.root
         }
 
-        async fn persist_compact_state(&self) -> Result<(), qmdb::Error<Self::Family>> {
+        async fn persist_compact_state(&mut self) -> Result<(), qmdb::Error<Self::Family>> {
             Ok(())
         }
     }

@@ -243,7 +243,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
 
                 Operation::Commit { metadata_bytes, floor_kind } => {
                     let pending_count = pending_appends.len() as u64;
-                    let end = db.bounds().await.end;
+                    let end = db.bounds().end;
                     let commit_loc = end.as_u64() + pending_count;
                     let current_floor = db.inactivity_floor_loc();
 
@@ -296,7 +296,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                 }
 
                 Operation::BadChainedCommit { ancestor_kind } => {
-                    let end = db.bounds().await.end;
+                    let end = db.bounds().end;
                     let current_floor = db.inactivity_floor_loc();
 
                     // Parent batch: base = end, 1 append lands at `end`, commit lands at `end + 1`.
@@ -346,7 +346,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                 }
 
                 Operation::Get { loc_offset } => {
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     if op_count > 0 {
                         let loc = (*loc_offset as u64) % op_count.as_u64();
                         let _ = db.get(loc.into()).await;
@@ -366,7 +366,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     // Advance the floor to the new commit location so the subsequent prune
                     // actually removes data. This exercises more of the code path than pruning
                     // at a stale floor would.
-                    let end = db.bounds().await.end;
+                    let end = db.bounds().end;
                     let floor = Location::<F>::new(end.as_u64() + pending_count);
                     let merkleized = batch.merkleize(&db, None, floor);
                     db.apply_batch(merkleized).await.expect("Commit should not fail");
@@ -387,7 +387,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().await.end;
+                    let _ = db.bounds().end;
                 }
 
                 Operation::LastCommitLoc => {
@@ -395,7 +395,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.bounds().await.start;
+                    let _ = db.bounds().start;
                 }
 
                 Operation::Root => {
@@ -413,7 +413,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     if op_count == 0 {
                         continue;
                     }
@@ -446,7 +446,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     if op_count == 0 {
                         continue;
                     }
@@ -458,7 +458,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     db.apply_batch(merkleized).await.expect("Commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                     // Use post-commit op_count so it's consistent with the root.
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                     let size: Location<F> = Location::new(size);
                     let start_loc = (*start_offset as u64) % *size;

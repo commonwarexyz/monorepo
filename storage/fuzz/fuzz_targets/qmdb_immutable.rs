@@ -198,7 +198,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             None
                         };
 
-                        let end = db.bounds().await.end;
+                        let end = db.bounds().end;
                         let pending_count = pending_sets.len() as u64;
                         assign_pending_locations(
                             &pending_sets,
@@ -221,7 +221,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let merkleized = batch.merkleize(&db, metadata, floor);
                         db.apply_batch(merkleized).await.unwrap();
                         db.commit().await.unwrap();
-                        last_commit_loc = Some(db.bounds().await.end - 1);
+                        last_commit_loc = Some(db.bounds().end - 1);
                     }
 
                     ImmutableOperation::Prune { loc } => {
@@ -230,7 +230,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             let safe_loc = Location::new(safe_loc);
                             assign_pending_locations(
                                 &pending_sets,
-                                db.bounds().await.end,
+                                db.bounds().end,
                                 &mut keys_set,
                                 &mut set_locations,
                             );
@@ -244,9 +244,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             let merkleized = batch.merkleize(&db, None, floor);
                             db.apply_batch(merkleized).await.unwrap();
                             db.commit().await.unwrap();
-                            last_commit_loc = Some(db.bounds().await.end - 1);
+                            last_commit_loc = Some(db.bounds().end - 1);
                             db.prune(safe_loc).await.expect("prune should not fail");
-                            let oldest = db.bounds().await.start;
+                            let oldest = db.bounds().start;
                             set_locations.retain(|(_, l)| *l >= oldest);
                             keys_set.retain(|(_, l)| *l >= oldest);
                         }
@@ -256,7 +256,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         start_index,
                         max_ops,
                     } => {
-                        let op_count = db.bounds().await.end;
+                        let op_count = db.bounds().end;
                         if op_count > 0 {
                             let safe_start = start_index % op_count.as_u64();
                             let safe_start = Location::new(safe_start);
@@ -264,7 +264,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
                             assign_pending_locations(
                                 &pending_sets,
-                                db.bounds().await.end,
+                                db.bounds().end,
                                 &mut keys_set,
                                 &mut set_locations,
                             );
@@ -276,7 +276,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             let merkleized = batch.merkleize(&db, None, floor);
                             db.apply_batch(merkleized).await.unwrap();
                             db.commit().await.unwrap();
-                            last_commit_loc = Some(db.bounds().await.end - 1);
+                            last_commit_loc = Some(db.bounds().end - 1);
                             if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
                                 let root = db.root();
                                 let _ = verify_proof(&hasher, &proof, safe_start, &ops, &root);
@@ -289,7 +289,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         start_loc,
                         max_ops,
                     } => {
-                        let op_count = db.bounds().await.end;
+                        let op_count = db.bounds().end;
                         if op_count > 0 && pending_sets.is_empty() {
                             let safe_size = (size % op_count.as_u64()).max(1);
                             let safe_size = Location::new(safe_size);
@@ -302,8 +302,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             let batch = db.new_batch().merkleize(&db, None, floor);
                             db.apply_batch(batch).await.unwrap();
                             db.commit().await.unwrap();
-                            last_commit_loc = Some(db.bounds().await.end - 1);
-                            if safe_start >= db.bounds().await.start {
+                            last_commit_loc = Some(db.bounds().end - 1);
+                            if safe_start >= db.bounds().start {
                                 let _ = db
                                     .historical_proof(safe_size, safe_start, safe_max_ops)
                                     .await;
@@ -316,17 +316,17 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     }
 
                     ImmutableOperation::OpCount => {
-                        let _ = db.bounds().await.end;
+                        let _ = db.bounds().end;
                     }
 
                     ImmutableOperation::OldestRetainedLoc => {
-                        let _ = db.bounds().await.start;
+                        let _ = db.bounds().start;
                     }
 
                     ImmutableOperation::Root => {
                         assign_pending_locations(
                             &pending_sets,
-                            db.bounds().await.end,
+                            db.bounds().end,
                             &mut keys_set,
                             &mut set_locations,
                         );
@@ -338,7 +338,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let merkleized = batch.merkleize(&db, None, floor);
                         db.apply_batch(merkleized).await.unwrap();
                         db.commit().await.unwrap();
-                        last_commit_loc = Some(db.bounds().await.end - 1);
+                        last_commit_loc = Some(db.bounds().end - 1);
                         let _ = db.root();
                     }
                 }
@@ -346,7 +346,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
             assign_pending_locations(
                 &pending_sets,
-                db.bounds().await.end,
+                db.bounds().end,
                 &mut keys_set,
                 &mut set_locations,
             );

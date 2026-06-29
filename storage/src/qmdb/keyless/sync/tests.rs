@@ -65,7 +65,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
         config: ConfigOf<Self>,
     ) -> impl Future<Output = Self::Db> + Send;
     fn destroy(db: Self::Db) -> impl Future<Output = ()> + Send;
-    fn db_sync(db: &Self::Db) -> impl Future<Output = ()> + Send;
+    fn db_sync(db: &mut Self::Db) -> impl Future<Output = ()> + Send;
 
     fn apply_ops(
         db: Self::Db,
@@ -74,9 +74,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     ) -> impl Future<Output = Self::Db> + Send;
     fn prune(db: &mut Self::Db, loc: Location<Self::Family>) -> impl Future<Output = ()> + Send;
 
-    fn bounds(
-        db: &Self::Db,
-    ) -> impl Future<Output = std::ops::Range<Location<Self::Family>>> + Send;
+    fn bounds(db: &Self::Db) -> std::ops::Range<Location<Self::Family>>;
     fn db_root(db: &Self::Db) -> sha256::Digest;
     fn get_metadata(db: &Self::Db) -> impl Future<Output = Option<Self::Value>> + Send;
     fn get_value(
@@ -129,7 +127,7 @@ where
         let target_ops = H::create_ops(target_db_ops);
         let target_db =
             H::apply_ops(target_db, target_ops.clone(), Some(H::sample_metadata())).await;
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let target_op_count = bounds.end;
         let target_oldest_retained_loc = bounds.start;
         let target_root = H::db_root(&target_db);
@@ -155,7 +153,7 @@ where
         };
         let got_db: DbOf<H> = sync::sync(config).await.unwrap();
 
-        let bounds = H::bounds(&got_db).await;
+        let bounds = H::bounds(&got_db);
         assert_eq!(bounds.end, target_op_count);
         assert_eq!(bounds.start, target_oldest_retained_loc);
         assert_eq!(H::db_root(&got_db), target_root);
@@ -191,7 +189,7 @@ where
         let target_db = H::init_db(context.child("target")).await;
         let target_db = H::apply_ops(target_db, vec![], Some(H::sample_metadata())).await;
 
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let target_op_count = bounds.end;
         let target_oldest_retained_loc = bounds.start;
         let target_root = H::db_root(&target_db);
@@ -216,7 +214,7 @@ where
         };
         let got_db: DbOf<H> = sync::sync(config).await.unwrap();
 
-        let bounds = H::bounds(&got_db).await;
+        let bounds = H::bounds(&got_db);
         assert_eq!(bounds.end, target_op_count);
         assert_eq!(bounds.start, target_oldest_retained_loc);
         assert_eq!(H::db_root(&got_db), target_root);
@@ -242,7 +240,7 @@ where
             H::apply_ops(target_db, target_ops.clone(), Some(H::sample_metadata())).await;
 
         let target_root = H::db_root(&target_db);
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let lower_bound = bounds.start;
         let op_count = bounds.end;
 
@@ -265,20 +263,20 @@ where
             reached_target_tx: None,
             max_retained_roots: 8,
         };
-        let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
+        let mut synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         assert_eq!(H::db_root(&synced_db), target_root);
         let expected_root = H::db_root(&synced_db);
-        let bounds = H::bounds(&synced_db).await;
+        let bounds = H::bounds(&synced_db);
         let expected_op_count = bounds.end;
         let expected_oldest_retained_loc = bounds.start;
 
-        H::db_sync(&synced_db).await;
+        H::db_sync(&mut synced_db).await;
         drop(synced_db);
         let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
 
         assert_eq!(H::db_root(&reopened_db), expected_root);
-        let bounds = H::bounds(&reopened_db).await;
+        let bounds = H::bounds(&reopened_db);
         assert_eq!(bounds.end, expected_op_count);
         assert_eq!(bounds.start, expected_oldest_retained_loc);
 
@@ -308,14 +306,14 @@ where
         let initial_ops = H::create_ops(50);
         let target_db = H::apply_ops(target_db, initial_ops, None).await;
 
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let initial_lower_bound = bounds.start;
         let initial_upper_bound = bounds.end;
         let initial_root = H::db_root(&target_db);
 
         let additional_ops = H::create_ops_seeded(25, 1);
         let target_db = H::apply_ops(target_db, additional_ops, None).await;
-        let final_upper_bound = H::bounds(&target_db).await.end;
+        let final_upper_bound = H::bounds(&target_db).end;
         let final_root = H::db_root(&target_db);
 
         let target_db = Arc::new(target_db);
@@ -344,7 +342,7 @@ where
                     NextStep::Continue(new_client) => new_client,
                     NextStep::Complete(_) => panic!("client should not be complete"),
                 };
-                let log_size = Contiguous::size(client.journal()).await;
+                let log_size = Contiguous::bounds(client.journal()).end;
                 if log_size > *initial_lower_bound {
                     break client;
                 }
@@ -365,8 +363,8 @@ where
         let target_db =
             Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("Failed to unwrap Arc"));
         {
-            let bounds = H::bounds(&synced_db).await;
-            let target_bounds = H::bounds(&target_db).await;
+            let bounds = H::bounds(&synced_db);
+            let target_bounds = H::bounds(&target_db);
             assert_eq!(bounds.end, target_bounds.end);
             assert_eq!(bounds.start, target_bounds.start);
             assert_eq!(H::db_root(&synced_db), H::db_root(&target_db));
@@ -389,7 +387,7 @@ where
         let target_db = H::apply_ops(target_db, target_ops[..29].to_vec(), None).await;
 
         let target_root = H::db_root(&target_db);
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let lower_bound = bounds.start;
         let op_count = bounds.end;
 
@@ -415,7 +413,7 @@ where
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         assert_eq!(H::db_root(&synced_db), target_root);
-        assert_eq!(H::bounds(&synced_db).await.end, op_count);
+        assert_eq!(H::bounds(&synced_db).end, op_count);
 
         H::destroy(synced_db).await;
         let target_db =
@@ -446,7 +444,7 @@ where
         let last_op = H::create_ops_seeded(1, 1);
         let target_db = H::apply_ops(target_db, last_op, None).await;
         let root = H::db_root(&target_db);
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let lower_bound = bounds.start;
         let upper_bound = bounds.end;
 
@@ -469,7 +467,7 @@ where
         };
         let sync_db: DbOf<H> = sync::sync(config).await.unwrap();
 
-        assert_eq!(H::bounds(&sync_db).await.end, upper_bound);
+        assert_eq!(H::bounds(&sync_db).end, upper_bound);
         assert_eq!(H::db_root(&sync_db), root);
 
         H::destroy(sync_db).await;
@@ -499,7 +497,7 @@ where
         drop(sync_db);
 
         let root = H::db_root(&target_db);
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let lower_bound = bounds.start;
         let upper_bound = bounds.end;
 
@@ -522,7 +520,7 @@ where
         };
         let sync_db: DbOf<H> = sync::sync(config).await.unwrap();
 
-        assert_eq!(H::bounds(&sync_db).await.end, upper_bound);
+        assert_eq!(H::bounds(&sync_db).end, upper_bound);
         assert_eq!(H::db_root(&sync_db), root);
 
         H::destroy(sync_db).await;
@@ -545,7 +543,7 @@ where
 
         H::prune(&mut target_db, Location::new(10)).await;
 
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let initial_lower_bound = bounds.start;
         let initial_upper_bound = bounds.end;
         let initial_root = H::db_root(&target_db);
@@ -606,7 +604,7 @@ where
         let target_ops = H::create_ops(50);
         let target_db = H::apply_ops(target_db, target_ops, None).await;
 
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let initial_lower_bound = bounds.start;
         let initial_upper_bound = bounds.end;
         let initial_root = H::db_root(&target_db);
@@ -664,7 +662,7 @@ where
         let target_ops = H::create_ops(100);
         let target_db = H::apply_ops(target_db, target_ops, None).await;
 
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let initial_lower_bound = bounds.start;
         let initial_upper_bound = bounds.end;
         let initial_root = H::db_root(&target_db);
@@ -675,7 +673,7 @@ where
         H::prune(&mut target_db, Location::new(10)).await;
         let target_db = H::apply_ops(target_db, vec![], None).await;
 
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let final_lower_bound = bounds.start;
         let final_upper_bound = bounds.end;
         let final_root = H::db_root(&target_db);
@@ -713,7 +711,7 @@ where
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         assert_eq!(H::db_root(&synced_db), final_root);
-        let bounds = H::bounds(&synced_db).await;
+        let bounds = H::bounds(&synced_db);
         assert_eq!(bounds.end, final_upper_bound);
         assert_eq!(bounds.start, final_lower_bound);
 
@@ -735,7 +733,7 @@ where
         let target_ops = H::create_ops(10);
         let target_db = H::apply_ops(target_db, target_ops, None).await;
 
-        let bounds = H::bounds(&target_db).await;
+        let bounds = H::bounds(&target_db);
         let lower_bound = bounds.start;
         let upper_bound = bounds.end;
         let root = H::db_root(&target_db);
@@ -769,7 +767,7 @@ where
             .await;
 
         assert_eq!(H::db_root(&synced_db), root);
-        let bounds = H::bounds(&synced_db).await;
+        let bounds = H::bounds(&synced_db);
         assert_eq!(bounds.end, upper_bound);
         assert_eq!(bounds.start, lower_bound);
 
@@ -895,7 +893,7 @@ pub(crate) mod harnesses {
             db.destroy().await.unwrap();
         }
 
-        async fn db_sync(db: &Self::Db) {
+        async fn db_sync(db: &mut Self::Db) {
             db.sync().await.unwrap();
         }
 
@@ -911,8 +909,8 @@ pub(crate) mod harnesses {
             db.prune(loc).await.unwrap();
         }
 
-        async fn bounds(db: &Self::Db) -> std::ops::Range<Location<Self::Family>> {
-            db.bounds().await
+        fn bounds(db: &Self::Db) -> std::ops::Range<Location<Self::Family>> {
+            db.bounds()
         }
 
         fn db_root(db: &Self::Db) -> sha256::Digest {
@@ -1148,7 +1146,7 @@ mod compact_variable_mmr {
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -1198,7 +1196,7 @@ mod compact_variable_mmr {
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -1248,7 +1246,7 @@ mod compact_variable_mmr {
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -1312,7 +1310,7 @@ mod compact_variable_mmr {
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -1370,7 +1368,7 @@ mod compact_variable_mmr {
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -1420,7 +1418,7 @@ mod compact_variable_mmr {
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -1492,7 +1490,7 @@ mod compact_variable_mmr {
             source.commit().await.unwrap();
             let stale_target = sync::compact::Target {
                 root: source.root(),
-                leaf_count: source.bounds().await.end,
+                leaf_count: source.bounds().end,
             };
 
             let batch2 = source.new_batch().append(vec![4, 5, 6]).merkleize(
@@ -1504,7 +1502,7 @@ mod compact_variable_mmr {
             source.commit().await.unwrap();
             let current_target = sync::compact::Target {
                 root: source.root(),
-                leaf_count: source.bounds().await.end,
+                leaf_count: source.bounds().end,
             };
             assert_ne!(stale_target, current_target);
 
@@ -1698,7 +1696,7 @@ mod compact_variable_mmr {
             );
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -1758,7 +1756,7 @@ mod compact_variable_mmr {
             );
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target_b = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -1922,7 +1920,7 @@ mod compact_variable_mmb {
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -1972,7 +1970,7 @@ mod compact_variable_mmb {
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -2022,7 +2020,7 @@ mod compact_variable_mmb {
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -2086,7 +2084,7 @@ mod compact_variable_mmb {
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -2144,7 +2142,7 @@ mod compact_variable_mmb {
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
-            let bounds = source.bounds().await;
+            let bounds = source.bounds();
             let target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: bounds.end,
@@ -2195,7 +2193,7 @@ mod compact_variable_mmb {
             source.commit().await.unwrap();
             let stale_target = sync::compact::Target {
                 root: source.root(),
-                leaf_count: source.bounds().await.end,
+                leaf_count: source.bounds().end,
             };
 
             let batch2 = source.new_batch().append(vec![4, 5, 6]).merkleize(
@@ -2207,7 +2205,7 @@ mod compact_variable_mmb {
             source.commit().await.unwrap();
             let current_target = sync::compact::Target {
                 root: source.root(),
-                leaf_count: source.bounds().await.end,
+                leaf_count: source.bounds().end,
             };
             assert_ne!(stale_target, current_target);
 

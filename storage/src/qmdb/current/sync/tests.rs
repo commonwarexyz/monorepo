@@ -521,7 +521,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let sync_root = SyncDatabase::root(&target_db);
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary();
-        let upper_bound = target_db.bounds().await.end;
+        let upper_bound = target_db.bounds().end;
 
         let client_suffix = context.next_u64().to_string();
         let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
@@ -606,7 +606,7 @@ fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
         assert!(db.sync_boundary() >= prune_loc);
         db.prune(prune_loc).await.unwrap();
 
-        let bounds = db.bounds().await;
+        let bounds = db.bounds();
         let local_start = bounds.start;
         let local_end = bounds.end;
         let sync_root = SyncDatabase::root(&db);

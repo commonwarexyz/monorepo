@@ -331,7 +331,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
 
             // Verify range proofs over the recovered DB.
             let floor = *db.sync_boundary();
-            let size = *db.bounds().await.end;
+            let size = *db.bounds().end;
             for i in floor..size {
                 let loc = Location::<F>::new(i);
                 let (proof, ops, chunks) = db

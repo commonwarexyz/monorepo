@@ -171,7 +171,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     }
 
                     QmdbOperation::OpCount => {
-                        let _ = db.bounds().await.end;
+                        let _ = db.bounds().end;
                     }
 
                     QmdbOperation::Commit => {
@@ -194,7 +194,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             &mut db, &mut pending_writes, &mut committed_state,
                             &mut pending_inserts, &mut pending_deletes,
                         ).await;
-                        let actual_op_count = db.bounds().await.end;
+                        let actual_op_count = db.bounds().end;
 
                         if actual_op_count > 0 {
                             let current_root = db.root();
@@ -221,7 +221,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             &mut db, &mut pending_writes, &mut committed_state,
                             &mut pending_inserts, &mut pending_deletes,
                         ).await;
-                        let actual_op_count = db.bounds().await.end;
+                        let actual_op_count = db.bounds().end;
 
                         let proof = Proof {
                             leaves: Location::<F>::new(*proof_leaves),

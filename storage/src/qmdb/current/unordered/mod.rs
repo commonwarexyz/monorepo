@@ -20,7 +20,7 @@ pub mod tests {
     use super::db;
     use crate::{
         index::unordered::Index,
-        journal::contiguous::Mutable,
+        journal::contiguous::{Contiguous as _, Mutable},
         merkle::{Graftable, Location, Proof},
         qmdb::{
             any::{
@@ -139,7 +139,7 @@ pub mod tests {
         assert_eq!(db.root(), root3);
 
         // Confirm all activity bits are false except for the last commit.
-        let bounds = db.bounds().await;
+        let bounds = db.bounds();
         for i in 0..*bounds.end - 1 {
             assert!(!db.get_bit(i));
         }
@@ -354,7 +354,7 @@ pub mod tests {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.bounds().await.end;
+            let end_loc = db.bounds().end;
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
@@ -422,7 +422,7 @@ pub mod tests {
                 }
                 // Found an active operation! Create a proof for its active current key/value if
                 // it's a key-updating operation.
-                let (key, value) = match db.any.log.read(Location::<F>::new(i)).await.unwrap() {
+                let (key, value) = match db.any.log.read(*Location::<F>::new(i)).await.unwrap() {
                     Operation::Update(UnorderedUpdate(key, value)) => (key, value),
                     Operation::CommitFloor(_, _) => continue,
                     Operation::Delete(_) => {

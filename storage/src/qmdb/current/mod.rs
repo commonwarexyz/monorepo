@@ -348,7 +348,7 @@ use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
+use commonware_utils::bitmap::Prunable as BitMap;
 use std::sync::Arc;
 
 pub mod batch;
@@ -479,7 +479,7 @@ where
     let db = db::Db {
         any,
         grafted_tree,
-        metadata: AsyncMutex::new(metadata),
+        metadata,
         strategy,
         root,
         metrics,
@@ -763,12 +763,12 @@ pub mod tests {
             .await
             .unwrap();
         let committed_root = db.root();
-        let committed_size = db.size().await;
+        let committed_size = db.size();
         drop(db);
 
         let db: C = Box::pin(open_db(context.child("second"), partition)).await;
         assert_eq!(db.root(), committed_root);
-        assert_eq!(db.size().await, committed_size);
+        assert_eq!(db.size(), committed_size);
         assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
 
@@ -798,7 +798,7 @@ pub mod tests {
             .unwrap();
         commit_writes(&mut db, []).await.unwrap();
         let committed_root = db.root();
-        let committed_op_count = db.bounds().await.end;
+        let committed_op_count = db.bounds().end;
         db.prune(db.sync_boundary().await).await.unwrap();
 
         // Perform more random operations without committing any of them.
@@ -815,7 +815,7 @@ pub mod tests {
         ))
         .await;
         assert_eq!(db.root(), committed_root);
-        assert_eq!(db.bounds().await.end, committed_op_count);
+        assert_eq!(db.bounds().end, committed_op_count);
 
         // Re-apply the exact same operations, this time committed.
         let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
@@ -825,7 +825,7 @@ pub mod tests {
         // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
         // before sync/prune is called. We do this by dropping the db without calling
         // sync or prune.
-        let committed_op_count = db.bounds().await.end;
+        let committed_op_count = db.bounds().end;
         drop(db);
 
         // We should be able to recover, so the root should differ from the previous commit, and
@@ -850,7 +850,7 @@ pub mod tests {
             .unwrap();
         db.prune(db.sync_boundary().await).await.unwrap();
         // State from scenario #2 should match that of a successful commit.
-        assert_eq!(db.bounds().await.end, committed_op_count);
+        assert_eq!(db.bounds().end, committed_op_count);
         assert_eq!(db.root(), scenario_2_root);
 
         db.destroy().await.unwrap();
@@ -970,7 +970,7 @@ pub mod tests {
             "pruned_bits_before={}, inactivity_floor={}, op_count={}",
             pruned_bits_before,
             *db.inactivity_floor_loc().await,
-            *db.bounds().await.end
+            *db.bounds().end
         );
 
         // Verify we actually have some pruning (otherwise the test is meaningless).
@@ -1120,7 +1120,7 @@ pub mod tests {
 
         db.apply_batch(batch_a).await.unwrap();
         let expected_root = db.root();
-        let expected_bounds = db.bounds().await;
+        let expected_bounds = db.bounds();
         let expected_metadata = db.get_metadata().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1.clone()));
         assert_eq!(db.get(&key2).await.unwrap(), None);
@@ -1131,7 +1131,7 @@ pub mod tests {
             "expected StaleBatch error, got {result:?}"
         );
         assert_eq!(db.root(), expected_root);
-        assert_eq!(db.bounds().await, expected_bounds);
+        assert_eq!(db.bounds(), expected_bounds);
         assert_eq!(db.get_metadata().await.unwrap(), expected_metadata);
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
         assert_eq!(db.get(&key2).await.unwrap(), None);
@@ -1670,7 +1670,7 @@ pub mod tests {
             )
             .await
             .unwrap();
-            let initial_size = db.bounds().await.end;
+            let initial_size = db.bounds().end;
             let initial_root = db.root();
             let initial_ops_root = db.ops_root();
             let initial_floor = db.inactivity_floor_loc();
@@ -1683,7 +1683,7 @@ pub mod tests {
             )
             .await;
             assert_eq!(first_range.start, initial_size);
-            let size_before = db.bounds().await.end;
+            let size_before = db.bounds().end;
             let root_before = db.root();
             let ops_root_before = db.ops_root();
             let floor_before = db.inactivity_floor_loc();
@@ -1708,7 +1708,7 @@ pub mod tests {
             assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
 
             db.rewind(size_before).await.unwrap();
-            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.bounds().end, size_before);
             assert_eq!(db.root(), root_before);
             assert_eq!(db.ops_root(), ops_root_before);
             assert_eq!(db.inactivity_floor_loc(), floor_before);
@@ -1726,7 +1726,7 @@ pub mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(reopened.bounds().await.end, size_before);
+            assert_eq!(reopened.bounds().end, size_before);
             assert_eq!(reopened.root(), root_before);
             assert_eq!(reopened.ops_root(), ops_root_before);
             assert_eq!(reopened.inactivity_floor_loc(), floor_before);
@@ -1737,7 +1737,7 @@ pub mod tests {
 
             let mut reopened = reopened;
             reopened.rewind(initial_size).await.unwrap();
-            assert_eq!(reopened.bounds().await.end, initial_size);
+            assert_eq!(reopened.bounds().end, initial_size);
             assert_eq!(reopened.root(), initial_root);
             assert_eq!(reopened.ops_root(), initial_ops_root);
             assert_eq!(reopened.inactivity_floor_loc(), initial_floor);
@@ -1755,7 +1755,7 @@ pub mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(reopened_initial.bounds().await.end, initial_size);
+            assert_eq!(reopened_initial.bounds().end, initial_size);
             assert_eq!(reopened_initial.root(), initial_root);
             assert_eq!(reopened_initial.ops_root(), initial_ops_root);
             assert_eq!(reopened_initial.inactivity_floor_loc(), initial_floor);
@@ -1791,7 +1791,7 @@ pub mod tests {
                 )
                 .await;
                 history.push((
-                    db.bounds().await.end,
+                    db.bounds().end,
                     db.inactivity_floor_loc(),
                     db.root(),
                     db.ops_root(),
@@ -1804,7 +1804,7 @@ pub mod tests {
             db.prune(Location::new(1)).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(pruned_bits > 0, "expected bitmap pruning for rewind test");
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
 
             let (target_size, target_root, target_ops_root, target_value) = history
                 .iter()
@@ -1827,7 +1827,7 @@ pub mod tests {
             db.rewind(target_size).await.unwrap();
             assert_eq!(db.root(), target_root);
             assert_eq!(db.ops_root(), target_ops_root);
-            assert_eq!(db.bounds().await.end, target_size);
+            assert_eq!(db.bounds().end, target_size);
             assert_eq!(db.get(&key0).await.unwrap(), Some(target_value));
 
             db.commit().await.unwrap();
@@ -1841,7 +1841,7 @@ pub mod tests {
             .unwrap();
             assert_eq!(reopened.root(), target_root);
             assert_eq!(reopened.ops_root(), target_ops_root);
-            assert_eq!(reopened.bounds().await.end, target_size);
+            assert_eq!(reopened.bounds().end, target_size);
             assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_value));
 
             let metadata_after_rewind = val(30_000);
@@ -1856,7 +1856,7 @@ pub mod tests {
             .end;
             let root_after_new_write = reopened.root();
             let ops_root_after_new_write = reopened.ops_root();
-            assert_eq!(reopened.bounds().await.end, expected_end);
+            assert_eq!(reopened.bounds().end, expected_end);
             assert_eq!(reopened.get_metadata().await.unwrap(), Some(metadata_after_rewind));
             assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_value));
             assert_eq!(reopened.get(&new_key).await.unwrap(), Some(new_value));
@@ -1870,7 +1870,7 @@ pub mod tests {
             .unwrap();
             assert_eq!(reopened_after_new_write.root(), root_after_new_write);
             assert_eq!(reopened_after_new_write.ops_root(), ops_root_after_new_write);
-            assert_eq!(reopened_after_new_write.bounds().await.end, expected_end);
+            assert_eq!(reopened_after_new_write.bounds().end, expected_end);
             assert_eq!(
                 reopened_after_new_write.get_metadata().await.unwrap(),
                 Some(metadata_after_rewind)
@@ -1977,7 +1977,7 @@ pub mod tests {
                 let merkleized = batch.merkleize(&db, None).await.unwrap();
                 db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap();
-                history.push((db.bounds().await.end, db.inactivity_floor_loc()));
+                history.push((db.bounds().end, db.inactivity_floor_loc()));
             }
 
             db.prune(db.sync_boundary()).await.unwrap();
@@ -2067,10 +2067,10 @@ pub mod tests {
                 "delayed-merge lag must be strictly active: boundary={boundary}, floor={floor}"
             );
             assert!(
-                db.bounds().await.start <= boundary,
+                db.bounds().start <= boundary,
                 "ops journal was pruned past the settled bitmap boundary: \
                  bounds.start={}, boundary={boundary}",
-                db.bounds().await.start
+                db.bounds().start
             );
 
             db.destroy().await.unwrap();
@@ -2115,9 +2115,9 @@ pub mod tests {
                 "MMR lag should be only chunk alignment: boundary={boundary}, floor={floor}, chunk_bits={chunk_bits}"
             );
             assert!(
-                db.bounds().await.start <= boundary,
+                db.bounds().start <= boundary,
                 "ops journal bounds must be <= sync_boundary: bounds.start={}, boundary={boundary}",
-                db.bounds().await.start
+                db.bounds().start
             );
 
             db.destroy().await.unwrap();
@@ -2150,9 +2150,9 @@ pub mod tests {
             db.prune(small).await.unwrap();
 
             assert!(
-                db.bounds().await.start <= small,
+                db.bounds().start <= small,
                 "journal pruning exceeded the caller-supplied target: bounds.start={}, requested={small}",
-                db.bounds().await.start
+                db.bounds().start
             );
 
             db.destroy().await.unwrap();
@@ -2585,7 +2585,7 @@ pub mod tests {
                 .await;
 
                 history.push((
-                    db.bounds().await.end,
+                    db.bounds().end,
                     db.root(),
                     db.ops_root(),
                     key0_value,
@@ -2599,7 +2599,7 @@ pub mod tests {
             let (target_size, target_root, target_ops_root, target_key0, target_key1) = target;
 
             db.rewind(target_size).await.unwrap();
-            assert_eq!(db.bounds().await.end, target_size);
+            assert_eq!(db.bounds().end, target_size);
             assert_eq!(db.root(), target_root);
             assert_eq!(db.ops_root(), target_ops_root);
             assert_eq!(db.get(&key0).await.unwrap(), Some(target_key0));
@@ -2614,7 +2614,7 @@ pub mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(reopened.bounds().await.end, target_size);
+            assert_eq!(reopened.bounds().end, target_size);
             assert_eq!(reopened.root(), target_root);
             assert_eq!(reopened.ops_root(), target_ops_root);
             assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_key0));
@@ -2658,7 +2658,7 @@ pub mod tests {
                 first_range.start
             );
 
-            let oldest_retained = db.bounds().await.start;
+            let oldest_retained = db.bounds().start;
             let boundary_err = db.rewind(oldest_retained).await.unwrap_err();
             assert!(
                 matches!(
@@ -2704,7 +2704,7 @@ pub mod tests {
                     None,
                 )
                 .await;
-                history.push((db.bounds().await.end, db.inactivity_floor_loc()));
+                history.push((db.bounds().end, db.inactivity_floor_loc()));
             }
             assert!(db.inactivity_floor_loc() > Location::new(64));
 
@@ -2714,7 +2714,7 @@ pub mod tests {
             db.prune(prune_loc).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(pruned_bits > 0);
-            let retained_start = db.bounds().await.start;
+            let retained_start = db.bounds().start;
 
             // Pick a historical commit that is still within retained log bounds but whose floor is
             // below the bitmap pruning boundary.
@@ -3082,16 +3082,13 @@ pub mod tests {
             let parent_merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(parent_merkleized).await.unwrap();
 
-            let (child_merkleized, commit_result) = futures::join!(
-                async {
-                    assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
-                    let mut child = db.new_batch();
-                    child = child.write(key(1), Some(val(1)));
-                    child.merkleize(&db, None).await.unwrap()
-                },
-                db.commit(),
-            );
-            commit_result.unwrap();
+            let child_merkleized = {
+                assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+                let mut child = db.new_batch();
+                child = child.write(key(1), Some(val(1)));
+                child.merkleize(&db, None).await.unwrap()
+            };
+            db.commit().await.unwrap();
 
             db.apply_batch(child_merkleized).await.unwrap();
             db.commit().await.unwrap();
@@ -3898,7 +3895,7 @@ pub mod tests {
             commit_writes(&mut db, writes).await.unwrap();
 
             let ops_root = db.ops_root();
-            let historical_size = db.bounds().await.end;
+            let historical_size = db.bounds().end;
             let (proof, ops) = db
                 .ops_historical_proof(historical_size, Location::new(0), NZU64!(32))
                 .await

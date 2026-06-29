@@ -249,10 +249,10 @@ impl<
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::init(self.context.child("journal"), journal_cfg)
+        let mut journal = Journal::init(self.context.child("journal"), journal_cfg)
             .await
             .expect("init failed");
-        let unverified_heights = self.replay(&journal).await;
+        let unverified_heights = self.replay(&mut journal).await;
         self.journal = Some(journal);
 
         // Request digests for unverified heights
@@ -419,7 +419,7 @@ impl<
         }
 
         // Close journal on shutdown
-        if let Some(journal) = self.journal.take() {
+        if let Some(mut journal) = self.journal.take() {
             journal
                 .sync_all()
                 .await
@@ -790,7 +790,7 @@ impl<
 
     /// Replays the journal, updating the state of the engine.
     /// Returns a list of unverified pending heights that need digest requests.
-    async fn replay(&mut self, journal: &Journal<E, Activity<P::Scheme, D>>) -> Vec<Height> {
+    async fn replay(&mut self, journal: &mut Journal<E, Activity<P::Scheme, D>>) -> Vec<Height> {
         let mut tip = Height::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
