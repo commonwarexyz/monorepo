@@ -7,7 +7,7 @@
 //! single random update per batch so each overlay covers a tiny fraction of chunks.
 
 use crate::common::{seed_db, write_random_updates, Digest, WRITE_BUFFER_SIZE};
-use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
     benchmarks::{context, tokio},

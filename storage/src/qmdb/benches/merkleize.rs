@@ -10,7 +10,7 @@
 //!   optimizes for.
 
 use crate::common::{seed_db, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
-use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
