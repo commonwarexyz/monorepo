@@ -575,52 +575,36 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             .expect("player index should be < num_players"))
     }
 
-    /// Verify a dealer's public message.
-    ///
-    /// A wrong commitment degree, missing prior share commitment, or reshare
-    /// commitment whose constant term does not match the dealer's prior share
-    /// commitment, is a provable [`Verdict::Fault`].
-    fn check_dealer_pub_msg<M: Faults>(
-        &self,
-        dealer: &P,
-        pub_msg: &DealerPubMsg<V>,
-    ) -> Verdict<()> {
+    #[must_use]
+    fn check_dealer_pub_msg<M: Faults>(&self, dealer: &P, pub_msg: &DealerPubMsg<V>) -> bool {
         if self.degree::<M>() != pub_msg.commitment.degree_exact() {
-            return Verdict::Fault;
+            return false;
         }
         if let Some(previous) = self.previous.as_ref() {
             let Some(share_commitment) = previous.share_commitment(dealer) else {
-                return Verdict::Fault;
+                return false;
             };
             if *pub_msg.commitment.constant() != share_commitment {
-                return Verdict::Fault;
+                return false;
             }
         }
-        Verdict::Valid(())
+        true
     }
 
-    /// Verify a dealer's private message against its public commitment.
-    ///
-    /// A share inconsistent with the commitment, including a private share
-    /// addressed to a different participant, is a provable [`Verdict::Fault`].
+    #[must_use]
     fn check_dealer_priv_msg(
         &self,
         player: &P,
         pub_msg: &DealerPubMsg<V>,
         priv_msg: &DealerPrivMsg,
-    ) -> Verdict<()> {
+    ) -> bool {
         let Ok(scalar) = self.player_scalar(player) else {
-            return Verdict::Fault;
+            return false;
         };
         let expected = pub_msg.commitment.eval_msm(&scalar, &Sequential);
-        if priv_msg
+        priv_msg
             .share
             .expose(|share| expected == V::Public::generator() * share)
-        {
-            Verdict::Valid(())
-        } else {
-            Verdict::Fault
-        }
     }
 
     #[must_use]
@@ -635,10 +619,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         if self.dealer_index(dealer).is_err() {
             return false;
         }
-        if !self
-            .check_dealer_pub_msg::<M>(dealer, &log.pub_msg)
-            .is_valid()
-        {
+        if !self.check_dealer_pub_msg::<M>(dealer, &log.pub_msg) {
             return false;
         }
         let Some(results_iter) = log.zip_players(&self.players) else {
@@ -1834,18 +1815,14 @@ impl<V: Variant, S: Signer> Player<V, S> {
         if self.info.dealer_index(&dealer).is_err() {
             return Verdict::Fault;
         }
-        match self.info.check_dealer_pub_msg::<M>(&dealer, &pub_msg) {
-            Verdict::Valid(()) => {}
-            Verdict::Skip => return Verdict::Skip,
-            Verdict::Fault => return Verdict::Fault,
+        if !self.info.check_dealer_pub_msg::<M>(&dealer, &pub_msg) {
+            return Verdict::Fault;
         }
-        match self
+        if !self
             .info
             .check_dealer_priv_msg(&self.me_pub, &pub_msg, &priv_msg)
         {
-            Verdict::Valid(()) => {}
-            Verdict::Skip => return Verdict::Skip,
-            Verdict::Fault => return Verdict::Fault,
+            return Verdict::Fault;
         }
         let sig = transcript_for_ack(&self.transcript, &dealer, &pub_msg).sign(&self.me);
         self.view.insert(dealer, (pub_msg, priv_msg));
