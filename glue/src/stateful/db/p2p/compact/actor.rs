@@ -319,9 +319,7 @@ where
             return false;
         }
 
-        let hasher = qmdb::hasher::<H>();
-        qmdb::verify_proof(
-            &hasher,
+        qmdb::verify_proof::<H, _, _>(
             &state.last_commit_proof,
             Location::new(*state.leaf_count - 1),
             std::slice::from_ref(&state.last_commit_op),

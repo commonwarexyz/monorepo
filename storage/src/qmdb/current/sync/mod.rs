@@ -8,9 +8,9 @@
 //! the module documentation). The sync engine operates on the **ops root**, not the canonical root:
 //! it downloads operations and verifies each batch against the ops root using ops-tree range proofs
 //! (identical to `any` sync). Callers that verify current ops proofs directly should use
-//! `qmdb::hasher`. [crate::qmdb::current::proof::OpsRootWitness] can be used by callers that need
-//! to authenticate the synced ops root against a trusted canonical root; the sync engine does not
-//! perform this check itself.
+//! [crate::qmdb::verify_proof]. [crate::qmdb::current::proof::OpsRootWitness] can be used by
+//! callers that need to authenticate the synced ops root against a trusted canonical root; the sync
+//! engine does not perform this check itself.
 //!
 //! After all operations are synced, the bitmap and grafted tree are reconstructed deterministically
 //! from the operations. The canonical root is then computed from the ops root, the reconstructed
