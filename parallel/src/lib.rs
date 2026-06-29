@@ -72,7 +72,7 @@ commonware_macros::stability_scope!(BETA {
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
-            use commonware_utils::sync::{Mutex, MutexGuard};
+            use parking_lot::{Mutex, MutexGuard};
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
                 slice::ParallelSliceMut,
