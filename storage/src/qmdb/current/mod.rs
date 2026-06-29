@@ -498,7 +498,7 @@ pub trait BitmapPrunedBits {
     fn get_bit(&self, index: u64) -> bool;
 
     /// Returns the position of the oldest retained bit.
-    fn oldest_retained(&self) -> impl core::future::Future<Output = u64> + Send;
+    fn oldest_retained(&self) -> u64;
 }
 
 #[cfg(test)]
@@ -799,7 +799,7 @@ pub mod tests {
         commit_writes(&mut db, []).await.unwrap();
         let committed_root = db.root();
         let committed_op_count = db.bounds().end;
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
 
         // Perform more random operations without committing any of them.
         let db = apply_random_ops::<M, C>(ELEMENTS, false, rng_seed + 1, db)
@@ -848,7 +848,7 @@ pub mod tests {
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
             .await
             .unwrap();
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
         // State from scenario #2 should match that of a successful commit.
         assert_eq!(db.bounds().end, committed_op_count);
         assert_eq!(db.root(), scenario_2_root);
@@ -903,7 +903,7 @@ pub mod tests {
                     .await
                     .unwrap();
                 db_pruning
-                    .prune(db_no_pruning.sync_boundary().await)
+                    .prune(db_no_pruning.sync_boundary())
                     .await
                     .unwrap();
             }
@@ -924,8 +924,8 @@ pub mod tests {
 
         // Also verify inactivity floors match
         assert_eq!(
-            db_no_pruning.inactivity_floor_loc().await,
-            db_pruning.inactivity_floor_loc().await
+            db_no_pruning.inactivity_floor_loc(),
+            db_pruning.inactivity_floor_loc()
         );
 
         db_no_pruning.destroy().await.unwrap();
@@ -963,13 +963,13 @@ pub mod tests {
         db.apply_batch(merkleized).await.unwrap();
 
         // Prune to flatten bitmap layers and advance pruned_chunks.
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
 
         let pruned_bits_before = db.pruned_bits();
         warn!(
             "pruned_bits_before={}, inactivity_floor={}, op_count={}",
             pruned_bits_before,
-            *db.inactivity_floor_loc().await,
+            *db.inactivity_floor_loc(),
             *db.bounds().end
         );
 
@@ -1063,7 +1063,7 @@ pub mod tests {
 
         // Sync and prune.
         db.sync().await.unwrap();
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
 
         // Record root before dropping.
         let root = db.root();

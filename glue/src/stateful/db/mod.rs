@@ -217,7 +217,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     }
 
     /// Return the sync target for this database's current committed state.
-    fn sync_target(&self) -> impl Future<Output = Self::SyncTarget> + Send;
+    fn sync_target(&self) -> Self::SyncTarget;
 
     /// Rewind committed state to `target`.
     ///
@@ -464,12 +464,12 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
 
     async fn committed_targets(&self) -> Self::SyncTargets {
         let database = self.read().await;
-        T::sync_target(&*database).await
+        T::sync_target(&*database)
     }
 
     async fn rewind_to_targets(&self, target: Self::SyncTargets) {
         let mut database = self.write().await;
-        if T::sync_target(&*database).await == target {
+        if T::sync_target(&*database) == target {
             return;
         }
         rewind_or_panic(&mut *database, target, None).await;
@@ -575,7 +575,7 @@ where
         let (db_result, (converged_anchor, converged_target)) = join!(sync, coordinator);
         let database = db_result?;
         assert!(
-            T::sync_target(&database).await == converged_target,
+            T::sync_target(&database) == converged_target,
             "state sync database target does not match the coordinator target",
         );
         Ok((
@@ -703,7 +703,7 @@ macro_rules! impl_database_set {
                 join!($(
                     async {
                         let database = self.$idx.read().await;
-                        $T::sync_target(&*database).await
+                        $T::sync_target(&*database)
                     },
                 )+)
             }
@@ -712,7 +712,7 @@ macro_rules! impl_database_set {
                 join!($(
                     async {
                         let mut database = self.$idx.write().await;
-                        if $T::sync_target(&*database).await == targets.$idx {
+                        if $T::sync_target(&*database) == targets.$idx {
                             return;
                         }
                         rewind_or_panic(&mut *database, targets.$idx, Some($idx)).await;
@@ -1539,7 +1539,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {}
+        fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
@@ -1569,7 +1569,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             self.current_target
         }
 
@@ -1608,7 +1608,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {}
+        fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
@@ -1708,7 +1708,7 @@ mod tests {
             Err(TestFinalizeError)
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {}
+        fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
@@ -1796,7 +1796,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {}
+        fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
@@ -1826,7 +1826,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
@@ -1860,7 +1860,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
@@ -1892,7 +1892,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
@@ -1924,7 +1924,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             0
         }
 
@@ -1956,7 +1956,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
@@ -1988,7 +1988,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             0
         }
 
@@ -2020,7 +2020,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
@@ -2052,7 +2052,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
@@ -2084,7 +2084,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
@@ -2118,7 +2118,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 
@@ -2259,7 +2259,7 @@ mod tests {
             Ok(())
         }
 
-        async fn sync_target(&self) -> Self::SyncTarget {
+        fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
 

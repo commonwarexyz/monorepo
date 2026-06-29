@@ -388,7 +388,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
@@ -400,7 +400,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -485,7 +485,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
@@ -497,7 +497,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",

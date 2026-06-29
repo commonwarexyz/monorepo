@@ -274,7 +274,7 @@ where
         hasher: &StandardHasher<H>,
     ) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
-        let ops_size = storage.size().await;
+        let ops_size = storage.size();
         let ops_leaves = Location::<F>::try_from(ops_size)?;
         let grafted_root = compute_grafted_root::<F, H, _, _, N>(
             hasher,
@@ -1004,7 +1004,7 @@ pub(super) async fn compute_grafted_root<
     ops_leaves: Location<F>,
     inactivity_floor: Location<F>,
 ) -> Result<H::Digest, Error<F>> {
-    let size = storage.size().await;
+    let size = storage.size();
     let leaves = Location::try_from(size)?;
 
     // Collect peak digests of the grafted structure.

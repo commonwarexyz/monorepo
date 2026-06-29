@@ -890,7 +890,7 @@ impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest, S: Strategy>
 {
     type Digest = D;
 
-    async fn size(&self) -> Position<F> {
+    fn size(&self) -> Position<F> {
         self.size()
     }
 

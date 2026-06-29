@@ -295,7 +295,7 @@ pub async fn range_proof<
     range: Range<Location<F>>,
     inactive_peaks: usize,
 ) -> Result<Proof<F, D>, Error<F>> {
-    let leaves = Location::try_from(merkle.size().await)?;
+    let leaves = Location::try_from(merkle.size())?;
     historical_range_proof(hasher, merkle, leaves, range, inactive_peaks).await
 }
 
@@ -372,7 +372,7 @@ pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
     }
 
     // Collect all required node positions
-    let size = merkle.size().await;
+    let size = merkle.size();
     let leaves = Location::try_from(size)?;
     let node_positions: BTreeSet<_> =
         merkle_proof::nodes_required_for_multi_proof(leaves, inactive_peaks, bagging, locations)?;

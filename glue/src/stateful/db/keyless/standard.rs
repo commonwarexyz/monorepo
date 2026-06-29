@@ -280,7 +280,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
@@ -292,7 +292,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -358,7 +358,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
@@ -370,7 +370,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -543,7 +543,7 @@ mod tests {
             );
             assert_eq!(guard.get_metadata().await.unwrap(), Some(U64::new(9)));
 
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard).await;
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard);
             assert_eq!(target.root, guard.root());
             assert_eq!(target.range.start(), mmr::Location::new(1));
             assert_eq!(target.range.end(), mmr::Location::new(3));

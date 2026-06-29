@@ -386,7 +386,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
@@ -398,7 +398,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -480,7 +480,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
@@ -492,7 +492,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -651,7 +651,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
@@ -663,7 +663,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -750,7 +750,7 @@ where
         self.prune((*target.range.start()).into()).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
@@ -762,7 +762,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -1237,8 +1237,7 @@ mod tests {
                 .unwrap();
             verification_db.sync().await.unwrap();
 
-            let valid_target =
-                <OrderedFixedDb as ManagedDb<_>>::sync_target(&verification_db).await;
+            let valid_target = <OrderedFixedDb as ManagedDb<_>>::sync_target(&verification_db);
             assert!(<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &valid_target,
@@ -1290,7 +1289,7 @@ mod tests {
             }
             let target_after_first = {
                 let guard = db.read().await;
-                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard).await
+                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard)
             };
 
             let key2 = Sha256::hash(b"key2");
@@ -1321,7 +1320,7 @@ mod tests {
             }
             let target_after_rewind = {
                 let guard = db.read().await;
-                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard).await
+                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard)
             };
             assert_eq!(target_after_rewind, target_after_first);
         });
@@ -1357,7 +1356,7 @@ mod tests {
                 .unwrap();
             verification_db.sync().await.unwrap();
 
-            let valid_target = <FixedDb as ManagedDb<_>>::sync_target(&verification_db).await;
+            let valid_target = <FixedDb as ManagedDb<_>>::sync_target(&verification_db);
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &valid_target,
