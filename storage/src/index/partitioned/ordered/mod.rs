@@ -448,10 +448,11 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         if self.is_empty() {
             return None;
         }
-        let (i, sub) = partition_index_and_sub_key::<P>(key);
-        let k = self.translator.transform(sub);
+
         // The largest translated key strictly less than `k`: within the partition first, then the
         // last key of the nearest lower partition, else cycle to the global last key.
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
         if let Some(vals) = self.partition_prev_before(i, &k) {
             return Some((vals.iter(), false));
         }
@@ -479,10 +480,11 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         if self.is_empty() {
             return None;
         }
-        let (i, sub) = partition_index_and_sub_key::<P>(key);
-        let k = self.translator.transform(sub);
+
         // The smallest translated key strictly greater than `k`: within the partition first, then
         // the first key of the nearest higher partition, else cycle to the global first key.
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
         if let Some(vals) = self.partition_next_after(i, &k) {
             return Some((vals.iter(), false));
         }
@@ -507,6 +509,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         if self.is_empty() {
             return None;
         }
+
+        // Scan partitions in ascending order for the global first key.
         for p in 0..self.partitions.len() {
             if let Some(vals) = self.partition_first(p) {
                 return Some(vals.iter());
@@ -523,6 +527,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         if self.is_empty() {
             return None;
         }
+
+        // Scan partitions in descending order for the global last key.
         for p in (0..self.partitions.len()).rev() {
             if let Some(vals) = self.partition_last(p) {
                 return Some(vals.iter());
