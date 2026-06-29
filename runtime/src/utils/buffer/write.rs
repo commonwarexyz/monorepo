@@ -73,7 +73,7 @@ impl<B: Blob> Write<B> {
         Self {
             blob,
             buffer: Buffer::new(size, capacity.get(), pool),
-            sync_state: SyncState::new(true),
+            sync_state: SyncState::new(true), // ensure pending writes on the wrapped blob are synced
         }
     }
 
