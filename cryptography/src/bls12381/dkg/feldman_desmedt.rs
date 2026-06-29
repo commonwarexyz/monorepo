@@ -172,8 +172,10 @@
 //! construction is used.
 //!
 //! In practice:
-//! - [`Player::dealer_message`] returns `None` for invalid messages (implicit complaint)
-//! - [`Dealer::receive_player_ack`] validates acknowledgements
+//! - [`Player::dealer_message`] returns a [`Verdict`] that distinguishes a provably
+//!   invalid message ([`Verdict::Fault`], an implicit complaint) from a benign skip
+//! - [`Dealer::receive_player_ack`] validates acknowledgements, returning
+//!   [`Error::InvalidAck`] for a provably bad signature
 //! - Other custom mechanisms can exclude dealers before calling [`observe`] or [`Player::finalize`],
 //!   to enforce other rules for "misbehavior" beyond what the DKG does already.
 //!
@@ -195,7 +197,7 @@
 //!
 //! ```
 //! use commonware_cryptography::bls12381::{
-//!     dkg::feldman_desmedt::{Dealer, Info, Logs, Player, SignedDealerLog, observe},
+//!     dkg::feldman_desmedt::{Dealer, Info, Logs, Player, SignedDealerLog, Verdict, observe},
 //!     primitives::{variant::MinSig, sharing::Mode},
 //! };
 //! use commonware_cryptography::{ed25519, Signer};
@@ -255,7 +257,7 @@
 //!     // Distribute messages to players and collect acknowledgements
 //!     for (player_pk, priv_msg) in priv_msgs {
 //!         if let Some(player) = players.get_mut(&player_pk) {
-//!             if let Some(ack) = player.dealer_message::<N3f1>(
+//!             if let Verdict::Valid(ack) = player.dealer_message::<N3f1>(
 //!                 dealer_priv.public_key(),
 //!                 pub_msg.clone(),
 //!                 priv_msg,
@@ -343,6 +345,8 @@ pub enum Error {
     MissingDealerShare,
     #[error("player is not present in the list of players")]
     UnknownPlayer,
+    #[error("player acknowledgement signature did not verify")]
+    InvalidAck,
     #[error("dealer is not present in the previous list of players")]
     UnknownDealer(String),
     #[error("invalid number of dealers: {0}")]
@@ -571,36 +575,52 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             .expect("player index should be < num_players"))
     }
 
-    #[must_use]
-    fn check_dealer_pub_msg<M: Faults>(&self, dealer: &P, pub_msg: &DealerPubMsg<V>) -> bool {
+    /// Verify a dealer's public message.
+    ///
+    /// A wrong commitment degree, missing prior share commitment, or reshare
+    /// commitment whose constant term does not match the dealer's prior share
+    /// commitment, is a provable [`Verdict::Fault`].
+    fn check_dealer_pub_msg<M: Faults>(
+        &self,
+        dealer: &P,
+        pub_msg: &DealerPubMsg<V>,
+    ) -> Verdict<()> {
         if self.degree::<M>() != pub_msg.commitment.degree_exact() {
-            return false;
+            return Verdict::Fault;
         }
         if let Some(previous) = self.previous.as_ref() {
             let Some(share_commitment) = previous.share_commitment(dealer) else {
-                return false;
+                return Verdict::Fault;
             };
             if *pub_msg.commitment.constant() != share_commitment {
-                return false;
+                return Verdict::Fault;
             }
         }
-        true
+        Verdict::Valid(())
     }
 
-    #[must_use]
+    /// Verify a dealer's private message against its public commitment.
+    ///
+    /// A share inconsistent with the commitment, including a private share
+    /// addressed to a different participant, is a provable [`Verdict::Fault`].
     fn check_dealer_priv_msg(
         &self,
         player: &P,
         pub_msg: &DealerPubMsg<V>,
         priv_msg: &DealerPrivMsg,
-    ) -> bool {
+    ) -> Verdict<()> {
         let Ok(scalar) = self.player_scalar(player) else {
-            return false;
+            return Verdict::Fault;
         };
         let expected = pub_msg.commitment.eval_msm(&scalar, &Sequential);
-        priv_msg
+        if priv_msg
             .share
             .expose(|share| expected == V::Public::generator() * share)
+        {
+            Verdict::Valid(())
+        } else {
+            Verdict::Fault
+        }
     }
 
     #[must_use]
@@ -615,7 +635,10 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         if self.dealer_index(dealer).is_err() {
             return false;
         }
-        if !self.check_dealer_pub_msg::<M>(dealer, &log.pub_msg) {
+        if !self
+            .check_dealer_pub_msg::<M>(dealer, &log.pub_msg)
+            .is_valid()
+        {
             return false;
         }
         let Some(results_iter) = log.zip_players(&self.players) else {
@@ -877,6 +900,39 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let sig = u.arbitrary()?;
         Ok(Self { sig })
+    }
+}
+
+/// The result of validating an untrusted protocol message from a peer.
+///
+/// This drives peer punishment in adversarial deployments. A [`Verdict::Fault`]
+/// is a provable protocol violation, so the sender should be penalized (e.g.
+/// blocked). A [`Verdict::Skip`] is a benign non-action, such as a duplicate,
+/// that must not be penalized.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum Verdict<T> {
+    /// The message validated. Carries any resulting artifact.
+    Valid(T),
+    /// The message is not actionable, but the sender is not provably faulty.
+    Skip,
+    /// The message is provably invalid; the sender should be penalized.
+    Fault,
+}
+
+impl<T> Verdict<T> {
+    /// Returns the validated artifact, discarding skip and fault verdicts.
+    pub fn valid(self) -> Option<T> {
+        match self {
+            Self::Valid(value) => Some(value),
+            Self::Skip | Self::Fault => None,
+        }
+    }
+
+    /// Returns whether the message validated.
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        matches!(self, Self::Valid(_))
     }
 }
 
@@ -1536,9 +1592,10 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             .results
             .get_value_mut(&player)
             .ok_or(Error::UnknownPlayer)?;
-        if self.transcript.verify(&player, &ack.sig) {
-            *res_mut = AckOrReveal::Ack(ack);
+        if !self.transcript.verify(&player, &ack.sig) {
+            return Err(Error::InvalidAck);
         }
+        *res_mut = AckOrReveal::Ack(ack);
         Ok(())
     }
 
@@ -1730,7 +1787,8 @@ impl<V: Variant, S: Signer> Player<V, S> {
         let mut this = Self::new(info, me)?;
         let mut acks = BTreeMap::new();
         for (dealer, pub_msg, priv_msg) in msgs {
-            if let Some(ack) = this.dealer_message::<M>(dealer.clone(), pub_msg, priv_msg) {
+            if let Verdict::Valid(ack) = this.dealer_message::<M>(dealer.clone(), pub_msg, priv_msg)
+            {
                 acks.insert(dealer, ack);
             }
         }
@@ -1760,28 +1818,38 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// private message was not exposed to anyone else. A convenient way to
     /// provide this is by using an authenticated channel, e.g. via
     /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
+    ///
+    /// The returned [`Verdict`] distinguishes a provably-invalid message
+    /// ([`Verdict::Fault`], the dealer should be penalized) from a benign skip
+    /// ([`Verdict::Skip`]: a duplicate).
     pub fn dealer_message<M: Faults>(
         &mut self,
         dealer: S::PublicKey,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) -> Option<PlayerAck<S::PublicKey>> {
+    ) -> Verdict<PlayerAck<S::PublicKey>> {
         if self.view.contains_key(&dealer) {
-            return None;
+            return Verdict::Skip;
         }
-        self.info.dealer_index(&dealer).ok()?;
-        if !self.info.check_dealer_pub_msg::<M>(&dealer, &pub_msg) {
-            return None;
+        if self.info.dealer_index(&dealer).is_err() {
+            return Verdict::Fault;
         }
-        if !self
+        match self.info.check_dealer_pub_msg::<M>(&dealer, &pub_msg) {
+            Verdict::Valid(()) => {}
+            Verdict::Skip => return Verdict::Skip,
+            Verdict::Fault => return Verdict::Fault,
+        }
+        match self
             .info
             .check_dealer_priv_msg(&self.me_pub, &pub_msg, &priv_msg)
         {
-            return None;
+            Verdict::Valid(()) => {}
+            Verdict::Skip => return Verdict::Skip,
+            Verdict::Fault => return Verdict::Fault,
         }
         let sig = transcript_for_ack(&self.transcript, &dealer, &pub_msg).sign(&self.me);
         self.view.insert(dealer, (pub_msg, priv_msg));
-        Some(PlayerAck { sig })
+        Verdict::Valid(PlayerAck { sig })
     }
 
     /// Finalize the player, producing an output, and a share.
@@ -2463,8 +2531,9 @@ mod test_plan {
                         let player = &mut players.values_mut()[usize::from(i_player)];
                         let persisted = priv_msg.clone();
 
-                        let ack =
-                            player.dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg);
+                        let ack = player
+                            .dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
+                            .valid();
                         assert_eq!(ack, ReadExt::read(&mut ack.encode())?);
                         if let Some(ack) = ack {
                             acked_dealings
@@ -3076,6 +3145,7 @@ mod test {
                         .get_mut(&player_pk)
                         .expect("player should exist")
                         .dealer_message::<QuorumTwo>(dealer_pk.clone(), pub_msg.clone(), priv_msg)
+                        .valid()
                         .expect("dealer message must succeed");
                     dealer
                         .receive_player_ack(player_pk, ack)
@@ -3536,6 +3606,7 @@ mod test {
             let mut player = Player::new(info.clone(), sk)?;
             let ack = player
                 .dealer_message::<N3f1>(pk.clone(), pub_msg, priv_msgs[0].1.clone())
+                .valid()
                 .unwrap();
             dealer.receive_player_ack(pk, ack)?;
             dealer.finalize::<N3f1>()
@@ -3543,6 +3614,102 @@ mod test {
         std::mem::swap(&mut log0.log, &mut log1.log);
         assert!(log0.check(&info).is_none());
         assert!(log1.check(&info).is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn dealer_message_classifies_faults_and_skips() -> Result<(), Error> {
+        let a = ed25519::PrivateKey::from_seed(0);
+        let b = ed25519::PrivateKey::from_seed(1);
+        let stranger = ed25519::PrivateKey::from_seed(2);
+        let (a_pk, b_pk, stranger_pk) = (a.public_key(), b.public_key(), stranger.public_key());
+        let members: Set<ed25519::PublicKey> = vec![a_pk.clone(), b_pk.clone()].try_into().unwrap();
+        let info = Info::<MinPk, _>::new::<N3f1>(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
+            0,
+            None,
+            Mode::default(),
+            members.clone(),
+            members,
+        )?;
+
+        // Dealer A produces one private message per player.
+        let (_, pub_msg, priv_msgs) =
+            Dealer::start::<N3f1>(&mut test_rng(), info.clone(), a, None)?;
+        let priv_for_a = priv_msgs
+            .iter()
+            .find(|(player, _)| *player == a_pk)
+            .map(|(_, msg)| msg.clone())
+            .expect("share for a");
+        let priv_for_b = priv_msgs
+            .iter()
+            .find(|(player, _)| *player == b_pk)
+            .map(|(_, msg)| msg.clone())
+            .expect("share for b");
+
+        // A dealing whose private share does not match the public commitment at
+        // our index is a provable fault.
+        let mut player = Player::new(info, b)?;
+        assert!(matches!(
+            player.dealer_message::<N3f1>(a_pk.clone(), pub_msg.clone(), priv_for_a),
+            Verdict::Fault
+        ));
+
+        // A dealing from a key outside the dealer set is a provable fault.
+        assert!(matches!(
+            player.dealer_message::<N3f1>(stranger_pk, pub_msg.clone(), priv_for_b.clone()),
+            Verdict::Fault
+        ));
+
+        // A correct dealing validates.
+        assert!(player
+            .dealer_message::<N3f1>(a_pk, pub_msg, priv_for_b)
+            .is_valid());
+
+        Ok(())
+    }
+
+    #[test]
+    fn receive_player_ack_rejects_invalid_signature() -> Result<(), Error> {
+        let a = ed25519::PrivateKey::from_seed(0);
+        let stranger = ed25519::PrivateKey::from_seed(1);
+        let (a_pk, stranger_pk) = (a.public_key(), stranger.public_key());
+        let members: Set<ed25519::PublicKey> = vec![a_pk.clone()].try_into().unwrap();
+        let info = Info::<MinPk, _>::new::<N3f1>(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST",
+            0,
+            None,
+            Mode::default(),
+            members.clone(),
+            members,
+        )?;
+
+        let (mut dealer, pub_msg, priv_msgs) =
+            Dealer::start::<N3f1>(&mut test_rng(), info.clone(), a.clone(), None)?;
+        let mut player = Player::new(info, a.clone())?;
+        let ack = player
+            .dealer_message::<N3f1>(a_pk.clone(), pub_msg, priv_msgs[0].1.clone())
+            .valid()
+            .expect("valid ack");
+
+        // An ack signature that does not verify is a provable fault.
+        let forged = PlayerAck {
+            sig: a.sign(b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_TEST", b"not an ack"),
+        };
+        assert!(matches!(
+            dealer.receive_player_ack(a_pk.clone(), forged),
+            Err(Error::InvalidAck)
+        ));
+
+        // An ack from a player outside the round is a benign unknown player.
+        assert!(matches!(
+            dealer.receive_player_ack(stranger_pk, ack.clone()),
+            Err(Error::UnknownPlayer)
+        ));
+
+        // The genuine ack is still accepted.
+        assert!(dealer.receive_player_ack(a_pk, ack).is_ok());
 
         Ok(())
     }
