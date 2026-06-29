@@ -1068,6 +1068,7 @@ mod tests {
             },
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -1095,6 +1096,7 @@ mod tests {
             },
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 

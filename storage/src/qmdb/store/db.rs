@@ -31,6 +31,7 @@
 //!             page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
+//!         init_cache_size: Some(NZUsize!(1 << 16)),
 //!     };
 //!     let mut db =
 //!         Db::<_, Digest, Digest, TwoCap>::init(ctx.child("store"), config)
@@ -95,7 +96,7 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_utils::Array;
-use core::ops::Range;
+use core::{num::NonZeroUsize, ops::Range};
 use std::collections::BTreeMap;
 use tracing::{debug, warn};
 
@@ -109,6 +110,10 @@ pub struct Config<T: Translator, C> {
 
     /// The [Translator] used by the [Index].
     pub translator: T,
+
+    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
+    /// collisions without re-reading the log; `None` disables it.
+    pub init_cache_size: Option<NonZeroUsize>,
 }
 
 /// A finalized batch of writes and deletes ready to be applied to the store.
@@ -357,6 +362,7 @@ where
             Location::new(log.size().checked_sub(1).expect("commit should exist"));
 
         // Build the snapshot.
+        let cache_size = cfg.init_cache_size;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
         let (inactivity_floor_loc, active_keys) = {
             let op = log.read(*last_commit_loc).await?;
@@ -366,9 +372,14 @@ where
                     "inactivity floor exceeds last commit",
                 ));
             }
-            let active_keys =
-                build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {})
-                    .await?;
+            let active_keys = build_snapshot_from_log(
+                inactivity_floor_loc,
+                &log,
+                &mut snapshot,
+                cache_size,
+                |_, _| {},
+            )
+            .await?;
             (inactivity_floor_loc, active_keys)
         };
 
@@ -428,6 +439,7 @@ where
                         &self.log,
                         &key,
                         Location::new(new_loc),
+                        None,
                     )
                     .await?
                 };
@@ -440,9 +452,13 @@ where
                     .append(&Operation::Update(Update(key, value)))
                     .await?;
             } else {
-                let deleted =
-                    delete_key::<crate::mmr::Family, _, _>(&mut self.snapshot, &self.log, &key)
-                        .await?;
+                let deleted = delete_key::<crate::mmr::Family, _, _>(
+                    &mut self.snapshot,
+                    &self.log,
+                    &key,
+                    None,
+                )
+                .await?;
                 if deleted.is_some() {
                     self.log.append(&Operation::Delete(key)).await?;
                     self.steps += 1;
@@ -514,6 +530,7 @@ mod test {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         };
         TestStore::init(context, cfg).await.unwrap()
     }

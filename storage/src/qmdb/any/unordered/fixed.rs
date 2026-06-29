@@ -142,7 +142,8 @@ pub(crate) mod test {
         deterministic::{self, Context},
         Metrics as _, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{test_rng_seeded, NZU64};
+    use commonware_utils::{test_rng_seeded, NZUsize, NZU64};
+    use core::num::NonZeroUsize;
     use rand::RngCore;
     use std::collections::HashMap;
 
@@ -252,6 +253,40 @@ pub(crate) mod test {
 
     fn val(i: u64) -> Digest {
         Sha256::hash(&(i + 10000).to_be_bytes())
+    }
+
+    /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
+    /// with the cache disabled (`init_cache_size = None`) or enabled must produce the identical root.
+    #[test_traced("WARN")]
+    fn test_unordered_fixed_init_cache_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            // Populate a database with churny operations (repeated updates and deletes drive the
+            // collision resolution that the cache accelerates), then commit and drop it.
+            let cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
+            let mut db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
+            apply_ops(&mut db, create_test_ops(10_000)).await;
+            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            // Reopen with the cache disabled and with a large cache; both rebuild the snapshot by
+            // replaying the same immutable log, so both roots must equal the pre-drop root.
+            for cache_size in [None, Some(NZUsize!(1 << 20))] {
+                let mut cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
+                cfg.init_cache_size = cache_size;
+                let ctx = context
+                    .child("reopen")
+                    .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));
+                let db = AnyTest::init(ctx, cfg).await.unwrap();
+                assert_eq!(
+                    db.root(),
+                    root,
+                    "root mismatch at cache_size={cache_size:?}"
+                );
+                drop(db);
+            }
+        });
     }
 
     #[test_traced("INFO")]

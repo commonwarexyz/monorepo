@@ -28,7 +28,8 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{distributions::Distribution, rngs::StdRng, RngCore, SeedableRng};
+use rand_distr::Zipf;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 pub type Digest = <Sha256 as Hasher>::Digest;
@@ -44,6 +45,7 @@ pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 pub const DELETE_FREQUENCY: u32 = 10;
 pub const VARIABLE_VALUE_MAX_LEN: usize = 256;
 pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
+pub const INIT_CACHE_SIZE: Option<NonZeroUsize> = Some(NZUsize!(1 << 18));
 
 // -- Fixed value (Digest), fixed storage layout --
 
@@ -137,18 +139,20 @@ fn var_log_cfg<C>(
 }
 
 pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap, Rayon> {
-    any_fix_cfg_with(ctx, ITEMS_PER_BLOB)
+    any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE)
 }
 
 pub fn any_fix_cfg_with(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
+    page_cache_size: NonZeroUsize,
 ) -> AnyFixedConfig<EightCap, Rayon> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, page_cache_size);
     AnyFixedConfig {
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -161,6 +165,7 @@ pub fn imm_fix_cfg_with(
         merkle_config: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -180,6 +185,7 @@ pub fn cur_fix_cfg_with(
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -198,6 +204,7 @@ pub fn any_var_digest_cfg_with(
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -217,6 +224,7 @@ pub fn cur_var_digest_cfg_with(
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -243,6 +251,7 @@ pub fn any_var_vec_cfg_with(
             items_per_blob,
         ),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -267,6 +276,7 @@ pub fn cur_var_vec_cfg_with(
         ),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -344,12 +354,13 @@ macro_rules! define_db_variants {
 
         #[allow(unused_macros)]
         macro_rules! $timed_dispatch_name {
-            ($ctx_expr:expr, $variant_expr:expr, $iters:expr, |$db_name:ident| $body:expr) => {
+            ($ctx_expr:expr, $variant_expr:expr, $iters:expr, $cache_size:expr, |$db_name:ident| $body:expr) => {
                 match $variant_expr {
                     $(
                         $enum_name::$entry => {
                             let ctx = $ctx_expr;
-                            let cfg = $cfg(&ctx);
+                            let mut cfg = $cfg(&ctx);
+                            cfg.init_cache_size = $cache_size;
                             let start = std::time::Instant::now();
                             for _ in 0..$iters {
                                 #[allow(unused_mut)]
@@ -556,11 +567,29 @@ pub(crate) use define_vec_variants;
 
 /// Seed a database with `num_elements` entries, then perform `num_operations` random
 /// updates/deletes. Commits periodically when `commit_frequency` is `Some`.
+///
+/// `seed_batch` caps how many seeds accumulate before each merkleize+apply+commit (bounding peak
+/// memory); `None` seeds in a single batch. `prune_frequency` prunes to the inactivity floor every
+/// `Some(n)` commits to bound on-disk growth; `None` never prunes during generation.
+///
+/// `key_zipf_exponent` selects how update/delete keys are sampled: `None` is uniform; `Some(s)`
+/// draws keys from a Zipf distribution with exponent `s`, so a hot subset is churned far more than
+/// the long tail (a more realistic workload than uniform churn).
+///
+/// `keyspace` sets the index space that updates are drawn from; the seed is always the distinct keys
+/// `0..num_elements`. `None` means updates also draw from `0..num_elements`, so they only touch seeded
+/// keys. `Some(k)` (with `k >= num_elements`) draws updates over all of `0..k`, so some updates land on
+/// unseeded keys and insert them organically -- a growing keyspace rather than a fixed population.
+#[allow(clippy::too_many_arguments)]
 pub async fn gen_random_kv<F, M>(
     db: &mut M,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
+    seed_batch: Option<u64>,
+    prune_frequency: Option<u32>,
+    key_zipf_exponent: Option<f64>,
+    keyspace: Option<u64>,
     make_value: impl Fn(&mut StdRng) -> M::Value,
 ) where
     F: Family,
@@ -568,22 +597,56 @@ pub async fn gen_random_kv<F, M>(
 {
     let mut rng = StdRng::seed_from_u64(42);
 
-    // Seed the db with `num_elements` entries.
+    // Count commits across both phases so `prune_frequency` can prune to the inactivity floor every
+    // N commits, bounding on-disk growth instead of accumulating the whole (re-appended) log until
+    // the end. Pruning below the floor never affects an `init` replay, which starts at the floor.
+    let mut commits = 0u32;
+
+    // Seed the db with `num_elements` entries. `seed_batch` caps how many seeds accumulate before a
+    // merkleize+apply (bounding the batch); `None` seeds in a single batch. Each apply is followed by
+    // a `commit`, whose `merkle.flush()` writes the in-memory merkle nodes to the journal and prunes
+    // them from memory -- without that, a large build accumulates the whole merkle in RAM.
     {
         let mut batch = db.new_batch();
+        let mut pending = 0u64;
         for i in 0u64..num_elements {
-            let k = Sha256::hash(&i.to_be_bytes());
-            batch = batch.write(k, Some(make_value(&mut rng)));
+            let key = Sha256::hash(&i.to_be_bytes());
+            batch = batch.write(key, Some(make_value(&mut rng)));
+            pending += 1;
+            if seed_batch.is_some_and(|n| pending >= n) {
+                let merkleized = batch.merkleize(db, None).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+                commits += 1;
+                if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
+                    let boundary = db.sync_boundary().await;
+                    db.prune(boundary).await.unwrap();
+                }
+                batch = db.new_batch();
+                pending = 0;
+            }
         }
-        let merkleized = batch.merkleize(db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        if pending > 0 {
+            let merkleized = batch.merkleize(db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
+        }
     }
 
-    // Perform `num_operations` random updates/deletes, committing periodically.
+    // Perform `num_operations` random updates/deletes, committing periodically. Each apply is
+    // followed by a `commit` so the merkle structure is flushed out of memory (see the seed phase).
     {
+        // Sample over the full keyspace (which may exceed the seeded set, so some samples hit unseeded
+        // keys and insert them). `Zipf::new` samples a rank in `[1, space]`; map it to a 0-based index.
+        let space = keyspace.unwrap_or(num_elements);
+        let zipf = key_zipf_exponent.map(|s| Zipf::new(space, s).expect("valid zipf parameters"));
         let mut batch = db.new_batch();
         for _ in 0u64..num_operations {
-            let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+            let idx = match &zipf {
+                Some(z) => ((z.sample(&mut rng) as u64).saturating_sub(1)).min(space - 1),
+                None => rng.next_u64() % space,
+            };
+            let rand_key = Sha256::hash(&idx.to_be_bytes());
             if rng.next_u32() % DELETE_FREQUENCY == 0 {
                 batch = batch.write(rand_key, None);
                 continue;
@@ -593,12 +656,19 @@ pub async fn gen_random_kv<F, M>(
                 if rng.next_u32() % freq == 0 {
                     let merkleized = batch.merkleize(db, None).await.unwrap();
                     db.apply_batch(merkleized).await.unwrap();
+                    db.commit().await.unwrap();
+                    commits += 1;
+                    if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
+                        let boundary = db.sync_boundary().await;
+                        db.prune(boundary).await.unwrap();
+                    }
                     batch = db.new_batch();
                 }
             }
         }
         let merkleized = batch.merkleize(db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
     }
 }
 
