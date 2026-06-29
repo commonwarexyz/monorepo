@@ -1579,7 +1579,8 @@ mod tests {
         // exercise the sequential path.
         let shard_len = canonical_shard_len(data.len(), min as usize);
         assert!(
-            striped::ranges(shard_len, strategy.manual().parallelism_hint()).map_or(0, |r| r.len()) >= 2,
+            striped::ranges(shard_len, strategy.manual().parallelism_hint()).map_or(0, |r| r.len())
+                >= 2,
             "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
@@ -1739,7 +1740,8 @@ mod tests {
         let shard_len = canonical_shard_len(data.len(), min as usize);
         let rayon = Rayon::new(NZUsize!(4)).unwrap();
         assert!(
-            striped::ranges(shard_len, rayon.manual().parallelism_hint()).map_or(0, |r| r.len()) >= 2,
+            striped::ranges(shard_len, rayon.manual().parallelism_hint()).map_or(0, |r| r.len())
+                >= 2,
             "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
@@ -2169,7 +2171,8 @@ mod tests {
         let min = 4u16;
         let shard_len = canonical_shard_len(data.len(), min as usize);
         assert!(
-            striped::ranges(shard_len, strategy.manual().parallelism_hint()).map_or(0, |r| r.len()) >= 2,
+            striped::ranges(shard_len, strategy.manual().parallelism_hint()).map_or(0, |r| r.len())
+                >= 2,
             "test must exercise the striped path (shard_len={shard_len})"
         );
 
