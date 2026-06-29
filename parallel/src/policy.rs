@@ -152,8 +152,7 @@ impl Entry {
                 self.serial_samples = self.serial_samples.saturating_add(1);
             }
             Execution::Parallel => {
-                self.parallel_ns =
-                    update_ewma(self.parallel_ns, self.parallel_samples, elapsed_ns);
+                self.parallel_ns = update_ewma(self.parallel_ns, self.parallel_samples, elapsed_ns);
                 self.parallel_samples = self.parallel_samples.saturating_add(1);
             }
         }
