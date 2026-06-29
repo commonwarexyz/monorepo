@@ -724,11 +724,9 @@ where
                 guard.extend_to(*inactivity_floor_loc);
             }
 
-            // Build the snapshot. The closure fires synchronously between the build's awaits, so
-            // each invocation does its own brief lock-update-release; holding the guard across
-            // `.await` would not be `Send`-safe. The serial build supplies `old_loc` to clear
-            // superseded bits; the parallel build pushes already-resolved bits with `old_loc =
-            // None`.
+            // The closure takes a brief lock per call (holding it across the build's `.await`s is
+            // not `Send`). `old_loc`, when set, clears a superseded bit: the serial build supplies
+            // it per op; the parallel build pre-resolves and passes `None`.
             let active_keys = {
                 let bitmap = &bitmap;
                 index
@@ -749,10 +747,6 @@ where
                     )
                     .await?
             };
-
-            // CommitFloor convention: only the current `last_commit_loc` carries bit=1; earlier
-            // CommitFloors are 0. The build reports `is_active = (loc == last_commit_loc)` for each
-            // CommitFloor op, so the per-op push above already encodes this.
 
             (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
         };
