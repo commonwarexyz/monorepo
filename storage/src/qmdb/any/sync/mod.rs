@@ -99,8 +99,17 @@ where
     .await?;
     let snapshot_context = context.child("snapshot");
     let metrics = Metrics::new(context);
-    // State-sync rebuilds use auto-derived parallelism (`0`) for the snapshot build.
-    let db = Db::init_from_log(snapshot_context, index, log, None, cache_size, 0, metrics).await?;
+    // State-sync rebuilds derive the worker count from the runtime (`Auto`) for the snapshot build.
+    let db = Db::init_from_log(
+        snapshot_context,
+        index,
+        log,
+        None,
+        cache_size,
+        crate::qmdb::InitParallelism::Auto,
+        metrics,
+    )
+    .await?;
 
     Ok(db)
 }

@@ -52,6 +52,7 @@ use commonware_storage::{
     qmdb::{
         any::{unordered::fixed, FixedConfig},
         sync::Target,
+        InitParallelism,
     },
     translator::TwoCap,
 };
@@ -350,7 +351,7 @@ impl EngineDefinition for SingleDbEngine {
 
         // QMDB database config (created by Stateful::start)
         let db_config = FixedConfig {
-            init_parallelism: 0,
+            init_parallelism: InitParallelism::Serial,
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{partition_prefix}-qmdb-mmr-journal"),
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),

@@ -438,6 +438,20 @@ where
     Ok(index)
 }
 
+/// How `init` builds the snapshot index, for index types that support parallel construction
+/// (currently only the ordered partitioned index; every other index type builds serially regardless).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InitParallelism {
+    /// Build serially on the calling task (no worker tasks).
+    #[default]
+    Serial,
+    /// Build with this many worker tasks, plus the task that replays and routes the log. `Workers(1)`
+    /// still de-interleaves replay from the build onto a separate task.
+    Workers(NonZeroUsize),
+    /// Build with `strategy.parallelism_hint()` worker tasks.
+    Auto,
+}
+
 /// Builds a database's snapshot index from the operations log. Implemented per snapshot-index type so
 /// the ordered partitioned index can build its partitions in parallel across async worker tasks,
 /// while other index types use the serial replay. The default is the serial replay
@@ -445,10 +459,10 @@ where
 pub trait SnapshotBuild<F: Family>: Index<Value = Location<F>> + Sized {
     /// Replay `log` from `inactivity_floor_loc`, populating `self` and invoking `callback` for each
     /// operation (its activity status and the location it inactivates, if any). Returns the number of
-    /// active keys. `parallelism` requests a worker count for index types that build in parallel
-    /// (`0` derives it from `strategy.parallelism_hint()`); extra workers can have diminishing
-    /// returns once the main replay/routing task becomes the bottleneck. `cache_size` bounds each
-    /// build's `(location -> key)` cache (`None` disables it).
+    /// active keys. `parallelism` selects how index types that build in parallel split the work
+    /// ([`InitParallelism::Auto`] derives the worker count from `strategy.parallelism_hint()`, less one
+    /// core for the replay/routing task); extra workers have diminishing returns once that task becomes
+    /// the bottleneck. `cache_size` bounds each build's `(location -> key)` cache (`None` disables it).
     #[allow(clippy::too_many_arguments)]
     fn build_snapshot<E, C, S, Fn>(
         &mut self,
@@ -456,7 +470,7 @@ pub trait SnapshotBuild<F: Family>: Index<Value = Location<F>> + Sized {
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
         strategy: &S,
-        parallelism: usize,
+        parallelism: InitParallelism,
         cache_size: Option<NonZeroUsize>,
         callback: Fn,
     ) -> impl core::future::Future<Output = Result<usize, Error<F>>> + Send
@@ -494,7 +508,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
         strategy: &S,
-        parallelism: usize,
+        parallelism: InitParallelism,
         cache_size: Option<NonZeroUsize>,
         mut callback: Fn,
     ) -> impl core::future::Future<Output = Result<usize, Error<F>>> + Send
@@ -506,15 +520,15 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     {
         async move {
             let count = self.partition_count();
-            let hint = if parallelism == 0 {
-                strategy.parallelism_hint()
-            } else {
-                parallelism
+            let workers = match parallelism {
+                InitParallelism::Serial => 0,
+                InitParallelism::Workers(n) => n.get().min(count),
+                // The replay/routing task occupies one core, so leave it one and spawn the rest.
+                InitParallelism::Auto => strategy.parallelism_hint().saturating_sub(1).min(count),
             };
-            let workers = hint.clamp(1, count);
 
-            // A single worker gains nothing from the routing machinery: replay serially.
-            if workers == 1 {
+            // Serial, or Auto where the hint left no spare core: build on this task.
+            if workers == 0 {
                 return build_snapshot_from_log(
                     inactivity_floor_loc,
                     &**log,

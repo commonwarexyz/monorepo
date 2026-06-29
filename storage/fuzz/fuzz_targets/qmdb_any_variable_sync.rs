@@ -160,7 +160,7 @@ fn test_config(
         },
         translator: TwoCap,
         init_cache_size: Some(NZUsize!(3)),
-        init_parallelism: 0,
+        init_parallelism: commonware_storage::qmdb::InitParallelism::Serial,
     }
 }
 

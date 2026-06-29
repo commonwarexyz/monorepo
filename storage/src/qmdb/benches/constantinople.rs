@@ -30,7 +30,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{full, mmb},
-    qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig},
+    qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig, InitParallelism},
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -322,7 +322,7 @@ fn main() {
         match db_kind.as_str() {
             "current::unordered::fixed::mmb" => {
                 let cfg = CurrentFixedConfig {
-                    init_parallelism: 0,
+                    init_parallelism: InitParallelism::Serial,
                     merkle_config,
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
@@ -339,7 +339,7 @@ fn main() {
             }
             "current::ordered::fixed::mmb" => {
                 let cfg = CurrentFixedConfig {
-                    init_parallelism: 0,
+                    init_parallelism: InitParallelism::Serial,
                     merkle_config,
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
@@ -356,7 +356,7 @@ fn main() {
             }
             "any::ordered::fixed::mmb" => {
                 let cfg = FixedConfig {
-                    init_parallelism: 0,
+                    init_parallelism: InitParallelism::Serial,
                     merkle_config,
                     journal_config,
                     translator: EightCap,
@@ -367,7 +367,7 @@ fn main() {
             }
             "any::unordered::variable::mmb" => {
                 let cfg = commonware_storage::qmdb::any::VariableConfig {
-                    init_parallelism: 0,
+                    init_parallelism: InitParallelism::Serial,
                     merkle_config,
                     journal_config: VConfig {
                         partition: "constantinople-var-log".into(),
@@ -385,7 +385,7 @@ fn main() {
             }
             _ => {
                 let cfg = FixedConfig {
-                    init_parallelism: 0,
+                    init_parallelism: InitParallelism::Serial,
                     merkle_config,
                     journal_config,
                     translator: EightCap,
