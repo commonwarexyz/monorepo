@@ -1,4 +1,4 @@
-//! Adaptive execution policy for Rayon collection operations.
+//! Adaptive execution policy for collection operations.
 //!
 //! Entries are keyed by callsite, input-size bucket, and thread count so a decision learned for
 //! one workload does not leak into another. The policy compares recent serial and parallel timing
@@ -31,6 +31,7 @@ const EWMA_WEIGHT: u64 = EWMA_PREVIOUS_WEIGHT + EWMA_NEXT_WEIGHT;
 // Serial must take at most 90% of parallel's time before it becomes preferred.
 const SERIAL_WIN_NUMERATOR: u64 = 90;
 const SERIAL_WIN_DENOMINATOR: u64 = 100;
+const SERIAL_SAMPLE_LIMIT_NS: u64 = 50_000_000;
 
 type Entries = HashMap<Key, Entry>;
 
@@ -62,6 +63,7 @@ impl Policy {
         if parallelism <= 1 {
             return run(Execution::Serial);
         }
+
         let key = Key::new(caller, len, parallelism);
         let (execution, measure) = self.entries.lock().entry(key).or_default().choose();
         let start = measure.then(Instant::now);
@@ -123,7 +125,15 @@ impl Entry {
             return (Execution::Parallel, true);
         }
         if self.serial_samples == 0 {
-            return (Execution::Serial, true);
+            if self.can_sample_serial() {
+                return (Execution::Serial, true);
+            }
+
+            self.since_probe = self.since_probe.saturating_add(1);
+            return (
+                Execution::Parallel,
+                self.since_probe.is_multiple_of(PREFERRED_SAMPLE_INTERVAL),
+            );
         }
 
         let serial = u128::from(self.serial_ns) * u128::from(SERIAL_WIN_DENOMINATOR);
@@ -146,7 +156,8 @@ impl Entry {
         // After enough calls, try the path that is currently losing.
         match preferred {
             Execution::Serial => (Execution::Parallel, true),
-            Execution::Parallel => (Execution::Serial, true),
+            Execution::Parallel if self.can_sample_serial() => (Execution::Serial, true),
+            Execution::Parallel => (Execution::Parallel, true),
         }
     }
 
@@ -163,10 +174,13 @@ impl Entry {
             }
         }
     }
+
+    const fn can_sample_serial(&self) -> bool {
+        self.parallel_ns < SERIAL_SAMPLE_LIMIT_NS
+    }
 }
 
 fn update_ewma(current: u64, samples: u32, next: u64) -> u64 {
-    // Integer math keeps the update cheap and deterministic.
     if samples == 0 {
         next
     } else {
@@ -201,6 +215,21 @@ mod tests {
         entry.record(Execution::Parallel, Duration::from_micros(100));
 
         assert_eq!(entry.choose(), (Execution::Serial, true));
+    }
+
+    #[test]
+    fn skips_initial_serial_probe_when_parallel_is_slow() {
+        let mut entry = Entry::default();
+
+        entry.record(Execution::Parallel, Duration::from_millis(50));
+
+        for i in 1..PREFERRED_SAMPLE_INTERVAL {
+            assert_eq!(
+                entry.choose(),
+                (Execution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
+            );
+        }
+        assert_eq!(entry.choose(), (Execution::Parallel, true));
     }
 
     #[test]
@@ -259,6 +288,21 @@ mod tests {
             );
         }
         assert_eq!(entry.choose(), (Execution::Serial, true));
+    }
+
+    #[test]
+    fn skips_serial_resample_when_parallel_is_slow() {
+        let mut entry = Entry::default();
+        entry.record(Execution::Parallel, Duration::from_millis(50));
+        entry.record(Execution::Serial, Duration::from_millis(60));
+
+        for i in 1..RESAMPLE_INTERVAL {
+            assert_eq!(
+                entry.choose(),
+                (Execution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
+            );
+        }
+        assert_eq!(entry.choose(), (Execution::Parallel, true));
     }
 
     #[test]

@@ -378,7 +378,7 @@ fn encode<H: Hasher, S: Strategy>(
         .map(|i| originals.slice(i * shard_len..(i + 1) * shard_len))
         .chain((0..m).map(|i| recoveries.slice(i * shard_len..(i + 1) * shard_len)))
         .collect();
-    let shard_hashes = strategy.map_init_collect_vec(&shard_slices, H::new, |hasher, shard| {
+    let shard_hashes = manual.map_init_collect_vec(&shard_slices, H::new, |hasher, shard| {
         hasher.update(shard);
         hasher.finalize()
     });
@@ -757,8 +757,9 @@ fn verify_root<H: Hasher, S: Strategy>(
         })
         .collect::<Vec<_>>();
 
+    let manual = strategy.manual();
     for (i, digest) in
-        strategy.map_init_collect_vec(missing_shards, H::new, |hasher, (i, shard)| {
+        manual.map_init_collect_vec(missing_shards, H::new, |hasher, (i, shard)| {
             hasher.update(shard);
             (i, hasher.finalize())
         })
