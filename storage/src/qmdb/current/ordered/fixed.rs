@@ -20,7 +20,7 @@ use crate::{
     translator::Translator,
     Context,
 };
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
@@ -41,7 +41,7 @@ impl<
         E: Context,
         K: Array,
         V: FixedValue,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         const N: usize,
         S: Strategy,
@@ -84,7 +84,7 @@ pub mod partitioned {
             E: Context,
             K: Array,
             V: FixedValue,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator,
             const P: usize,
             const N: usize,

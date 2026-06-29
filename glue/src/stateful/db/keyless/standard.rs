@@ -11,7 +11,7 @@ use crate::stateful::db::{
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
@@ -42,7 +42,7 @@ where
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -58,7 +58,7 @@ where
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -75,7 +75,7 @@ where
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -127,7 +127,7 @@ where
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -141,7 +141,7 @@ where
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -158,7 +158,7 @@ where
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -187,7 +187,7 @@ where
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -214,7 +214,7 @@ where
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -240,7 +240,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: FixedValue + 'static,
-    H: Hasher + 'static,
+    H: CodecHasher + 'static,
     S: Strategy,
 {
     type Unmerkleized =
@@ -306,7 +306,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: VariableValue + 'static,
-    H: Hasher + 'static,
+    H: CodecHasher + 'static,
     S: Strategy,
 {
     type Unmerkleized = KeylessUnmerkleized<
@@ -384,7 +384,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: FixedValue + 'static,
-    H: Hasher + 'static,
+    H: CodecHasher + 'static,
     S: Strategy,
     R: Resolver<Family = F, Op = fixed::Operation<F, V>, Digest = H::Digest>,
 {
@@ -422,7 +422,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: VariableValue + 'static,
-    H: Hasher + 'static,
+    H: CodecHasher + 'static,
     S: Strategy,
     R: Resolver<Family = F, Op = variable::Operation<F, V>, Digest = H::Digest>,
 {

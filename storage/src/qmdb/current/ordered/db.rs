@@ -20,7 +20,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Read, Write};
-use commonware_cryptography::{CodecHasher as Hasher, Digest};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_parallel::Strategy;
 use futures::stream::Stream;
 
@@ -92,7 +92,7 @@ impl<
         K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location<F>>,
-        H: Hasher,
+        H: CodecHasher,
         const N: usize,
         S: Strategy,
     > Db<F, E, C, K, V, I, H, N, S>
@@ -187,7 +187,7 @@ impl<
         K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location<F>>,
-        H: Hasher,
+        H: CodecHasher,
         const N: usize,
         S: Strategy,
     > Db<F, E, C, K, V, I, H, N, S>

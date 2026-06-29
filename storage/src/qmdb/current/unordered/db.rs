@@ -19,7 +19,7 @@ use crate::{
     Context,
 };
 use commonware_codec::Codec;
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
@@ -41,7 +41,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         I: UnorderedIndex<Value = Location<F>>,
-        H: Hasher,
+        H: CodecHasher,
         const N: usize,
         S: Strategy,
     > Db<F, E, C, K, V, I, H, N, S>
@@ -74,7 +74,7 @@ impl<
         K: Array,
         V: ValueEncoding,
         I: UnorderedIndex<Value = Location<F>>,
-        H: Hasher,
+        H: CodecHasher,
         const N: usize,
         S: Strategy,
     > Db<F, E, C, K, V, I, H, N, S>

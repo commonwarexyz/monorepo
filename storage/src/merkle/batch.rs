@@ -92,7 +92,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use commonware_cryptography::{CodecHasher as CHasher, Digest};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_parallel::{Sequential, Strategy};
 use core::ops::Range;
 
@@ -352,7 +352,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Consume this batch and produce an immutable [`MerkleizedBatch`] using reusable hash state.
     #[cfg(feature = "std")]
-    pub(crate) fn merkleize_reusing<H: CHasher<Digest = D>>(
+    pub(crate) fn merkleize_reusing<H: CodecHasher<Digest = D>>(
         self,
         base: &Mem<F, D>,
     ) -> Arc<MerkleizedBatch<F, D, S>> {
@@ -367,7 +367,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         map_pos: M,
     ) -> Arc<MerkleizedBatch<F, D, S>>
     where
-        H: CHasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         M: Fn(Position<F>) -> Position<F> + Copy + Send + Sync,
     {
         let buckets = self.prepare_dirty_buckets();
@@ -454,7 +454,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         height: u32,
         map_pos: M,
     ) where
-        H: CHasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         M: Fn(Position<F>) -> Position<F> + Copy + Send + Sync,
     {
         if positions.len() < SEQUENTIAL_BUCKET_THRESHOLD {

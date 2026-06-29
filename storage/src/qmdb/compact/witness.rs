@@ -22,7 +22,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
-use commonware_cryptography::{CodecHasher as Hasher, Digest};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::{AsyncMutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -185,7 +185,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
     ) -> Result<(), Error<F>>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         S: Strategy,
     {
         self.persist::<H, S>(
@@ -210,7 +210,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
     ) -> Result<(), Error<F>>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         S: Strategy,
     {
         self.persist::<H, S>(
@@ -235,7 +235,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         durability: Durability,
     ) -> Result<(), Error<F>>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         S: Strategy,
     {
         let _guard = self.sync_lock.lock().await;
@@ -268,7 +268,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
     ) -> Result<Option<VerifiedWitness<F, D>>, Error<F>>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         S: Strategy,
     {
         // An equal leaf count means no commit has been applied since the cache was set.
@@ -308,7 +308,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         last_commit_floor: impl FnOnce(&Op) -> Option<Location<F>>,
     ) -> Result<Op, Error<F>>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         S: Strategy,
         Op: Read,
     {
@@ -432,7 +432,7 @@ fn build_witness<F, H, S>(
 ) -> Result<VerifiedWitness<F, H::Digest>, Error<F>>
 where
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     let hasher = qmdb::hasher::<H>();
@@ -482,7 +482,7 @@ async fn load_tip<E, F, H, S, Op>(
 where
     E: Context,
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Op: Read,
 {
@@ -515,7 +515,7 @@ fn rebuild_and_verify<F, D, H, S, Op>(
 where
     F: Family,
     D: Digest,
-    H: Hasher<Digest = D>,
+    H: CodecHasher<Digest = D>,
     S: Strategy,
     Op: Read,
 {
@@ -569,7 +569,7 @@ pub(crate) async fn init<E, F, H, S, Op>(
 where
     E: Context,
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Op: Read,
 {
@@ -591,7 +591,7 @@ async fn bootstrap_initial_commit<E, F, H, S>(
 where
     E: Context,
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     let hasher = qmdb::hasher::<H>();

@@ -80,7 +80,7 @@ use crate::{
     Context,
 };
 use commonware_codec::CodecShared;
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::sync::Arc;
@@ -127,7 +127,7 @@ where
     F: Family,
     E: Context,
     U: Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     T: Translator,
     I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
@@ -149,7 +149,7 @@ where
     F: Family,
     E: Context,
     U: Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     T: Translator,
     I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
@@ -190,7 +190,7 @@ pub(crate) mod test {
         translator::OneCap,
     };
     use commonware_codec::{Codec, CodecShared};
-    use commonware_cryptography::{sha256::Digest, CodecHasher as Hasher, Hasher as _, Sha256};
+    use commonware_cryptography::{sha256::Digest, CodecHasher, Hasher as _, Sha256};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic::Context, BufferPooler, Supervisor as _,
     };
@@ -289,7 +289,7 @@ pub(crate) mod test {
         U: UpdateTrait,
         C: Mutable<Item = AnyOperation<mmr::Family, U>>,
         I: UnorderedIndex<Value = Location>,
-        H: Hasher,
+        H: CodecHasher,
         AnyOperation<mmr::Family, U>: Codec,
         S: Strategy,
     {

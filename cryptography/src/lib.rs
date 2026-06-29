@@ -390,17 +390,6 @@ commonware_macros::stability_scope!(BETA {
             self.hash_parts([left.as_ref(), right.as_ref()])
         }
 
-        /// Merge two Merkle child digests.
-        #[doc(hidden)]
-        #[inline]
-        fn merge_digest_pair(
-            &mut self,
-            left: &Self::Digest,
-            right: &Self::Digest,
-        ) -> Self::Digest {
-            self.hash_digest_pair(left, right)
-        }
-
         /// Hash a `u64` followed by two digests.
         #[doc(hidden)]
         #[inline]
@@ -779,10 +768,6 @@ mod tests {
         );
         assert_eq!(
             hasher.hash_digest_pair(&left, &right),
-            hasher!(H, left.as_ref(), right.as_ref())
-        );
-        assert_eq!(
-            hasher.merge_digest_pair(&left, &right),
             hasher!(H, left.as_ref(), right.as_ref())
         );
 

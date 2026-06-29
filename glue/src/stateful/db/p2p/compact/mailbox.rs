@@ -3,7 +3,7 @@
 use super::handler;
 use crate::stateful::db::AttachableResolver;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_cryptography::{CodecHasher as Hasher, Digest};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_storage::{merkle::Family, qmdb::sync::compact};
 use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock};
 use std::{collections::VecDeque, future::Future, sync::Arc};
@@ -122,11 +122,11 @@ impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
 }
 
 /// Client-facing resolver mailbox used by compact QMDB sync.
-pub struct Mailbox<DB, F: Family, Op, H: Hasher> {
+pub struct Mailbox<DB, F: Family, Op, H: CodecHasher> {
     sender: Sender<Message<DB, F, Op, H::Digest>>,
 }
 
-impl<DB, F: Family, Op, H: Hasher> Clone for Mailbox<DB, F, Op, H> {
+impl<DB, F: Family, Op, H: CodecHasher> Clone for Mailbox<DB, F, Op, H> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -134,13 +134,13 @@ impl<DB, F: Family, Op, H: Hasher> Clone for Mailbox<DB, F, Op, H> {
     }
 }
 
-impl<DB, F: Family, Op, H: Hasher> Mailbox<DB, F, Op, H> {
+impl<DB, F: Family, Op, H: CodecHasher> Mailbox<DB, F, Op, H> {
     pub(super) const fn new(sender: Sender<Message<DB, F, Op, H::Digest>>) -> Self {
         Self { sender }
     }
 }
 
-impl<DB: Send + Sync, F: Family, Op: Send, H: Hasher> Mailbox<DB, F, Op, H> {
+impl<DB: Send + Sync, F: Family, Op: Send, H: CodecHasher> Mailbox<DB, F, Op, H> {
     pub fn attach_database(&self, db: Arc<TracedAsyncRwLock<DB>>) {
         let _ = self.sender.enqueue(Message::AttachDatabase(db));
     }
@@ -151,7 +151,7 @@ where
     DB: Send + Sync + 'static,
     F: Family,
     Op: Send + Sync + Clone + 'static,
-    H: Hasher,
+    H: CodecHasher,
 {
     type Digest = H::Digest;
     type Error = ResponseDropped;
@@ -180,7 +180,7 @@ where
     DB: Send + Sync + 'static,
     F: Family,
     Op: Send + Sync + Clone + 'static,
-    H: Hasher,
+    H: CodecHasher,
 {
     fn attach_database(&self, db: Arc<TracedAsyncRwLock<DB>>) -> impl Future<Output = ()> + Send {
         Self::attach_database(self, db);

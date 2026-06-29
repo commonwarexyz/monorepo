@@ -2,7 +2,7 @@
 
 use crate::merkle::{batch, compact, Family};
 use commonware_codec::EncodeShared;
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ pub(crate) fn merkleize_ops<F, H, S, Op>(
 ) -> Arc<batch::MerkleizedBatch<F, H::Digest, S>>
 where
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Op: EncodeShared,
 {

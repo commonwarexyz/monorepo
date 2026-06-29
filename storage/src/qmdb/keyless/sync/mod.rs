@@ -16,7 +16,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{EncodeShared, Read};
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 
@@ -27,7 +27,7 @@ where
     V: ValueEncoding + Codec,
     C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
     C::Config: Clone + Send,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -128,7 +128,7 @@ where
     F: Family,
     E: Context,
     V: ValueEncoding + Codec,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
     Operation<F, V>: Read<Cfg = Cfg>,

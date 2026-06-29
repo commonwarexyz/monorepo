@@ -16,7 +16,7 @@ use crate::merkle::{
     mem::{Config as MemConfig, Mem},
     Error, Family, Location,
 };
-use commonware_cryptography::{CodecHasher as CHasher, Digest};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::RwLock;
 use std::sync::Arc;
@@ -61,7 +61,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Consume this batch and produce an immutable [`batch::MerkleizedBatch`] using reusable hash state.
-    pub(crate) fn merkleize_reusing<H: CHasher<Digest = D>>(
+    pub(crate) fn merkleize_reusing<H: CodecHasher<Digest = D>>(
         self,
         base: &Mem<F, D>,
     ) -> Arc<batch::MerkleizedBatch<F, D, S>> {

@@ -33,7 +33,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
-use commonware_cryptography::{CodecHasher as Hasher, Digest, DigestOf};
+use commonware_cryptography::{CodecHasher, Digest, DigestOf};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::metrics::{
@@ -135,7 +135,7 @@ pub struct Db<
     E: Context,
     C: Contiguous<Item: CodecShared>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     U: Send + Sync,
     const N: usize,
     S: Strategy,
@@ -177,7 +177,7 @@ where
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -225,7 +225,7 @@ where
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -233,11 +233,10 @@ where
     /// or above the grafting height, returns the grafted node. For positions below the grafting
     /// height, the ops tree is used.
     fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
-        grafting::Storage::new(
+        grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
-            qmdb::hasher::<H>(),
         )
     }
 
@@ -383,7 +382,7 @@ where
     U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -639,12 +638,10 @@ where
             &self.strategy,
         )
         .await?;
-        let hasher = qmdb::hasher::<H>();
-        let storage = grafting::Storage::new(
+        let storage = grafting::Storage::<F, H, _, _>::new(
             &grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
-            hasher.clone(),
         );
         let partial_chunk = partial_chunk(self.any.bitmap.as_ref());
         let ops_root = self.any.root();
@@ -756,7 +753,7 @@ where
     U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -796,7 +793,7 @@ where
     U: Update + 'static,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -900,7 +897,7 @@ pub(super) fn pending_chunk<F: merkle::Graftable, B: bitmap::Readable<N>, const 
 /// `pending` contributes `D` bytes when present; `partial` contributes `D + 8` bytes (`D` =
 /// digest size). Different fixed lengths, so the two cannot produce the same input bytes,
 /// even when their digests are identical. Collisions reduce to H.
-pub(super) fn combine_roots<H: Hasher>(
+pub(super) fn combine_roots<H: CodecHasher>(
     ops_root: &H::Digest,
     grafted_root: &H::Digest,
     pending: Option<&H::Digest>,
@@ -946,7 +943,7 @@ pub(super) fn combine_roots<H: Hasher>(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn compute_db_root<
     F: merkle::Graftable,
-    H: Hasher,
+    H: CodecHasher,
     B: bitmap::Readable<N>,
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
@@ -987,7 +984,7 @@ pub(super) async fn compute_db_root<
 /// `pruned_chunks <= graftable_chunks <= complete_chunks` invariant.
 pub(super) async fn compute_grafted_root<
     F: merkle::Graftable,
-    H: Hasher,
+    H: CodecHasher,
     B: bitmap::Readable<N>,
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
@@ -1038,7 +1035,7 @@ pub(super) async fn compute_grafted_root<
 /// The provided strategy determines if or how to parallelize merkleization.
 pub(super) async fn compute_grafted_leaves<
     F: merkle::Graftable,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     const N: usize,
 >(
@@ -1096,7 +1093,7 @@ pub(super) async fn compute_grafted_leaves<
 /// instant as the bitmap state.
 pub(super) async fn build_grafted_tree<
     F: merkle::Graftable,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     const N: usize,
 >(

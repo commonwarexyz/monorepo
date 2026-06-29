@@ -68,7 +68,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
-use commonware_cryptography::{CodecHasher as Hasher, DigestOf};
+use commonware_cryptography::{CodecHasher, DigestOf};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, sync::AsyncMutex, Array,
@@ -110,7 +110,7 @@ where
     E: Context,
     U: Update + Send + Sync + 'static,
     I: IndexFactory<T, Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     T: Translator,
     J: Mutable<Item = Operation<F, U>>,
     S: Strategy,
@@ -192,12 +192,8 @@ where
     // Compute the canonical root. The grafted root is deterministic from the ops
     // (which are authenticated by the engine) and the bitmap (which is deterministic
     // from the ops).
-    let storage = grafting::Storage::new(
-        &grafted_tree,
-        grafting::height::<N>(),
-        &any.log.merkle,
-        hasher.clone(),
-    );
+    let storage =
+        grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting::height::<N>(), &any.log.merkle);
     let partial = db::partial_chunk(any.bitmap.as_ref());
     let grafted_root = db::compute_grafted_root::<F, H, _, _, N>(
         any.bitmap.as_ref(),
@@ -256,7 +252,7 @@ macro_rules! impl_current_sync_database {
             E: Context,
             K: $key_bound,
             V: $value_bound + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator,
             S: Strategy,
             $($($where_extra)+)?
@@ -399,7 +395,7 @@ macro_rules! impl_current_resolver {
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -447,7 +443,7 @@ macro_rules! impl_current_resolver {
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -492,7 +488,7 @@ macro_rules! impl_current_resolver {
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,

@@ -17,7 +17,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::Read;
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 
@@ -45,7 +45,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Key,
         V: VariableValue,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         S: Strategy,
     > Db<F, E, K, V, H, T, S>
@@ -73,7 +73,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Key,
         V: VariableValue,
-        H: Hasher,
+        H: CodecHasher,
         C: Clone + Send + Sync + 'static,
         S: Strategy,
     > CompactDb<F, E, K, V, H, C, S>

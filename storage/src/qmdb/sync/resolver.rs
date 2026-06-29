@@ -26,7 +26,7 @@ use crate::{
     translator::Translator,
     Context,
 };
-use commonware_cryptography::{CodecHasher as Hasher, Digest};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     channel::oneshot,
@@ -231,7 +231,7 @@ macro_rules! impl_resolver {
             E: Context,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -273,7 +273,7 @@ macro_rules! impl_resolver {
             E: Context,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -312,7 +312,7 @@ macro_rules! impl_resolver {
             E: Context,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -371,7 +371,7 @@ macro_rules! impl_resolver_immutable {
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -413,7 +413,7 @@ macro_rules! impl_resolver_immutable {
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -452,7 +452,7 @@ macro_rules! impl_resolver_immutable {
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -502,7 +502,7 @@ macro_rules! impl_resolver_keyless {
             F: Family,
             E: Context,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             S: Strategy,
         {
             type Family = F;
@@ -541,7 +541,7 @@ macro_rules! impl_resolver_keyless {
             F: Family,
             E: Context,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             S: Strategy,
         {
             type Family = F;
@@ -577,7 +577,7 @@ macro_rules! impl_resolver_keyless {
             F: Family,
             E: Context,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             S: Strategy,
         {
             type Family = F;

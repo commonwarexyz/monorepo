@@ -21,7 +21,7 @@ use alloc::{
     vec::Vec,
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
-use commonware_cryptography::{CodecHasher as Hasher, Digest, DigestOf};
+use commonware_cryptography::{CodecHasher, Digest, DigestOf};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use core::num::NonZeroU64;
@@ -44,7 +44,7 @@ type MerkleizedParent<F, H, Item, S> = Arc<MerkleizedBatch<F, DigestOf<H>, Item,
 
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
-pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync, S: Strategy> {
+pub struct UnmerkleizedBatch<F: Family, H: CodecHasher, Item: Send + Sync, S: Strategy> {
     // The inner batch of Merkle leaf digests.
     inner: batch::UnmerkleizedBatch<F, H::Digest, S>,
     // The hasher to use for hashing the items.
@@ -57,7 +57,7 @@ pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync, S: Strateg
 
 type MerkleizedBatchArc<F, H, Item, S> = Arc<MerkleizedBatch<F, DigestOf<H>, Item, S>>;
 
-impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
+impl<F: Family, H: CodecHasher, Item: Encode + Send + Sync, S: Strategy>
     UnmerkleizedBatch<F, H, Item, S>
 {
     /// Add an item to the batch.
@@ -204,7 +204,7 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     ///
     /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
     /// fork has been applied.
-    pub fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, Item, S>
+    pub fn new_batch<H: CodecHasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, Item, S>
     where
         Item: Encode,
     {
@@ -246,7 +246,7 @@ where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     /// Merkle structure where each leaf is an item digest.
@@ -265,7 +265,7 @@ where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     /// Returns the Location of the next item appended to the journal.
@@ -333,7 +333,7 @@ where
     F: Family,
     E: Context,
     C: Mutable<Item: EncodeShared>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     /// Durably persist the journal. This is faster than `sync()` but does not guarantee that the
@@ -356,7 +356,7 @@ where
     F: Family,
     E: Context,
     C: Mutable<Item: EncodeShared>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     /// Create a new [Journal] from the given components after aligning the Merkle structure with
@@ -566,7 +566,7 @@ where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     /// Generate a proof of inclusion for items starting at `start_loc`.
@@ -646,7 +646,7 @@ where
     F: Family,
     E: Context,
     C: Mutable<Item: EncodeShared>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     /// Destroy the authenticated journal, removing all data from disk.
@@ -683,7 +683,7 @@ macro_rules! impl_journal_new {
             F: Family,
             E: Context,
             O: $codec_bound,
-            H: Hasher,
+            H: CodecHasher,
             S: Strategy,
         {
             /// Create a new authenticated [Journal].
@@ -727,7 +727,7 @@ where
     F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     type Item = C::Item;
@@ -746,7 +746,7 @@ where
     F: Family,
     E: Context,
     C: Mutable<Item: EncodeShared>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     async fn append(&mut self, item: &Self::Item) -> Result<u64, JournalError> {
@@ -792,7 +792,7 @@ pub trait Inner<E: Context>: Mutable {
     type Config: Clone + Send;
 
     /// Initialize an authenticated [Journal] backed by this journal type.
-    fn init<F: Family, H: Hasher, S: Strategy>(
+    fn init<F: Family, H: CodecHasher, S: Strategy>(
         context: E,
         merkle_cfg: merkle::full::Config<S>,
         journal_cfg: Self::Config,
@@ -811,7 +811,7 @@ where
     E: Context,
     C: Contiguous<Item: EncodeShared>,
     S: Strategy,
-    H: Hasher,
+    H: CodecHasher,
 {
     /// Test helper: Read the item at the given location.
     pub(crate) async fn read(&self, loc: Location<F>) -> Result<C::Item, Error<F>> {

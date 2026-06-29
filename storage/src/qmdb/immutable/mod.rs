@@ -96,7 +96,7 @@ use crate::{
 };
 use ahash::AHashSet;
 use commonware_codec::EncodeShared;
-use commonware_cryptography::CodecHasher as CHasher;
+use commonware_cryptography::CodecHasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::{num::NonZeroU64, ops::Range, sync::Arc};
@@ -165,7 +165,7 @@ pub struct Immutable<
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
-    H: CHasher,
+    H: CodecHasher,
     T: Translator,
     S: Strategy,
 > where
@@ -204,7 +204,7 @@ where
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
     C::Item: EncodeShared,
-    H: CHasher,
+    H: CodecHasher,
     T: Translator,
     S: Strategy,
 {

@@ -2,7 +2,7 @@ use crate::merkle::{
     hasher::Standard, verification::ProofStore, Error, Family, Location, Position, Proof,
 };
 use commonware_codec::Encode;
-use commonware_cryptography::{CodecHasher as Hasher, Digest};
+use commonware_cryptography::{CodecHasher, Digest};
 
 /// Verify that a [Proof] is valid for a range of operations and a target root.
 pub fn verify_proof<F, Op, H, D>(
@@ -15,7 +15,7 @@ pub fn verify_proof<F, Op, H, D>(
 where
     F: Family,
     Op: Encode,
-    H: Hasher<Digest = D>,
+    H: CodecHasher<Digest = D>,
     D: Digest,
 {
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
@@ -34,7 +34,7 @@ pub fn verify_proof_and_pinned_nodes<F, Op, H, D>(
 where
     F: Family,
     Op: Encode,
-    H: Hasher<Digest = D>,
+    H: CodecHasher<Digest = D>,
     D: Digest,
 {
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
@@ -53,7 +53,7 @@ pub fn verify_proof_and_extract_digests<F, Op, H, D>(
 where
     F: Family,
     Op: Encode,
-    H: Hasher<Digest = D>,
+    H: CodecHasher<Digest = D>,
     D: Digest,
 {
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
@@ -71,7 +71,7 @@ pub fn create_proof_store<F, Op, H, D>(
 where
     F: Family,
     Op: Encode,
-    H: Hasher<Digest = D>,
+    H: CodecHasher<Digest = D>,
     D: Digest,
 {
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
@@ -109,7 +109,7 @@ pub fn verify_multi_proof<F, Op, H, D>(
 where
     F: Family,
     Op: Encode,
-    H: Hasher<Digest = D>,
+    H: CodecHasher<Digest = D>,
     D: Digest,
 {
     let elements = operations

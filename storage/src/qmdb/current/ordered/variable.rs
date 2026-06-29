@@ -21,7 +21,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -41,7 +41,7 @@ impl<
         E: Context,
         K: Key,
         V: VariableValue,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         const N: usize,
         S: Strategy,
@@ -89,7 +89,7 @@ pub mod partitioned {
             E: Context,
             K: Key,
             V: VariableValue,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator,
             const P: usize,
             const N: usize,

@@ -17,7 +17,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
@@ -36,7 +36,7 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, S: Strategy>
+impl<F: Family, E: Context, K: Key, V: VariableValue, H: CodecHasher, T: Translator, S: Strategy>
     Db<F, E, K, V, H, T, S>
 where
     Operation<F, K, V>: Codec,
@@ -71,7 +71,7 @@ pub mod partitioned {
         Context,
     };
     use commonware_codec::{Codec, Read};
-    use commonware_cryptography::CodecHasher as Hasher;
+    use commonware_cryptography::CodecHasher;
     use commonware_parallel::Strategy;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
@@ -99,7 +99,7 @@ pub mod partitioned {
             E: Context,
             K: Key,
             V: VariableValue,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator,
             const P: usize,
             S: Strategy,

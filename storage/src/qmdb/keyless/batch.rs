@@ -12,7 +12,7 @@ use crate::{
     Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::{CodecHasher as Hasher, Digest, DigestOf};
+use commonware_cryptography::{CodecHasher, Digest, DigestOf};
 use commonware_parallel::Strategy;
 use std::sync::{Arc, Weak};
 
@@ -27,7 +27,7 @@ pub struct UnmerkleizedBatch<F, H, V, S: Strategy>
 where
     F: Family,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, V>: EncodeShared,
 {
     /// Authenticated journal batch for computing the speculative Merkle root.
@@ -111,7 +111,7 @@ impl<F, H, V, S: Strategy> UnmerkleizedBatch<F, H, V, S>
 where
     F: Family,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, V>: EncodeShared,
 {
     /// Create a batch from a committed DB (no parent chain).
@@ -328,7 +328,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
         let loc_val = *loc;
@@ -356,7 +356,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
         if locs.is_empty() {
@@ -402,7 +402,7 @@ where
     /// loss detected at `apply_batch` time.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
     {
         UnmerkleizedBatch {
             journal_batch: self.journal_batch.new_batch::<H>(),

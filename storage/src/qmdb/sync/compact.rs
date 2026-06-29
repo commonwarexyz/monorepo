@@ -66,7 +66,7 @@ use crate::{
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
-use commonware_cryptography::{CodecHasher as Hasher, Digest};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor};
@@ -320,7 +320,7 @@ pub trait Database: Sized + Send {
     type Config: Clone;
     type Digest: Digest;
     type Context: Storage + Clock + Metrics;
-    type Hasher: Hasher<Digest = Self::Digest>;
+    type Hasher: CodecHasher<Digest = Self::Digest>;
 
     /// Build a database from authenticated state in memory.
     ///
@@ -576,7 +576,7 @@ macro_rules! impl_compact_resolver_keyless {
             F: Family,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             S: Strategy,
         {
             type Family = F;
@@ -614,7 +614,7 @@ macro_rules! impl_compact_resolver_keyless {
             F: Family,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             S: Strategy,
         {
             type Family = F;
@@ -649,7 +649,7 @@ macro_rules! impl_compact_resolver_keyless {
             F: Family,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             S: Strategy,
         {
             type Family = F;
@@ -692,7 +692,7 @@ macro_rules! impl_compact_resolver_immutable {
             E: crate::Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -733,7 +733,7 @@ macro_rules! impl_compact_resolver_immutable {
             E: crate::Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -771,7 +771,7 @@ macro_rules! impl_compact_resolver_immutable {
             E: crate::Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -815,7 +815,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             F: Family,
             E: crate::Context,
             V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             $op<F, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
             S: Strategy,
@@ -842,7 +842,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             F: Family,
             E: crate::Context,
             V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             $op<F, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
             S: Strategy,
@@ -866,7 +866,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             F: Family,
             E: crate::Context,
             V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             $op<F, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
             S: Strategy,
@@ -898,7 +898,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             E: crate::Context,
             K: Key,
             V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             $op<F, K, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
             S: Strategy,
@@ -926,7 +926,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             E: crate::Context,
             K: Key,
             V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             $op<F, K, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
             S: Strategy,
@@ -951,7 +951,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             E: crate::Context,
             K: Key,
             V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             $op<F, K, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
             S: Strategy,

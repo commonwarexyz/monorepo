@@ -332,7 +332,6 @@ use crate::{
     },
     merkle::{self, full::Config as MerkleConfig, Location},
     qmdb::{
-        self,
         any::{
             self,
             operation::{Operation, Update},
@@ -345,7 +344,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{CodecShared, FixedSize};
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
@@ -404,7 +403,7 @@ where
     F: merkle::Graftable,
     E: Context,
     U: Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     T: Translator,
     I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
@@ -454,12 +453,10 @@ where
     .await?;
 
     // Compute and cache the root.
-    let hasher = qmdb::hasher::<H>();
-    let storage = grafting::Storage::new(
+    let storage = grafting::Storage::<F, H, _, _>::new(
         &grafted_tree,
         grafting::height::<N>(),
         &any.log.merkle,
-        hasher.clone(),
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.root();

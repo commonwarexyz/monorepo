@@ -15,7 +15,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -44,7 +44,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: FixedValue,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         S: Strategy,
     > Db<F, E, K, V, H, T, S>
@@ -64,7 +64,7 @@ impl<
     }
 }
 
-impl<F: Family, E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, S: Strategy>
+impl<F: Family, E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: CodecHasher, S: Strategy>
     CompactDb<F, E, K, V, H, S>
 {
     /// Returns a [CompactDb] initialized from `cfg`.

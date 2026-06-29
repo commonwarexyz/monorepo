@@ -58,7 +58,7 @@ use crate::{
     Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::{num::NonZeroU64, sync::Arc};
@@ -115,7 +115,7 @@ where
     E: Context,
     V: ValueEncoding,
     C: Contiguous<Item = Operation<F, V>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -142,7 +142,7 @@ where
     E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -612,7 +612,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let bounds = db.bounds().await;
@@ -673,7 +673,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let value0 = V::Value::make(10);
@@ -718,7 +718,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // Build a db with 2 values and make sure we can get them back.
@@ -769,7 +769,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let root = db.root();
@@ -881,7 +881,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let metadata = V::Value::make(99);
@@ -908,7 +908,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // Initial floor is 0, so pruning past 0 should fail.
@@ -963,7 +963,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let root = db.root();
@@ -1046,7 +1046,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // Add some initial operations and commit.
@@ -1230,7 +1230,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let batch_a = db.new_batch().append(V::Value::make(10)).merkleize(
@@ -1258,7 +1258,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // Chain: DB <- A <- B <- C
@@ -1329,7 +1329,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // Append many values then commit, advancing the floor to the new commit so we can
@@ -1577,7 +1577,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         assert!(db.get(Location::new(0)).await.unwrap().is_none());
@@ -1609,7 +1609,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let base_vals: Vec<V::Value> = (0..3).map(|i| V::Value::make(10 + i)).collect();
@@ -1679,7 +1679,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let mut batch = db.new_batch();
@@ -1749,7 +1749,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let v1 = V::Value::make(1);
@@ -1823,7 +1823,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let merkleized = db.new_batch().append(V::Value::make(1)).merkleize(
@@ -2060,7 +2060,7 @@ pub(crate) mod tests {
     where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // Tests that don't specifically exercise floor behavior advance the floor to the new
@@ -2089,7 +2089,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let initial_root = db.root();
@@ -2194,7 +2194,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let first_range = commit_appends(&mut db, (0..16).map(V::Value::make), None).await;
@@ -2247,7 +2247,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // Freshly created db has floor = 0.
@@ -2295,7 +2295,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // Advance floor to 3.
@@ -2340,7 +2340,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // Batch of 2 appends + 1 commit lands at locations [1..4); commit at 3, total_size = 4.
@@ -2378,7 +2378,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // First commit: floor advances to 3 (= commit location).
@@ -2427,7 +2427,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         let appends = [V::Value::make(1), V::Value::make(2)];
@@ -2469,7 +2469,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // 2 appends + 1 commit on top of the initial commit: commit lands at location 3.
@@ -2503,7 +2503,7 @@ pub(crate) mod tests {
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // First commit: 2 appends + commit, floor advances to 3.
@@ -2567,7 +2567,7 @@ pub(crate) mod tests {
         F: Family,
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // parent: 1 append + commit at loc 2 with floor=2 (the parent's commit_loc).
@@ -2615,7 +2615,7 @@ pub(crate) mod tests {
         F: Family,
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // parent: 1 append + commit at loc 2. Declare floor = 3 (one past the commit).
@@ -2654,7 +2654,7 @@ pub(crate) mod tests {
         F: Family,
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // Initial commit is at loc 0. 3 appends + commit → commit lands at loc 4.
@@ -2753,7 +2753,7 @@ pub(crate) mod tests {
         F: Family,
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
+        H: CodecHasher,
         Operation<F, V>: EncodeShared,
     {
         // parent:     1 append, commit at loc 2, floor = 2.

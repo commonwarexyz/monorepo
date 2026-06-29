@@ -1,15 +1,15 @@
 //! Stateless Binary Merkle Tree (BMT).
 //!
 //! The Binary Merkle Tree is constructed level-by-level. The first level consists of position-hashed leaf digests.
-//! On each additional level, pairs of nodes are merged from the previous level (if a level contains an odd
-//! number of nodes, the last node is duplicated). The finalized root of the tree incorporates the leaf count
-//! to prevent proof malleability: `root = hash(leaf_count || tree_root)`.
+//! On each additional level, pairs of nodes from the previous level are hashed as `hash(left || right)`
+//! (if a level contains an odd number of nodes, the last node is duplicated). The finalized root of the tree
+//! incorporates the leaf count to prevent proof malleability: `root = hash(leaf_count || tree_root)`.
 //!
 //! For example, given three leaves A, B, and C, the tree is constructed as follows:
 //!
 //! ```text
-//!     Level 2 (tree_root):  [merge(merge(hash(0,A),hash(1,B)),merge(hash(2,C),hash(2,C)))]
-//!     Level 1:              [merge(hash(0,A),hash(1,B)),merge(hash(2,C),hash(2,C))]
+//!     Level 2 (tree_root):  [hash(hash(hash(0,A) || hash(1,B)) || hash(hash(2,C) || hash(2,C)))]
+//!     Level 1:              [hash(hash(0,A) || hash(1,B)),hash(hash(2,C) || hash(2,C))]
 //!     Level 0 (leaves):     [hash(0,A),hash(1,B),hash(2,C)]
 //!     Finalized root:       hash(3 || tree_root)
 //! ```
@@ -152,10 +152,10 @@ impl<D: Digest> Tree<D> {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
             let mut chunks = current_level.chunks_exact(2);
             for chunk in &mut chunks {
-                next_level.push(hasher.merge_digest_pair(&chunk[0], &chunk[1]));
+                next_level.push(hasher.hash_digest_pair(&chunk[0], &chunk[1]));
             }
             if let [last] = chunks.remainder() {
-                next_level.push(hasher.merge_digest_pair(last, last));
+                next_level.push(hasher.hash_digest_pair(last, last));
             }
 
             // Add the computed level to the tree
@@ -504,7 +504,7 @@ impl<D: Digest> Proof<D> {
             };
 
             // Compute the parent digest
-            computed = hasher.merge_digest_pair(left_node, right_node);
+            computed = hasher.hash_digest_pair(left_node, right_node);
 
             // Move up the tree
             position /= 2;
@@ -614,7 +614,7 @@ impl<D: Digest> Proof<D> {
                 };
 
                 // Hash parent
-                next_level.push((parent_pos, hasher.merge_digest_pair(&left, &right)));
+                next_level.push((parent_pos, hasher.hash_digest_pair(&left, &right)));
 
                 idx += 1;
             }

@@ -11,7 +11,7 @@ use crate::stateful::db::{
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, Read as CodecRead};
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
@@ -55,7 +55,7 @@ where
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -73,7 +73,7 @@ where
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
 {
@@ -115,7 +115,7 @@ where
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -130,7 +130,7 @@ where
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -148,7 +148,7 @@ where
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -168,7 +168,7 @@ where
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
     I: OrderedIndex<Value = Location<F>> + 'static,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
 {
@@ -208,7 +208,7 @@ where
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -237,7 +237,7 @@ where
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
 {
@@ -264,7 +264,7 @@ where
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
     I: OrderedIndex<Value = Location<F>> + 'static,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
 {
@@ -289,7 +289,7 @@ where
     U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
     AnyUnmerkleized<F, E, C, I, H, U, S>: UnmerkleizedTrait,
@@ -334,7 +334,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: value::FixedValue + 'static,
-    H: Hasher + 'static,
+    H: CodecHasher + 'static,
     T: Translator,
     S: Strategy,
 {
@@ -426,7 +426,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: value::VariableValue + 'static,
-    H: Hasher,
+    H: CodecHasher,
     T: Translator,
     S: Strategy,
     Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
@@ -522,7 +522,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: value::FixedValue + 'static,
-    H: Hasher,
+    H: CodecHasher,
     T: Translator,
     S: Strategy,
     R: Resolver<
@@ -576,7 +576,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: value::VariableValue + 'static,
-    H: Hasher,
+    H: CodecHasher,
     T: Translator,
     S: Strategy,
     Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,

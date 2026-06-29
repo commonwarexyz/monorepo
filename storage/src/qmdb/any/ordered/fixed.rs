@@ -15,7 +15,7 @@ use crate::{
     translator::Translator,
     Context,
 };
-use commonware_cryptography::CodecHasher as Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
@@ -35,7 +35,7 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S: Strategy>
+impl<F: Family, E: Context, K: Array, V: FixedValue, H: CodecHasher, T: Translator, S: Strategy>
     Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
@@ -67,7 +67,7 @@ pub mod partitioned {
         translator::Translator,
         Context,
     };
-    use commonware_cryptography::CodecHasher as Hasher;
+    use commonware_cryptography::CodecHasher;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
 
@@ -96,7 +96,7 @@ pub mod partitioned {
             E: Context,
             K: Array,
             V: FixedValue,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator,
             const P: usize,
             S: Strategy,
