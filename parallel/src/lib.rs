@@ -143,6 +143,26 @@ commonware_macros::stability_scope!(BETA {
             F: FnOnce() -> T + Send + 'static,
             T: Send + 'static;
 
+        /// Runs either a serial or parallel body.
+        ///
+        /// Adaptive strategies use `len` to decide which body to run. The parallel body is
+        /// responsible for using this strategy, [`manual`](Self::manual), or another parallel
+        /// primitive to perform parallel work.
+        #[track_caller]
+        fn run<R, SEQ, PAR>(
+            &self,
+            _len: usize,
+            serial: SEQ,
+            _parallel: PAR,
+        ) -> R
+        where
+            R: Send,
+            SEQ: FnOnce() -> R + Send,
+            PAR: FnOnce() -> R + Send,
+        {
+            serial()
+        }
+
         /// Reduces a collection to a single value with per-partition initialization.
         ///
         /// Similar to [`fold`](Self::fold), but provides a separate initialization value
@@ -442,6 +462,29 @@ commonware_macros::stability_scope!(BETA {
             )
         }
 
+        /// Maps each element with per-partition state and a per-item work multiplier.
+        ///
+        /// The multiplier is used only by adaptive strategies to distinguish workloads where the
+        /// item count hides the real amount of work. Implementations that do not adapt their
+        /// execution path may ignore it.
+        #[track_caller]
+        fn map_init_collect_vec_with_multiplier<I, INIT, T, F, R>(
+            &self,
+            iter: I,
+            _multiplier: usize,
+            init: INIT,
+            map_op: F,
+        ) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            F: Fn(&mut T, I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            self.map_init_collect_vec(iter, init, map_op)
+        }
+
         /// Maps each element, filtering out `None` results and tracking their keys.
         ///
         /// This is a convenience method that applies `map_op` to each element. The
@@ -568,6 +611,21 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[track_caller]
+        fn run<R, SEQ, PAR>(
+            &self,
+            len: usize,
+            serial: SEQ,
+            parallel: PAR,
+        ) -> R
+        where
+            R: Send,
+            SEQ: FnOnce() -> R + Send,
+            PAR: FnOnce() -> R + Send,
+        {
+            self.strategy.run(len, serial, parallel)
+        }
+
+        #[track_caller]
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
@@ -639,6 +697,25 @@ commonware_macros::stability_scope!(BETA {
             R: Send,
         {
             self.strategy.map_init_collect_vec(iter, init, map_op)
+        }
+
+        #[track_caller]
+        fn map_init_collect_vec_with_multiplier<I, INIT, T, F, R>(
+            &self,
+            iter: I,
+            multiplier: usize,
+            init: INIT,
+            map_op: F,
+        ) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            F: Fn(&mut T, I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            self.strategy
+                .map_init_collect_vec_with_multiplier(iter, multiplier, init, map_op)
         }
 
         #[track_caller]
@@ -839,7 +916,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         #[track_caller]
-        fn execute<R>(&self, len: usize, run: impl FnOnce(policy::Execution) -> R) -> R {
+        fn execute<R>(
+            &self,
+            len: usize,
+            multiplier: usize,
+            run: impl FnOnce(policy::Execution) -> R,
+        ) -> R {
             let threads = self.thread_pool.current_num_threads();
             let Some(policy) = &self.policy else {
                 let execution = if threads <= 1 {
@@ -850,7 +932,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 return run(execution);
             };
 
-            policy.run(Location::caller(), len, threads, run)
+            let work = len.saturating_mul(multiplier);
+            policy.run(Location::caller(), len, work, threads, run)
         }
     }
 
@@ -893,6 +976,24 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         #[track_caller]
+        fn run<R, SEQ, PAR>(
+            &self,
+            len: usize,
+            serial: SEQ,
+            parallel: PAR,
+        ) -> R
+        where
+            R: Send,
+            SEQ: FnOnce() -> R + Send,
+            PAR: FnOnce() -> R + Send,
+        {
+            self.execute(len, 1, |execution| match execution {
+                policy::Execution::Serial => serial(),
+                policy::Execution::Parallel => parallel(),
+            })
+        }
+
+        #[track_caller]
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
@@ -911,7 +1012,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), |execution| match execution {
+            self.execute(items.len(), 1, |execution| match execution {
                 policy::Execution::Serial => Sequential.fold_init(items, init, identity, fold_op, reduce_op),
                 policy::Execution::Parallel => self.thread_pool.install(|| {
                     items
@@ -939,6 +1040,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(
                 items.len(),
+                1,
                 |execution| {
                     match execution {
                         policy::Execution::Serial => Sequential.map_collect_vec(items, map_op),
@@ -961,6 +1063,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(
                 items.len(),
+                1,
                 |execution| {
                     match execution {
                         policy::Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
@@ -984,9 +1087,42 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(
                 items.len(),
+                1,
                 |execution| {
                     match execution {
                         policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                        policy::Execution::Parallel => self
+                            .thread_pool
+                            .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+                    }
+                },
+            )
+        }
+
+        #[track_caller]
+        fn map_init_collect_vec_with_multiplier<I, INIT, T, F, R>(
+            &self,
+            iter: I,
+            multiplier: usize,
+            init: INIT,
+            map_op: F,
+        ) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            F: Fn(&mut T, I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            let items: Vec<I::Item> = iter.into_iter().collect();
+            self.execute(
+                items.len(),
+                multiplier,
+                |execution| {
+                    match execution {
+                        policy::Execution::Serial => {
+                            Sequential.map_init_collect_vec(items, init, map_op)
+                        }
                         policy::Execution::Parallel => self
                             .thread_pool
                             .install(|| items.into_par_iter().map_init(init, map_op).collect()),
@@ -1012,7 +1148,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), |execution| match execution {
+            self.execute(items.len(), 1, |execution| match execution {
                 policy::Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
                 policy::Execution::Parallel => self.thread_pool.install(|| {
                     items
@@ -1041,6 +1177,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             self.execute(
                 items.len(),
+                1,
                 |execution| match execution {
                     policy::Execution::Serial => Sequential.sort_by(items, compare),
                     policy::Execution::Parallel => self.thread_pool.install(|| items.par_sort_by(compare)),
@@ -1073,6 +1210,19 @@ mod test {
 
     fn map_from_same_callsite(strategy: &Rayon, len: usize) {
         let _: Vec<_> = strategy.map_collect_vec(0..len, |x| x);
+    }
+
+    fn map_init_with_multiplier_from_same_callsite(
+        strategy: &Rayon,
+        len: usize,
+        multiplier: usize,
+    ) {
+        let _: Vec<_> =
+            strategy.map_init_collect_vec_with_multiplier(0..len, multiplier, || (), |_, x| x);
+    }
+
+    fn run_from_same_callsite(strategy: &Rayon, len: usize) {
+        let _: usize = strategy.run(len, || 1, || 2);
     }
 
     #[test]
@@ -1126,6 +1276,16 @@ mod test {
                 x
             },
         );
+        let _: Vec<_> = strategy.map_init_collect_vec_with_multiplier(
+            0..16,
+            2,
+            || AtomicUsize::new(0),
+            |counter, x| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                x
+            },
+        );
+        let _: usize = strategy.run(16, || 1, || 2);
         let _: (Vec<_>, Vec<_>) = strategy.map_partition_collect_vec(0..16, |x| {
             if x % 2 == 0 {
                 (x, Some(x))
@@ -1138,7 +1298,7 @@ mod test {
         strategy.sort_by(&mut sortable, |a, b| a.cmp(b));
 
         assert_eq!(sortable, vec![1, 2, 3]);
-        assert_eq!(policy_len(&strategy), 8);
+        assert_eq!(policy_len(&strategy), 10);
     }
 
     #[test]
@@ -1153,14 +1313,42 @@ mod test {
     }
 
     #[test]
+    fn adaptive_policy_buckets_by_work_multiplier() {
+        let strategy = parallel_strategy();
+
+        map_init_with_multiplier_from_same_callsite(&strategy, 16, 1);
+        map_init_with_multiplier_from_same_callsite(&strategy, 16, 2);
+        map_init_with_multiplier_from_same_callsite(&strategy, 16, 3);
+
+        assert_eq!(policy_len(&strategy), 2);
+    }
+
+    #[test]
+    fn adaptive_run_buckets_by_input_size() {
+        let strategy = parallel_strategy();
+
+        run_from_same_callsite(&strategy, 1);
+        run_from_same_callsite(&strategy, 2);
+        run_from_same_callsite(&strategy, 3);
+
+        assert_eq!(policy_len(&strategy), 2);
+    }
+
+    #[test]
     fn manual_strategy_does_not_use_adaptive_policy() {
         let strategy = parallel_strategy();
         let manual = strategy.manual();
 
         let _: usize = manual.fold(0..4, || 0, |acc, x| acc + x, |a, b| a + b);
+        assert_eq!(manual.run(4, || 1, || 2), 2);
 
         assert_eq!(policy_len(&strategy), 0);
         assert_eq!(policy_len(&manual.strategy), 0);
+    }
+
+    #[test]
+    fn sequential_run_uses_serial_body() {
+        assert_eq!(Sequential.run(4, || 1, || 2), 1);
     }
 
     #[test]
