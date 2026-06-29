@@ -293,7 +293,10 @@ impl Checksum {
         self.encode_fixed()
     }
 
-    /// Returns one checksum slot in its storage representation.
+    /// Encode a whole checksum slot (`[len: u16][crc: u32]`) in its storage representation.
+    ///
+    /// A page footer holds two slots; recovery treats the one with the larger `len` as
+    /// authoritative (see [`Self::get_crc`]). A `len` of 0 is never authoritative.
     fn slot_bytes(len: u16, crc: u32) -> [u8; CHECKSUM_SLOT_SIZE] {
         let mut bytes = [0; CHECKSUM_SLOT_SIZE];
         let mut buf = bytes.as_mut_slice();
@@ -302,7 +305,12 @@ impl Checksum {
         bytes
     }
 
-    /// Returns a checksum slot's length field in its storage representation.
+    /// Encode just a slot's leading `len` field (the first [`CHECKSUM_SLOT_LEN_SIZE`] bytes of
+    /// [`Self::slot_bytes`]).
+    ///
+    /// Because `len` decides which slot is authoritative, rewriting only this field flips a slot's
+    /// authority without disturbing its already-durable CRC: writing a non-zero `len` commits a
+    /// previously staged slot, while writing 0 retires one.
     fn slot_len_bytes(len: u16) -> [u8; CHECKSUM_SLOT_LEN_SIZE] {
         let mut bytes = [0; CHECKSUM_SLOT_LEN_SIZE];
         let mut buf = bytes.as_mut_slice();

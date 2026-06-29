@@ -41,7 +41,7 @@ use super::{
 };
 use crate::{
     buffer::{
-        paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_LEN_SIZE, CHECKSUM_SLOT_SIZE},
+        paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
         tip::Buffer,
         SyncState,
     },
@@ -865,7 +865,7 @@ impl<B: Blob> Writer<B> {
         let old_slot_offset = crc_start
             .checked_add(old_slot_start as u64)
             .ok_or(Error::OffsetOverflow)?;
-        self.write_at_sync(old_slot_offset, vec![0u8; CHECKSUM_SLOT_LEN_SIZE])
+        self.write_at_sync(old_slot_offset, Checksum::slot_len_bytes(0).to_vec())
             .await?;
 
         let final_record = if new_slot_start == 0 {
@@ -1143,9 +1143,11 @@ impl<B: Blob> Writer<B> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::tests::SyncTrackingBlob, deterministic, telemetry::metrics::Registry, Buf,
-        BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _, Storage as _,
-        Supervisor as _,
+        buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
+        deterministic,
+        telemetry::metrics::Registry,
+        Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
+        Storage as _, Supervisor as _,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
