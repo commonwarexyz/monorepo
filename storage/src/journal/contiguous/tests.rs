@@ -164,7 +164,9 @@ pub(super) mod partition_sync_fault {
 
         async fn sync(&self) -> Result<(), Error> {
             if self.partition == self.fail_partition {
-                return Err(Error::Io(IoError::other("injected partition sync fault")));
+                return Err(Error::Io(
+                    IoError::other("injected partition sync fault").into(),
+                ));
             }
             self.inner.sync().await
         }
@@ -174,6 +176,205 @@ pub(super) mod partition_sync_fault {
                 return Handle::ready(self.sync().await);
             }
             self.inner.start_sync().await
+        }
+    }
+}
+
+/// A [Context] wrapper whose blob `start_sync` defers completion until [`Control::release`], so a
+/// test can observe (and act on) the journal while a real backend sync is genuinely in flight.
+pub(super) mod delayed_start_sync {
+    use commonware_runtime::{
+        deterministic, telemetry::metrics, Blob, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics,
+        Name, Storage, Supervisor,
+    };
+    use commonware_utils::sync::Notify;
+    use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
+    use std::{
+        future::Future,
+        ops::RangeInclusive,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::{Duration, SystemTime},
+    };
+
+    /// Shared control over every blob's deferred `start_sync` produced by one [Context].
+    pub(in crate::journal::contiguous) struct Control {
+        released: AtomicBool,
+        release: Notify,
+    }
+
+    impl Control {
+        pub(in crate::journal::contiguous) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                released: AtomicBool::new(false),
+                release: Notify::new(),
+            })
+        }
+
+        /// Let every in-flight (and future) `start_sync` proceed to completion.
+        pub(in crate::journal::contiguous) fn release(&self) {
+            self.released.store(true, Ordering::SeqCst);
+            self.release.notify_waiters();
+        }
+
+        async fn wait_released(&self) {
+            while !self.released.load(Ordering::SeqCst) {
+                self.release.notified().await;
+            }
+        }
+    }
+
+    pub(in crate::journal::contiguous) struct Context {
+        inner: deterministic::Context,
+        control: Arc<Control>,
+    }
+
+    impl Context {
+        pub(in crate::journal::contiguous) fn new(
+            inner: deterministic::Context,
+            control: Arc<Control>,
+        ) -> Self {
+            Self { inner, control }
+        }
+    }
+
+    #[derive(Clone)]
+    pub(in crate::journal::contiguous) struct DelayedStartSyncBlob<B: Blob> {
+        inner: B,
+        control: Arc<Control>,
+    }
+
+    impl Supervisor for Context {
+        fn name(&self) -> Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            Self {
+                inner: self.inner.child(label),
+                control: self.control.clone(),
+            }
+        }
+
+        fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            self.inner = self.inner.with_attribute(key, value);
+            self
+        }
+    }
+
+    impl Metrics for Context {
+        fn register<N: Into<String>, H: Into<String>, M: metrics::Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> metrics::Registered<M> {
+            self.inner.register(name, help, metric)
+        }
+
+        fn encode(&self) -> String {
+            self.inner.encode()
+        }
+    }
+
+    impl Clock for Context {
+        fn current(&self) -> SystemTime {
+            self.inner.current()
+        }
+
+        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+            self.inner.sleep(duration)
+        }
+
+        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+            self.inner.sleep_until(deadline)
+        }
+    }
+
+    impl GovernorClock for Context {
+        type Instant = SystemTime;
+
+        fn now(&self) -> Self::Instant {
+            self.current()
+        }
+    }
+
+    impl ReasonablyRealtime for Context {}
+
+    impl Storage for Context {
+        type Blob = DelayedStartSyncBlob<<deterministic::Context as Storage>::Blob>;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: RangeInclusive<u16>,
+        ) -> Result<(Self::Blob, u64, u16), Error> {
+            let (inner, len, version) =
+                self.inner.open_versioned(partition, name, versions).await?;
+            Ok((
+                DelayedStartSyncBlob {
+                    inner,
+                    control: self.control.clone(),
+                },
+                len,
+                version,
+            ))
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+            self.inner.remove(partition, name).await
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+            self.inner.scan(partition).await
+        }
+    }
+
+    impl<B: Blob> Blob for DelayedStartSyncBlob<B> {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            let control = self.control.clone();
+            let inner = self.inner.clone();
+            Handle::from_future(async move {
+                control.wait_released().await;
+                inner.start_sync().await.await?;
+                Ok(())
+            })
         }
     }
 }

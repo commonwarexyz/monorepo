@@ -9,7 +9,8 @@
 //!
 //! # Seal
 //!
-//! [Writer::seal] consumes the writer and turns it into an immutable [super::Sealed] view.
+//! [Writer::seal] consumes the writer and returns a [Seal] containing an immutable [super::Sealed]
+//! view plus the sync it starts ([super::Sealed] no longer exposes a sync method).
 //!
 //! # Paging
 //!
@@ -43,13 +44,18 @@ use crate::{
     buffer::{
         paged::{CacheRef, Checksum, Slot, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
         tip::Buffer,
-        SyncState,
     },
-    Blob, Error, IoBuf, IoBufMut, IoBufs,
+    utils::blob::SyncGate,
+    Blob, Error, Handle, IoBuf, IoBufMut, IoBufs,
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::{
+    future::Future,
+    num::{NonZeroU16, NonZeroUsize},
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tracing::warn;
 
 /// Adjusts a requested write-buffer `capacity` upward to the value the buffer actually uses,
@@ -94,8 +100,11 @@ const fn too_big_for_buffer(
 
 /// Unique writer to a cache-wrapped [Blob].
 pub struct Writer<B: Blob> {
-    /// The underlying blob being wrapped.
+    /// The underlying blob.
     blob: B,
+
+    /// Durability gate: drains any in-flight sync before the next mutation.
+    gate: SyncGate,
 
     /// The page where the next appended byte will be written to.
     current_page: u64,
@@ -103,9 +112,6 @@ pub struct Writer<B: Blob> {
     /// The state of the partial page in the blob. If it was written due to a sync call, then this
     /// will contain its CRC record.
     partial_page_state: Option<Checksum>,
-
-    /// Durability state for plain writes, resizes, and range-sync writes.
-    sync_state: SyncState,
 
     /// Unique id assigned to this blob by the page cache.
     id: u64,
@@ -118,10 +124,51 @@ pub struct Writer<B: Blob> {
     buffer: Buffer,
 }
 
+/// Result of sealing a [Writer].
+#[must_use = "seal starts a sync; await or store the returned sync handle"]
+pub struct Seal<B: Blob> {
+    sealed: super::Sealed<B>,
+    sync: SealSync,
+}
+
+impl<B: Blob> Seal<B> {
+    /// Split the sealed read handle from the sync completion handle.
+    pub fn into_parts(self) -> (super::Sealed<B>, SealSync) {
+        (self.sealed, self.sync)
+    }
+
+    /// Await the sync completion and return the sealed read handle.
+    pub async fn into_synced(self) -> Result<super::Sealed<B>, Error> {
+        self.sync.await?;
+        Ok(self.sealed)
+    }
+}
+
+/// Completion handle for the sync started by [Writer::seal].
+#[must_use = "seal sync must be awaited or stored"]
+pub struct SealSync {
+    handle: Handle<()>,
+}
+
+impl SealSync {
+    /// Stop waiting for this sync result.
+    pub fn abort(&self) {
+        self.handle.abort();
+    }
+}
+
+impl Future for SealSync {
+    type Output = Result<(), Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.handle).poll(cx)
+    }
+}
+
 impl<B: Blob> Writer<B> {
-    /// Write bytes to the underlying blob and mark them as needing sync.
+    /// Write bytes to the underlying blob.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.sync_state.write_at(&self.blob, offset, bufs).await
+        self.gate.write_at(&self.blob, offset, bufs).await
     }
 
     /// Write bytes to the underlying blob and make them durable.
@@ -133,9 +180,7 @@ impl<B: Blob> Writer<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.sync_state
-            .write_at_sync(&self.blob, offset, bufs)
-            .await
+        self.gate.write_at_sync(&self.blob, offset, bufs).await
     }
 
     /// Write bytes to the underlying blob, optionally making them durable.
@@ -150,11 +195,6 @@ impl<B: Blob> Writer<B> {
         } else {
             self.write_at(offset, bufs).await
         }
-    }
-
-    /// Sync the underlying blob if there are unsynced mutations.
-    async fn sync_inner(&mut self) -> Result<(), Error> {
-        self.sync_state.sync(&self.blob).await
     }
 
     /// Wrap `blob` in a [Writer]. `blob` must already hold `original_blob_size` physical bytes;
@@ -180,7 +220,6 @@ impl<B: Blob> Writer<B> {
         }
 
         let capacity = adjusted_capacity(capacity, cache_ref.page_size());
-        let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
 
         let (current_page, partial_page_state, partial_data) = match partial_page_state {
             Some((partial_page, crc_record)) => (pages - 1, Some(crc_record), Some(partial_page)),
@@ -196,9 +235,9 @@ impl<B: Blob> Writer<B> {
 
         Ok(Self {
             blob,
+            gate: SyncGate::new(!invalid_data_found), // ensure pending writes on the wrapped blob are synced
             current_page,
             partial_page_state,
-            sync_state: SyncState::new(needs_sync),
             id: cache_ref.next_id(),
             cache_ref,
             buffer,
@@ -903,8 +942,7 @@ impl<B: Blob> Writer<B> {
     /// writer.
     ///
     /// This writes buffered bytes to the blob layout but does not make them durable. Call
-    /// [`Self::sync`] or [`super::Sealed::sync`] if the returned handle's bytes must survive a
-    /// crash.
+    /// [`Self::sync`] before sealing if the returned handle's bytes must survive a crash.
     ///
     /// If this writer later rewinds or truncates into the returned handle's range, reads from that
     /// handle may observe unspecified contents.
@@ -925,9 +963,18 @@ impl<B: Blob> Writer<B> {
             return Ok(());
         }
 
-        // Otherwise, the flush either had no bytes to write or used plain writes. Sync only if a
-        // durability barrier is still pending.
-        self.sync_inner().await
+        // Otherwise, the flush either had no bytes to write or used plain writes. The gate waits
+        // for in-flight work, syncs dirty work, or no-ops if clean.
+        self.gate.sync(&self.blob).await
+    }
+
+    /// Flushes buffered data and begins making all pending mutations durable. Awaiting the returned
+    /// [`Handle`] waits for the same durability guarantee as [`Self::sync`].
+    pub async fn start_sync(&mut self) -> Handle<()> {
+        if let Err(err) = self.flush_internal(true, false).await {
+            return Handle::ready(Err(err));
+        }
+        self.gate.start_sync(&self.blob).await
     }
 
     /// Resize the blob to the provided logical `size`.
@@ -994,8 +1041,7 @@ impl<B: Blob> Writer<B> {
         // A logical shrink can leave the physical page count unchanged. Only real physical
         // resizes need to create a pending sync.
         if new_physical_size != current_physical_size {
-            self.blob.resize(new_physical_size).await?;
-            self.sync_state.mark_unsynced();
+            self.gate.resize(&self.blob, new_physical_size).await?;
         }
 
         // Evict cached pages at or beyond the new full-page boundary. The page at
@@ -1090,15 +1136,15 @@ impl<B: Blob> Writer<B> {
         )
     }
 
-    /// Consume the write handle and return an immutable [`super::Sealed`] handle for the same
-    /// blob.
-    ///
-    /// Buffered bytes (full and partial pages) are written to the underlying blob, but the blob is
-    /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
-    /// [`super::Sealed::sync`].
-    pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
+    /// Consume the write handle, begin making its current bytes durable, and return an immutable
+    /// [`super::Sealed`] handle plus the completion handle for that sync.
+    pub async fn seal(mut self) -> Result<Seal<B>, Error> {
         self.flush_internal(true, false).await?;
-        Ok(self.sealed_handle(self.id))
+        let handle = self.gate.start_sync(&self.blob).await;
+        Ok(Seal {
+            sealed: self.sealed_handle(self.id),
+            sync: SealSync { handle },
+        })
     }
 }
 
@@ -1106,8 +1152,11 @@ impl<B: Blob> Writer<B> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
-        deterministic,
+        buffer::{
+            paged::CHECKSUM_SLOT_LEN_SIZE,
+            tests::{DelayedStartSyncBlob, SyncTrackingBlob},
+        },
+        deterministic, reschedule,
         telemetry::metrics::Registry,
         Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
@@ -1177,6 +1226,114 @@ mod tests {
                     &data[off as usize..off as usize + 4],
                 );
             }
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_start_sync_durability() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"ssync").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..200u8).collect();
+            writer.append(&data).await.unwrap();
+
+            writer.start_sync().await.await.unwrap();
+            let size = writer.size();
+            drop(writer);
+
+            let (blob, blob_size) = context.open("test_partition", b"ssync").await.unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), size);
+            let offsets: Vec<u64> = (0..data.len() as u64).step_by(4).collect();
+            let mut buf = vec![0u8; offsets.len() * 4];
+            reopened
+                .read_many_into(&mut buf, &offsets, NZUsize!(4))
+                .await
+                .unwrap();
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &buf[i * 4..i * 4 + 4],
+                    &data[off as usize..off as usize + 4]
+                );
+            }
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_start_sync_clears_pending_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            writer.append(b"abc").await.unwrap();
+            writer.start_sync().await.await.unwrap();
+
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            writer.sync().await.unwrap();
+            writer.start_sync().await.await.unwrap();
+
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_sync_waits_for_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = DelayedStartSyncBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            writer.append(b"abc").await.unwrap();
+            let handle = writer.start_sync().await;
+            assert_eq!(blob.starts(), 1);
+
+            let sync = context.child("sync").spawn(|_| async move {
+                writer.sync().await.unwrap();
+                writer
+            });
+
+            while blob.start_waits() == 0 {
+                reschedule().await;
+            }
+
+            assert_eq!(blob.starts(), 1);
+            let (_, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(full_syncs, 0);
+
+            blob.release();
+            let mut writer = sync.await.unwrap();
+            handle.await.unwrap();
+
+            assert_eq!(blob.start_completions(), 1);
+            let (_, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(full_syncs, 1);
+
+            writer.start_sync().await.await.unwrap();
+            assert_eq!(blob.starts(), 1);
+            writer.sync().await.unwrap();
+            let (_, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(full_syncs, 1);
         });
     }
 
@@ -2463,7 +2620,9 @@ mod tests {
                     .write_at(offset, bytes.slice(..partial_len))
                     .await?;
                 self.inner.sync().await?;
-                return Err(Error::Io(std::io::Error::other("injected partial write")));
+                return Err(Error::Io(
+                    std::io::Error::other("injected partial write").into(),
+                ));
             }
 
             self.inner.write_at(offset, bufs).await
@@ -2483,7 +2642,9 @@ mod tests {
                 self.inner
                     .write_at_sync(offset, bytes.slice(..partial_len))
                     .await?;
-                return Err(Error::Io(std::io::Error::other("injected partial write")));
+                return Err(Error::Io(
+                    std::io::Error::other("injected partial write").into(),
+                ));
             }
 
             self.inner.write_at_sync(offset, bufs).await

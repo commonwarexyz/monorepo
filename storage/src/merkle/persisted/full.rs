@@ -574,9 +574,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         futures::future::try_join_all(futs).await
     }
 
-    /// Flush all nodes cached in the in-memory structure to the journal without forcing them to
-    /// disk. Flushed nodes are pruned from the in-memory structure and remain readable through the
-    /// journal, but they are not guaranteed to survive a crash until [Self::sync] is called.
+    /// Flush all nodes cached in the in-memory structure to the journal without waiting for
+    /// durability. Flushed nodes are pruned from the in-memory structure and remain readable through
+    /// the journal, but callers must use [Self::sync] if those nodes must survive a crash.
     pub async fn flush(&mut self) -> Result<(), Error<F>> {
         self.flush_internal().await
     }
@@ -1369,20 +1369,23 @@ mod tests {
         executor.start(full_flush_inner::<mmb::Family>);
     }
 
-    /// Flushed-but-unsynced nodes are lost on a crash, while synced nodes survive: the durability
-    /// barrier comes from `sync`, not `flush`.
+    /// Tail-only flushed-but-unsynced nodes are lost on a crash, while synced nodes survive: the
+    /// durability barrier comes from `sync`, not `flush`.
     fn full_flush_crash_inner<F: Family>() {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
-        // Phase 1: durably sync a first batch of leaves, flush (but don't sync) a second batch,
-        // then simulate an unclean shutdown.
+        // Phase 1: durably sync a first batch of leaves, flush (but don't sync) a second batch into
+        // the tail blob, then simulate an unclean shutdown.
         let executor = deterministic::Runner::default();
         let (synced_size, checkpoint) = executor.start_and_recover(|context| async move {
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("first"),
                 &hasher,
-                test_config(&context),
+                Config {
+                    items_per_blob: NZU64!(512),
+                    ..test_config(&context)
+                },
             )
             .await
             .unwrap();
@@ -1414,7 +1417,10 @@ mod tests {
             let mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("second"),
                 &hasher,
-                test_config(&context),
+                Config {
+                    items_per_blob: NZU64!(512),
+                    ..test_config(&context)
+                },
             )
             .await
             .unwrap();
