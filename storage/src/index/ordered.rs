@@ -5,10 +5,7 @@
 //! applies only to the _translated_ key space.
 
 use crate::{
-    index::{
-        storage::{push_displaced, Cursor as CursorImpl, IndexEntry, Overflow, Values},
-        Cursor as CursorTrait, Ordered, Unordered,
-    },
+    index::{storage::RunCursor, Ordered, OrderedReadable, Readable, Snapshottable, Unordered},
     translator::Translator,
 };
 use commonware_runtime::{
@@ -16,132 +13,393 @@ use commonware_runtime::{
     Metrics,
 };
 use std::{
-    collections::{
-        btree_map::{
-            Entry as BTreeEntry, OccupiedEntry as BTreeOccupiedEntry,
-            VacantEntry as BTreeVacantEntry,
-        },
-        BTreeMap, HashMap,
-    },
+    collections::BTreeMap,
     ops::Bound::{Excluded, Unbounded},
+    sync::Arc,
 };
 
-/// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
-impl<K: Ord + Send + Sync, V: Send + Sync> IndexEntry<V> for BTreeOccupiedEntry<'_, K, V> {
-    type Key = K;
-
-    fn key(&self) -> &K {
-        BTreeOccupiedEntry::key(self)
-    }
-
-    fn get_mut(&mut self) -> &mut V {
-        self.get_mut()
-    }
-
-    fn remove(self) {
-        self.remove_entry();
-    }
-}
-
 /// A [crate::index::Cursor] over the values associated with a translated key.
-pub type Cursor<'a, K, V, S> = CursorImpl<'a, K, V, BTreeOccupiedEntry<'a, K, V>, S>;
+pub type Cursor<'a, V> = RunCursor<'a, V>;
 
-/// A memory-efficient index that uses an ordered map internally to map translated keys to arbitrary
+/// A memory-efficient index that uses ordered maps internally to map translated keys to arbitrary
 /// values.
 ///
-/// Each translated key maps directly to its most recently inserted value. Conflicting values (from
-/// key collisions or repeated insertions) live in a separate overflow map, keeping the common
-/// (collision-free) case compact.
+/// Snapshots use sparse run-level overlays, so the first mutation of a key after a snapshot clones
+/// only that key's visible value run.
 pub struct Index<T: Translator, V: Send + Sync> {
     translator: T,
-    map: BTreeMap<T::Key, V>,
-    overflow: Overflow<T::Key, V, T>,
+    base: Arc<BTreeMap<T::Key, Vec<V>>>,
+    sealed: Arc<Epoch<T::Key, V>>,
+    head: Overlay<T::Key, V>,
 
     keys: Gauge,
     items: Gauge,
     pruned: Counter,
 }
 
-impl<T: Translator, V: Send + Sync> Index<T, V> {
-    /// Create a new entry in the index.
-    fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<'_, T::Key, V>, v: V) {
-        keys.inc();
-        items.inc();
-        vacant.insert(v);
+/// Read-only snapshot of an ordered index.
+#[derive(Clone)]
+pub struct Snapshot<T: Translator, V: Send + Sync> {
+    translator: T,
+    base: Arc<BTreeMap<T::Key, Vec<V>>>,
+    sealed: Arc<Epoch<T::Key, V>>,
+}
+
+struct Overlay<K, V> {
+    runs: BTreeMap<K, Vec<V>>,
+}
+
+impl<K, V> Default for Overlay<K, V> {
+    fn default() -> Self {
+        Self {
+            runs: BTreeMap::new(),
+        }
+    }
+}
+
+struct Epoch<K, V> {
+    parent: Option<Arc<Self>>,
+    overlay: Overlay<K, V>,
+    depth: u16,
+    changed_runs: usize,
+}
+
+const MAX_EPOCH_DEPTH: u16 = 8;
+
+impl<K: Ord + Copy, V> Overlay<K, V> {
+    fn is_empty(&self) -> bool {
+        self.runs.is_empty()
     }
 
+    fn changed_runs(&self) -> usize {
+        self.runs.len()
+    }
+
+    fn run(&self, key: &K) -> Option<&[V]> {
+        self.runs.get(key).map(Vec::as_slice)
+    }
+
+    fn next_key(&self, after: Option<K>) -> Option<K> {
+        after.map_or_else(
+            || self.runs.first_key_value().map(|(key, _)| *key),
+            |key| {
+                self.runs
+                    .range((Excluded(key), Unbounded))
+                    .next()
+                    .map(|(key, _)| *key)
+            },
+        )
+    }
+
+    fn prev_key(&self, before: Option<K>) -> Option<K> {
+        before.map_or_else(
+            || self.runs.last_key_value().map(|(key, _)| *key),
+            |key| self.runs.range(..key).next_back().map(|(key, _)| *key),
+        )
+    }
+
+    fn apply_to(&self, runs: &mut BTreeMap<K, Vec<V>>)
+    where
+        V: Clone,
+    {
+        for (key, values) in &self.runs {
+            // Empty runs are tombstones that mask older/base values.
+            if values.is_empty() {
+                runs.remove(key);
+            } else {
+                runs.insert(*key, values.clone());
+            }
+        }
+    }
+}
+
+impl<K: Ord + Copy, V> Epoch<K, V> {
+    fn empty() -> Self {
+        Self {
+            parent: None,
+            overlay: Overlay::default(),
+            depth: 0,
+            changed_runs: 0,
+        }
+    }
+
+    fn run(&self, key: &K) -> Option<&[V]> {
+        self.overlay
+            .run(key)
+            .or_else(|| self.parent.as_deref().and_then(|parent| parent.run(key)))
+    }
+
+    fn parent_changed_runs(parent: &Option<Arc<Self>>) -> usize {
+        parent.as_ref().map_or(0, |parent| parent.changed_runs)
+    }
+
+    fn next_key(&self, after: Option<K>) -> Option<K> {
+        let parent = self
+            .parent
+            .as_deref()
+            .and_then(|parent| parent.next_key(after));
+        next_candidate(after, [self.overlay.next_key(after), parent])
+    }
+
+    fn prev_key(&self, before: Option<K>) -> Option<K> {
+        let parent = self
+            .parent
+            .as_deref()
+            .and_then(|parent| parent.prev_key(before));
+        prev_candidate(before, [self.overlay.prev_key(before), parent])
+    }
+
+    fn apply_to(&self, runs: &mut BTreeMap<K, Vec<V>>)
+    where
+        V: Clone,
+    {
+        // Apply oldest to newest so later overlays win.
+        if let Some(parent) = &self.parent {
+            parent.apply_to(runs);
+        }
+        self.overlay.apply_to(runs);
+    }
+}
+
+fn base_next_key<K: Ord + Copy, V>(base: &BTreeMap<K, Vec<V>>, after: Option<K>) -> Option<K> {
+    after.map_or_else(
+        || base.first_key_value().map(|(key, _)| *key),
+        |key| {
+            base.range((Excluded(key), Unbounded))
+                .next()
+                .map(|(key, _)| *key)
+        },
+    )
+}
+
+fn base_prev_key<K: Ord + Copy, V>(base: &BTreeMap<K, Vec<V>>, before: Option<K>) -> Option<K> {
+    before.map_or_else(
+        || base.last_key_value().map(|(key, _)| *key),
+        |key| base.range(..key).next_back().map(|(key, _)| *key),
+    )
+}
+
+fn next_candidate<K: Ord + Copy>(
+    after: Option<K>,
+    candidates: impl IntoIterator<Item = Option<K>>,
+) -> Option<K> {
+    candidates
+        .into_iter()
+        .flatten()
+        .filter(|candidate| after.is_none_or(|after| *candidate > after))
+        .min()
+}
+
+fn prev_candidate<K: Ord + Copy>(
+    before: Option<K>,
+    candidates: impl IntoIterator<Item = Option<K>>,
+) -> Option<K> {
+    candidates
+        .into_iter()
+        .flatten()
+        .filter(|candidate| before.is_none_or(|before| *candidate < before))
+        .max()
+}
+
+impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// Create a new [Index] with the given translator and metrics registry.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         Self {
-            overflow: HashMap::with_hasher(translator.clone()),
             translator,
-            map: BTreeMap::new(),
+            base: Arc::new(BTreeMap::new()),
+            sealed: Arc::new(Epoch::empty()),
+            head: Overlay::default(),
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
             pruned: ctx.counter("pruned", "Number of items pruned"),
         }
     }
 
-    /// Returns an iterator over the values associated with the translated key `k`, given that
-    /// key's inline (head) value.
-    fn values<'a>(&'a self, k: &T::Key, head: &'a V) -> Values<'a, T::Key, V, T> {
-        Values::new(Some(head), &self.overflow, *k)
-    }
-
-    /// Translate a key without probing.
-    pub(super) fn translate(&self, key: &[u8]) -> T::Key {
-        self.translator.transform(key)
-    }
-
     /// Returns an iterator over all values associated with an already-translated key.
-    pub(super) fn get_translated(&self, key: T::Key) -> Values<'_, T::Key, V, T> {
-        Values::new(self.map.get(&key), &self.overflow, key)
+    pub(super) fn get_translated(&self, key: T::Key) -> std::slice::Iter<'_, V> {
+        self.run(&key).iter()
+    }
+
+    fn run(&self, key: &T::Key) -> &[V] {
+        self.head
+            .run(key)
+            .or_else(|| self.sealed.run(key))
+            .unwrap_or_else(|| self.base.get(key).map_or(&[], Vec::as_slice))
+    }
+
+    fn next_key(&self, after: Option<T::Key>) -> Option<T::Key> {
+        next_candidate(
+            after,
+            [
+                self.head.next_key(after),
+                self.sealed.next_key(after),
+                base_next_key(&self.base, after),
+            ],
+        )
+    }
+
+    fn prev_key(&self, before: Option<T::Key>) -> Option<T::Key> {
+        prev_candidate(
+            before,
+            [
+                self.head.prev_key(before),
+                self.sealed.prev_key(before),
+                base_prev_key(&self.base, before),
+            ],
+        )
     }
 
     /// Returns an iterator over the values of the translated key that lexicographically follows
-    /// `key`, or None if no such key exists (no cycling).
-    pub(super) fn next_translated_values_no_cycle(
-        &self,
-        key: &[u8],
-    ) -> Option<Values<'_, T::Key, V, T>> {
-        let k = self.translator.transform(key);
-        self.map
-            .range((Excluded(k), Unbounded))
-            .next()
-            .map(|(k, head)| self.values(k, head))
+    /// `after`, or None if no such key exists.
+    fn next_values(&self, after: Option<T::Key>) -> Option<std::slice::Iter<'_, V>> {
+        let mut after = after;
+        while let Some(candidate) = self.next_key(after) {
+            let values = self.run(&candidate);
+            // Overlay keys can be tombstones, so skip empty visible runs.
+            if !values.is_empty() {
+                return Some(values.iter());
+            }
+            after = Some(candidate);
+        }
+        None
     }
 
     /// Returns an iterator over the values of the translated key that lexicographically precedes
-    /// `key`, or None if no such key exists (no cycling).
-    pub(super) fn prev_translated_values_no_cycle(
-        &self,
-        key: &[u8],
-    ) -> Option<Values<'_, T::Key, V, T>> {
-        let k = self.translator.transform(key);
-        self.map
-            .range(..k)
-            .next_back()
-            .map(|(k, head)| self.values(k, head))
-    }
-
-    /// Returns an iterator over the values of the lexicographically first translated key, or
-    /// None if the index is empty.
-    pub(super) fn first_translated_values(&self) -> Option<Values<'_, T::Key, V, T>> {
-        self.map
-            .first_key_value()
-            .map(|(k, head)| self.values(k, head))
-    }
-
-    /// Returns an iterator over the values of the lexicographically last translated key, or
-    /// None if the index is empty.
-    pub(super) fn last_translated_values(&self) -> Option<Values<'_, T::Key, V, T>> {
-        self.map
-            .last_key_value()
-            .map(|(k, head)| self.values(k, head))
+    /// `before`, or None if no such key exists.
+    fn prev_values(&self, before: Option<T::Key>) -> Option<std::slice::Iter<'_, V>> {
+        let mut before = before;
+        while let Some(candidate) = self.prev_key(before) {
+            let values = self.run(&candidate);
+            if !values.is_empty() {
+                return Some(values.iter());
+            }
+            before = Some(candidate);
+        }
+        None
     }
 }
 
-impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
+impl<T: Translator, V: Clone + Send + Sync> Index<T, V> {
+    fn ensure_run(&mut self, key: T::Key) -> &mut Vec<V> {
+        if self.head.runs.contains_key(&key) {
+            return self.head.runs.get_mut(&key).unwrap();
+        }
+
+        // First mutation after a snapshot clones the visible run.
+        let run = self
+            .sealed
+            .run(&key)
+            .unwrap_or_else(|| self.base.get(&key).map_or(&[], Vec::as_slice))
+            .to_vec();
+        self.head.runs.entry(key).or_insert(run)
+    }
+
+    /// Returns whether sealed overlays should be merged into the base soon.
+    pub fn needs_compaction(&self) -> bool {
+        self.sealed.depth >= MAX_EPOCH_DEPTH
+            || self.sealed.changed_runs >= (self.keys.get() as usize).max(1)
+    }
+
+    /// Merge sealed overlays and the live head into a new base.
+    pub fn compact(&mut self) {
+        let mut runs = self.base.as_ref().clone();
+        self.sealed.apply_to(&mut runs);
+        self.head.apply_to(&mut runs);
+        self.base = Arc::new(runs);
+        self.sealed = Arc::new(Epoch::empty());
+        self.head = Overlay::default();
+    }
+}
+
+impl<T: Translator, V: Send + Sync> Snapshot<T, V> {
+    fn run(&self, key: &T::Key) -> &[V] {
+        self.sealed
+            .run(key)
+            .unwrap_or_else(|| self.base.get(key).map_or(&[], Vec::as_slice))
+    }
+
+    fn get_translated(&self, key: T::Key) -> std::slice::Iter<'_, V> {
+        self.run(&key).iter()
+    }
+
+    fn next_key(&self, after: Option<T::Key>) -> Option<T::Key> {
+        next_candidate(
+            after,
+            [
+                self.sealed.next_key(after),
+                base_next_key(&self.base, after),
+            ],
+        )
+    }
+
+    fn prev_key(&self, before: Option<T::Key>) -> Option<T::Key> {
+        prev_candidate(
+            before,
+            [
+                self.sealed.prev_key(before),
+                base_prev_key(&self.base, before),
+            ],
+        )
+    }
+
+    /// Returns an iterator over the values of the translated key that lexicographically follows
+    /// `after`, or None if no such key exists.
+    fn next_values(&self, after: Option<T::Key>) -> Option<std::slice::Iter<'_, V>> {
+        let mut after = after;
+        while let Some(candidate) = self.next_key(after) {
+            let values = self.run(&candidate);
+            if !values.is_empty() {
+                return Some(values.iter());
+            }
+            after = Some(candidate);
+        }
+        None
+    }
+
+    /// Returns an iterator over the values of the translated key that lexicographically precedes
+    /// `before`, or None if no such key exists.
+    fn prev_values(&self, before: Option<T::Key>) -> Option<std::slice::Iter<'_, V>> {
+        let mut before = before;
+        while let Some(candidate) = self.prev_key(before) {
+            let values = self.run(&candidate);
+            if !values.is_empty() {
+                return Some(values.iter());
+            }
+            before = Some(candidate);
+        }
+        None
+    }
+}
+
+impl<T: Translator, V: Send + Sync> Readable for Snapshot<T, V> {
+    type Value = V;
+
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + Send + 'a
+    where
+        V: 'a,
+    {
+        self.get_translated(self.translator.transform(key))
+    }
+
+    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
+    where
+        V: 'a,
+    {
+        let mut order: Vec<(T::Key, usize)> = keys
+            .iter()
+            .enumerate()
+            .map(|(key_idx, key)| (self.translator.transform(key.as_ref()), key_idx))
+            .collect();
+        order.sort_unstable();
+        for (translated, key_idx) in order {
+            for value in self.get_translated(translated) {
+                visit(key_idx, value);
+            }
+        }
+    }
+}
+
+impl<T: Translator, V: Send + Sync> OrderedReadable for Snapshot<T, V> {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
@@ -149,10 +407,11 @@ impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
     where
         V: 'a,
     {
-        if let Some(values) = self.prev_translated_values_no_cycle(key) {
+        let k = self.translator.transform(key);
+        if let Some(values) = self.prev_values(Some(k)) {
             return Some((values, false));
         }
-        self.last_translated_values().map(|values| (values, true))
+        self.prev_values(None).map(|values| (values, true))
     }
 
     fn next_translated_key<'a>(
@@ -162,34 +421,103 @@ impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
     where
         V: 'a,
     {
-        if let Some(values) = self.next_translated_values_no_cycle(key) {
+        let k = self.translator.transform(key);
+        if let Some(values) = self.next_values(Some(k)) {
             return Some((values, false));
         }
-        self.first_translated_values().map(|values| (values, true))
+        self.next_values(None).map(|values| (values, true))
     }
 
     fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
         V: 'a,
     {
-        self.first_translated_values()
+        self.next_values(None)
     }
 
     fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
         V: 'a,
     {
-        self.last_translated_values()
+        self.prev_values(None)
     }
 }
 
-impl<T: Translator, V: Send + Sync> super::Factory<T> for Index<T, V> {
+impl<T: Translator, V: Clone + Send + Sync + 'static> Snapshottable for Index<T, V> {
+    type Value = V;
+    type Snapshot = Snapshot<T, V>;
+
+    fn snapshot(&mut self) -> Self::Snapshot {
+        if !self.head.is_empty() {
+            // Avoid linking the empty root epoch.
+            let parent = (self.sealed.depth > 0).then(|| Arc::clone(&self.sealed));
+            let overlay = std::mem::take(&mut self.head);
+            self.sealed = Arc::new(Epoch {
+                changed_runs: Epoch::parent_changed_runs(&parent) + overlay.changed_runs(),
+                depth: self.sealed.depth + 1,
+                parent,
+                overlay,
+            });
+        }
+        Snapshot {
+            translator: self.translator.clone(),
+            base: Arc::clone(&self.base),
+            sealed: Arc::clone(&self.sealed),
+        }
+    }
+}
+
+impl<T: Translator, V: Clone + Send + Sync> Ordered for Index<T, V> {
+    fn prev_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
+    where
+        V: 'a,
+    {
+        let k = self.translator.transform(key);
+        if let Some(values) = self.prev_values(Some(k)) {
+            return Some((values, false));
+        }
+        self.prev_values(None).map(|values| (values, true))
+    }
+
+    fn next_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
+    where
+        V: 'a,
+    {
+        let k = self.translator.transform(key);
+        if let Some(values) = self.next_values(Some(k)) {
+            return Some((values, false));
+        }
+        self.next_values(None).map(|values| (values, true))
+    }
+
+    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
+    where
+        V: 'a,
+    {
+        self.next_values(None)
+    }
+
+    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
+    where
+        V: 'a,
+    {
+        self.prev_values(None)
+    }
+}
+
+impl<T: Translator, V: Clone + Send + Sync> super::Factory<T> for Index<T, V> {
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }
 }
 
-impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
+impl<T: Translator, V: Clone + Send + Sync> Unordered for Index<T, V> {
     type Value = V;
 
     fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
@@ -211,7 +539,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         }
     }
     type Cursor<'a>
-        = Cursor<'a, T::Key, V, T>
+        = Cursor<'a, V>
     where
         Self: 'a;
 
@@ -224,127 +552,86 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
 
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
-        match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T::Key, V, T>::new(
-                entry,
-                &mut self.overflow,
-                &self.keys,
-                &self.items,
-                &self.pruned,
-            )),
-            BTreeEntry::Vacant(_) => None,
+        if self.run(&k).is_empty() {
+            return None;
         }
+        let keys = self.keys.clone();
+        let items = self.items.clone();
+        let pruned = self.pruned.clone();
+        Some(RunCursor::new(self.ensure_run(k), keys, items, pruned))
     }
 
     fn get_mut_or_insert<'a>(&'a mut self, key: &[u8], value: V) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
-        match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T::Key, V, T>::new(
-                entry,
-                &mut self.overflow,
-                &self.keys,
-                &self.items,
-                &self.pruned,
-            )),
-            BTreeEntry::Vacant(entry) => {
-                Self::create(&self.keys, &self.items, entry, value);
-                None
-            }
+        if !self.run(&k).is_empty() {
+            let keys = self.keys.clone();
+            let items = self.items.clone();
+            let pruned = self.pruned.clone();
+            return Some(RunCursor::new(self.ensure_run(k), keys, items, pruned));
         }
+        self.ensure_run(k).push(value);
+        self.keys.inc();
+        self.items.inc();
+        None
     }
 
     fn insert(&mut self, key: &[u8], value: V) {
         let k = self.translator.transform(key);
-        match self.map.entry(k) {
-            BTreeEntry::Occupied(mut entry) => {
-                // The newest value is stored inline; the displaced value joins the end of the
-                // overflow chain.
-                let old = std::mem::replace(entry.get_mut(), value);
-                push_displaced(&mut self.overflow, k, old);
-                self.items.inc();
-            }
-            BTreeEntry::Vacant(entry) => {
-                Self::create(&self.keys, &self.items, entry, value);
-            }
+        let run = self.ensure_run(k);
+        let new_key = run.is_empty();
+        run.insert(0, value);
+        self.items.inc();
+        if new_key {
+            self.keys.inc();
         }
     }
 
     fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
-        match self.map.entry(k) {
-            BTreeEntry::Occupied(mut entry) => {
-                // Optimized fast path for the common case of no overflow chain.
-                #[allow(clippy::map_entry)]
-                if !self.overflow.contains_key(&k) {
-                    match (should_retain(entry.get()), should_retain(&value)) {
-                        // Keep both, with the new value placed at the end of the overflow chain.
-                        (true, true) => {
-                            self.overflow.insert(k, vec![value]);
-                            self.items.inc();
-                        }
-                        // Drop the existing value, keep the new one: replace in place.
-                        (false, true) => {
-                            *entry.get_mut() = value;
-                            self.pruned.inc();
-                        }
-                        // Drop both: remove the key entirely.
-                        (false, false) => {
-                            entry.remove();
-                            self.keys.dec();
-                            self.items.dec();
-                            self.pruned.inc();
-                        }
-                        // Keep the existing value, drop the new one: nothing to do.
-                        (true, false) => {}
-                    }
-                    return;
-                }
-
-                // Slow path: the key has conflicting values; walk them with a cursor.
-                let mut cursor = Cursor::<'_, T::Key, V, T>::new(
-                    entry,
-                    &mut self.overflow,
-                    &self.keys,
-                    &self.items,
-                    &self.pruned,
-                );
-
-                // Drop anything that should not be retained.
-                cursor.retain(&should_retain);
-
-                // Add the new value only if it should be retained.
-                if should_retain(&value) {
-                    cursor.insert(value);
-                }
+        let had_key = !self.run(&k).is_empty();
+        let retain_new = should_retain(&value);
+        let (pruned, created, emptied) = {
+            let run = self.ensure_run(k);
+            let before = run.len();
+            run.retain(&should_retain);
+            let pruned = before - run.len();
+            let created = retain_new && !had_key && run.is_empty();
+            if retain_new {
+                run.push(value);
             }
-            BTreeEntry::Vacant(entry) => {
-                // Create the entry only if the value should be retained.
-                if should_retain(&value) {
-                    Self::create(&self.keys, &self.items, entry, value);
-                }
+            let emptied = !retain_new && had_key && run.is_empty();
+            (pruned, created, emptied)
+        };
+        if pruned > 0 {
+            self.items.dec_by(pruned as i64);
+            self.pruned.inc_by(pruned as u64);
+        }
+        if retain_new {
+            if created {
+                self.keys.inc();
             }
+            self.items.inc();
+        } else if emptied {
+            self.keys.dec();
         }
     }
 
     fn remove(&mut self, key: &[u8]) {
         let k = self.translator.transform(key);
-        if self.map.remove(&k).is_some() {
-            // To ensure metrics are accurate, account for all conflicting values in the chain.
-            self.keys.dec();
-            self.items.dec();
-            self.pruned.inc();
-            if !self.overflow.is_empty() {
-                if let Some(chain) = self.overflow.remove(&k) {
-                    self.items.dec_by(chain.len() as i64);
-                    self.pruned.inc_by(chain.len() as u64);
-                }
-            }
+        if self.run(&k).is_empty() {
+            return;
         }
+        let run = self.ensure_run(k);
+        let n = run.len();
+        run.clear();
+        self.keys.dec();
+        self.items.dec_by(n as i64);
+        self.pruned.inc_by(n as u64);
     }
 
     #[cfg(test)]
     fn keys(&self) -> usize {
-        self.map.len()
+        self.keys.get() as usize
     }
 
     #[cfg(test)]
@@ -365,6 +652,20 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
+
+    impl<T: Translator, V: Clone + Send + Sync> Index<T, V> {
+        pub(crate) fn epoch_depth(&self) -> u16 {
+            self.sealed.depth
+        }
+
+        pub(crate) fn changed_runs(&self) -> usize {
+            self.sealed.changed_runs
+        }
+
+        pub(crate) fn head_changed_runs(&self) -> usize {
+            self.head.changed_runs()
+        }
+    }
 
     #[test_traced]
     fn test_ordered_empty_index() {

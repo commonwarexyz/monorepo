@@ -5,6 +5,7 @@ use commonware_runtime::{
 };
 use criterion::criterion_main;
 
+mod grinding;
 mod hashmap_insert;
 mod hashmap_insert_fixed;
 mod hashmap_iteration;
@@ -12,6 +13,7 @@ mod insert;
 mod insert_and_retain;
 mod lookup;
 mod lookup_miss;
+mod snapshot;
 
 pub(crate) type Digest = <Sha256 as Hasher>::Digest;
 
@@ -48,6 +50,7 @@ impl Metrics for DummyMetrics {
 }
 
 criterion_main!(
+    grinding::benches,
     hashmap_iteration::benches,
     hashmap_insert_fixed::benches,
     hashmap_insert::benches,
@@ -55,4 +58,5 @@ criterion_main!(
     insert_and_retain::benches,
     lookup::benches,
     lookup_miss::benches,
+    snapshot::benches,
 );

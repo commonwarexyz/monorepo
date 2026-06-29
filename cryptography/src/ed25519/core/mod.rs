@@ -11,11 +11,15 @@
 //! - Adapted code to `commonware`'s clippy rules.
 //! - The batch verifier accepts pre-decompressed [`VerificationKey`] values and reuses their
 //!   cached point decompression state.
+//! - Replaced `Scalar::from_hash` with [`Scalar::from_bytes_mod_order_wide`] to use `sha2` 0.11.
 //!
 //! [`ed25519_consensus`]: https://crates.io/crates/ed25519-consensus
 //! [`ed25519_zebra`]: https://crates.io/crates/ed25519-zebra
 //! [`curve25519_dalek_ng`]: https://crates.io/crates/curve25519-dalek-ng
 //! [`Scalar::from_bytes_mod_order`]: curve25519_dalek::scalar::Scalar::from_bytes_mod_order
+
+use curve25519_dalek::scalar::Scalar;
+use sha2::{Digest, Sha512};
 
 pub mod batch;
 mod error;
@@ -27,3 +31,8 @@ pub use error::Error;
 pub use signature::Signature;
 pub use signing_key::SigningKey;
 pub use verification_key::{VerificationKey, VerificationKeyBytes};
+
+/// Reduce a SHA-512 digest to a scalar modulo the group order.
+fn scalar_from_hash(h: Sha512) -> Scalar {
+    Scalar::from_bytes_mod_order_wide(&h.finalize().into())
+}
