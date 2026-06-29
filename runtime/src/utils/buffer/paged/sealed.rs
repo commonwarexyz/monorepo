@@ -892,10 +892,9 @@ mod tests {
             }
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
-            let mut recovered =
-                Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
-                    .await
-                    .unwrap();
+            let mut recovered = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
             assert_eq!(recovered.size(), data.len() as u64);
 
             recovered.sync().await.unwrap();
