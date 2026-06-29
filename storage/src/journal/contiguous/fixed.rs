@@ -98,13 +98,14 @@ use super::{
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
 };
+#[commonware_macros::stability(ALPHA)]
+use crate::{journal::authenticated, merkle};
 use crate::{
     journal::{
-        authenticated,
         contiguous::{metrics::FixedMetrics as Metrics, Many, Mutable},
         Error,
     },
-    merkle, Context,
+    Context,
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{

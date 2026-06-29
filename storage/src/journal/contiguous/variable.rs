@@ -10,16 +10,17 @@ use super::{
     metrics::VariableMetrics as Metrics,
     position_to_blob, Contiguous, Many, Mutable,
 };
+#[commonware_macros::stability(ALPHA)]
+use crate::{journal::authenticated, merkle};
 use crate::{
     journal::{
-        authenticated,
         frame::{
             decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
             FrameInfo,
         },
         Error,
     },
-    merkle, Context,
+    Context,
 };
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_macros::boxed;
