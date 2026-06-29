@@ -426,16 +426,13 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             return Ok(());
         }
 
-        let mut dirty = Vec::new();
-        for section in &self.pending {
-            if let Some(blob) = self.blobs.remove(section) {
-                dirty.push((*section, blob));
-            }
-        }
-
-        let result = try_join_all(dirty.iter_mut().map(|(_, blob)| blob.sync())).await;
-        self.blobs.extend(dirty);
-        result?;
+        let futures: Vec<_> = self
+            .blobs
+            .iter_mut()
+            .filter(|(section, _)| self.pending.contains(section))
+            .map(|(_, blob)| blob.sync())
+            .collect();
+        try_join_all(futures).await?;
 
         // Clear pending sections.
         self.pending.clear();

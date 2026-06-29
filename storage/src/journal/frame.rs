@@ -8,7 +8,7 @@ use commonware_codec::{
     varint::{UInt, MAX_U32_VARINT_SIZE},
     Codec, EncodeSize, ReadExt as _, Write as _,
 };
-use commonware_runtime::{Blob, Buf, IoBufMut, IoBufs};
+use commonware_runtime::{buffer::paged::Writer, Blob, Buf, IoBufMut, IoBufs};
 use std::{future::Future, io::Cursor};
 use zstd::{bulk::compress, decode_all};
 
@@ -30,7 +30,7 @@ pub(super) trait FrameReader {
     ) -> impl Future<Output = Result<IoBufs, Error>> + Send;
 }
 
-impl<B: Blob> FrameReader for commonware_runtime::buffer::paged::Writer<B> {
+impl<B: Blob> FrameReader for Writer<B> {
     async fn read_up_to(
         &self,
         offset: u64,
