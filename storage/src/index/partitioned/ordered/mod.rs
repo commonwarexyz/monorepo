@@ -252,8 +252,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
     /// Move a build `worker`'s partitions and spilled entries into self (a full `offset == 0` index),
     /// at the global slots `[worker.offset, worker.offset + worker.partitions.len())`, which must be
-    /// empty. Returns the `(keys, items)` counts moved so the caller can total them across workers;
-    /// does not update self's gauges (call [`Self::set_metrics`] once after installing all ranges).
+    /// empty. Build workers are transient, so the worker's cumulative counters (`spills`, `pruned`)
+    /// are folded into self's here; the `(keys, items)` gauge totals are returned instead so the
+    /// caller can sum them across workers and apply them once via [`Self::set_metrics`].
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn install_range(&mut self, worker: &mut Self) -> (i64, i64) {
         let lo = worker.offset;
@@ -262,13 +263,16 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         }
         // Drain only the partitions that actually spilled (remapping local -> global), rather than
         // probing every slot in the range. Count each toward the full index's spill metric, since
-        // the workers themselves do not (their indices are transient).
+        // the workers themselves do not.
         for (local, inner) in worker.spilled.drain() {
             self.spilled.insert(lo + local, inner);
             if let Some(spills) = &self.spills {
                 spills.inc();
             }
         }
+        // Fold in the worker's delete-driven prune count (a build worker's own `pruned` series is
+        // transient), matching what the serial replay records on the full index.
+        self.pruned.inc_by(worker.pruned.get());
         (worker.keys.get(), worker.items.get())
     }
 
@@ -912,6 +916,34 @@ mod tests {
             full.install_range(&mut worker);
             assert_eq!(full.spilled_count(), 1);
             assert_eq!(full.spills(), 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_install_range_carries_pruned() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut full = new_index(context.child("full"));
+            assert_eq!(full.pruned(), 0);
+
+            // A worker covering the whole partition range. Give a key two values, then delete both
+            // through a cursor (the same path the parallel build's deletes take) so the worker
+            // records prunes that the full index never sees directly.
+            let mut worker = full.new_range(context.child("worker"), 0, full.partition_count());
+            worker.insert(&[0x10, 0x01], 1);
+            worker.insert(&[0x10, 0x01], 2);
+            {
+                let mut cursor = worker.get_mut(&[0x10, 0x01]).unwrap();
+                while cursor.next().is_some() {
+                    cursor.delete();
+                }
+            }
+            assert_eq!(worker.pruned(), 2);
+            assert_eq!(full.pruned(), 0);
+
+            // Installing the worker folds its prune count into the full index (matching the serial
+            // build, which records prunes on the full index directly).
+            full.install_range(&mut worker);
+            assert_eq!(full.pruned(), 2);
         });
     }
 
