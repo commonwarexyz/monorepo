@@ -116,6 +116,10 @@ fn main() {
 /// `zipf_exponent` sets the key distribution: `None` is uniform, `Some(e)` is Zipf with exponent `e`.
 /// The populated set fills organically as updates sample the keyspace (no separate seed phase).
 fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option<f64>) {
+    if keyspace == 0 {
+        eprintln!("keyspace must be > 0");
+        return;
+    }
     if db_dir_nonempty(folder) {
         eprintln!("{folder} already contains data; `destroy` it first or pick a new folder");
         return;

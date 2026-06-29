@@ -576,11 +576,10 @@ pub(crate) use define_vec_variants;
 /// draws keys from a Zipf distribution with exponent `s`, so a hot subset is churned far more than
 /// the long tail (a more realistic workload than uniform churn).
 ///
-/// `keyspace` sets the index space that keys are drawn from. `None` means `num_elements` (every key
-/// is seeded once, 0..num_elements, and updates only touch seeded keys). `Some(k)` (with
-/// `k >= num_elements`) seeds a uniform-random subset of `num_elements` keys out of `k` and samples
-/// updates over all of `k`, so some updates land on unseeded keys and insert them organically -- a
-/// growing keyspace rather than a fixed population.
+/// `keyspace` sets the index space that updates are drawn from; the seed is always the distinct keys
+/// `0..num_elements`. `None` means updates also draw from `0..num_elements`, so they only touch seeded
+/// keys. `Some(k)` (with `k >= num_elements`) draws updates over all of `0..k`, so some updates land on
+/// unseeded keys and insert them organically -- a growing keyspace rather than a fixed population.
 #[allow(clippy::too_many_arguments)]
 pub async fn gen_random_kv<F, M>(
     db: &mut M,
@@ -611,10 +610,7 @@ pub async fn gen_random_kv<F, M>(
         let mut batch = db.new_batch();
         let mut pending = 0u64;
         for i in 0u64..num_elements {
-            // With a sparse `keyspace`, seed a uniform-random subset of it (so later updates can land
-            // on unseeded keys and insert them); otherwise seed keys 0..num_elements.
-            let idx = keyspace.map_or(i, |k| rng.next_u64() % k);
-            let key = Sha256::hash(&idx.to_be_bytes());
+            let key = Sha256::hash(&i.to_be_bytes());
             batch = batch.write(key, Some(make_value(&mut rng)));
             pending += 1;
             if seed_batch.is_some_and(|n| pending >= n) {
