@@ -163,6 +163,6 @@ harness = false
 path = "src/bloomfilter/benches/bench.rs"
 
 [[bench]]
-name = "ipa"
+name = "bulletproofs"
 harness = false
 path = "src/zk/bulletproofs/benches/bench.rs"
