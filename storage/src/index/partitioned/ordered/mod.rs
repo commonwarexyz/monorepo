@@ -94,6 +94,10 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
 
     /// Metric: cumulative values removed (via `remove`, cursor `delete`, or `retain`).
     pruned: Counter,
+
+    /// Metric: cumulative partitions spilled to the side-table. `None` on build workers, so only the
+    /// full index is counted; emptied partitions that de-spill (rare) are not subtracted.
+    spills: Option<Counter>,
 }
 
 impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
@@ -116,6 +120,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
             pruned: ctx.counter("pruned", "Number of items pruned"),
+            spills: Some(ctx.counter("spills", "Number of partitions spilled to the side-table")),
         }
     }
 
@@ -135,6 +140,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         }
         let inner: BTreeMap<T::Key, Vec<V>> = self.partitions[i].drain_runs().into_iter().collect();
         self.spilled.insert(i, inner);
+        if let Some(spills) = &self.spills {
+            spills.inc();
+        }
     }
 
     /// The `BTreeMap` of spilled partition `i`, or `None` if `i` has not spilled. The empty-map
@@ -206,6 +214,12 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         self.spilled.len()
     }
 
+    /// Cumulative value of the `spills` metric (full index only; `0` on build workers).
+    #[cfg(test)]
+    fn spills(&self) -> usize {
+        self.spills.as_ref().map_or(0, |c| c.get() as usize)
+    }
+
     /// The number of partitions (`2^(8*P)`).
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn partition_count(&self) -> usize {
@@ -233,6 +247,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
             pruned: ctx.counter("pruned", "Number of items pruned"),
+            spills: None,
         }
     }
 
@@ -247,9 +262,13 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
             self.partitions[lo + local] = std::mem::take(partition);
         }
         // Drain only the partitions that actually spilled (remapping local -> global), rather than
-        // probing every slot in the range.
+        // probing every slot in the range. Count each toward the full index's spill metric, since
+        // the workers themselves do not (their indices are transient).
         for (local, inner) in worker.spilled.drain() {
             self.spilled.insert(lo + local, inner);
+            if let Some(spills) = &self.spills {
+                spills.inc();
+            }
         }
         (worker.keys.get(), worker.items.get())
     }
@@ -630,7 +649,7 @@ mod tests {
     use crate::translator::OneCap;
     use commonware_formatting::hex;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Runner, Supervisor as _};
 
     fn new_index(context: deterministic::Context) -> Index<OneCap, u64, 1> {
         Index::new(context, OneCap)
@@ -824,6 +843,7 @@ mod tests {
             // Inline -> spilled: a second distinct key crosses the threshold.
             index.insert(&[0x10, 0x02], 2);
             assert_eq!(index.spilled_count(), 1);
+            assert_eq!(index.spills(), 1);
             assert_eq!(index.keys(), 2);
             assert_eq!(index.items(), 2);
 
@@ -841,6 +861,7 @@ mod tests {
                 cursor.delete();
             }
             assert_eq!(index.spilled_count(), 0); // de-spilled back to empty
+            assert_eq!(index.spills(), 1); // cumulative: a de-spill does not decrement it
             assert_eq!(index.keys(), 0);
             assert_eq!(index.items(), 0);
 
@@ -849,6 +870,7 @@ mod tests {
             assert_eq!(index.spilled_count(), 0);
             index.insert(&[0x10, 0x04], 4);
             assert_eq!(index.spilled_count(), 1);
+            assert_eq!(index.spills(), 2); // a fresh spill of the same partition counts again
             assert_eq!(
                 index.get(&[0x10, 0x03]).copied().collect::<Vec<_>>(),
                 vec![3]
@@ -863,11 +885,34 @@ mod tests {
             assert_eq!(index.spilled_count(), 1); // 0x04 still present
             index.remove(&[0x10, 0x04]);
             assert_eq!(index.spilled_count(), 0);
+            assert_eq!(index.spills(), 2); // still cumulative after a second spill + de-spill
             assert_eq!(index.keys(), 0);
             assert_eq!(index.items(), 0);
 
             // Every removed value was counted once: 2 via cursor delete + 2 via remove.
             assert_eq!(index.pruned(), 4);
+        });
+    }
+
+    #[test_traced]
+    fn test_spill_install_range_counts() {
+        deterministic::Runner::default().start(|context| async move {
+            // The full index that build workers fold into; spills once a partition holds two entries.
+            let mut full = new_index_spilling(context.child("full"));
+            assert_eq!(full.spills(), 0);
+
+            // A build worker covering the whole partition range. Workers do not register the metric,
+            // so a spill on a worker is counted only when it is folded into the full index.
+            let mut worker = full.new_range(context.child("worker"), 0, full.partition_count());
+            worker.get_mut_or_insert(&[0x10, 0x01], 1);
+            worker.get_mut_or_insert(&[0x10, 0x02], 2); // second key in partition 0x10 -> spills
+            assert_eq!(worker.spilled_count(), 1);
+            assert_eq!(worker.spills(), 0); // not tracked on the worker
+
+            // Folding the worker in counts its spilled partition toward the full index's metric.
+            full.install_range(&mut worker);
+            assert_eq!(full.spilled_count(), 1);
+            assert_eq!(full.spills(), 1);
         });
     }
 
