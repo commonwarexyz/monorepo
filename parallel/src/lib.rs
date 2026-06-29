@@ -71,7 +71,8 @@ commonware_macros::stability_scope!(BETA {
     use core::{cmp::Ordering, fmt};
 
     cfg_if! {
-        if #[cfg(feature = "std")] {
+        if #[cfg(any(feature = "std", test))] {
+            use commonware_utils::sync::{Mutex, MutexGuard};
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
                 slice::ParallelSliceMut,
@@ -81,7 +82,7 @@ commonware_macros::stability_scope!(BETA {
                 collections::HashMap,
                 num::NonZeroUsize,
                 panic::Location,
-                sync::{Arc, Mutex},
+                sync::Arc,
                 time::{Duration, Instant},
             };
         } else {
@@ -597,7 +598,7 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 });
-commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
+commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// A clone-able wrapper around a [rayon]-compatible thread pool.
     pub type ThreadPool = Arc<RThreadPool>;
 
@@ -629,6 +630,12 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         kind: OperationKind,
         bucket: u8,
         parallelism: usize,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct PolicyCall {
+        kind: OperationKind,
+        caller: &'static Location<'static>,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -669,7 +676,8 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             if self.since_probe < RESAMPLE_INTERVAL {
                 return (
                     preferred,
-                    self.since_probe % PREFERRED_SAMPLE_INTERVAL == 0,
+                    self.since_probe
+                        .is_multiple_of(PREFERRED_SAMPLE_INTERVAL),
                 );
             }
             self.since_probe = 0;
@@ -708,11 +716,11 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         }
     }
 
-    fn policy_entries(policy: &Mutex<PolicyEntries>) -> std::sync::MutexGuard<'_, PolicyEntries> {
-        policy.lock().unwrap_or_else(|poison| poison.into_inner())
+    fn policy_entries(policy: &Mutex<PolicyEntries>) -> MutexGuard<'_, PolicyEntries> {
+        policy.lock()
     }
 
-    fn len_bucket(len: usize) -> u8 {
+    const fn len_bucket(len: usize) -> u8 {
         if len == 0 {
             0
         } else {
@@ -720,17 +728,12 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         }
     }
 
-    fn policy_key(
-        kind: OperationKind,
-        caller: &'static Location<'static>,
-        len: usize,
-        parallelism: usize,
-    ) -> PolicyKey {
+    const fn policy_key(call: PolicyCall, len: usize, parallelism: usize) -> PolicyKey {
         PolicyKey {
-            file: caller.file(),
-            line: caller.line(),
-            column: caller.column(),
-            kind,
+            file: call.caller.file(),
+            line: call.caller.line(),
+            column: call.caller.column(),
+            kind: call.kind,
             bucket: len_bucket(len),
             parallelism,
         }
@@ -738,12 +741,11 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
     fn choose_execution(
         policy: &Mutex<PolicyEntries>,
-        kind: OperationKind,
-        caller: &'static Location<'static>,
+        call: PolicyCall,
         len: usize,
         parallelism: usize,
     ) -> (PolicyKey, Execution, bool) {
-        let key = policy_key(kind, caller, len, parallelism);
+        let key = policy_key(call, len, parallelism);
         if parallelism <= 1 {
             return (key, Execution::Serial, false);
         }
@@ -827,15 +829,13 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
         fn execute<R>(
             &self,
-            kind: OperationKind,
-            caller: &'static Location<'static>,
+            call: PolicyCall,
             len: usize,
             run: impl FnOnce(Execution) -> R,
         ) -> R {
             let (key, execution, measure) = choose_execution(
                 &self.policy,
-                kind,
-                caller,
+                call,
                 len,
                 self.thread_pool.current_num_threads(),
             );
@@ -849,8 +849,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
         fn fold_init_with<I, INIT, T, R, ID, F, RD>(
             &self,
-            kind: OperationKind,
-            caller: &'static Location<'static>,
+            call: PolicyCall,
             iter: I,
             init: INIT,
             identity: ID,
@@ -867,7 +866,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(kind, caller, items.len(), |execution| match execution {
+            self.execute(call, items.len(), |execution| match execution {
                 Execution::Serial => Sequential.fold_init(items, init, identity, fold_op, reduce_op),
                 Execution::Parallel => self.thread_pool.install(|| {
                     items
@@ -887,8 +886,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
         fn try_fold_with<I, R, E, ID, F, RD>(
             &self,
-            kind: OperationKind,
-            caller: &'static Location<'static>,
+            call: PolicyCall,
             iter: I,
             identity: ID,
             fold_op: F,
@@ -903,7 +901,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(kind, caller, items.len(), |execution| match execution {
+            self.execute(call, items.len(), |execution| match execution {
                 Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
                 Execution::Parallel => self.thread_pool.install(|| {
                     items
@@ -935,8 +933,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             self.fold_init_with(
-                OperationKind::FoldInit,
-                Location::caller(),
+                PolicyCall {
+                    kind: OperationKind::FoldInit,
+                    caller: Location::caller(),
+                },
                 iter,
                 init,
                 identity,
@@ -955,8 +955,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             self.fold_init_with(
-                OperationKind::Fold,
-                Location::caller(),
+                PolicyCall {
+                    kind: OperationKind::Fold,
+                    caller: Location::caller(),
+                },
                 iter,
                 || (),
                 identity,
@@ -974,8 +976,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(
-                OperationKind::MapCollect,
-                Location::caller(),
+                PolicyCall {
+                    kind: OperationKind::MapCollect,
+                    caller: Location::caller(),
+                },
                 items.len(),
                 |execution| {
                     match execution {
@@ -998,8 +1002,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(
-                OperationKind::TryMapCollect,
-                Location::caller(),
+                PolicyCall {
+                    kind: OperationKind::TryMapCollect,
+                    caller: Location::caller(),
+                },
                 items.len(),
                 |execution| {
                     match execution {
@@ -1023,8 +1029,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(
-                OperationKind::MapInitCollect,
-                Location::caller(),
+                PolicyCall {
+                    kind: OperationKind::MapInitCollect,
+                    caller: Location::caller(),
+                },
                 items.len(),
                 |execution| {
                     match execution {
@@ -1054,8 +1062,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             self.try_fold_with(
-                OperationKind::TryFold,
-                Location::caller(),
+                PolicyCall {
+                    kind: OperationKind::TryFold,
+                    caller: Location::caller(),
+                },
                 iter,
                 identity,
                 fold_op,
@@ -1072,8 +1082,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             U: Send,
         {
             self.fold_init_with(
-                OperationKind::MapPartitionCollect,
-                Location::caller(),
+                PolicyCall {
+                    kind: OperationKind::MapPartitionCollect,
+                    caller: Location::caller(),
+                },
                 iter,
                 || (),
                 || (Vec::new(), Vec::new()),
@@ -1110,8 +1122,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
             self.execute(
-                OperationKind::Sort,
-                Location::caller(),
+                PolicyCall {
+                    kind: OperationKind::Sort,
+                    caller: Location::caller(),
+                },
                 items.len(),
                 |execution| match execution {
                     Execution::Serial => Sequential.sort_by(items, compare),
@@ -1128,7 +1142,8 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
 #[cfg(test)]
 mod test {
-    use crate::{Rayon, Sequential, Strategy};
+    use crate::Rayon;
+    use crate::{Sequential, Strategy};
     use core::num::NonZeroUsize;
     use proptest::prelude::*;
     use std::{
