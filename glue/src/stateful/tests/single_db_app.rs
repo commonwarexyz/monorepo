@@ -534,7 +534,7 @@ impl EngineDefinition for SingleDbEngine {
             Box::pin(async move {
                 let databases = mailbox.subscribe_databases().await;
                 let guard = databases.read().await;
-                let bounds = guard.bounds().await;
+                let bounds = guard.bounds();
                 *bounds.start
             })
         });

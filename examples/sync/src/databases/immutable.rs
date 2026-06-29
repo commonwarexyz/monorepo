@@ -143,7 +143,7 @@ where
     E: Storage + Clock + Metrics,
 {
     async fn size(&self) -> Location {
-        self.bounds().await.end
+        self.bounds().end
     }
 
     async fn sync_boundary(&self) -> Location {
@@ -173,6 +173,6 @@ where
     E: Storage + Clock + Metrics,
 {
     async fn target(&self) -> compact::Target<Self::Family, Key> {
-        compact::Target::new(self.root(), self.bounds().await.end)
+        compact::Target::new(self.root(), self.bounds().end)
     }
 }

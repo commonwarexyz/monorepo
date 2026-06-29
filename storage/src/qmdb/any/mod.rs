@@ -165,7 +165,7 @@ where
     )
     .await?;
 
-    if log.size().await == 0 {
+    if log.size() == 0 {
         warn!("Authenticated log is empty, initializing new db");
         let commit_floor = Operation::CommitFloor(None, Location::new(0));
         log.append(&commit_floor).await?;
@@ -324,11 +324,11 @@ pub(crate) mod test {
         db.commit().await.unwrap();
         db.prune(db.sync_boundary().await).await.unwrap();
         let root = db.root();
-        let op_count = db.size().await;
+        let op_count = db.size();
         let inactivity_floor_loc = db.inactivity_floor_loc().await;
 
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
-        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.size(), op_count);
         assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
         assert_eq!(db.root(), root);
 
@@ -343,7 +343,7 @@ pub(crate) mod test {
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
         let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
-        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.size(), op_count);
         assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
         assert_eq!(db.root(), root);
 
@@ -358,7 +358,7 @@ pub(crate) mod test {
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
         let db = reopen_db(context.child("reopen").with_attribute("index", 3)).await;
-        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.size(), op_count);
         assert_eq!(db.root(), root);
 
         // Three rounds of unapplied batches.
@@ -372,7 +372,7 @@ pub(crate) mod test {
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 4)).await;
-        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.size(), op_count);
         assert_eq!(db.root(), root);
 
         // Now actually commit a batch.
@@ -388,7 +388,7 @@ pub(crate) mod test {
         }
         db.commit().await.unwrap();
         let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
-        assert!(db.size().await > op_count);
+        assert!(db.size() > op_count);
         assert_ne!(db.inactivity_floor_loc().await, inactivity_floor_loc);
         assert_ne!(db.root(), root);
 
@@ -407,7 +407,7 @@ pub(crate) mod test {
         let root = db.root();
 
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
-        assert_eq!(db.size().await, 1);
+        assert_eq!(db.size(), 1);
         assert_eq!(db.root(), root);
 
         // Write without applying (unapplied batch should be lost on reopen).
@@ -421,7 +421,7 @@ pub(crate) mod test {
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
         let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
-        assert_eq!(db.size().await, 1);
+        assert_eq!(db.size(), 1);
         assert_eq!(db.root(), root);
 
         // Write without applying again.
@@ -436,7 +436,7 @@ pub(crate) mod test {
         }
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 3)).await;
-        assert_eq!(db.size().await, 1);
+        assert_eq!(db.size(), 1);
         assert_eq!(db.root(), root);
 
         // Three rounds of unapplied batches.
@@ -451,7 +451,7 @@ pub(crate) mod test {
         }
         drop(db);
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 4)).await;
-        assert_eq!(db.size().await, 1);
+        assert_eq!(db.size(), 1);
         assert_eq!(db.root(), root);
 
         // Now actually commit a batch.
@@ -468,7 +468,7 @@ pub(crate) mod test {
         db.commit().await.unwrap();
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
-        assert!(db.size().await > 1);
+        assert!(db.size() > 1);
         assert_ne!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -510,12 +510,12 @@ pub(crate) mod test {
         db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         let committed_root = db.root();
-        let committed_size = db.size().await;
+        let committed_size = db.size();
         drop(db);
 
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.root(), committed_root);
-        assert_eq!(db.size().await, committed_size);
+        assert_eq!(db.size(), committed_size);
         assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
 
@@ -536,7 +536,7 @@ pub(crate) mod test {
         let key1 = Sha256::hash(&1u64.to_be_bytes());
         let key2 = Sha256::hash(&2u64.to_be_bytes());
         let initial_root = db.root();
-        let initial_size = db.size().await;
+        let initial_size = db.size();
         let initial_floor = db.inactivity_floor_loc().await;
 
         // Empty-batch rewind on an otherwise empty DB should apply no snapshot undos.
@@ -544,10 +544,10 @@ pub(crate) mod test {
         let empty_range = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         assert_eq!(empty_range.start, initial_size);
-        assert_eq!(db.size().await, empty_range.end);
+        assert_eq!(db.size(), empty_range.end);
         db.rewind_to_size(initial_size).await.unwrap();
         assert_eq!(db.root(), initial_root);
-        assert_eq!(db.size().await, initial_size);
+        assert_eq!(db.size(), initial_size);
         assert_eq!(db.inactivity_floor_loc().await, initial_floor);
         assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -566,7 +566,7 @@ pub(crate) mod test {
         db.commit().await.unwrap();
 
         let root_a = db.root();
-        let size_a = db.size().await;
+        let size_a = db.size();
         let floor_a = db.inactivity_floor_loc().await;
         assert_eq!(size_a, range_a.end);
 
@@ -606,7 +606,7 @@ pub(crate) mod test {
         // - `key1` was deleted then recreated (exercises net-zero active_keys_delta path)
         db.rewind_to_size(size_a).await.unwrap();
         assert_eq!(db.root(), root_a);
-        assert_eq!(db.size().await, size_a);
+        assert_eq!(db.size(), size_a);
         assert_eq!(db.inactivity_floor_loc().await, floor_a);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a.clone()));
         assert_eq!(db.get(&key0).await.unwrap(), Some(value0_a));
@@ -617,7 +617,7 @@ pub(crate) mod test {
         drop(db);
         let mut db = reopen_db(context.child("reopen_after_rewind")).await;
         assert_eq!(db.root(), root_a);
-        assert_eq!(db.size().await, size_a);
+        assert_eq!(db.size(), size_a);
         assert_eq!(db.inactivity_floor_loc().await, floor_a);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
@@ -651,7 +651,7 @@ pub(crate) mod test {
         // Rewind all the way to the initial commit boundary (`first_commit_loc + 1`).
         db.rewind_to_size(initial_size).await.unwrap();
         assert_eq!(db.root(), initial_root);
-        assert_eq!(db.size().await, initial_size);
+        assert_eq!(db.size(), initial_size);
         assert_eq!(db.inactivity_floor_loc().await, initial_floor);
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert_eq!(db.get(&key0).await.unwrap(), None);
@@ -662,7 +662,7 @@ pub(crate) mod test {
         drop(db);
         let db = reopen_db(context.child("reopen_initial_boundary")).await;
         assert_eq!(db.root(), initial_root);
-        assert_eq!(db.size().await, initial_size);
+        assert_eq!(db.size(), initial_size);
         assert_eq!(db.inactivity_floor_loc().await, initial_floor);
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert_eq!(db.get(&key0).await.unwrap(), None);
@@ -747,7 +747,7 @@ pub(crate) mod test {
         }
 
         let hasher = qmdb::hasher::<Sha256>();
-        let bounds = db.bounds().await;
+        let bounds = db.bounds();
         let inactivity_floor = db.inactivity_floor_loc().await;
         for loc in *inactivity_floor..*bounds.end {
             let loc = Location::new(loc);
@@ -822,7 +822,7 @@ pub(crate) mod test {
             db.apply_batch(merkleized).await.unwrap();
         }
         let root_hash = db.root();
-        let original_op_count = db.size().await;
+        let original_op_count = db.size();
 
         // Historical proof should match "regular" proof when historical size == current database size
         let max_ops = NZU64!(10);
@@ -903,7 +903,7 @@ pub(crate) mod test {
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
             if i == 0 {
-                historical_op_count = db.bounds().await.end;
+                historical_op_count = db.bounds().end;
             }
         }
 
@@ -1033,7 +1033,7 @@ pub(crate) mod test {
         // commit boundary when the db commits to an inactive peak boundary, so we anchor each test on
         // one of the boundaries we recorded here rather than hardcoding sizes that depend
         // on internal floor-raising behavior.
-        let initial_size = db.bounds().await.end;
+        let initial_size = db.bounds().end;
         let mut boundaries = vec![initial_size];
         for i in 0u64..5 {
             let k = Sha256::hash(&i.to_be_bytes());
@@ -1045,7 +1045,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
-            boundaries.push(db.bounds().await.end);
+            boundaries.push(db.bounds().end);
         }
 
         // Singleton historical state: only the initial CommitFloor is visible.
@@ -2176,13 +2176,13 @@ pub(crate) mod test {
                 commit_writes(&mut db, updates, None).await;
 
                 db.prune(db.sync_boundary()).await.unwrap();
-                let bounds = db.bounds().await;
+                let bounds = db.bounds();
                 if bounds.start > first_range.start {
                     break;
                 }
             }
 
-            let oldest_retained = db.bounds().await.start;
+            let oldest_retained = db.bounds().start;
             let boundary_err = db.rewind(oldest_retained).await.unwrap_err();
             assert!(
                 matches!(
@@ -2219,10 +2219,10 @@ pub(crate) mod test {
             .unwrap();
 
             let root_before = db.root();
-            let size_before = db.size().await;
+            let size_before = db.size();
             db.rewind(size_before).await.unwrap();
             assert_eq!(db.root(), root_before);
-            assert_eq!(db.size().await, size_before);
+            assert_eq!(db.size(), size_before);
 
             let zero_err = db.rewind(Location::new(0)).await.unwrap_err();
             assert!(
@@ -2233,7 +2233,7 @@ pub(crate) mod test {
                 "unexpected rewind error: {zero_err:?}"
             );
             assert_eq!(db.root(), root_before);
-            assert_eq!(db.size().await, size_before);
+            assert_eq!(db.size(), size_before);
 
             let too_large_target = Location::new(*size_before + 1);
             let too_large_err = db.rewind(too_large_target).await.unwrap_err();
@@ -2246,7 +2246,7 @@ pub(crate) mod test {
                 "unexpected rewind error: {too_large_err:?}"
             );
             assert_eq!(db.root(), root_before);
-            assert_eq!(db.size().await, size_before);
+            assert_eq!(db.size(), size_before);
 
             db.destroy().await.unwrap();
         });
@@ -2274,7 +2274,7 @@ pub(crate) mod test {
             )
             .await;
 
-            let rewind_target = db.size().await;
+            let rewind_target = db.size();
             let target_floor = db.inactivity_floor_loc();
             let prune_loc = Location::new(*target_floor + (KEYS / 2));
             assert!(
@@ -2298,7 +2298,7 @@ pub(crate) mod test {
             }
 
             db.prune(prune_loc).await.unwrap();
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             assert!(
                 bounds.start > *target_floor,
                 "test setup expected pruned start beyond target floor; bounds={bounds:?}, target_floor={target_floor:?}"
@@ -2348,7 +2348,7 @@ pub(crate) mod test {
                 UnorderedVariableDb::init(ctx.child("storage"), cfg).await.unwrap();
 
             commit_writes(&mut db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
-            let rewind_target = db.size().await;
+            let rewind_target = db.size();
             // Rewind target must lie below the chunk boundary the buggy prune would advance
             // to; otherwise the unfixed code would not panic on truncate.
             assert!(
@@ -2372,7 +2372,7 @@ pub(crate) mod test {
 
             // Pre-rewind size must actually exceed the rewind target so the rewind is not a
             // no-op.
-            let pre_prune_size = db.size().await;
+            let pre_prune_size = db.size();
             assert!(pre_prune_size > rewind_target);
 
             let prune_loc = Location::new(600);
@@ -2394,7 +2394,7 @@ pub(crate) mod test {
 
             // Journal could not prune any section, so it still retains from 0. The bitmap
             // must therefore also remain at 0.
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             assert_eq!(bounds.start, Location::new(0));
             assert_eq!(
                 db.bitmap.pruned_bits(),
@@ -2405,7 +2405,7 @@ pub(crate) mod test {
             // Rewind to the still-retained early commit must succeed and restore visible
             // state (root match implies the snapshot was rebuilt correctly).
             db.rewind(rewind_target).await.unwrap();
-            assert_eq!(db.size().await, rewind_target);
+            assert_eq!(db.size(), rewind_target);
             assert_eq!(db.root(), root_at_target);
 
             db.destroy().await.unwrap();
@@ -2533,14 +2533,14 @@ pub(crate) mod test {
             commit_writes_mmb(&mut db, [(key(1), Some(val(1)))], None).await;
 
             let root = db.root();
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             db.sync().await.unwrap();
             drop(db);
 
             // Reopen and verify state.
             let db = open_mmb_db(context.child("db").with_attribute("index", 1), "recovery").await;
             assert_eq!(db.root(), root);
-            assert_eq!(db.bounds().await, bounds);
+            assert_eq!(db.bounds(), bounds);
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
             assert_eq!(db.get_metadata().await.unwrap(), None);
@@ -2591,16 +2591,13 @@ pub(crate) mod test {
                 db.apply_batch(merkleized).await.unwrap();
             }
 
-            let (child_merkleized, commit_result) = futures::join!(
-                async {
-                    assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
-                    let mut child = db.new_batch();
-                    child = child.write(key(1), Some(val(1)));
-                    child.merkleize(&db, None).await.unwrap()
-                },
-                db.commit(),
-            );
-            commit_result.unwrap();
+            let child_merkleized = {
+                assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+                let mut child = db.new_batch();
+                child = child.write(key(1), Some(val(1)));
+                child.merkleize(&db, None).await.unwrap()
+            };
+            db.commit().await.unwrap();
 
             db.apply_batch(child_merkleized).await.unwrap();
             db.commit().await.unwrap();
@@ -2645,7 +2642,7 @@ mod bitmap_tests {
     }
 
     /// Commit, drop, reopen, and assert the rebuilt bitmap matches the in-memory bitmap.
-    async fn assert_oracle_round_trip(db: AnyTest, context: Context, label: &str) -> AnyTest {
+    async fn assert_oracle_round_trip(mut db: AnyTest, context: Context, label: &str) -> AnyTest {
         let pre_active = bitmap_active_locs(&db);
         let pre_len = db.bitmap.len();
         let pre_pruned = db.bitmap.pruned_bits();

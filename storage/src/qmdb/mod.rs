@@ -44,7 +44,7 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::{
-        contiguous::{Mutable, Reader},
+        contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
     merkle::{hasher::Standard as StandardHasher, Bagging, Family, Location},
@@ -103,7 +103,7 @@ pub(crate) async fn find_inactivity_floor_at<F, R>(
 ) -> Result<Location<F>, Error<F>>
 where
     F: Family,
-    R: Reader,
+    R: Contiguous,
 {
     let Some(last_op) = op_count.checked_sub(1) else {
         return Err(Error::HistoricalFloorPruned(op_count));
@@ -132,7 +132,7 @@ pub(crate) async fn inactive_peaks_at<F, R>(
 ) -> Result<usize, Error<F>>
 where
     F: Family,
-    R: Reader,
+    R: Contiguous,
 {
     if op_count == Location::new(0) {
         return Ok(0);
@@ -238,13 +238,13 @@ pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
 ) -> Result<usize, Error<F>>
 where
     F: crate::merkle::Family,
-    C: Reader<Item: Operation<F>>,
+    C: Contiguous<Item: Operation<F>>,
     I: Index<Value = crate::merkle::Location<F>>,
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
     let stream = reader
-        .replay(SNAPSHOT_READ_BUFFER_SIZE, *inactivity_floor_loc)
+        .replay(*inactivity_floor_loc, SNAPSHOT_READ_BUFFER_SIZE)
         .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
@@ -284,7 +284,7 @@ async fn delete_key<F, I, R>(
 where
     F: Family,
     I: Index<Value = Location<F>>,
-    R: Reader,
+    R: Contiguous,
     R::Item: Operation<F>,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
@@ -311,7 +311,7 @@ async fn update_key<F, I, R>(
 where
     F: Family,
     I: Index<Value = Location<F>>,
-    R: Reader,
+    R: Contiguous,
     R::Item: Operation<F>,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
@@ -346,7 +346,7 @@ async fn find_update_op<F, R>(
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
-    R: Reader,
+    R: Contiguous,
     R::Item: Operation<F>,
 {
     while let Some(&loc) = cursor.next() {
@@ -438,7 +438,7 @@ where
             }
 
             // Update the operation's snapshot location to point to tip.
-            cursor.update(Location::<F>::new(self.log.size().await));
+            cursor.update(Location::<F>::new(self.log.bounds().end));
         }
 
         // Apply the operation at tip.
@@ -460,7 +460,7 @@ where
         &mut self,
         mut inactivity_floor_loc: Location<F>,
     ) -> Result<Location<F>, Error<F>> {
-        let tip_loc: Location<F> = Location::new(self.log.size().await);
+        let tip_loc: Location<F> = Location::new(self.log.bounds().end);
         loop {
             assert!(
                 *inactivity_floor_loc < tip_loc,
@@ -468,10 +468,7 @@ where
             );
             let old_loc = inactivity_floor_loc;
             inactivity_floor_loc += 1;
-            let op = {
-                let reader = self.log.reader().await;
-                reader.read(*old_loc).await?
-            };
+            let op = self.log.read(*old_loc).await?;
             if self.move_op_if_active(op, old_loc).await? {
                 return Ok(inactivity_floor_loc);
             }

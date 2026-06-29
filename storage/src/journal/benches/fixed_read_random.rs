@@ -4,7 +4,7 @@ use commonware_runtime::{
     tokio::{Config, Context, Runner},
     Runner as _, Supervisor as _,
 };
-use commonware_storage::journal::contiguous::{fixed::Journal, Reader as _};
+use commonware_storage::journal::contiguous::{fixed::Journal, Contiguous as _};
 use commonware_utils::{sequence::FixedBytes, NZU64};
 use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
@@ -29,8 +29,11 @@ const ITEM_SIZE: usize = 32;
 
 /// Read `items_to_read` random items from the given `journal`, awaiting each
 /// result before continuing.
-async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: usize) {
-    let reader = journal.reader().await;
+async fn bench_run_serial(
+    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>,
+    items_to_read: usize,
+) {
+    let reader = journal.snapshot().await.unwrap();
     let mut rng = StdRng::seed_from_u64(0);
     for _ in 0..items_to_read {
         let pos = rng.gen_range(0..ITEMS_TO_WRITE);
@@ -40,10 +43,10 @@ async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, ite
 
 /// Concurrently read (via try_join_all) `items_to_read` random items from the given `journal`.
 async fn bench_run_concurrent(
-    journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
+    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_read: usize,
 ) {
-    let reader = journal.reader().await;
+    let reader = journal.snapshot().await.unwrap();
     let mut rng = StdRng::seed_from_u64(0);
     let mut futures = Vec::with_capacity(items_to_read);
     for _ in 0..items_to_read {
@@ -55,10 +58,10 @@ async fn bench_run_concurrent(
 
 /// Batch-read `items_to_read` random items via `read_many`.
 async fn bench_run_read_many(
-    journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
+    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_read: usize,
 ) {
-    let reader = journal.reader().await;
+    let reader = journal.snapshot().await.unwrap();
     let mut rng = StdRng::seed_from_u64(0);
     let mut positions: Vec<u64> = (0..items_to_read)
         .map(|_| rng.gen_range(0..ITEMS_TO_WRITE))
@@ -101,15 +104,16 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                     // Benchmark: measure read time.
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let j = get_fixed_journal(ctx.child("storage"), PARTITION, ITEMS_PER_BLOB)
-                            .await;
+                        let mut j =
+                            get_fixed_journal(ctx.child("storage"), PARTITION, ITEMS_PER_BLOB)
+                                .await;
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
                             match mode {
-                                "serial" => bench_run_serial(&j, items_to_read).await,
-                                "concurrent" => bench_run_concurrent(&j, items_to_read).await,
-                                "read_many" => bench_run_read_many(&j, items_to_read).await,
+                                "serial" => bench_run_serial(&mut j, items_to_read).await,
+                                "concurrent" => bench_run_concurrent(&mut j, items_to_read).await,
+                                "read_many" => bench_run_read_many(&mut j, items_to_read).await,
                                 _ => unreachable!(),
                             }
                             duration += start.elapsed();

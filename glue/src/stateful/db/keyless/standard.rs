@@ -281,7 +281,7 @@ where
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+        let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
@@ -359,7 +359,7 @@ where
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+        let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),

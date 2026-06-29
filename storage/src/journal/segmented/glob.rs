@@ -112,7 +112,7 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         // Write to blob
         let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
         let writer = self.manager.get_or_create(section).await?;
-        let offset = writer.size().await;
+        let offset = writer.size();
         writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
 
         Ok((offset, entry_size))
@@ -162,19 +162,19 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok(value)
     }
 
-    /// Sync section to disk (flushes write buffer).
-    pub async fn sync(&self, section: u64) -> Result<(), Error> {
-        self.manager.sync(section).await
+    /// Sync the given `sections` to disk (flushes write buffers).
+    pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
+        self.manager.sync(sections).await
     }
 
     /// Sync all sections to disk.
-    pub async fn sync_all(&self) -> Result<(), Error> {
+    pub async fn sync_all(&mut self) -> Result<(), Error> {
         self.manager.sync_all().await
     }
 
     /// Get the current size of a section (including buffered data).
-    pub async fn size(&self, section: u64) -> Result<u64, Error> {
-        self.manager.size(section).await
+    pub fn size(&self, section: u64) -> Result<u64, Error> {
+        self.manager.size(section)
     }
 
     /// Rewind to a specific section and size.
@@ -366,7 +366,7 @@ mod tests {
             glob.sync(1).await.expect("Failed to sync");
 
             // Corrupt the data by writing directly to the underlying blob
-            let writer = glob.manager.blobs.get(&1).unwrap();
+            let writer = glob.manager.blobs.get_mut(&1).unwrap();
             writer
                 .write_at(offset, vec![0xFF, 0xFF, 0xFF, 0xFF])
                 .await

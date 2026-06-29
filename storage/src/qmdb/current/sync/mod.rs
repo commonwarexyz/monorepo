@@ -29,7 +29,7 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Mutable, Reader as _},
+        contiguous::{fixed, variable, Contiguous, Mutable},
     },
     merkle::{
         full::{self, Merkle},
@@ -70,9 +70,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{
-    bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, sync::AsyncMutex, Array,
-};
+use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -231,10 +229,10 @@ where
             .await?;
 
     let metrics = db::Metrics::new(context);
-    let current_db = db::Db {
+    let mut current_db = db::Db {
         any,
         grafted_tree,
-        metadata: AsyncMutex::new(metadata),
+        metadata,
         strategy,
         root,
         metrics,
@@ -309,8 +307,7 @@ macro_rules! impl_current_sync_database {
                     return Ok(None);
                 }
 
-                let reader = journal.reader().await;
-                let bounds = reader.bounds();
+                let bounds = journal.bounds();
                 if Location::new(bounds.start) > target.range.start()
                     || Location::new(bounds.end) != target.range.end()
                 {
@@ -318,12 +315,11 @@ macro_rules! impl_current_sync_database {
                 }
 
                 let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(
-                    &reader,
+                    journal,
                     target.range.end(),
                     |op| op.has_floor(),
                 )
                 .await?;
-                drop(reader);
 
                 let hasher = qmdb::hasher::<H>();
                 let merkle = Merkle::<F, _, _, S>::init(
