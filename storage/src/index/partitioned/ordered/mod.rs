@@ -65,10 +65,9 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     /// Translates the prefix-stripped key bytes into a partition-local key.
     translator: T,
 
-    /// Index of the first partition this instance covers, `0` for a full index. A parallel
-    /// snapshot-build worker (see [`Self::new_range`]) allocates only a contiguous sub-range of
-    /// partitions and sets `offset`, so it can be indexed by a key's global partition number while
-    /// holding just its range.
+    /// Base partition index this instance addresses from: a key's global partition `p` maps to local
+    /// slot `p - offset`. A full index covers every partition and so has `offset == 0`; a parallel
+    /// snapshot-build worker (see [`Self::new_range`]) covers only `[offset, offset + len)`.
     offset: usize,
 
     /// The partitions this instance covers, indexed by `global_partition - offset`. A full index
