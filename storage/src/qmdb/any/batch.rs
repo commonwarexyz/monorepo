@@ -38,6 +38,9 @@ use tracing::debug;
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 
+/// One contiguous chunk of floor-raise candidates paired with their resolved operations.
+type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
+
 /// Sorted `(key, (value, loc))` vec consulted by `find_prev_key` to find the predecessor
 /// of a given key during ordered merkleization. The value is `None` for cache-resolved
 /// keys: the predecessor-rewrite loop only reads a value for keys outside this batch's
@@ -795,14 +798,25 @@ where
                         ),
                     }
                 };
-                let outcomes: Vec<FloorOutcome<F>> = strategy
-                    .map_collect_vec(candidates.iter().zip(&resolved), |(loc, op)| {
-                        classify(*loc, op)
+                let manual = strategy.manual();
+                let chunk_len = candidates.len().div_ceil(manual.parallelism_hint());
+                let chunks: Vec<CandidateChunk<'_, F, U>> = candidates
+                    .chunks(chunk_len)
+                    .zip(resolved.chunks(chunk_len))
+                    .collect();
+                let outcomes: Vec<Vec<FloorOutcome<F>>> =
+                    manual.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
+                        chunk_locs
+                            .iter()
+                            .zip(chunk_ops)
+                            .map(|(loc, op)| classify(*loc, op))
+                            .collect()
                     });
 
                 // Apply in candidate order, moving active ops to the tip.
-                for ((candidate, op), outcome) in candidates.into_iter().zip(resolved).zip(outcomes)
-                {
+                let mut outcomes = outcomes.into_iter().flatten();
+                for (candidate, op) in candidates.into_iter().zip(resolved) {
+                    let outcome = outcomes.next().expect("one outcome per candidate");
                     floor = Location::new(*candidate + 1);
                     match outcome {
                         FloorOutcome::Inactive => continue,

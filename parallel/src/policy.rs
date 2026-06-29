@@ -22,8 +22,8 @@ const RESAMPLE_INTERVAL: u32 = 64;
 const EWMA_PREVIOUS_WEIGHT: u64 = 4;
 const EWMA_NEXT_WEIGHT: u64 = 1;
 const EWMA_WEIGHT: u64 = EWMA_PREVIOUS_WEIGHT + EWMA_NEXT_WEIGHT;
-// Serial must take at most 95% of parallel's time before it becomes preferred.
-const SERIAL_WIN_NUMERATOR: u64 = 95;
+// Serial must take at most 90% of parallel's time before it becomes preferred.
+const SERIAL_WIN_NUMERATOR: u64 = 90;
 const SERIAL_WIN_DENOMINATOR: u64 = 100;
 
 type Entries = HashMap<Key, Entry>;

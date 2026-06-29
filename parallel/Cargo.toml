@@ -20,6 +20,7 @@ parking_lot = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
+futures.workspace = true
 parking_lot.workspace = true
 proptest.workspace = true
 rayon.workspace = true
