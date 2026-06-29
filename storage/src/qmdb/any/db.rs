@@ -255,7 +255,8 @@ where
         // for large batches the probe is sharded across the strategy pool; each candidate carries
         // its global key index, so partition order does not matter.
         let strategy = self.strategy();
-        let parallelism = strategy.parallelism_hint().max(1);
+        let manual = strategy.manual();
+        let parallelism = manual.parallelism_hint();
         let mut candidates: Vec<(usize, u64)> =
             if parallelism == 1 || keys.len() < MIN_PROBES_PER_SHARD.saturating_mul(parallelism) {
                 let mut candidates = Vec::with_capacity(keys.len());
@@ -265,7 +266,7 @@ where
             } else {
                 let chunk = keys.len().div_ceil(parallelism);
                 let snapshot = &self.snapshot;
-                strategy
+                manual
                     .map_collect_vec(
                         keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
                         |(ci, chunk_keys)| {

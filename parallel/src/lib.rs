@@ -68,7 +68,7 @@
 
 commonware_macros::stability_scope!(BETA {
     use cfg_if::cfg_if;
-    use core::{cmp::Ordering, fmt};
+    use core::{cmp::Ordering, fmt, num::NonZeroUsize};
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
@@ -77,7 +77,7 @@ commonware_macros::stability_scope!(BETA {
                 slice::ParallelSliceMut,
                 ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
             };
-            use std::{num::NonZeroUsize, panic::Location, sync::Arc};
+            use std::{panic::Location, sync::Arc};
 
             mod policy;
         } else {
@@ -91,7 +91,25 @@ commonware_macros::stability_scope!(BETA {
     /// This disables adaptive serial-vs-parallel policy decisions for operations that callers have
     /// already split into partitions.
     #[derive(Clone, Debug)]
-    pub struct Manual<S>(S);
+    pub struct Manual<S> {
+        strategy: S,
+        parallelism: NonZeroUsize,
+    }
+
+    impl<S> Manual<S> {
+        /// Creates a strategy wrapper for manually partitioned work.
+        pub const fn new(strategy: S, parallelism: NonZeroUsize) -> Self {
+            Self {
+                strategy,
+                parallelism,
+            }
+        }
+
+        /// Return the number of threads available for manually partitioned work.
+        pub const fn parallelism_hint(&self) -> usize {
+            self.parallelism.get()
+        }
+    }
 
     /// A strategy for executing fold operations.
     ///
@@ -102,10 +120,7 @@ commonware_macros::stability_scope!(BETA {
         /// Returns a strategy wrapper for manually partitioned work.
         fn manual(&self) -> Manual<Self>
         where
-            Self: Sized,
-        {
-            Manual(self.clone())
-        }
+            Self: Sized;
 
         /// Reduces a collection to a single value with per-partition initialization.
         ///
@@ -516,12 +531,13 @@ commonware_macros::stability_scope!(BETA {
         where
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync;
-
-        /// Return the number of threads that are available, as a hint to chunking.
-        fn parallelism_hint(&self) -> usize;
     }
 
     impl<S: Strategy> Strategy for Manual<S> {
+        fn manual(&self) -> Manual<Self> {
+            Manual::new(self.clone(), self.parallelism)
+        }
+
         #[track_caller]
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
@@ -540,7 +556,8 @@ commonware_macros::stability_scope!(BETA {
             F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
             RD: Fn(R, R) -> R + Send + Sync,
         {
-            self.0.fold_init(iter, init, identity, fold_op, reduce_op)
+            self.strategy
+                .fold_init(iter, init, identity, fold_op, reduce_op)
         }
 
         #[track_caller]
@@ -559,7 +576,7 @@ commonware_macros::stability_scope!(BETA {
             F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
             RD: Fn(R, R) -> R + Send + Sync,
         {
-            self.0.try_fold(iter, identity, fold_op, reduce_op)
+            self.strategy.try_fold(iter, identity, fold_op, reduce_op)
         }
 
         #[track_caller]
@@ -569,7 +586,7 @@ commonware_macros::stability_scope!(BETA {
             F: Fn(I::Item) -> T + Send + Sync,
             T: Send,
         {
-            self.0.map_collect_vec(iter, map_op)
+            self.strategy.map_collect_vec(iter, map_op)
         }
 
         #[track_caller]
@@ -580,7 +597,7 @@ commonware_macros::stability_scope!(BETA {
             T: Send,
             E: Send,
         {
-            self.0.try_map_collect_vec(iter, map_op)
+            self.strategy.try_map_collect_vec(iter, map_op)
         }
 
         #[track_caller]
@@ -592,7 +609,7 @@ commonware_macros::stability_scope!(BETA {
             F: Fn(&mut T, I::Item) -> R + Send + Sync,
             R: Send,
         {
-            self.0.map_init_collect_vec(iter, init, map_op)
+            self.strategy.map_init_collect_vec(iter, init, map_op)
         }
 
         #[track_caller]
@@ -603,7 +620,7 @@ commonware_macros::stability_scope!(BETA {
             K: Send,
             U: Send,
         {
-            self.0.map_partition_collect_vec(iter, map_op)
+            self.strategy.map_partition_collect_vec(iter, map_op)
         }
 
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
@@ -613,7 +630,7 @@ commonware_macros::stability_scope!(BETA {
             RA: Send,
             RB: Send,
         {
-            self.0.join(a, b)
+            self.strategy.join(a, b)
         }
 
         #[track_caller]
@@ -622,11 +639,7 @@ commonware_macros::stability_scope!(BETA {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            self.0.sort_by(items, compare)
-        }
-
-        fn parallelism_hint(&self) -> usize {
-            self.0.parallelism_hint()
+            self.strategy.sort_by(items, compare)
         }
     }
 
@@ -655,6 +668,10 @@ commonware_macros::stability_scope!(BETA {
     pub struct Sequential;
 
     impl Strategy for Sequential {
+        fn manual(&self) -> Manual<Self> {
+            Manual::new(Self, NonZeroUsize::new(1).unwrap())
+        }
+
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
@@ -713,9 +730,6 @@ commonware_macros::stability_scope!(BETA {
             items.sort_by(compare);
         }
 
-        fn parallelism_hint(&self) -> usize {
-            1
-        }
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
@@ -809,11 +823,16 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
     impl Strategy for Rayon {
         fn manual(&self) -> Manual<Self> {
-            Manual(Self {
-                thread_pool: self.thread_pool.clone(),
-                policy: policy::Policy::default(),
-                adaptive: false,
-            })
+            let parallelism = NonZeroUsize::new(self.thread_pool.current_num_threads())
+                .unwrap_or_else(|| NonZeroUsize::new(1).unwrap());
+            Manual::new(
+                Self {
+                    thread_pool: self.thread_pool.clone(),
+                    policy: policy::Policy::default(),
+                    adaptive: false,
+                },
+                parallelism,
+            )
         }
 
         #[track_caller]
@@ -972,9 +991,6 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             );
         }
 
-        fn parallelism_hint(&self) -> usize {
-            self.thread_pool.current_num_threads()
-        }
     }
 });
 
@@ -1082,7 +1098,7 @@ mod test {
         let _: usize = manual.fold(0..4, || 0, |acc, x| acc + x, |a, b| a + b);
 
         assert_eq!(policy_len(&strategy), 0);
-        assert_eq!(policy_len(&manual.0), 0);
+        assert_eq!(policy_len(&manual.strategy), 0);
     }
 
     #[test]

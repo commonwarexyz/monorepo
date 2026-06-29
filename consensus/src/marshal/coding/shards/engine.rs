@@ -260,6 +260,9 @@ where
     /// capacity.
     pub background_channel_capacity: NonZeroUsize,
 
+    /// Number of in-flight background shard decode tasks.
+    pub decode_concurrency: NonZeroUsize,
+
     /// Provider for peer set information. Pre-leader shards are buffered per
     /// peer only while that peer appears in the
     /// [`commonware_p2p::PeerSetUpdate::latest`] primary set, matching
@@ -342,6 +345,9 @@ where
     /// Capacity of the background receiver channel.
     background_channel_capacity: NonZeroUsize,
 
+    /// Number of in-flight background shard decode tasks.
+    decode_concurrency: NonZeroUsize,
+
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
     /// These blocks are evicted after a durability signal from the marshal.
@@ -402,6 +408,7 @@ where
                 aggregate_peers: Set::default(),
                 latest_primary_peers: Set::default(),
                 background_channel_capacity: config.background_channel_capacity,
+                decode_concurrency: config.decode_concurrency,
                 reconstructed_blocks: BTreeMap::new(),
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
@@ -435,7 +442,7 @@ where
                 self.shard_codec_cfg.clone(),
                 self.blocker.clone(),
                 self.background_channel_capacity,
-                &self.strategy,
+                self.decode_concurrency,
             );
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
@@ -1970,6 +1977,7 @@ mod tests {
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: NZUsize!(1024),
+            decode_concurrency: NZUsize!(1),
                         peer_provider: oracle.manager(),
                     };
 
@@ -2009,6 +2017,7 @@ mod tests {
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: NZUsize!(1024),
+            decode_concurrency: NZUsize!(1),
                         peer_provider: oracle.manager(),
                     };
 
@@ -4018,6 +4027,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
+            decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
 
@@ -4147,6 +4157,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
+            decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
             let (broadcaster_engine, broadcaster_mailbox) =
@@ -4170,6 +4181,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
+            decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
             let (receiver_engine, receiver_mailbox) =
@@ -4949,6 +4961,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
+            decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
 
@@ -5052,6 +5065,7 @@ mod tests {
                 mailbox_size: NZUsize!(16),
                 peer_buffer_size: NZUsize!(4),
                 background_channel_capacity: NZUsize!(16),
+            decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
 
@@ -5163,6 +5177,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
+            decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
 
@@ -5318,6 +5333,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
+            decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
 
