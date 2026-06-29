@@ -161,3 +161,8 @@ path = "src/handshake/benches/bench.rs"
 name = "bloomfilter"
 harness = false
 path = "src/bloomfilter/benches/bench.rs"
+
+[[bench]]
+name = "bulletproofs"
+harness = false
+path = "src/zk/bulletproofs/benches/bench.rs"
