@@ -82,13 +82,15 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::{
-    frame::{decode_item, decode_length_prefix, encode_frame_into, find_frame, FrameInfo},
+    frame::{
+        decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at, FrameInfo,
+    },
     Error,
 };
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay, Writer},
-    Blob, Buf, IoBuf, IoBufMut, Metrics, Storage,
+    Blob, Buf, IoBuf, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
@@ -181,47 +183,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         blob: &Writer<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
-        // Read varint header (max 5 bytes for u32)
-        let (buf, available) = blob
-            .read_up_to(
-                offset,
-                MAX_U32_VARINT_SIZE,
-                IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
-            )
-            .await?;
-        let buf = buf.freeze();
-        let mut cursor = Cursor::new(buf.slice(..available));
-        let (next_offset, item_info) = find_frame(&mut cursor, offset)?;
-
-        // Decode item - either directly from buffer or by chaining prefix with remainder
-        let (item_size, decoded) = match item_info {
-            FrameInfo::Complete {
-                varint_len,
-                data_len,
-            } => {
-                // Data follows varint in buffer
-                let data = buf.slice(varint_len..varint_len + data_len);
-                let decoded = decode_item::<V>(data, cfg, compressed)?;
-                (data_len as u32, decoded)
-            }
-            FrameInfo::Incomplete {
-                varint_len,
-                prefix_len,
-                total_len,
-            } => {
-                // Read remainder and chain with prefix to avoid copying
-                let prefix = buf.slice(varint_len..varint_len + prefix_len);
-                let read_offset = offset + varint_len as u64 + prefix_len as u64;
-                let remainder_len = total_len - prefix_len;
-                let mut remainder = vec![0u8; remainder_len];
-                blob.read_into(&mut remainder, read_offset).await?;
-                let chained = prefix.chain(IoBuf::from(remainder));
-                let decoded = decode_item::<V>(chained, cfg, compressed)?;
-                (total_len as u32, decoded)
-            }
-        };
-
-        Ok((next_offset, item_size, decoded))
+        read_frame_at(blob, offset, cfg, compressed).await
     }
 
     /// Returns an ordered stream of all items in the journal starting with the item at the given

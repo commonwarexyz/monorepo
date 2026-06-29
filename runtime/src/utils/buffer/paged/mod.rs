@@ -42,7 +42,8 @@ pub use writer::Writer;
 
 // A checksum record contains two slots. Each slot stores one u16 length and one CRC.
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
-const CHECKSUM_SLOT_SIZE: usize = u16::SIZE + crc32::Digest::SIZE;
+const CHECKSUM_SLOT_LEN_SIZE: usize = u16::SIZE;
+const CHECKSUM_SLOT_SIZE: usize = CHECKSUM_SLOT_LEN_SIZE + crc32::Digest::SIZE;
 
 /// Ensure `buf` has one `item_size` slot per offset, offsets are sorted and non-overlapping, and
 /// every requested range lies within the blob's size.
@@ -156,6 +157,31 @@ async fn get_page_with_checksum_from_blob(
     Ok((page.freeze().slice(..len as usize), record))
 }
 
+/// One of a page footer's two CRC slots, laid out back to back after the page data.
+#[derive(Clone, Copy)]
+enum Slot {
+    First,
+    Second,
+}
+
+impl Slot {
+    /// Byte offset of this slot within the page's CRC footer.
+    const fn offset(self) -> usize {
+        match self {
+            Self::First => 0,
+            Self::Second => CHECKSUM_SLOT_SIZE,
+        }
+    }
+
+    /// The other slot.
+    const fn other(self) -> Self {
+        match self {
+            Self::First => Self::Second,
+            Self::Second => Self::First,
+        }
+    }
+}
+
 /// Describes a CRC record stored at the end of a page.
 ///
 /// The CRC accompanied by the larger length is the one that should be treated as authoritative for
@@ -173,11 +199,33 @@ impl Checksum {
     /// Create a new CRC record with the given length and CRC.
     /// The new CRC is stored in the first slot (len1/crc1), with the second slot zeroed.
     const fn new(len: u16, crc: u32) -> Self {
-        Self {
-            len1: len,
-            crc1: crc,
-            len2: 0,
-            crc2: 0,
+        Self::in_slot(Slot::First, len, crc)
+    }
+
+    /// A record carrying `(len, crc)` in `slot`, with the other slot zeroed.
+    const fn in_slot(slot: Slot, len: u16, crc: u32) -> Self {
+        match slot {
+            Slot::First => Self {
+                len1: len,
+                crc1: crc,
+                len2: 0,
+                crc2: 0,
+            },
+            Slot::Second => Self {
+                len1: 0,
+                crc1: 0,
+                len2: len,
+                crc2: crc,
+            },
+        }
+    }
+
+    /// The slot holding the authoritative (longer) CRC; the first slot wins ties.
+    const fn authoritative(&self) -> Slot {
+        if self.len1 >= self.len2 {
+            Slot::First
+        } else {
+            Slot::Second
         }
     }
 
@@ -263,10 +311,9 @@ impl Checksum {
     /// validation. If they both have the same length (which should only happen due to data
     /// corruption) return the first.
     const fn get_crc(&self) -> (u16, u32) {
-        if self.len1 >= self.len2 {
-            (self.len1, self.crc1)
-        } else {
-            (self.len2, self.crc2)
+        match self.authoritative() {
+            Slot::First => (self.len1, self.crc1),
+            Slot::Second => (self.len2, self.crc2),
         }
     }
 
@@ -274,22 +321,50 @@ impl Checksum {
     /// should only be called if the primary CRC failed validation. After this returns, get_crc will
     /// no longer return the invalid primary CRC.
     const fn get_fallback_crc(&mut self) -> (u16, u32) {
-        if self.len1 >= self.len2 {
-            // First CRC was primary, and must have been invalid. Zero it and return the second.
-            self.len1 = 0;
-            self.crc1 = 0;
-            (self.len2, self.crc2)
-        } else {
-            // Second CRC was primary, and must have been invalid. Zero it and return the first.
-            self.len2 = 0;
-            self.crc2 = 0;
-            (self.len1, self.crc1)
+        match self.authoritative() {
+            Slot::First => {
+                // First CRC was primary, and must have been invalid. Zero it and return the second.
+                self.len1 = 0;
+                self.crc1 = 0;
+                (self.len2, self.crc2)
+            }
+            Slot::Second => {
+                // Second CRC was primary, and must have been invalid. Zero it and return the first.
+                self.len2 = 0;
+                self.crc2 = 0;
+                (self.len1, self.crc1)
+            }
         }
     }
 
     /// Returns the CRC record in its storage representation.
     fn to_bytes(&self) -> [u8; CHECKSUM_SIZE as usize] {
         self.encode_fixed()
+    }
+
+    /// Encode a whole checksum slot (`[len: u16][crc: u32]`) in its storage representation.
+    ///
+    /// A page footer holds two slots; recovery treats the one with the larger `len` as
+    /// authoritative (see [`Self::get_crc`]). A `len` of 0 is never authoritative.
+    fn slot_bytes(len: u16, crc: u32) -> [u8; CHECKSUM_SLOT_SIZE] {
+        let mut bytes = [0; CHECKSUM_SLOT_SIZE];
+        let mut buf = bytes.as_mut_slice();
+        len.write(&mut buf);
+        crc.write(&mut buf);
+        bytes
+    }
+
+    /// Encode just a slot's leading `len` field (the first [`CHECKSUM_SLOT_LEN_SIZE`] bytes of
+    /// [`Self::slot_bytes`]).
+    ///
+    /// Because `len` decides which slot is authoritative, rewriting only this field flips a slot's
+    /// authority without disturbing its already-durable CRC: writing a non-zero `len` commits a
+    /// previously staged slot, while writing 0 retires one.
+    fn slot_len_bytes(len: u16) -> [u8; CHECKSUM_SLOT_LEN_SIZE] {
+        let mut bytes = [0; CHECKSUM_SLOT_LEN_SIZE];
+        let mut buf = bytes.as_mut_slice();
+        len.write(&mut buf);
+        bytes
     }
 }
 

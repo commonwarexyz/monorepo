@@ -1,4 +1,7 @@
-use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBufs};
+use crate::{
+    buffer::{tip::Buffer, SyncState},
+    Blob, Buf, BufferPool, BufferPooler, Error, IoBufs,
+};
 use std::num::NonZeroUsize;
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
@@ -59,11 +62,8 @@ pub struct Write<B: Blob> {
     /// Buffered bytes at the logical tip of the blob.
     buffer: Buffer,
 
-    /// Whether a prior plain mutation must be persisted with [`Blob::sync`].
-    ///
-    /// [`Self::write_blob_sync`] uses [`Blob::write_at_sync`] only when this is false, otherwise it
-    /// must use [`Blob::sync`] to cover earlier unsynced mutations.
-    needs_sync: bool,
+    /// Durability state for plain writes and range-sync writes.
+    sync_state: SyncState,
 }
 
 impl<B: Blob> Write<B> {
@@ -73,7 +73,7 @@ impl<B: Blob> Write<B> {
         Self {
             blob,
             buffer: Buffer::new(size, capacity.get(), pool),
-            needs_sync: true, // ensure pending writes on the wrapped blob are synced
+            sync_state: SyncState::new(true), // ensure pending writes on the wrapped blob are synced
         }
     }
 
@@ -215,7 +215,7 @@ impl<B: Blob> Write<B> {
 
         // Resize the underlying blob.
         self.blob.resize(len).await?;
-        self.needs_sync = true;
+        self.sync_state.mark_unsynced();
 
         Ok(())
     }
@@ -235,9 +235,7 @@ impl<B: Blob> Write<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.blob.write_at(offset, bufs).await?;
-        self.needs_sync = true;
-        Ok(())
+        self.sync_state.write_at(&self.blob, offset, bufs).await
     }
 
     /// Write bytes to the underlying blob and make them durable.
@@ -249,25 +247,13 @@ impl<B: Blob> Write<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        if self.needs_sync {
-            self.write_blob(offset, bufs).await?;
-            self.sync_blob().await
-        } else {
-            // If `write_at_sync` fails, a later sync must not treat the drained buffer as durable.
-            self.needs_sync = true;
-            self.blob.write_at_sync(offset, bufs).await?;
-            self.needs_sync = false;
-            Ok(())
-        }
+        self.sync_state
+            .write_at_sync(&self.blob, offset, bufs)
+            .await
     }
 
     /// Sync the underlying blob if there are unsynced mutations.
     async fn sync_blob(&mut self) -> Result<(), Error> {
-        if !self.needs_sync {
-            return Ok(());
-        }
-        self.blob.sync().await?;
-        self.needs_sync = false;
-        Ok(())
+        self.sync_state.sync(&self.blob).await
     }
 }

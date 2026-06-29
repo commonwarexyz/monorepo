@@ -41,8 +41,9 @@ use super::{
 };
 use crate::{
     buffer::{
-        paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
+        paged::{CacheRef, Checksum, Slot, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
         tip::Buffer,
+        SyncState,
     },
     Blob, Error, IoBuf, IoBufMut, IoBufs,
 };
@@ -50,15 +51,6 @@ use bytes::BufMut;
 use commonware_cryptography::Crc32;
 use std::num::{NonZeroU16, NonZeroUsize};
 use tracing::warn;
-
-/// Indicates which CRC slot in a page record must not be overwritten.
-#[derive(Clone, Copy)]
-enum ProtectedCrc {
-    /// The first slot still protects the committed prefix.
-    First,
-    /// The second slot still protects the committed prefix.
-    Second,
-}
 
 /// Adjusts a requested write-buffer `capacity` upward to the value the buffer actually uses,
 /// applying two upward adjustments:
@@ -112,8 +104,8 @@ pub struct Writer<B: Blob> {
     /// will contain its CRC record.
     partial_page_state: Option<Checksum>,
 
-    /// Whether prior plain writes or resizes must be made durable by a full sync.
-    needs_sync: bool,
+    /// Durability state for plain writes, resizes, and range-sync writes.
+    sync_state: SyncState,
 
     /// Unique id assigned to this blob by the page cache.
     id: u64,
@@ -129,9 +121,7 @@ pub struct Writer<B: Blob> {
 impl<B: Blob> Writer<B> {
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.blob.write_at(offset, bufs).await?;
-        self.needs_sync = true;
-        Ok(())
+        self.sync_state.write_at(&self.blob, offset, bufs).await
     }
 
     /// Write bytes to the underlying blob and make them durable.
@@ -143,17 +133,9 @@ impl<B: Blob> Writer<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        if self.needs_sync {
-            self.write_at(offset, bufs).await?;
-            self.sync_inner().await
-        } else {
-            // If `write_at_sync` fails, a later sync must not treat the drained
-            // buffer as durable.
-            self.needs_sync = true;
-            self.blob.write_at_sync(offset, bufs).await?;
-            self.needs_sync = false;
-            Ok(())
-        }
+        self.sync_state
+            .write_at_sync(&self.blob, offset, bufs)
+            .await
     }
 
     /// Write bytes to the underlying blob, optionally making them durable.
@@ -172,12 +154,7 @@ impl<B: Blob> Writer<B> {
 
     /// Sync the underlying blob if there are unsynced mutations.
     async fn sync_inner(&mut self) -> Result<(), Error> {
-        if !self.needs_sync {
-            return Ok(());
-        }
-        self.blob.sync().await?;
-        self.needs_sync = false;
-        Ok(())
+        self.sync_state.sync(&self.blob).await
     }
 
     /// Wrap `blob` in a [Writer]. `blob` must already hold `original_blob_size` physical bytes;
@@ -221,7 +198,7 @@ impl<B: Blob> Writer<B> {
             blob,
             current_page,
             partial_page_state,
-            needs_sync,
+            sync_state: SyncState::new(needs_sync),
             id: cache_ref.next_id(),
             cache_ref,
             buffer,
@@ -490,7 +467,7 @@ impl<B: Blob> Writer<B> {
         // Write the physical pages to the blob.
         // If there are protected regions in the first page, we need to write around them.
         match protected_regions {
-            Some((prefix_len, ProtectedCrc::First)) => {
+            Some((prefix_len, Slot::First)) => {
                 // Protected CRC is first: [page_size..page_size+6].
                 //
                 // If only one of these writes is emitted, it can be made durable here. If
@@ -532,7 +509,7 @@ impl<B: Blob> Writer<B> {
 
                 Ok(false)
             }
-            Some((prefix_len, ProtectedCrc::Second)) => {
+            Some((prefix_len, Slot::Second)) => {
                 // Protected CRC is second: [page_size+6..page_size+12].
                 //
                 // If only one of these writes is emitted, it can be made durable here. If
@@ -658,18 +635,11 @@ impl<B: Blob> Writer<B> {
     /// - `prefix_len`: bytes `[0, prefix_len)` are committed logical data already covered by the
     ///   protected CRC and do not need to be rewritten
     /// - `protected_crc`: which CRC slot must not be overwritten by the next flush
-    fn identify_protected_regions(
-        partial_page_state: Option<&Checksum>,
-    ) -> Option<(usize, ProtectedCrc)> {
+    fn identify_protected_regions(partial_page_state: Option<&Checksum>) -> Option<(usize, Slot)> {
         let crc_record = partial_page_state?;
         let (old_len, _) = crc_record.get_crc();
-        // The protected CRC is the one with the larger (authoritative) length.
-        let protected_crc = if crc_record.len1 >= crc_record.len2 {
-            ProtectedCrc::First
-        } else {
-            ProtectedCrc::Second
-        };
-        Some((old_len as usize, protected_crc))
+        // The protected CRC is the authoritative (longer) slot.
+        Some((old_len as usize, crc_record.authoritative()))
     }
 
     /// Prepare physical-page writes from buffered logical bytes.
@@ -801,14 +771,6 @@ impl<B: Blob> Writer<B> {
         }
     }
 
-    /// Encode one checksum slot as `[len: u16][crc: u32]`, matching `Checksum::write`.
-    fn checksum_slot_bytes(len: u16, crc: u32) -> [u8; CHECKSUM_SLOT_SIZE] {
-        let mut bytes = [0u8; CHECKSUM_SLOT_SIZE];
-        bytes[..2].copy_from_slice(&len.to_be_bytes());
-        bytes[2..].copy_from_slice(&crc.to_be_bytes());
-        bytes
-    }
-
     /// Build a CRC record that preserves the old CRC in its original slot and places the new CRC
     /// in the other slot.
     ///
@@ -820,23 +782,20 @@ impl<B: Blob> Writer<B> {
         old_crc: &Checksum,
     ) -> Checksum {
         let (old_len, old_crc_val) = old_crc.get_crc();
-        // The old CRC is in the slot with the larger length value (first slot wins ties).
-        if old_crc.len1 >= old_crc.len2 {
-            // Old CRC is in slot 0, put new CRC in slot 1
-            Checksum {
+        // Keep the old CRC in its slot and place the new CRC in the free one.
+        match old_crc.authoritative() {
+            Slot::First => Checksum {
                 len1: old_len,
                 crc1: old_crc_val,
                 len2: new_len,
                 crc2: new_crc,
-            }
-        } else {
-            // Old CRC is in slot 1, put new CRC in slot 0
-            Checksum {
+            },
+            Slot::Second => Checksum {
                 len1: new_len,
                 crc1: new_crc,
                 len2: old_len,
                 crc2: old_crc_val,
-            }
+            },
         }
     }
 
@@ -860,52 +819,34 @@ impl<B: Blob> Writer<B> {
             .checked_mul(physical_page_size)
             .and_then(|start| start.checked_add(logical_page_size))
             .ok_or(Error::OffsetOverflow)?;
-        let (new_slot_start, old_slot_start) = if old_crc.len1 >= old_crc.len2 {
-            (CHECKSUM_SLOT_SIZE, 0)
-        } else {
-            (0, CHECKSUM_SLOT_SIZE)
-        };
+        let old_slot = old_crc.authoritative();
+        let new_slot = old_slot.other();
 
         // Stage the new slot with a 0 length and the shrunken page CRC. A crash here leaves the
         // old slot as the only non-zero valid slot.
         let new_slot_offset = crc_start
-            .checked_add(new_slot_start as u64)
+            .checked_add(new_slot.offset() as u64)
             .ok_or(Error::OffsetOverflow)?;
-        let staged_slot = Self::checksum_slot_bytes(0, new_crc);
+        let staged_slot = Checksum::slot_bytes(0, new_crc);
         self.write_at_sync(new_slot_offset, staged_slot.to_vec())
             .await?;
 
         // Publish the new shrunken length. If a crash happens before the old slot is invalidated,
         // both slots may be valid, but recovery still chooses the old longer length.
-        self.write_at_sync(new_slot_offset, new_len.to_be_bytes().to_vec())
+        let published_len = Checksum::slot_len_bytes(new_len);
+        self.write_at_sync(new_slot_offset, published_len.to_vec())
             .await?;
 
         // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across
         // both slots and lose the already-durable shorter checksum. Once this lands, length 0 is
         // never authoritative, so the shrunken slot wins.
         let old_slot_offset = crc_start
-            .checked_add(old_slot_start as u64)
+            .checked_add(old_slot.offset() as u64)
             .ok_or(Error::OffsetOverflow)?;
-        let len_size = std::mem::size_of::<u16>();
-        self.write_at_sync(old_slot_offset, vec![0u8; len_size])
+        self.write_at_sync(old_slot_offset, Checksum::slot_len_bytes(0).to_vec())
             .await?;
 
-        let final_record = if new_slot_start == 0 {
-            Checksum {
-                len1: new_len,
-                crc1: new_crc,
-                len2: 0,
-                crc2: 0,
-            }
-        } else {
-            Checksum {
-                len1: 0,
-                crc1: 0,
-                len2: new_len,
-                crc2: new_crc,
-            }
-        };
-        Ok(final_record)
+        Ok(Checksum::in_slot(new_slot, new_len, new_crc))
     }
 
     /// Flushes any buffered data, then returns a [Replay] for the underlying blob.
@@ -1054,7 +995,7 @@ impl<B: Blob> Writer<B> {
         // resizes need to create a pending sync.
         if new_physical_size != current_physical_size {
             self.blob.resize(new_physical_size).await?;
-            self.needs_sync = true;
+            self.sync_state.mark_unsynced();
         }
 
         // Evict cached pages at or beyond the new full-page boundary. The page at
@@ -1165,9 +1106,11 @@ impl<B: Blob> Writer<B> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::tests::SyncTrackingBlob, deterministic, telemetry::metrics::Registry, Buf,
-        BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _, Storage as _,
-        Supervisor as _,
+        buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
+        deterministic,
+        telemetry::metrics::Registry,
+        Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
+        Storage as _, Supervisor as _,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
@@ -2694,7 +2637,7 @@ mod tests {
         let (prefix_len, protected_crc) = result.unwrap();
         assert_eq!(prefix_len, 50);
         assert!(
-            matches!(protected_crc, ProtectedCrc::First),
+            matches!(protected_crc, Slot::First),
             "First CRC should be protected when lengths are equal"
         );
     }
@@ -2715,7 +2658,7 @@ mod tests {
         let (prefix_len, protected_crc) = result.unwrap();
         assert_eq!(prefix_len, 100);
         assert!(
-            matches!(protected_crc, ProtectedCrc::First),
+            matches!(protected_crc, Slot::First),
             "First CRC should be protected when len1 > len2"
         );
     }
@@ -2736,7 +2679,7 @@ mod tests {
         let (prefix_len, protected_crc) = result.unwrap();
         assert_eq!(prefix_len, 100);
         assert!(
-            matches!(protected_crc, ProtectedCrc::Second),
+            matches!(protected_crc, Slot::Second),
             "Second CRC should be protected when len2 > len1"
         );
     }
@@ -4247,7 +4190,7 @@ mod tests {
             assert_eq!(write_count.load(Ordering::SeqCst), 3);
             assert_eq!(
                 failed_write_len.load(Ordering::SeqCst),
-                std::mem::size_of::<u16>()
+                CHECKSUM_SLOT_LEN_SIZE
             );
             drop(append);
 

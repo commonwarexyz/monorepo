@@ -113,13 +113,13 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let mut blobs = BTreeMap::new();
         let stored_blobs = if bits.is_none() {
             match context.remove(&config.partition, None).await {
-                Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
+                Ok(()) | Err(RError::PartitionMissing(_)) => Vec::new(),
                 Err(err) => return Err(Error::Runtime(err)),
             }
         } else {
             match context.scan(&config.partition).await {
                 Ok(blobs) => blobs,
-                Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
+                Err(RError::PartitionMissing(_)) => Vec::new(),
                 Err(err) => return Err(Error::Runtime(err)),
             }
         };

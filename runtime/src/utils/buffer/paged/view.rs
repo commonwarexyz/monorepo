@@ -36,6 +36,17 @@ impl<B: Blob> Clone for View<'_, B> {
 impl<B: Blob> Copy for View<'_, B> {}
 
 impl<B: Blob> View<'_, B> {
+    /// Copy any in-memory tail overlap into `buf`, returning the remaining prefix length.
+    fn copy_tail_overlap(&self, buf: &mut [u8], offset: u64) -> usize {
+        let tail_start = self.tail_offset.max(offset);
+        let prefix_len = (tail_start - offset) as usize;
+        let tail_offset = (tail_start - self.tail_offset) as usize;
+        let tail_len = buf.len() - prefix_len;
+        let (_, tail_buf) = buf.split_at_mut(prefix_len);
+        tail_buf.copy_from_slice(&self.tail[tail_offset..tail_offset + tail_len]);
+        prefix_len
+    }
+
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
     /// `buf.len()` bytes were satisfied from the page cache and/or the in-memory tail. When `false`
     /// is returned, the contents of `buf` are unspecified.
@@ -56,11 +67,7 @@ impl<B: Blob> View<'_, B> {
 
         // Copy the suffix overlapping the tail, then serve any prefix below `tail_offset` from the
         // cache.
-        let overlap_start = self.tail_offset.max(offset);
-        let dst_start = (overlap_start - offset) as usize;
-        let src_start = (overlap_start - self.tail_offset) as usize;
-        let copied = buf.len() - dst_start;
-        buf[dst_start..].copy_from_slice(&self.tail[src_start..src_start + copied]);
+        let dst_start = self.copy_tail_overlap(buf, offset);
 
         if dst_start == 0 {
             return true;
@@ -85,12 +92,7 @@ impl<B: Blob> View<'_, B> {
         let remaining = if end_offset <= self.tail_offset {
             buf.len()
         } else {
-            let overlap_start = self.tail_offset.max(offset);
-            let dst_start = (overlap_start - offset) as usize;
-            let src_start = (overlap_start - self.tail_offset) as usize;
-            let copied = buf.len() - dst_start;
-            buf[dst_start..].copy_from_slice(&self.tail[src_start..src_start + copied]);
-            dst_start
+            self.copy_tail_overlap(buf, offset)
         };
 
         if remaining == 0 {

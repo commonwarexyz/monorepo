@@ -1,6 +1,9 @@
 //! Blob management for a contiguous journal.
 
-use crate::{journal::Error, Context};
+use crate::{
+    journal::{frame::FrameReader, Error},
+    Context,
+};
 use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
@@ -142,7 +145,10 @@ pub(super) struct Writable<E: Context> {
     oldest_blob_index: u64,
 
     /// Sealed historical blobs.
-    sealed: Arc<[Sealed<E::Blob>]>,
+    sealed: Vec<Sealed<E::Blob>>,
+
+    /// Cached owned snapshot of [Self::sealed].
+    sealed_snapshot: Option<Arc<[Sealed<E::Blob>]>>,
 }
 
 impl<E: Context> Writable<E> {
@@ -204,7 +210,8 @@ impl<E: Context> Writable<E> {
             metrics,
             oldest_blob_index,
             tail,
-            sealed: sealed.into(),
+            sealed,
+            sealed_snapshot: None,
         })
     }
 
@@ -214,7 +221,7 @@ impl<E: Context> Writable<E> {
     }
 
     /// Index of the newest blob.
-    pub(super) fn tail_blob_index(&self) -> u64 {
+    pub(super) const fn tail_blob_index(&self) -> u64 {
         self.oldest_blob_index + self.sealed.len() as u64
     }
 
@@ -234,9 +241,17 @@ impl<E: Context> Writable<E> {
 
     /// Capture owned blob handles for a snapshot reader.
     pub(super) async fn snapshot(&mut self) -> Result<Blobs<'static, E::Blob>, Error> {
+        let sealed = match &self.sealed_snapshot {
+            Some(sealed) => sealed.clone(),
+            None => {
+                let sealed: Arc<[Sealed<E::Blob>]> = self.sealed.clone().into();
+                self.sealed_snapshot = Some(sealed.clone());
+                sealed
+            }
+        };
         Ok(Blobs {
             oldest_blob_index: self.oldest_blob_index,
-            sealed: SealedBlobs::Owned(self.sealed.clone()),
+            sealed: SealedBlobs::Owned(sealed),
             tail: Blob::Sealed(self.tail.snapshot().await.map_err(Error::Runtime)?),
         })
     }
@@ -252,20 +267,14 @@ impl<E: Context> Writable<E> {
         let old_writer = std::mem::replace(&mut self.tail, new_writer);
         let sealed = old_writer.seal().await.map_err(Error::Runtime)?;
         self.metrics.tracked.inc();
-
-        // Rebuild is O(n).
-        self.sealed = self
-            .sealed
-            .iter()
-            .cloned()
-            .chain(std::iter::once(sealed))
-            .collect::<Vec<Sealed<E::Blob>>>()
-            .into();
+        self.sealed.push(sealed);
+        self.sealed_snapshot = None;
         Ok(())
     }
 
-    /// Drop every blob below `min_blob` and remove its file, oldest-first. Readers holding
-    /// the old slice keep reading the removed blobs.
+    /// Drop every blob below `min_blob` and remove its file, oldest-first. Safe with live readers:
+    /// snapshot readers keep their own handles, which the runtime's read-after-remove contract keeps
+    /// valid.
     ///
     /// # Invariants
     ///
@@ -274,7 +283,8 @@ impl<E: Context> Writable<E> {
         assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
         let prev_oldest_blob_index = self.oldest_blob_index;
-        self.sealed = self.sealed[drop_count..].to_vec().into();
+        self.sealed.drain(..drop_count);
+        self.sealed_snapshot = None;
         self.oldest_blob_index = min_blob;
 
         for blob in prev_oldest_blob_index..min_blob {
@@ -350,7 +360,8 @@ impl<E: Context> Writable<E> {
         }
 
         // Sealed history now ends below the target, which is the tail.
-        self.sealed = self.sealed[..idx].to_vec().into();
+        self.sealed.truncate(idx);
+        self.sealed_snapshot = None;
         Ok(())
     }
 
@@ -366,7 +377,8 @@ impl<E: Context> Writable<E> {
         self.tail = self.partition.open(tail_blob).await?;
         self.metrics.tracked.inc();
         self.oldest_blob_index = tail_blob;
-        self.sealed = Vec::new().into();
+        self.sealed.clear();
+        self.sealed_snapshot = None;
         Ok(())
     }
 
@@ -525,6 +537,21 @@ impl<'a, B: RBlob> Blob<'a, B> {
                 .await
                 .map_err(Error::Runtime),
         }
+    }
+}
+
+impl<B: RBlob> FrameReader for Blob<'_, B> {
+    async fn read_up_to(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufMut> + Send,
+    ) -> Result<(IoBufMut, usize), Error> {
+        Self::read_up_to(self, offset, len, bufs).await
+    }
+
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        Self::read_at(self, offset, len).await
     }
 }
 

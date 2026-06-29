@@ -14,7 +14,12 @@ use commonware_runtime::{
     Blob, BufferPool, Error as RError, Metrics, Storage,
 };
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    mem::take,
+    num::NonZeroUsize,
+};
 use tracing::debug;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
@@ -217,7 +222,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Sync the given `sections` to storage.
     pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
-        let sections = sections.sections().collect::<Vec<_>>();
+        let sections = sections.sections().collect::<BTreeSet<_>>();
         for &section in &sections {
             self.prune_guard(section)?;
         }
