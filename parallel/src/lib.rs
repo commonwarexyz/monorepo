@@ -72,7 +72,10 @@ commonware_macros::stability_scope!(BETA {
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
-            use futures::channel::oneshot;
+            use futures::{
+                channel::oneshot,
+                future::{self, Either},
+            };
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
                 slice::ParallelSliceMut,
@@ -866,12 +869,16 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             F: FnOnce() -> T + Send + 'static,
             T: Send + 'static,
         {
+            if self.thread_pool.current_num_threads() <= 1 {
+                return Either::Left(future::ready(f()));
+            }
+
             let (tx, rx) = oneshot::channel();
             self.thread_pool.spawn(move || {
                 let result = f();
                 let _ = tx.send(result);
             });
-            async move { rx.await.expect("strategy job failed") }
+            Either::Right(async move { rx.await.expect("strategy job failed") })
         }
 
         #[track_caller]
@@ -1037,8 +1044,13 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 mod test {
     use crate::{Rayon, Sequential, Strategy};
     use core::num::NonZeroUsize;
+    use futures::FutureExt;
     use proptest::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use rayon::ThreadPoolBuilder;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     fn parallel_strategy() -> Rayon {
         Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
@@ -1180,6 +1192,21 @@ mod test {
         }));
 
         assert_eq!(result, 7);
+        assert_eq!(policy_len(&strategy), 0);
+    }
+
+    #[test]
+    fn rayon_spawn_runs_inline_on_current_thread_single_worker_pool() {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(1)
+            .use_current_thread()
+            .build()
+            .unwrap();
+        let strategy = Rayon::with_pool(Arc::new(pool));
+
+        let result = strategy.spawn(|| 7).now_or_never();
+
+        assert_eq!(result, Some(7));
         assert_eq!(policy_len(&strategy), 0);
     }
 
