@@ -207,4 +207,122 @@ pub mod test {
     pub fn test_current_db_exclusion_proofs() {
         shared::test_exclusion_proofs(open_db);
     }
+
+    /// Build a `P`-partitioned current db with churny ops across two commits (so the second commit's
+    /// updates and deletes inactivate locations from the first), then assert that reopening it at a
+    /// range of worker counts all reconstruct the identical root. Unlike the `any` equivalence tests,
+    /// the current root commits to the activity bitmap, so this exercises the parallel build's bitmap
+    /// reconstruction (`for_each_value` + last-commit), not just the snapshot index and MMR.
+    async fn check_current_parallel_init_equivalence<const P: usize>(
+        context: deterministic::Context,
+        partition: &'static str,
+        parallelisms: &[usize],
+    ) {
+        type PartDb<const P: usize> = partitioned::Db<
+            mmr::Family,
+            deterministic::Context,
+            Digest,
+            Digest,
+            Sha256,
+            OneCap,
+            P,
+            32,
+            commonware_parallel::Sequential,
+        >;
+
+        let cfg = fixed_config::<OneCap>(partition, &context);
+        let mut db = PartDb::<P>::init(context.child("populate"), cfg)
+            .await
+            .unwrap();
+
+        // Commit 1: insert.
+        let mut batch = db.new_batch();
+        for i in 0u64..2000 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&(i * 7).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+
+        // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
+        let mut batch = db.new_batch();
+        for i in (0u64..2000).step_by(3) {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&((i + 1) * 11).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        for i in (1u64..2000).step_by(7) {
+            let k = Sha256::hash(&i.to_be_bytes());
+            batch = batch.write(k, None);
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+        db.sync().await.unwrap();
+        let root = db.root();
+        drop(db);
+
+        // Reopen at each worker count; all rebuild (snapshot + bitmap) from the same log and must match.
+        for &workers in parallelisms {
+            let mut cfg = fixed_config::<OneCap>(partition, &context);
+            cfg.init_parallelism = match workers {
+                0 => crate::qmdb::InitParallelism::Serial,
+                n => {
+                    crate::qmdb::InitParallelism::Workers(core::num::NonZeroUsize::new(n).unwrap())
+                }
+            };
+            let ctx = context
+                .child("reopen")
+                .with_attribute("parallelism", workers);
+            let db = PartDb::<P>::init(ctx, cfg).await.unwrap();
+            assert_eq!(
+                db.root(),
+                root,
+                "current root mismatch at P={P} init_parallelism={workers}"
+            );
+            drop(db);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_current_ordered_partitioned_p1_parallel_init_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            check_current_parallel_init_equivalence::<1>(
+                context,
+                "current_parallel_equiv_p1",
+                &[0, 1, 2, 4],
+            )
+            .await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_current_ordered_partitioned_p2_parallel_init_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            check_current_parallel_init_equivalence::<2>(
+                context,
+                "current_parallel_equiv_p2",
+                &[0, 1, 2, 4],
+            )
+            .await;
+        });
+    }
+
+    /// P=3 allocates `2^24` partition slots per index, so it is too memory-heavy for the default
+    /// suite; run explicitly with `--ignored` (and ideally `--release`). Only serial and one
+    /// offset-parallel reopen are checked.
+    #[test_traced("WARN")]
+    #[ignore]
+    fn test_current_ordered_partitioned_p3_parallel_init_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            check_current_parallel_init_equivalence::<3>(
+                context,
+                "current_parallel_equiv_p3",
+                &[0, 2],
+            )
+            .await;
+        });
+    }
 }
