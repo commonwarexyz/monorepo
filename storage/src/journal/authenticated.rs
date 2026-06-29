@@ -21,7 +21,7 @@ use alloc::{
     vec::Vec,
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher as Hasher, Digest, DigestOf};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use core::num::NonZeroU64;
@@ -40,7 +40,7 @@ pub enum Error<F: Family> {
 }
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] in the journal-batch chain.
-type MerkleizedParent<F, H, Item, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest, Item, S>>;
+type MerkleizedParent<F, H, Item, S> = Arc<MerkleizedBatch<F, DigestOf<H>, Item, S>>;
 
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
@@ -55,7 +55,7 @@ pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync, S: Strateg
     parent: Option<MerkleizedParent<F, H, Item, S>>,
 }
 
-type MerkleizedBatchArc<F, H, Item, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest, Item, S>>;
+type MerkleizedBatchArc<F, H, Item, S> = Arc<MerkleizedBatch<F, DigestOf<H>, Item, S>>;
 
 impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     UnmerkleizedBatch<F, H, Item, S>

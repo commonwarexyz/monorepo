@@ -20,7 +20,7 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-use crate::Hasher;
+use crate::{CodecHasher, Hasher};
 use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
@@ -89,6 +89,8 @@ impl Hasher for Blake3 {
         self
     }
 }
+
+impl CodecHasher for Blake3 {}
 
 /// Digest of a BLAKE3 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]

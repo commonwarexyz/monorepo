@@ -46,7 +46,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt as _, Write};
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::{CodecHasher as CCodecHasher, Digest};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
@@ -74,7 +74,7 @@ impl<F: Graftable, D: Digest> OpsRootWitness<F, D> {
     ///
     /// See the [Canonical root structure](self#canonical-root-structure) section in the module
     /// documentation for the full layout.
-    pub fn root<H: CHasher<Digest = D>>(&self, ops_root: &D) -> D {
+    pub fn root<H: CCodecHasher<Digest = D>>(&self, ops_root: &D) -> D {
         let partial = self.partial_chunk.as_ref().map(|(nb, d)| (*nb, d));
         combine_roots::<H>(
             ops_root,
@@ -85,7 +85,7 @@ impl<F: Graftable, D: Digest> OpsRootWitness<F, D> {
     }
 
     /// Return true if this witness proves that `root` commits to `ops_root`.
-    pub fn verify<H: CHasher<Digest = D>>(&self, ops_root: &D, root: &D) -> bool {
+    pub fn verify<H: CCodecHasher<Digest = D>>(&self, ops_root: &D, root: &D) -> bool {
         self.root::<H>(ops_root) == *root
     }
 }
@@ -183,7 +183,7 @@ pub struct RangeProofSpec<F: Family, D: Digest> {
 
 impl<F: Graftable, D: Digest> RangeProof<F, D> {
     /// Create a new range proof for the provided `range` of operations.
-    pub async fn new<H: CHasher<Digest = D>, S: Storage<F, Digest = D>, const N: usize>(
+    pub async fn new<H: CCodecHasher<Digest = D>, S: Storage<F, Digest = D>, const N: usize>(
         status: &impl BitmapReadable<N>,
         storage: &S,
         inactivity_floor: Location<F>,
@@ -238,7 +238,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     /// Returns [`merkle::Error::LocationOverflow`] if `start_loc` > [merkle::Family::MAX_LEAVES].
     /// Returns [`merkle::Error::RangeOutOfBounds`] if `start_loc` >= number of leaves in the tree.
     pub async fn new_with_ops<
-        H: CHasher<Digest = D>,
+        H: CCodecHasher<Digest = D>,
         C: Contiguous,
         S: Storage<F, Digest = D>,
         const N: usize,
@@ -300,7 +300,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         collected: Option<&mut Vec<(Position<F>, D)>>,
     ) -> Result<D, merkle::Error<F>>
     where
-        H: CHasher<Digest = D>,
+        H: CCodecHasher<Digest = D>,
         O: Codec,
     {
         if ops.is_empty() || chunks.is_empty() {
@@ -441,7 +441,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the db with the provided root, and having the activity status described by `chunks`.
-    pub fn verify<H: CHasher<Digest = D>, O: Codec, const N: usize>(
+    pub fn verify<H: CCodecHasher<Digest = D>, O: Codec, const N: usize>(
         &self,
         start_loc: Location<F>,
         ops: &[O],
@@ -467,7 +467,7 @@ pub fn verify_proof_and_extract_digests<F, Op, H, D, const N: usize>(
 where
     F: Graftable,
     Op: Codec,
-    H: CHasher<Digest = D>,
+    H: CCodecHasher<Digest = D>,
     D: Digest,
 {
     let mut collected = Vec::new();
@@ -556,7 +556,7 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
-    pub async fn new<H: CHasher<Digest = D>, S: Storage<F, Digest = D>>(
+    pub async fn new<H: CCodecHasher<Digest = D>, S: Storage<F, Digest = D>>(
         status: &impl BitmapReadable<N>,
         storage: &S,
         inactivity_floor: Location<F>,
@@ -587,7 +587,7 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
 impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     /// Verify that the proof proves that `operation` is active in the database with the given
     /// `root`.
-    pub fn verify<H: CHasher<Digest = D>, O: Codec>(&self, operation: O, root: &D) -> bool {
+    pub fn verify<H: CCodecHasher<Digest = D>, O: Codec>(&self, operation: O, root: &D) -> bool {
         // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
         // the operation is indeed active).
         if !BitMap::<N>::get_bit_from_chunk(&self.chunk, *self.loc) {
@@ -660,7 +660,7 @@ mod tests {
         qmdb::current::{db, grafting},
     };
     use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{sha256, Hasher as _, Sha256};
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
     use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};

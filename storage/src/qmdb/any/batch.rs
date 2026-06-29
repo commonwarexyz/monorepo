@@ -24,7 +24,7 @@ use crate::{
 };
 use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher as Hasher, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap, sync::Mutex};
 use core::{cmp::Ordering, ops::Range};
@@ -2217,7 +2217,7 @@ mod tests {
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{sha256, Hasher as _, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::test_rng;

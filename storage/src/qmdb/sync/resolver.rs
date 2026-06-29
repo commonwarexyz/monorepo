@@ -26,7 +26,7 @@ use crate::{
     translator::Translator,
     Context,
 };
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher as Hasher, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     channel::oneshot,

@@ -96,7 +96,7 @@ use crate::{
 };
 use ahash::AHashSet;
 use commonware_codec::EncodeShared;
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::CodecHasher as CHasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::{num::NonZeroU64, ops::Range, sync::Arc};
@@ -780,7 +780,7 @@ pub(super) mod test {
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
-    use commonware_cryptography::{sha256, sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256, sha256::Digest, Hasher as _, Sha256};
     use commonware_runtime::{deterministic, Supervisor as _};
     use commonware_utils::NZU64;
     use core::{future::Future, pin::Pin};

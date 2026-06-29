@@ -68,7 +68,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::{CodecHasher as Hasher, DigestOf};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, sync::AsyncMutex, Array,

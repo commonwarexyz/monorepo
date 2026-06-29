@@ -333,7 +333,10 @@ commonware_macros::stability_scope!(BETA {
         fn hash(message: &[u8]) -> Self::Digest {
             Self::new().update(message).finalize()
         }
+    }
 
+    /// Extension methods for hashing encoded values and fixed preimages.
+    pub trait CodecHasher: Hasher {
         /// Hash a sequence of byte slices as one contiguous message.
         ///
         /// The current hasher state is discarded before hashing, and the hasher is reset before
@@ -417,6 +420,21 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_utils::test_rng;
+
+    macro_rules! hasher {
+        ($h:ty $(,)?) => {{
+            let mut hasher = <$h>::new();
+            hasher.pending().finalize()
+        }};
+        ($h:ty, $($part:expr),+ $(,)?) => {{
+            let mut hasher = <$h>::new();
+            let mut pending = hasher.pending();
+            $(
+                pending.update($part);
+            )+
+            pending.finalize()
+        }};
+    }
 
     fn test_validate<C: PrivateKey>() {
         let private_key = C::random(&mut test_rng());
@@ -725,28 +743,54 @@ mod tests {
         assert!(H::Digest::decode(digest.as_ref()).is_ok());
     }
 
-    fn test_hasher_hash_parts<H: Hasher>() {
+    fn test_codec_hasher_manual_equivalence<H: CodecHasher>() {
         let mut hasher = H::new();
-        let digest = hasher.hash_parts([b"hello".as_slice(), b" world".as_slice()]);
-        assert_eq!(digest, H::hash(b"hello world"));
-
-        drop(hasher.update(b"discarded"));
-        let digest = hasher.hash_parts([b"hello world".as_slice()]);
-        assert_eq!(digest, H::hash(b"hello world"));
-    }
-
-    fn test_hasher_hash_encoded<H: Hasher>() {
-        let mut hasher = H::new();
-        let value = (1u32, 2u64);
+        let first = b"hello".as_slice();
+        let second = b" world".as_slice();
         assert_eq!(
-            hasher.hash_encoded(&value),
-            H::hash(value.encode().as_ref())
+            hasher.hash_parts([first, second]),
+            hasher!(H, first, second)
         );
 
+        drop(hasher.update(b"discarded"));
+        assert_eq!(
+            hasher.hash_parts([first, second]),
+            hasher!(H, first, second)
+        );
+
+        let value = (1u32, 2u64);
+        let encoded = value.encode();
+        assert_eq!(hasher.hash_encoded(&value), hasher!(H, encoded.as_ref()));
+
         let prefix = b"prefix";
-        let mut encoded = prefix.to_vec();
-        encoded.extend_from_slice(value.encode().as_ref());
-        assert_eq!(hasher.hash_prefixed(prefix, &value), H::hash(&encoded));
+        assert_eq!(
+            hasher.hash_prefixed(prefix, &value),
+            hasher!(H, prefix, encoded.as_ref())
+        );
+
+        assert_eq!(hasher.hash_empty(), hasher!(H));
+
+        let left = H::hash(b"left");
+        let right = H::hash(b"right");
+        let prefix32 = 7u32.to_be_bytes();
+        assert_eq!(
+            hasher.hash_u32_digest(7, &left),
+            hasher!(H, prefix32.as_slice(), left.as_ref())
+        );
+        assert_eq!(
+            hasher.hash_digest_pair(&left, &right),
+            hasher!(H, left.as_ref(), right.as_ref())
+        );
+        assert_eq!(
+            hasher.merge_digest_pair(&left, &right),
+            hasher!(H, left.as_ref(), right.as_ref())
+        );
+
+        let prefix64 = 9u64.to_be_bytes();
+        assert_eq!(
+            hasher.hash_u64_digest_pair(9, &left, &right),
+            hasher!(H, prefix64.as_slice(), left.as_ref(), right.as_ref())
+        );
     }
 
     #[test]
@@ -770,12 +814,18 @@ mod tests {
     }
 
     #[test]
-    fn test_sha256_hasher_hash_parts() {
-        test_hasher_hash_parts::<Sha256>();
+    fn test_sha256_codec_hasher_manual_equivalence() {
+        test_codec_hasher_manual_equivalence::<Sha256>();
     }
 
     #[test]
-    fn test_sha256_hasher_hash_encoded() {
-        test_hasher_hash_encoded::<Sha256>();
+    fn test_blake3_codec_hasher_manual_equivalence() {
+        test_codec_hasher_manual_equivalence::<Blake3>();
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_crc32_codec_hasher_manual_equivalence() {
+        test_codec_hasher_manual_equivalence::<Crc32>();
     }
 }

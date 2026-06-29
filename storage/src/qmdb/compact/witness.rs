@@ -22,7 +22,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher as Hasher, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::{AsyncMutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};

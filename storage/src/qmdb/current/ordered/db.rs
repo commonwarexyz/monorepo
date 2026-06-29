@@ -20,7 +20,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Read, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher as Hasher, Digest};
 use commonware_parallel::Strategy;
 use futures::stream::Stream;
 

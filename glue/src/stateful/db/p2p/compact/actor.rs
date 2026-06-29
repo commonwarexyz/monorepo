@@ -3,7 +3,7 @@
 use super::{handler, mailbox, Mailbox};
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
-use commonware_cryptography::{Hasher, PublicKey};
+use commonware_cryptography::{CodecHasher as Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{p2p, Resolver as _};

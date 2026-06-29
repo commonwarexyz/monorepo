@@ -1405,7 +1405,7 @@ impl<E: Context, V: CodecShared> crate::journal::authenticated::Inner<E> for Jou
 
     async fn init<
         F: crate::merkle::Family,
-        H: commonware_cryptography::Hasher,
+        H: commonware_cryptography::CodecHasher,
         S: commonware_parallel::Strategy,
     >(
         context: E,

@@ -64,7 +64,7 @@ use crate::merkle::{
     self, hasher::Hasher as HasherTrait, storage::Storage as StorageTrait, Family, Graftable,
     Location, Position, Readable,
 };
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::{CodecHasher as CHasher, Digest};
 use commonware_utils::bitmap::BitMap;
 use core::{cmp::Ordering, marker::PhantomData};
 use tracing::debug;

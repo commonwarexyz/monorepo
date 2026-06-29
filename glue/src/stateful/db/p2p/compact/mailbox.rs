@@ -3,7 +3,7 @@
 use super::handler;
 use crate::stateful::db::AttachableResolver;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher as Hasher, Digest};
 use commonware_storage::{merkle::Family, qmdb::sync::compact};
 use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock};
 use std::{collections::VecDeque, future::Future, sync::Arc};

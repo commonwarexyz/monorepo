@@ -10,7 +10,7 @@ use crate::stateful::db::{
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher as Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{

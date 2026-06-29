@@ -15,7 +15,7 @@ use crate::{
     translator::Translator,
     Context,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher as Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
@@ -67,7 +67,7 @@ pub mod partitioned {
         translator::Translator,
         Context,
     };
-    use commonware_cryptography::Hasher;
+    use commonware_cryptography::CodecHasher as Hasher;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
 
@@ -147,7 +147,7 @@ pub(crate) mod test {
         },
         translator::{OneCap, TwoCap},
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;

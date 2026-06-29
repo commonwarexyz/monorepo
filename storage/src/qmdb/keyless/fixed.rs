@@ -15,7 +15,7 @@ use crate::{
         Error, ROOT_BAGGING,
     },
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher as Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 

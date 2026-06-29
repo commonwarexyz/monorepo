@@ -2,7 +2,7 @@ use crate::merkle::{
     hasher::Standard, verification::ProofStore, Error, Family, Location, Position, Proof,
 };
 use commonware_codec::Encode;
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher as Hasher, Digest};
 
 /// Verify that a [Proof] is valid for a range of operations and a target root.
 pub fn verify_proof<F, Op, H, D>(
@@ -126,7 +126,7 @@ mod tests {
         merkle::{build_range_proof, mem::Mem, Bagging::ForwardFold, LocationRangeExt as _},
         mmb, mmr,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
     use core::ops::Range;

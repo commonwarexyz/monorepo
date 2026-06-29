@@ -3,7 +3,7 @@
 use crate::merkle::{Bagging, Error, Family, Location, Position};
 use alloc::vec::Vec;
 use commonware_codec::Encode;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::{CodecHasher as CCodecHasher, Digest};
 use core::marker::PhantomData;
 
 /// A trait for computing the various digests of a Merkle-family structure.
@@ -149,12 +149,12 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
 ///
 /// The `bagging` field selects how peaks are folded into the root.
 #[derive(Clone)]
-pub struct Standard<H: CHasher> {
+pub struct Standard<H: CCodecHasher> {
     bagging: Bagging,
     marker: PhantomData<H>,
 }
 
-impl<H: CHasher> Standard<H> {
+impl<H: CCodecHasher> Standard<H> {
     /// Creates a new [Standard] hasher with the given bagging policy.
     pub const fn new(bagging: Bagging) -> Self {
         Self {
@@ -186,11 +186,11 @@ impl<H: CHasher> Standard<H> {
 }
 
 /// Reusable hashing state for a local run of Merkle operations.
-pub(crate) struct StandardState<H: CHasher> {
+pub(crate) struct StandardState<H: CCodecHasher> {
     hasher: H,
 }
 
-impl<H: CHasher> StandardState<H> {
+impl<H: CCodecHasher> StandardState<H> {
     /// Hash a fixed-position Merkle node.
     pub(crate) fn node_digest<F: Family>(
         &mut self,
@@ -212,7 +212,7 @@ impl<H: CHasher> StandardState<H> {
     }
 }
 
-impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
+impl<F: Family, H: CCodecHasher> Hasher<F> for Standard<H> {
     type Digest = H::Digest;
 
     fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
@@ -259,7 +259,7 @@ mod tests {
         Bagging::{BackwardFold, ForwardFold},
     };
     use alloc::vec::Vec;
-    use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{sha256, CodecHasher as CCodecHasher, Hasher as CHasher, Sha256};
 
     #[test]
     fn test_leaf_digest_sha256() {
@@ -323,7 +323,7 @@ mod tests {
         H::hash(&[value])
     }
 
-    fn test_leaf_digest<H: CHasher>() {
+    fn test_leaf_digest<H: CCodecHasher>() {
         let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
         let digest1 = test_digest::<H>(1);
         let digest2 = test_digest::<H>(2);
@@ -341,7 +341,7 @@ mod tests {
         assert_ne!(out, out2, "hash should change with different input digest");
     }
 
-    fn test_node_digest<H: CHasher>() {
+    fn test_node_digest<H: CCodecHasher>() {
         let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
 
         let d1 = test_digest::<H>(1);
@@ -376,7 +376,7 @@ mod tests {
         );
     }
 
-    fn test_root<H: CHasher>() {
+    fn test_root<H: CCodecHasher>() {
         let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);

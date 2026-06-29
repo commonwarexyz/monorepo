@@ -33,7 +33,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
-use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_cryptography::{CodecHasher as Hasher, Digest, DigestOf};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::metrics::{
@@ -1223,7 +1223,7 @@ mod tests {
         translator::OneCap,
     };
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{sha256, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::bitmap::Prunable as PrunableBitMap;

@@ -11,7 +11,7 @@ use crate::stateful::db::{
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, Read as CodecRead};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher as Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
@@ -511,7 +511,7 @@ where
 /// unambiguously picks the inherent `Db::init`.
 mod open {
     use commonware_codec::{Codec, Read};
-    use commonware_cryptography::Hasher;
+    use commonware_cryptography::CodecHasher as Hasher;
     use commonware_parallel::Strategy;
     use commonware_runtime::{Clock, Metrics, Storage};
     use commonware_storage::{
@@ -996,7 +996,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,

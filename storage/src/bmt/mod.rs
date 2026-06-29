@@ -48,7 +48,7 @@ use alloc::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
@@ -72,12 +72,12 @@ pub enum Error {
 }
 
 /// Constructor for a Binary Merkle Tree (BMT).
-pub struct Builder<H: Hasher> {
+pub struct Builder<H: CodecHasher> {
     hasher: H,
     leaves: Vec<H::Digest>,
 }
 
-impl<H: Hasher> Builder<H> {
+impl<H: CodecHasher> Builder<H> {
     /// Creates a new Binary Merkle Tree builder.
     pub fn new(leaves: usize) -> Self {
         Self {
@@ -124,7 +124,7 @@ pub struct Tree<D: Digest> {
 
 impl<D: Digest> Tree<D> {
     /// Builds a Merkle Tree from a slice of position-hashed leaf digests.
-    fn new<H: Hasher<Digest = D>>(mut hasher: H, mut leaves: Vec<D>) -> Self {
+    fn new<H: CodecHasher<Digest = D>>(mut hasher: H, mut leaves: Vec<D>) -> Self {
         // If no leaves, add an empty node.
         //
         // Because this node only includes a position, there is no way a valid proof
@@ -465,7 +465,7 @@ impl<D: Digest> Proof<D> {
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
-    pub fn verify_element_inclusion<H: Hasher<Digest = D>>(
+    pub fn verify_element_inclusion<H: CodecHasher<Digest = D>>(
         &self,
         leaf: &D,
         mut position: u32,
@@ -535,7 +535,7 @@ impl<D: Digest> Proof<D> {
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
-    pub fn verify_multi_inclusion<H: Hasher<Digest = D>>(
+    pub fn verify_multi_inclusion<H: CodecHasher<Digest = D>>(
         &self,
         elements: &[(D, u32)],
         root: &D,
@@ -654,7 +654,7 @@ impl<D: Digest> Proof<D> {
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
-    pub fn verify_range_inclusion<H: Hasher<Digest = D>>(
+    pub fn verify_range_inclusion<H: CodecHasher<Digest = D>>(
         &self,
         position: u32,
         leaves: &[D],
@@ -689,7 +689,7 @@ impl<D: Digest> Proof<D> {
 mod tests {
     use super::*;
     use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::sha256::{Digest, Sha256};
+    use commonware_cryptography::{Hasher as _, sha256::{Digest, Sha256}};
     use rstest::rstest;
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2837

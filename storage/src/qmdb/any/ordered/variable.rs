@@ -18,7 +18,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher as Hasher;
 use commonware_parallel::Strategy;
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
@@ -76,7 +76,7 @@ pub mod partitioned {
         Context,
     };
     use commonware_codec::{Codec, Read};
-    use commonware_cryptography::Hasher;
+    use commonware_cryptography::CodecHasher as Hasher;
     use commonware_parallel::Strategy;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.

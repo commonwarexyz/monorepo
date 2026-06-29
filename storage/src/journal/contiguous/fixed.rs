@@ -1443,7 +1443,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> fo
 
     async fn init<
         F: crate::merkle::Family,
-        H: commonware_cryptography::Hasher,
+        H: commonware_cryptography::CodecHasher,
         S: commonware_parallel::Strategy,
     >(
         context: E,

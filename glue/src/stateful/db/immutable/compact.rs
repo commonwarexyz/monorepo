@@ -9,7 +9,7 @@ use crate::stateful::db::{
     Unmerkleized as UnmerkleizedTrait, MAX_CHANNEL_DRAIN_PER_TICK,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher as Hasher;
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{reschedule, Clock, Metrics, Storage};
@@ -520,7 +520,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Spawner as _,

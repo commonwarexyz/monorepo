@@ -92,7 +92,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::{CodecHasher as CHasher, Digest};
 use commonware_parallel::{Sequential, Strategy};
 use core::ops::Range;
 

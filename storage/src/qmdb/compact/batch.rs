@@ -2,7 +2,7 @@
 
 use crate::merkle::{batch, compact, Family};
 use commonware_codec::EncodeShared;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher as Hasher;
 use commonware_parallel::Strategy;
 use std::sync::Arc;
 

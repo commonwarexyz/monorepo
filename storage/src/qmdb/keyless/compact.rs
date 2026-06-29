@@ -40,7 +40,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher as Hasher, Digest};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::sync::{Arc, Weak};

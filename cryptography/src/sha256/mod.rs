@@ -20,7 +20,7 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-use crate::Hasher;
+use crate::{CodecHasher, Hasher};
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use bytes::{Buf, BufMut};
@@ -102,7 +102,9 @@ impl Hasher for Sha256 {
     fn hash(message: &[u8]) -> Self::Digest {
         digest_from_output(ISha256::digest(message).into())
     }
+}
 
+impl CodecHasher for Sha256 {
     #[inline]
     fn hash_parts<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
         let mut len = 0usize;
@@ -175,18 +177,6 @@ impl Hasher for Sha256 {
         write_scratch(&mut self.scratch[..32], left.as_ref());
         write_scratch(&mut self.scratch[32..64], right.as_ref());
         finalize_fixed_64(&mut self.scratch)
-    }
-
-    #[inline]
-    fn merge_digest_pair(&mut self, left: &Self::Digest, right: &Self::Digest) -> Self::Digest {
-        write_scratch(&mut self.scratch[..32], left.as_ref());
-        write_scratch(&mut self.scratch[32..64], right.as_ref());
-
-        let mut state = INITIAL_STATE;
-        let (blocks, remainder) = self.scratch[..BLOCK_LENGTH].as_chunks::<BLOCK_LENGTH>();
-        debug_assert!(remainder.is_empty());
-        compress256(&mut state, blocks);
-        digest_from_state(state)
     }
 
     #[inline]

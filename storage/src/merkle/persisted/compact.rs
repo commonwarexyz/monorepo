@@ -16,7 +16,7 @@ use crate::merkle::{
     mem::{Config as MemConfig, Mem},
     Error, Family, Location,
 };
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::{CodecHasher as CHasher, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::RwLock;
 use std::sync::Arc;
