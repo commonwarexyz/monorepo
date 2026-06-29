@@ -227,8 +227,8 @@ impl<S: crate::Storage> Storage<S> {
 }
 
 /// Create an IoError for injected faults.
-fn injected_io_error() -> IoError {
-    IoError::other("injected storage fault")
+fn injected_io_error() -> Arc<IoError> {
+    Arc::new(IoError::other("injected storage fault"))
 }
 
 impl<S: crate::Storage> crate::Storage for Storage<S> {

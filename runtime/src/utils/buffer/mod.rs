@@ -74,8 +74,14 @@ mod tests {
         Storage,
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{sync::Mutex, NZUsize};
-    use std::sync::Arc;
+    use commonware_utils::{
+        sync::{Mutex, Notify},
+        NZUsize,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
 
     #[derive(Default)]
     struct RangeSyncState {
@@ -201,6 +207,105 @@ mod tests {
 
         async fn start_sync(&self) -> Handle<()> {
             Handle::ready(self.sync().await)
+        }
+    }
+
+    /// A [`SyncTrackingBlob`] whose `start_sync` defers completion until [`Self::release`] is
+    /// called, while counting starts/waits/completions. Lets tests gate an in-flight async sync.
+    #[derive(Clone)]
+    pub struct DelayedStartSyncBlob {
+        inner: SyncTrackingBlob,
+        released: Arc<AtomicBool>,
+        release: Arc<Notify>,
+        starts: Arc<AtomicUsize>,
+        start_waits: Arc<AtomicUsize>,
+        start_completions: Arc<AtomicUsize>,
+    }
+
+    impl DelayedStartSyncBlob {
+        pub fn new() -> Self {
+            Self {
+                inner: SyncTrackingBlob::new(),
+                released: Arc::new(AtomicBool::new(false)),
+                release: Arc::new(Notify::new()),
+                starts: Arc::new(AtomicUsize::new(0)),
+                start_waits: Arc::new(AtomicUsize::new(0)),
+                start_completions: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        pub fn snapshot(&self) -> (Vec<u8>, usize, usize, usize) {
+            self.inner.snapshot()
+        }
+
+        pub fn starts(&self) -> usize {
+            self.starts.load(Ordering::SeqCst)
+        }
+
+        pub fn start_waits(&self) -> usize {
+            self.start_waits.load(Ordering::SeqCst)
+        }
+
+        pub fn start_completions(&self) -> usize {
+            self.start_completions.load(Ordering::SeqCst)
+        }
+
+        pub fn release(&self) {
+            self.released.store(true, Ordering::SeqCst);
+            self.release.notify_waiters();
+        }
+
+        async fn wait_released(&self) {
+            while !self.released.load(Ordering::SeqCst) {
+                self.release.notified().await;
+            }
+        }
+    }
+
+    impl crate::Blob for DelayedStartSyncBlob {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            let this = self.clone();
+            Handle::from_future(async move {
+                this.start_waits.fetch_add(1, Ordering::SeqCst);
+                this.wait_released().await;
+                this.inner.start_sync().await.await?;
+                this.start_completions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
         }
     }
 
