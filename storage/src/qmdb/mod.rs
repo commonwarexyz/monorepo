@@ -480,7 +480,15 @@ pub trait SnapshotBuild<F: Family>: Index<Value = Location<F>> + Sized {
         S: Strategy,
         Fn: FnMut(bool, Option<Location<F>>) + Send,
     {
-        let _ = (context, strategy, parallelism);
+        // This index type builds serially, so `parallelism` has no effect; warn rather than silently
+        // ignore a non-default setting (only the ordered partitioned index parallelizes).
+        if parallelism != InitParallelism::Serial {
+            tracing::warn!(
+                ?parallelism,
+                "init_parallelism configured but this index builds serially; ignoring"
+            );
+        }
+        let _ = (context, strategy);
         async move {
             build_snapshot_from_log(inactivity_floor_loc, &**log, self, cache_size, callback).await
         }
