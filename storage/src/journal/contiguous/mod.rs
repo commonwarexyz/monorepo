@@ -3,12 +3,17 @@
 //! This module provides position-based journal implementations where items are stored
 //! contiguously and can be accessed by their position (0-indexed). Both [fixed]-size and
 //! [variable]-size item journals are supported.
+//!
+//! Storage errors from mutable operations are considered fatal for the current handle and may
+//! leave its in-memory state inconsistent with the underlying storage.
 
 use super::Error;
-use futures::Stream;
+use futures::{stream, Stream, StreamExt as _};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
+mod blobs;
+mod checkpoint;
 pub mod fixed;
 mod metrics;
 pub mod variable;
@@ -16,17 +21,140 @@ pub mod variable;
 #[cfg(test)]
 mod tests;
 
-/// A reader guard that holds a consistent view of the journal.
+/// Return the number of items that can be written before crossing the current blob boundary.
 ///
-/// While this guard exists, the reader's logical bounds remain stable, and any position within
-/// `bounds()` remains readable through this guard.
+/// `position` is the next logical item position and `remaining` is the number of items left in the
+/// append batch. The result is always at least one when `remaining > 0`.
+fn batch_count_to_blob_boundary(position: u64, remaining: usize, items_per_blob: u64) -> usize {
+    let pos_in_blob = position % items_per_blob;
+    let remaining_space = items_per_blob - pos_in_blob;
+
+    // Keep the min in u64 so a 2^32-item blob space does not truncate to zero on 32-bit targets.
+    remaining_space.min(remaining as u64) as usize
+}
+
+/// Return the blob containing `position`.
 ///
-/// Implementations may still make physical storage progress, such as unlinking backing blobs from
-/// future namespace lookups, but they must not invalidate reads within the captured bounds or
-/// change the bounds visible through this reader.
-pub trait Reader: Send + Sync {
-    /// The type of items stored in the journal.
+/// # Examples
+///
+/// ```ignore
+/// // With 10 items per blob:
+/// assert_eq!(position_to_blob(0, 10), 0);   // position 0 -> blob 0
+/// assert_eq!(position_to_blob(9, 10), 0);   // position 9 -> blob 0
+/// assert_eq!(position_to_blob(10, 10), 1);  // position 10 -> blob 1
+/// assert_eq!(position_to_blob(25, 10), 2);  // position 25 -> blob 2
+/// assert_eq!(position_to_blob(30, 10), 3);  // position 30 -> blob 3
+/// ```
+const fn position_to_blob(position: u64, items_per_blob: u64) -> u64 {
+    position / items_per_blob
+}
+
+/// Return the first position stored in `blob`.
+fn blob_first_position(blob: u64, items_per_blob: u64) -> Result<u64, Error> {
+    blob.checked_mul(items_per_blob)
+        .ok_or(Error::OffsetOverflow)
+}
+
+/// Return the exclusive logical end for `blob`, clamped to `end`.
+const fn blob_end_position(blob: u64, items_per_blob: u64, end: u64) -> u64 {
+    // No positions exist, so `end - 1` would underflow
+    if end == 0 {
+        return 0;
+    }
+
+    // This blob contains `end - 1`, so clamp to the journal end
+    let end_blob = (end - 1) / items_per_blob;
+    if blob >= end_blob {
+        return end;
+    }
+
+    // Earlier blobs have a representable natural boundary
+    (blob + 1) * items_per_blob
+}
+
+/// A decoded batch yielded by [ReplayBatchState::next_batch] paired with the advanced state, or
+/// `None` once the state is exhausted.
+type ReplayBatch<S> = Option<(Vec<Result<(u64, <S as ReplayBatchState>::Item), Error>>, S)>;
+
+/// Per-blob replay state that yields decoded item batches.
+trait ReplayBatchState: Sized {
+    /// The decoded item type.
     type Item;
+
+    /// Decode the next batch from this blob state.
+    fn next_batch(self) -> impl Future<Output = ReplayBatch<Self>> + Send;
+}
+
+/// Stream driver over per-blob replay states.
+struct ReplayStreamState<S: ReplayBatchState> {
+    /// Remaining blob states, in ascending blob order.
+    states: std::vec::IntoIter<S>,
+    /// State currently being drained.
+    current: Option<S>,
+    /// Set after the first error so the stream terminates cleanly.
+    done: bool,
+}
+
+impl<S: ReplayBatchState + Send> ReplayStreamState<S>
+where
+    S::Item: Send,
+{
+    /// Yield the next decoded batch.
+    async fn next(mut self) -> Option<(Vec<Result<(u64, S::Item), Error>>, Self)> {
+        loop {
+            if self.done {
+                return None;
+            }
+
+            let state = match self.current.take().or_else(|| self.states.next()) {
+                Some(state) => state,
+                None => return None,
+            };
+
+            match state.next_batch().await {
+                Some((batch, state)) => {
+                    if batch.iter().any(Result::is_err) {
+                        self.done = true;
+                        self.current = None;
+                    } else {
+                        self.current = Some(state);
+                    }
+                    return Some((batch, self));
+                }
+                None => {
+                    self.current = None;
+                }
+            }
+        }
+    }
+}
+
+/// Build a stream from per-blob replay states.
+fn replay_stream_from_states<S>(
+    states: Vec<S>,
+) -> impl Stream<Item = Result<(u64, S::Item), Error>> + Send
+where
+    S: ReplayBatchState + Send,
+    S::Item: Send,
+{
+    stream::unfold(
+        ReplayStreamState {
+            states: states.into_iter(),
+            current: None,
+            done: false,
+        },
+        ReplayStreamState::next,
+    )
+    .flat_map(stream::iter)
+}
+
+/// A read-only, position-based view of a contiguous journal.
+///
+/// Maintains a monotonically increasing position counter where each appended item receives a unique
+/// position starting from 0.
+pub trait Contiguous: Send + Sync {
+    /// The type of items stored in the journal.
+    type Item: Send;
 
     /// Returns [start, end) with a guaranteed stable pruning boundary.
     fn bounds(&self) -> Range<u64>;
@@ -39,7 +167,7 @@ pub trait Reader: Send + Sync {
     /// Read multiple items at the given positions, which must be strictly increasing.
     ///
     /// The default implementation calls [`read`](Self::read) in a loop. Concrete journal
-    /// implementations override this to amortize lock acquisition and batch I/O.
+    /// implementations override this to batch I/O.
     fn read_many(
         &self,
         positions: &[u64],
@@ -63,46 +191,21 @@ pub trait Reader: Send + Sync {
         None
     }
 
-    /// Return a stream of all items starting from `start_pos`.
+    /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
-    /// Because the reader holds the lock, validation and stream setup happen
-    /// atomically with respect to `prune()`.
+    /// `buffer` controls the replay byte budget for each chunk.
     fn replay(
         &self,
-        buffer: NonZeroUsize,
         start_pos: u64,
+        buffer: NonZeroUsize,
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
     > + Send;
 }
 
-/// Journals that support sequential append operations.
-///
-/// Maintains a monotonically increasing position counter where each appended item receives a unique
-/// position starting from 0.
-pub trait Contiguous: Send + Sync {
-    /// The type of items stored in the journal.
-    type Item;
-
-    /// Acquire a reader guard that holds a consistent view of the journal.
-    ///
-    /// While the returned guard exists, operations that need the journal's
-    /// internal write lock (such as `append`, `prune`, and `rewind`) may block
-    /// until the guard is dropped. This ensures any position within
-    /// `reader.bounds()` remains readable.
-    fn reader(&self) -> impl Future<Output = impl Reader<Item = Self::Item> + '_> + Send;
-
-    /// Return the total number of items that have been appended to the journal.
-    ///
-    /// This count is NOT affected by pruning. The next appended item will receive this
-    /// position as its value. Equivalent to [`Reader::bounds`]`.end`.
-    fn size(&self) -> impl Future<Output = u64> + Send;
-}
-
 /// Items to append via [`Mutable::append_many`].
 ///
-/// `Flat` wraps a single contiguous slice; `Nested` wraps multiple slices that are
-/// appended in order under a single lock acquisition.
+/// `Flat` wraps a single contiguous slice; `Nested` wraps multiple slices appended in order.
 pub enum Many<'a, T> {
     /// A single contiguous slice of items.
     Flat(&'a [T]),
@@ -148,7 +251,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// Append items to the journal, returning the position of the last item appended.
     ///
     /// The default implementation calls [Self::append] in a loop. Concrete implementations
-    /// may override this to acquire the write lock once for all items.
+    /// may override this to encode and write all items in one batch.
     ///
     /// Returns [Error::EmptyAppend] if items is empty.
     fn append_many<'a>(
@@ -162,7 +265,7 @@ pub trait Mutable: Contiguous + Send + Sync {
             if items.is_empty() {
                 return Err(Error::EmptyAppend);
             }
-            let mut last_pos = self.size().await;
+            let mut last_pos = self.bounds().end;
             match items {
                 Many::Flat(items) => {
                     for item in items {
@@ -220,14 +323,15 @@ pub trait Mutable: Contiguous + Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
-    /// Returns an error if the underlying storage operation fails.
+    /// Returns [Error::InvalidRewind] if `size` is beyond the current size, or [Error::ItemPruned]
+    /// if it precedes the pruning boundary. Returns an error if the underlying storage operation
+    /// fails.
     fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Durably persist the journal, guaranteeing the current state will survive a crash.
     ///
     /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-    fn commit(&self) -> impl std::future::Future<Output = Result<(), Error>> + Send {
+    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send {
         self.sync()
     }
 
@@ -235,7 +339,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// no recovery will be needed on startup.
     ///
     /// This provides a stronger guarantee than [Self::commit] but may be slower.
-    fn sync(&self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+    fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Destroy the journal, removing all associated storage.
     ///
@@ -265,21 +369,15 @@ pub trait Mutable: Contiguous + Send + Sync {
         P: FnMut(&Self::Item) -> bool + Send + 'a,
     {
         async move {
-            let (bounds, rewind_size) = {
-                let reader = self.reader().await;
-                let bounds = reader.bounds();
-                let mut rewind_size = bounds.end;
-
-                while rewind_size > bounds.start {
-                    let item = reader.read(rewind_size - 1).await?;
-                    if predicate(&item) {
-                        break;
-                    }
-                    rewind_size -= 1;
+            let bounds = self.bounds();
+            let mut rewind_size = bounds.end;
+            while rewind_size > bounds.start {
+                let item = self.read(rewind_size - 1).await?;
+                if predicate(&item) {
+                    break;
                 }
-
-                (bounds, rewind_size)
-            };
+                rewind_size -= 1;
+            }
 
             if rewind_size != bounds.end {
                 let rewound_items = bounds.end - rewind_size;

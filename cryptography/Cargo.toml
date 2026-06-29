@@ -16,12 +16,6 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true, optional = true }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
-ark-ec.workspace = true
-ark-ed-on-bls12-381-bandersnatch = { workspace = true, features = ["r1cs"] }
-ark-ff.workspace = true
-ark-r1cs-std.workspace = true
-ark-relations.workspace = true
-ark-serialize.workspace = true
 blake3 = { workspace = true, features = ["zeroize"] }
 blst = { workspace = true, features = ["no-threads"] }
 bytes.workspace = true
@@ -34,7 +28,7 @@ commonware-parallel.workspace = true
 commonware-utils.workspace = true
 crc-fast = { workspace = true, features = ["std"], optional = true }
 ctutils.workspace = true
-curve25519-dalek = { workspace = true, features = ["digest"] }
+curve25519-dalek.workspace = true
 ecdsa.workspace = true
 fixedbitset.workspace = true
 num-rational = { workspace = true, optional = true }
@@ -83,7 +77,6 @@ bench = false
 [features]
 default = [ "std" ]
 blake3-parallel = [ "blake3/rayon", "std" ]
-sha2-asm = [ "sha2/asm" ]
 mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
@@ -96,12 +89,6 @@ arbitrary = [
 fuzz = [ "arbitrary", "std" ]
 std = [
 	"anyhow?/std",
-	"ark-ec/std",
-	"ark-ed-on-bls12-381-bandersnatch/std",
-	"ark-ff/std",
-	"ark-r1cs-std/std",
-	"ark-relations/std",
-	"ark-serialize/std",
 	"blake3/std",
 	"bytes/std",
 	"chacha20poly1305/getrandom",
@@ -126,7 +113,6 @@ std = [
 	"rand/std_rng",
 	"rand_chacha/std",
 	"rand_core/std",
-	"sha2/std",
 	"thiserror/std",
 	"zeroize/std",
 ]
@@ -175,3 +161,8 @@ path = "src/handshake/benches/bench.rs"
 name = "bloomfilter"
 harness = false
 path = "src/bloomfilter/benches/bench.rs"
+
+[[bench]]
+name = "bulletproofs"
+harness = false
+path = "src/zk/bulletproofs/benches/bench.rs"

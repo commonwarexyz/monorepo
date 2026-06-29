@@ -82,7 +82,7 @@ impl<
     }
 
     async fn oldest_retained(&self) -> u64 {
-        *self.any.bounds().await.start
+        *self.any.bounds().start
     }
 }
 
@@ -108,7 +108,7 @@ where
     }
 
     async fn oldest_retained(&self) -> u64 {
-        *self.any.bounds().await.start
+        *self.any.bounds().start
     }
 }
 
@@ -152,7 +152,7 @@ impl<
     }
 
     async fn oldest_retained(&self) -> u64 {
-        *self.any.bounds().await.start
+        *self.any.bounds().start
     }
 }
 
@@ -199,6 +199,6 @@ where
     }
 
     async fn oldest_retained(&self) -> u64 {
-        *self.any.bounds().await.start
+        *self.any.bounds().start
     }
 }

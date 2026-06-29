@@ -502,6 +502,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16};
     use futures::future::pending;
+    use rstest::rstest;
     use std::{
         num::NonZeroU16,
         sync::{
@@ -519,6 +520,15 @@ mod tests {
     // Logical page size (what CacheRef uses and what gets cached).
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_SIZE_U64: u64 = PAGE_SIZE.get() as u64;
+
+    fn expected_cached_bytes(logical_offset: u64, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| {
+                let page = (logical_offset + i as u64) / PAGE_SIZE_U64;
+                page as u8 + 1
+            })
+            .collect()
+    }
 
     /// A blob that signals once a read starts and then never returns.
     #[derive(Clone)]
@@ -1222,5 +1232,40 @@ mod tests {
         assert!(buf2 == page2);
         // Missed page's buffer should be untouched (still zeroed).
         assert!(buf1.iter().all(|b| *b == 0));
+    }
+
+    #[rstest]
+    #[case::empty_read(vec![], 0, 0, 0)]
+    #[case::single_cached_page(vec![0], 3, 5, 5)]
+    #[case::cached_range_can_cross_pages(vec![0, 1], PAGE_SIZE_U64 - 2, 4, 4)]
+    #[case::missing_first_page_reads_nothing(vec![1], 0, 4, 0)]
+    #[case::missing_later_page_truncates_read(vec![0], PAGE_SIZE_U64 - 2, 4, 2)]
+    fn test_read_cached(
+        #[case] cached_pages: Vec<u64>,
+        #[case] logical_offset: u64,
+        #[case] len: usize,
+        #[case] expected_count: usize,
+    ) {
+        let pool = test_pool();
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        let sentinel = 0xEE;
+        let page_size = PAGE_SIZE.get() as usize;
+
+        {
+            let mut cache = cache_ref.cache.write();
+            for page in cached_pages {
+                // Use a distinct byte per page so cross-page reads prove both halves were copied.
+                cache.cache(blob_id, &vec![page as u8 + 1; page_size], page);
+            }
+        }
+
+        let mut buf = vec![sentinel; len];
+        let count = cache_ref.read_cached(blob_id, &mut buf, logical_offset);
+        assert_eq!(count, expected_count);
+
+        // The satisfied prefix holds cached bytes; everything past the first fault is untouched.
+        assert_eq!(buf[..count], expected_cached_bytes(logical_offset, count));
+        assert!(buf[count..].iter().all(|b| *b == sentinel));
     }
 }

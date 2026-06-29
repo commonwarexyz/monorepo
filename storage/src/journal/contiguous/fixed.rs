@@ -13,9 +13,9 @@
 //! pool.
 //!
 //! ```text
-//! +--------+----- --+--- -+----------+
+//! +--------+--------+-----+----------+
 //! | item_0 | item_1 | ... | item_n-1 |
-//! +--------+-----------+--------+----0
+//! +--------+--------+-----+----------+
 //!
 //! n = config.items_per_blob
 //! ```
@@ -26,41 +26,40 @@
 //! Data fetched from disk is always checked for integrity before being returned. If the data is
 //! found to be invalid, an error is returned instead.
 //!
+//! # Architecture
+//!
+//! Three types divide the work:
+//!
+//! - [`Journal`] tracks which positions are readable (`bounds`), maps each position to a blob
+//!   and byte offset, and remembers which blobs have writes that are not yet fsynced
+//!   (`dirty_from_blob`) so commit/sync only fsync what changed.
+//!
+//! - `Writable` owns the files: the contiguous sealed blobs plus the one writable tail.
+//!
+//! - `Checkpoint` owns the durable recovery hints (mid-blob pruning boundary, recovery
+//!   watermark, staged clear target) consulted before trusting blob state on startup.
+//!
 //! # Open Blobs
 //!
-//! All `Blobs` in a given `partition` are kept open during the lifetime of `Journal`. You can limit
-//! the number of open blobs by using a higher number of `items_per_blob` and/or pruning old items.
+//! Every retained blob is held open; a pruned blob stays open until the last snapshot holding it
+//! drops. Use a larger `items_per_blob` or prune to bound the count.
 //!
 //! # Partition
 //!
 //! Blobs are stored in the legacy partition (`cfg.partition`) if it already contains data;
 //! otherwise they are stored in `{cfg.partition}-blobs`.
 //!
-//! Metadata is stored in `{cfg.partition}-metadata`.
-//!
-//! # Metadata
-//!
-//! Metadata contains the following keys:
-//! - PRUNING_BOUNDARY_KEY: Stores the pruning boundary as a u64 when it's mid-section (not a
-//!   multiple of items_per_blob). Absent from legacy journals or when the boundary is
-//!   section-aligned, since it can be derived from the oldest blob.
-//! - RECOVERY_WATERMARK_KEY: Stores a lower bound on the last logical size at which the fixed
-//!   journal's entries and metadata were synced as a coherent recovery checkpoint by an external
-//!   consumer. The key is durably written during initialization for any journal last opened before
-//!   this key was introduced.
-//!
-//! RECOVERY_WATERMARK_KEY is mainly useful when this journal is used as an index for a layered
-//! journal, such as the variable journal's offsets. Standalone fixed journals do not need it to
-//! recover their own size; they recover from retained blob lengths.
+//! The checkpoint (the durable recovery record: pruning boundary, recovery watermark, and any
+//! in-progress clear intent) is stored in `{cfg.partition}-metadata`.
 //!
 //! # Recovery
 //!
-//! Sections are filled sequentially. Recovery walks the section range from oldest to newest and
-//! compares each section's item count to its logical capacity:
+//! Blobs are filled sequentially. Recovery walks the blob range from oldest to newest and
+//! compares each blob's item count to its logical capacity:
 //!
-//! - A short or missing non-newest section indicates a gap in durable data; recovery stops there
-//!   and truncates newer sections.
-//! - The newest section may be short, since it is the normal append frontier. Recovery includes
+//! - A short or missing non-newest blob indicates a gap in durable data; recovery stops there
+//!   and truncates newer blobs.
+//! - The newest blob may be short, since it is the normal append frontier. Recovery includes
 //!   its items.
 //!
 //! The recovered size is the logical end of this contiguous prefix. If the persisted watermark
@@ -73,40 +72,54 @@
 //! # Consistency
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
-//! to determine when to force pending data to be durably written using `commit` or `sync`. When
-//! calling `close`, all pending data is automatically synced and any open blobs are closed.
+//! to determine when to force pending data to be durably written using `commit` or `sync`.
 //!
 //! # Pruning
 //!
 //! The `prune` method allows the `Journal` to prune blobs consisting entirely of items prior to a
 //! given point in history.
 //!
+//! # Clearing / reset
+//!
+//! Clearing wipes all data and restarts the journal at a new size.
+//!
+//! To stay crash-safe, a clear records its target size in the checkpoint *before* deleting any
+//! blob. If a crash interrupts the deletion, reopening sees that recorded target and finishes the
+//! clear, rather than mistaking the half-deleted blobs for corruption.
+//!
+//! Callers reach this through `clear_to_size` (clear an open journal) or `init_at_size` (open
+//! straight into a cleared, empty journal at a given size).
+//!
 //! # Replay
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
-#[cfg(test)]
-use super::Reader as _;
+use super::{
+    blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
+    checkpoint::Checkpoint,
+};
+#[commonware_macros::stability(ALPHA)]
+use crate::{journal::authenticated, merkle};
 use crate::{
     journal::{
         contiguous::{metrics::FixedMetrics as Metrics, Many, Mutable},
-        segmented::fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
         Error,
     },
-    metadata::{Config as MetadataConfig, Metadata},
     Context,
 };
-use commonware_codec::CodecFixedShared;
-use commonware_runtime::{buffer::paged::CacheRef, IoBuf};
-use commonware_utils::{
-    sequence::VecU64,
-    sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard},
+use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
+use commonware_runtime::{
+    buffer::paged::{CacheRef, Writer},
+    Blob as RBlob, Buf, IoBuf,
 };
-use futures::{future::try_join_all, stream::Stream, StreamExt};
+use futures::Stream;
 use std::{
+    collections::BTreeMap,
     future::Future,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
+    sync::Arc,
 };
 use tracing::warn;
 
@@ -117,50 +130,158 @@ pub struct PreparedAppend<A> {
     _marker: PhantomData<A>,
 }
 
-/// Metadata key for a mid-section pruning boundary.
-///
-/// This key is present only when the oldest retained item is not section-aligned. It is persisted
-/// after the blob state it describes exists. Recovery trusts it when it matches the oldest retained
-/// section, falls back to the blob boundary when it lags (crash before metadata update), and
-/// returns corruption when it is ahead of blob state or no blobs exist.
-const PRUNING_BOUNDARY_KEY: u64 = 1;
-
-/// Metadata key for an in-progress clear/reset target.
-///
-/// This key is synced before destructive reset work starts. If recovery sees it, recovery
-/// completes the reset to the recorded target before normal bounds recovery.
-pub(super) const CLEAR_TARGET_KEY: u64 = 2;
-
-/// Metadata key for storing the recovery watermark.
-const RECOVERY_WATERMARK_KEY: u64 = 3;
-
-/// Return the first retained logical position in `section`.
+/// Return the first retained logical position in `blob`.
 #[inline]
-fn first_in_section(
-    pruning_boundary: u64,
-    section: u64,
-    items_per_blob: u64,
-) -> Result<u64, Error> {
-    let start = section
-        .checked_mul(items_per_blob)
-        .ok_or(Error::OffsetOverflow)?;
+fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Result<u64, Error> {
+    let start = super::blob_first_position(blob, items_per_blob)?;
     Ok(pruning_boundary.max(start))
 }
 
-/// Maximum number of items a section's blob can physically hold. This is `items_per_blob` unless
-/// the pruning boundary falls mid-section (from `init_at_size`), in which case the skipped prefix
-/// reduces the capacity.
-#[inline]
-fn section_capacity(
+/// Build a replay stream over the retained blob range.
+///
+/// The stream is split into one state per blob so replay can start at a mid-blob pruning boundary,
+/// stop at the journal's logical end, and avoid reading across blob files. `buffer` is a byte
+/// budget for each blob replay, not an item count.
+fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
+    blobs: &Blobs<'a, B>,
+    bounds: Range<u64>,
+    items_per_blob: NonZeroU64,
+    start_pos: u64,
+    buffer: NonZeroUsize,
+) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + use<'a, B, A>, Error> {
+    if start_pos > bounds.end {
+        return Err(Error::ItemOutOfRange(start_pos));
+    }
+    if start_pos < bounds.start {
+        return Err(Error::ItemPruned(start_pos));
+    }
+
+    let mut states = Vec::new();
+    if start_pos < bounds.end {
+        let items_per_blob = items_per_blob.get();
+        let start_blob = super::position_to_blob(start_pos, items_per_blob);
+        let end_blob = super::position_to_blob(bounds.end - 1, items_per_blob);
+        let items_per_batch = (buffer.get() / A::SIZE).max(1);
+
+        for blob in start_blob..=end_blob {
+            // The oldest retained blob may begin after its natural blob boundary when pruning
+            // kept only a suffix.
+            let blob_first = first_in_blob(bounds.start, blob, items_per_blob)?;
+            let first_pos = if blob == start_blob {
+                start_pos
+            } else {
+                blob_first
+            };
+            let blob_end = super::blob_end_position(blob, items_per_blob, bounds.end);
+            let offset = (first_pos - blob_first)
+                .checked_mul(A::SIZE as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            let blob = blobs
+                .get(blob)
+                .expect("positions in bounds map to a retained blob");
+
+            states.push(FixedReplayState::<B, A> {
+                replay: blob.replay_from(offset, buffer)?,
+                pos: first_pos,
+                end_pos: blob_end,
+                items_per_batch,
+                _marker: PhantomData,
+            });
+        }
+    }
+
+    Ok(super::replay_stream_from_states(states))
+}
+
+/// Replay state for one fixed-size blob.
+struct FixedReplayState<'a, B: RBlob, A> {
+    /// Sequential logical bytes for this blob.
+    replay: BlobReplay<'a, B>,
+    /// Next position to yield.
+    pos: u64,
+    /// Exclusive end position within this blob.
+    end_pos: u64,
+    /// Maximum number of items decoded per stream poll.
+    items_per_batch: usize,
+    _marker: PhantomData<A>,
+}
+
+impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState<'_, B, A> {
+    type Item = A;
+
+    /// Decode the next batch of fixed-size items from this blob.
+    async fn next_batch(mut self) -> Option<(Vec<Result<(u64, A), Error>>, Self)> {
+        if self.pos == self.end_pos {
+            return None;
+        }
+
+        // Require at least one whole item so a short blob is reported as corruption at the
+        // current position. Additional already-buffered items are decoded below.
+        let mut batch = Vec::new();
+        match self.replay.ensure(A::SIZE).await {
+            Ok(true) => {}
+            Ok(false) => {
+                batch.push(Err(Error::Corruption(format!(
+                    "blob ended before position {}",
+                    self.pos
+                ))));
+                self.pos = self.end_pos;
+                return Some((batch, self));
+            }
+            Err(err) => {
+                batch.push(Err(err));
+                self.pos = self.end_pos;
+                return Some((batch, self));
+            }
+        }
+
+        // Decode only whole items that are already buffered, capped by the replay byte budget and
+        // this blob's logical end.
+        let available = (self.replay.remaining() / A::SIZE) as u64;
+        let remaining = self.end_pos - self.pos;
+        let count = available.min(self.items_per_batch as u64).min(remaining) as usize;
+        let Some(next_pos) = self.pos.checked_add(count as u64) else {
+            batch.push(Err(Error::OffsetOverflow));
+            self.pos = self.end_pos;
+            return Some((batch, self));
+        };
+        batch.reserve(count);
+
+        let base = self.pos;
+        for i in 0..count {
+            match A::read(&mut self.replay) {
+                Ok(item) => batch.push(Ok((base + i as u64, item))),
+                Err(err) => {
+                    batch.push(Err(Error::Codec(err)));
+                    self.pos = self.end_pos;
+                    return Some((batch, self));
+                }
+            }
+        }
+        self.pos = next_pos;
+        Some((batch, self))
+    }
+}
+
+/// How a blob's on-disk item count compares to its logical capacity.
+enum BlobFill {
+    Full { len: u64 },
+    Short { len: u64 },
+    Overfull { len: u64, capacity: u64 },
+}
+
+/// The recovered journal bounds and any pending tail repair, reconciled from the checkpoint hints
+/// and the on-disk blob lengths.
+struct RecoveredBounds {
+    /// First retained position.
     pruning_boundary: u64,
-    section: u64,
-    items_per_blob: u64,
-) -> Result<u64, Error> {
-    let start = section
-        .checked_mul(items_per_blob)
-        .ok_or(Error::OffsetOverflow)?;
-    let skipped = pruning_boundary.saturating_sub(start).min(items_per_blob);
-    Ok(items_per_blob - skipped)
+    /// Size: one past the last recovered item.
+    size: u64,
+    /// Recovery watermark to persist (a floor on durable size).
+    recovery_watermark: u64,
+    /// If set, the byte length to truncate the recovered tail blob to; every blob newer than the
+    /// tail must be removed.
+    repair: Option<u64>,
 }
 
 /// Configuration for `Journal` storage.
@@ -175,7 +296,7 @@ pub struct Config {
     /// The maximum number of journal items to store in each blob.
     ///
     /// Retained non-tail blobs are expected to be full relative to their logical capacity. A
-    /// mid-section oldest blob may physically hold fewer than this many items, and the newest blob
+    /// mid-blob oldest blob may physically hold fewer than this many items, and the newest blob
     /// may contain fewer items.
     pub items_per_blob: NonZeroU64,
 
@@ -186,94 +307,7 @@ pub struct Config {
     pub write_buffer: NonZeroUsize,
 }
 
-/// Inner state protected by a single RwLock.
-struct Inner<E: Context, A: CodecFixedShared> {
-    /// The underlying segmented journal.
-    journal: SegmentedJournal<E, A>,
-
-    /// Total number of items appended (not affected by pruning).
-    size: u64,
-
-    /// Stores the recovery watermark and, when the pruning boundary is mid-section, the exact
-    /// pruning boundary. Also stores an in-progress `CLEAR_TARGET_KEY` while a clear/reset is
-    /// running.
-    ///
-    /// Metadata that advances the pruning boundary or recovery watermark is persisted only after
-    /// the blob state it describes is durable. A lower recovery watermark is always safe to persist
-    /// because it only expands the suffix external consumers may replay. Recovery rejects pruning
-    /// metadata ahead of blob state and watermarks beyond the recovered size as corruption.
-    metadata: Metadata<E, u64, VecU64>,
-
-    /// The position before which all items have been pruned.
-    pruning_boundary: u64,
-
-    /// The earliest section modified since the last successful `commit()` or `sync()`.
-    dirty_from_section: Option<u64>,
-}
-
-/// A deferred blob truncation to apply after metadata is persisted during init.
-struct RecoveryRepair {
-    section: u64,
-    byte_offset: u64,
-}
-
-impl<E: Context, A: CodecFixedShared> Inner<E, A> {
-    /// Read the item at position `pos` in the journal.
-    ///
-    /// # Errors
-    ///
-    ///  - [Error::ItemPruned] if the item at position `pos` is pruned.
-    ///  - [Error::ItemOutOfRange] if the item at position `pos` does not exist.
-    async fn read(&self, pos: u64, items_per_blob: u64) -> Result<A, Error> {
-        if pos >= self.size {
-            return Err(Error::ItemOutOfRange(pos));
-        }
-        if pos < self.pruning_boundary {
-            return Err(Error::ItemPruned(pos));
-        }
-
-        let section = pos / items_per_blob;
-        let pos_in_section =
-            pos - first_in_section(self.pruning_boundary, section, items_per_blob)?;
-
-        self.journal
-            .get(section, pos_in_section)
-            .await
-            .map_err(|e| {
-                // Since we check bounds above, any failure here is unexpected.
-                match e {
-                    Error::SectionOutOfRange(e)
-                    | Error::AlreadyPrunedToSection(e)
-                    | Error::ItemOutOfRange(e) => {
-                        Error::Corruption(format!("section/item should be found, but got: {e}"))
-                    }
-                    other => other,
-                }
-            })
-    }
-
-    /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
-    fn try_read_sync(&self, pos: u64, items_per_blob: u64) -> Option<A> {
-        let mut buf = vec![0u8; SegmentedJournal::<E, A>::CHUNK_SIZE];
-        self.try_read_sync_into(pos, items_per_blob, &mut buf)
-    }
-
-    /// Read an item synchronously using caller-provided buffer.
-    fn try_read_sync_into(&self, pos: u64, items_per_blob: u64, buf: &mut [u8]) -> Option<A> {
-        if pos >= self.size || pos < self.pruning_boundary {
-            return None;
-        }
-        let section = pos / items_per_blob;
-        let pos_in_section =
-            pos - first_in_section(self.pruning_boundary, section, items_per_blob).ok()?;
-        self.journal.try_get_sync_into(section, pos_in_section, buf)
-    }
-}
-
-/// Implementation of `Journal` storage.
-///
-/// This is implemented as a wrapper around [SegmentedJournal] that provides position-based access
-/// where positions are automatically mapped to (section, position_in_section) pairs.
+/// Implementation of [super::Mutable] for fixed-size value journals.
 ///
 /// # Repair
 ///
@@ -282,380 +316,73 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the
-/// underlying blob will be truncated to the last valid item). Repair is performed
-/// by the underlying [SegmentedJournal] during init.
-pub struct Journal<E: Context, A: CodecFixedShared> {
-    /// Inner state with segmented journal and size.
-    inner: AsyncRwLock<Inner<E, A>>,
+/// underlying blob will be truncated to the last valid item). Repair is performed during init.
+pub struct Journal<E: Context, A> {
+    /// The blobs that comprise the journal.
+    blobs: Writable<E>,
 
-    /// Serializes writers with `commit()` and `sync()` so a plain rwlock is sufficient.
-    op_lock: AsyncMutex<()>,
+    /// The durable recovery checkpoint.
+    checkpoint: Checkpoint<E>,
 
-    /// The maximum number of items per blob (section).
-    items_per_blob: u64,
+    /// The readable positions; `bounds.end` is the next append position.
+    bounds: Range<u64>,
 
-    /// Metrics for monitoring journal state and activity.
-    metrics: Metrics<E>,
-}
+    /// Earliest blob modified since the last `commit()` or `sync()`.
+    dirty_from_blob: Option<u64>,
 
-/// A reader guard that holds a consistent snapshot of the journal's bounds.
-pub struct Reader<'a, E: Context, A: CodecFixedShared> {
-    guard: AsyncRwLockReadGuard<'a, Inner<E, A>>,
-    items_per_blob: u64,
-    metrics: &'a Metrics<E>,
-}
+    /// The maximum number of items per blob.
+    items_per_blob: NonZeroU64,
 
-impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
-    type Item = A;
+    /// Shared with [Reader]s.
+    metrics: Arc<Metrics<E>>,
 
-    fn bounds(&self) -> std::ops::Range<u64> {
-        self.guard.pruning_boundary..self.guard.size
-    }
-
-    async fn read(&self, pos: u64) -> Result<A, Error> {
-        self.metrics.read_calls.inc();
-
-        // Serve from the page cache synchronously when possible, avoiding the async storage path.
-        if let Some(item) = self.guard.try_read_sync(pos, self.items_per_blob) {
-            self.metrics.record_cache_hits(1);
-            self.metrics.items_read.inc();
-            return Ok(item);
-        }
-        self.metrics.record_cache_misses(1);
-
-        let _timer = self.metrics.read_timer();
-        let item = self.guard.read(pos, self.items_per_blob).await?;
-        self.metrics.items_read.inc();
-        Ok(item)
-    }
-
-    async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
-        if positions.is_empty() {
-            return Ok(Vec::new());
-        }
-        let _timer = self.metrics.read_many_timer();
-        self.metrics.read_many_calls.inc();
-        assert!(
-            positions.windows(2).all(|w| w[0] < w[1]),
-            "positions must be strictly increasing"
-        );
-        // Validate all positions.
-        for &pos in positions {
-            if pos >= self.guard.size {
-                return Err(Error::ItemOutOfRange(pos));
-            }
-            if pos < self.guard.pruning_boundary {
-                return Err(Error::ItemPruned(pos));
-            }
-        }
-
-        let items_per_blob = self.items_per_blob;
-        let pruning_boundary = self.guard.pruning_boundary;
-        let chunk_size = SegmentedJournal::<E, A>::CHUNK_SIZE;
-
-        // Read all positions grouped by section. Each group goes through the segmented journal's
-        // batched read, which serves page-cache and tip-buffer hits under a single lock acquisition
-        // and reads only true misses from the blob (concurrently). This avoids one lock acquisition
-        // per item that a per-item synchronous probe would incur for the warm steady state.
-        let mut result: Vec<A> = Vec::with_capacity(positions.len());
-        let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
-        let mut hits = 0u64;
-
-        let mut group_start = 0;
-        while group_start < positions.len() {
-            let section = positions[group_start] / items_per_blob;
-
-            let mut group_end = group_start + 1;
-            while group_end < positions.len() && positions[group_end] / items_per_blob == section {
-                group_end += 1;
-            }
-
-            let group_len = group_end - group_start;
-            let first_position = first_in_section(pruning_boundary, section, items_per_blob)?;
-            let section_positions: Vec<u64> = positions[group_start..group_end]
-                .iter()
-                .map(|&pos| pos - first_position)
-                .collect();
-
-            let buf = &mut reusable_buf[..group_len * chunk_size];
-            let (items, group_hits) = self
-                .guard
-                .journal
-                .get_many(section, &section_positions, buf)
-                .await
-                .map_err(|e| match e {
-                    Error::SectionOutOfRange(e)
-                    | Error::AlreadyPrunedToSection(e)
-                    | Error::ItemOutOfRange(e) => {
-                        Error::Corruption(format!("section/item should be found, but got: {e}"))
-                    }
-                    other => other,
-                })?;
-
-            hits += group_hits as u64;
-            result.extend(items);
-            group_start = group_end;
-        }
-
-        self.metrics.record_cache_hits(hits);
-        self.metrics
-            .record_cache_misses(positions.len() as u64 - hits);
-        self.metrics.items_read.inc_by(positions.len() as u64);
-        Ok(result)
-    }
-
-    fn try_read_sync(&self, pos: u64) -> Option<A> {
-        self.guard
-            .try_read_sync(pos, self.items_per_blob)
-            .map_or_else(
-                || {
-                    self.metrics.record_cache_misses(1);
-                    None
-                },
-                |item| {
-                    self.metrics.record_cache_hits(1);
-                    self.metrics.try_read_sync_hits.inc();
-                    self.metrics.items_read.inc();
-                    Some(item)
-                },
-            )
-    }
-
-    async fn replay(
-        &self,
-        buffer: NonZeroUsize,
-        start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        let items_per_blob = self.items_per_blob;
-        let pruning_boundary = self.guard.pruning_boundary;
-
-        // Validate bounds.
-        if start_pos > self.guard.size {
-            return Err(Error::ItemOutOfRange(start_pos));
-        }
-        if start_pos < pruning_boundary {
-            return Err(Error::ItemPruned(start_pos));
-        }
-
-        let start_section = start_pos / items_per_blob;
-        let start_pos_in_section =
-            start_pos - first_in_section(pruning_boundary, start_section, items_per_blob)?;
-
-        // Check all middle sections (not oldest, not tail) in range are complete.
-        let journal = &self.guard.journal;
-        if let (Some(oldest), Some(newest)) = (journal.oldest_section(), journal.newest_section()) {
-            let first_to_check = start_section.max(oldest + 1);
-            for section in first_to_check..newest {
-                let len = journal.section_len(section).await?;
-                if len < items_per_blob {
-                    return Err(Error::Corruption(format!(
-                        "section {section} incomplete: expected {items_per_blob} items, got {len}"
-                    )));
-                }
-            }
-        }
-
-        let inner_stream = journal
-            .replay(start_section, start_pos_in_section, buffer)
-            .await?;
-
-        // Transform (section, pos_in_section, item) to (global_pos, item).
-        let stream = inner_stream.map(move |result| {
-            result.and_then(|(section, pos_in_section, item)| {
-                let global_pos = first_in_section(pruning_boundary, section, items_per_blob)?
-                    .checked_add(pos_in_section)
-                    .ok_or(Error::OffsetOverflow)?;
-                Ok((global_pos, item))
-            })
-        });
-
-        Ok(stream)
-    }
+    _phantom: PhantomData<A>,
 }
 
 impl<E: Context, A: CodecFixedShared> Journal<E, A> {
-    /// Size of each entry in bytes.
-    pub const CHUNK_SIZE: usize = SegmentedJournal::<E, A>::CHUNK_SIZE;
+    /// Size of each entry in bytes. Evaluating this rejects zero-size item types at compile
+    /// time, which would otherwise divide by zero in the chunk math.
+    pub const CHUNK_SIZE: NonZeroUsize = match NonZeroUsize::new(A::SIZE) {
+        Some(size) => size,
+        None => panic!("journal item size must be nonzero"),
+    };
 
     /// Size of each entry in bytes (as u64).
-    pub const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
+    pub const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE.get() as u64;
 
-    /// Mark all sections from `section` onward as dirty.
-    fn mark_dirty_from(inner: &mut Inner<E, A>, section: u64) {
-        inner.dirty_from_section = Some(
-            inner
-                .dirty_from_section
-                .map_or(section, |existing| existing.min(section)),
+    /// Convert an item count to a byte length, failing on overflow.
+    fn items_to_bytes(items: u64) -> Result<u64, Error> {
+        items
+            .checked_mul(Self::CHUNK_SIZE_U64)
+            .ok_or(Error::OffsetOverflow)
+    }
+
+    /// Mark all blobs from `blob` onward as dirty.
+    fn mark_dirty_from(&mut self, blob: u64) {
+        self.dirty_from_blob = Some(
+            self.dirty_from_blob
+                .map_or(blob, |existing| existing.min(blob)),
         );
     }
 
-    /// Update pruning-boundary and recovery-watermark entries in metadata's in-memory state.
-    ///
-    /// Call `inner.metadata.sync()` separately to persist the updated entries.
-    fn update_metadata_entries(
-        inner: &mut Inner<E, A>,
-        items_per_blob: u64,
-        pruning_boundary: u64,
-        recovery_watermark: u64,
-    ) {
-        let current_pruning = inner
-            .metadata
-            .get(&PRUNING_BOUNDARY_KEY)
-            .copied()
-            .map(u64::from);
-        if !pruning_boundary.is_multiple_of(items_per_blob) {
-            if current_pruning != Some(pruning_boundary) {
-                inner
-                    .metadata
-                    .put(PRUNING_BOUNDARY_KEY, pruning_boundary.into());
-            }
-        } else if current_pruning.is_some() {
-            inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
+    /// Construct a journal from recovered blobs.
+    fn from_blobs(
+        blobs: Writable<E>,
+        checkpoint: Checkpoint<E>,
+        bounds: Range<u64>,
+        dirty_from_blob: Option<u64>,
+        items_per_blob: NonZeroU64,
+        metrics: Metrics<E>,
+    ) -> Self {
+        Self {
+            blobs,
+            checkpoint,
+            bounds,
+            dirty_from_blob,
+            items_per_blob,
+            metrics: Arc::new(metrics),
+            _phantom: PhantomData,
         }
-
-        let current_watermark = inner
-            .metadata
-            .get(&RECOVERY_WATERMARK_KEY)
-            .copied()
-            .map(u64::from);
-        if current_watermark != Some(recovery_watermark) {
-            inner
-                .metadata
-                .put(RECOVERY_WATERMARK_KEY, recovery_watermark.into());
-        }
-    }
-
-    /// Update and persist pruning-boundary and recovery-watermark metadata entries.
-    async fn persist_metadata_entries(
-        inner: &mut Inner<E, A>,
-        items_per_blob: u64,
-        pruning_boundary: u64,
-        recovery_watermark: u64,
-    ) -> Result<(), Error> {
-        Self::update_metadata_entries(inner, items_per_blob, pruning_boundary, recovery_watermark);
-        inner.metadata.sync().await.map_err(Into::into)
-    }
-
-    /// Stage a recovery watermark no greater than `limit`.
-    ///
-    /// This is used before blob state moves backward so external consumers never see a persisted
-    /// recovery checkpoint beyond the rewind/clear target.
-    fn lower_recovery_watermark(inner: &mut Inner<E, A>, limit: u64) -> bool {
-        let Some(current) = inner
-            .metadata
-            .get(&RECOVERY_WATERMARK_KEY)
-            .copied()
-            .map(u64::from)
-        else {
-            return false;
-        };
-        if current <= limit {
-            return false;
-        }
-        inner.metadata.put(RECOVERY_WATERMARK_KEY, limit.into());
-        true
-    }
-
-    /// Stage a recovery-watermark entry no greater than `limit` in raw metadata.
-    ///
-    /// This is used by `init_at_size` before it clears existing blobs, before an `Inner` exists.
-    #[commonware_macros::stability(ALPHA)]
-    pub(super) fn update_metadata_watermark_before_clear(
-        metadata: &mut Metadata<E, u64, VecU64>,
-        limit: u64,
-    ) -> bool {
-        let Some(current_watermark) = metadata
-            .get(&RECOVERY_WATERMARK_KEY)
-            .copied()
-            .map(u64::from)
-        else {
-            return false;
-        };
-        if current_watermark <= limit {
-            return false;
-        }
-        metadata.put(RECOVERY_WATERMARK_KEY, limit.into());
-        true
-    }
-
-    /// Open the metadata partition for `cfg`.
-    pub(super) async fn open_metadata(
-        context: E,
-        cfg: &Config,
-    ) -> Result<Metadata<E, u64, VecU64>, Error> {
-        let meta_cfg = MetadataConfig {
-            partition: format!("{}-metadata", cfg.partition),
-            codec_config: (),
-        };
-        Metadata::<_, u64, VecU64>::init(context, meta_cfg)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Scan a partition and return blob names, treating a missing partition as empty.
-    async fn scan_partition(context: &E, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        match context.scan(partition).await {
-            Ok(blobs) => Ok(blobs),
-            Err(commonware_runtime::Error::PartitionMissing(_)) => Ok(Vec::new()),
-            Err(err) => Err(Error::Runtime(err)),
-        }
-    }
-
-    /// Select the blobs partition using legacy-first compatibility rules.
-    ///
-    /// If both legacy and new blobs partitions contain data, returns corruption.
-    /// If neither contains data, defaults to the new blobs partition.
-    // TODO(#2941): Remove legacy partition support
-    async fn select_blob_partition(context: &E, cfg: &Config) -> Result<String, Error> {
-        let legacy_partition = cfg.partition.as_str();
-        let new_partition = format!("{}-blobs", cfg.partition);
-
-        let legacy_blobs = Self::scan_partition(context, legacy_partition).await?;
-        let new_blobs = Self::scan_partition(context, &new_partition).await?;
-
-        if !legacy_blobs.is_empty() && !new_blobs.is_empty() {
-            return Err(Error::Corruption(format!(
-                "both legacy and blobs partitions contain data: legacy={} blobs={}",
-                legacy_partition, new_partition
-            )));
-        }
-
-        if !legacy_blobs.is_empty() {
-            Ok(legacy_partition.into())
-        } else {
-            Ok(new_partition)
-        }
-    }
-
-    /// Stage `PRUNING_BOUNDARY_KEY` in metadata, putting the mid-section boundary or removing the
-    /// entry when section-aligned.
-    fn stage_pruning_boundary_metadata(
-        metadata: &mut Metadata<E, u64, VecU64>,
-        items_per_blob: u64,
-        pruning_boundary: u64,
-    ) {
-        if !pruning_boundary.is_multiple_of(items_per_blob) {
-            metadata.put(PRUNING_BOUNDARY_KEY, pruning_boundary.into());
-        } else {
-            metadata.remove(&PRUNING_BOUNDARY_KEY);
-        }
-    }
-
-    /// Clear blobs, recreate the tail section, reset metadata to `size`, and remove the in-progress
-    /// `CLEAR_TARGET_KEY`. Called both by `clear_to_size`/`init_at_size` and during init-time
-    /// crash recovery when `CLEAR_TARGET_KEY` is present.
-    async fn complete_clear_to_size(
-        journal: &mut SegmentedJournal<E, A>,
-        metadata: &mut Metadata<E, u64, VecU64>,
-        items_per_blob: u64,
-        size: u64,
-    ) -> Result<(), Error> {
-        journal.clear().await?;
-        journal.ensure_section_exists(size / items_per_blob).await?;
-        Self::stage_pruning_boundary_metadata(metadata, items_per_blob, size);
-        metadata.put(RECOVERY_WATERMARK_KEY, size.into());
-        metadata.remove(&CLEAR_TARGET_KEY);
-        metadata.sync().await.map_err(Into::into)
     }
 
     /// Initialize a new `Journal` instance.
@@ -663,120 +390,173 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
     /// used to iterate over all items in the `Journal`.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
-        let metadata = Self::open_metadata(context.child("meta"), &cfg).await?;
-        Self::init_with_metadata(context, cfg, metadata).await
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        Self::init_with_checkpoint(context, cfg, checkpoint).await
     }
 
-    /// Finish initialization using an already-open metadata handle. Callers use this after
-    /// `open_metadata` so the metadata partition is opened exactly once.
-    pub(super) async fn init_with_metadata(
+    /// Finish initialization using an already-open checkpoint.
+    async fn init_with_checkpoint(
         context: E,
         cfg: Config,
-        mut metadata: Metadata<E, u64, VecU64>,
+        mut checkpoint: Checkpoint<E>,
     ) -> Result<Self, Error> {
-        let items_per_blob = cfg.items_per_blob.get();
-
-        let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
-        let segmented_cfg = SegmentedConfig {
-            partition: blob_partition,
-            page_cache: cfg.page_cache,
-            write_buffer: cfg.write_buffer,
-        };
-
-        let mut journal = SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
-
-        // Complete any interrupted clear before recovering bounds. `complete_clear_to_size` also
-        // resets the recovery watermark to the clear target, so the subsequent bounds recovery
-        // sees fully consistent metadata.
-        if let Some(clear_target) = metadata.get(&CLEAR_TARGET_KEY).copied().map(u64::from) {
-            warn!(clear_target, "crash repair: completing interrupted clear");
-            Self::complete_clear_to_size(&mut journal, &mut metadata, items_per_blob, clear_target)
-                .await?;
+        // A staged clear intent means all old blob data is about to be discarded. Honor it before
+        // scanning or opening blobs so corrupt stale blobs cannot block recovery of the reset.
+        if let Some(clear_target) = checkpoint.clear_target() {
+            return Self::complete_staged_clear(context, cfg, checkpoint, clear_target).await;
         }
 
-        let meta_pruning_boundary = metadata.get(&PRUNING_BOUNDARY_KEY).copied().map(u64::from);
-        let meta_recovery_watermark = metadata
-            .get(&RECOVERY_WATERMARK_KEY)
-            .copied()
-            .map(u64::from);
+        let blob_partition = Partition::select(&context, &cfg.partition).await?;
+        let partition = Partition::new(
+            context.child("blobs"),
+            blob_partition,
+            cfg.page_cache,
+            cfg.write_buffer,
+        );
+        let mut pending = partition.open_all().await?;
 
-        let (pruning_boundary, size, recovery_watermark, repair) = Self::recover_bounds(
-            &mut journal,
-            items_per_blob,
-            meta_pruning_boundary,
-            meta_recovery_watermark,
-        )
-        .await?;
+        // Truncate any trailing non-chunk-aligned bytes on every blob before recovery. Items
+        // are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is junk
+        // from an incomplete write (the page-CRC layer surfaces it as a partial logical tail).
+        // The truncation is synced before `recover_bounds` queries lengths.
+        for (&blob, writer) in &mut pending {
+            let size = writer.size();
+            let valid_size = Self::items_to_bytes(size / Self::CHUNK_SIZE_U64)?;
+            if valid_size != size {
+                warn!(
+                    blob,
+                    invalid_size = size,
+                    new_size = valid_size,
+                    "trailing bytes detected: truncating"
+                );
+                writer.resize(valid_size).await.map_err(Error::Runtime)?;
+                writer.sync().await.map_err(Error::Runtime)?;
+            }
+        }
+
+        let RecoveredBounds {
+            pruning_boundary,
+            size,
+            recovery_watermark,
+            repair,
+        } = Self::recover_bounds(
+            &pending,
+            cfg.items_per_blob.get(),
+            checkpoint.boundary_hint(),
+            checkpoint.watermark(),
+        )?;
+
+        // Persist any lowered checkpoint before applying blob repairs that move recovered state
+        // backward.
+        checkpoint
+            .persist(
+                cfg.items_per_blob.get(),
+                pruning_boundary,
+                recovery_watermark,
+            )
+            .await?;
+
+        // Apply repair (if any). The short blob becomes the new tail; blobs strictly newer
+        // than it are removed (newest-first) and the truncation is synced, so the repair is
+        // durable before sealing.
+        let tail_blob = super::position_to_blob(size, cfg.items_per_blob.get());
+        if let Some(truncate_to) = repair {
+            while let Some((&newest, _)) = pending.last_key_value() {
+                if newest <= tail_blob {
+                    break;
+                }
+                drop(pending.remove(&newest));
+                partition.remove(newest).await?;
+            }
+            if let Some(writer) = pending.get_mut(&tail_blob) {
+                if truncate_to < writer.size() {
+                    writer.resize(truncate_to).await.map_err(Error::Runtime)?;
+                    writer.sync().await.map_err(Error::Runtime)?;
+                }
+            }
+        }
+
+        // Seal every blob below the tail and assemble the blobs.
+        let blobs = Writable::recover(partition, pending, tail_blob).await?;
 
         // Bytes beyond the persisted recovery watermark may be readable after reopen without
         // being crash-durable, so the next commit/sync must force a data sync before advancing it.
-        let dirty_from_section =
-            (recovery_watermark < size).then_some(recovery_watermark / items_per_blob);
-        let mut inner = Inner {
-            journal,
-            size,
-            metadata,
-            pruning_boundary,
-            dirty_from_section,
-        };
-
-        // Metadata must be persisted before the rewind repair: the rewind cannot reduce the
-        // recoverable size below what recover_bounds computed, so the watermark persisted here will
-        // remain valid even if a crash interrupts the rewind.
-        Self::persist_metadata_entries(
-            &mut inner,
-            items_per_blob,
-            pruning_boundary,
-            recovery_watermark,
-        )
-        .await?;
-
-        if let Some(repair) = repair {
-            inner
-                .journal
-                .rewind(repair.section, repair.byte_offset)
-                .await?;
-            inner.journal.sync(repair.section).await?;
-        }
-
-        let tail_section = size / items_per_blob;
-        inner.journal.ensure_section_exists(tail_section).await?;
+        let dirty_from_blob = (recovery_watermark < size)
+            .then(|| super::position_to_blob(recovery_watermark, cfg.items_per_blob.get()));
 
         let metrics = Metrics::new(context);
-        metrics.update(size, pruning_boundary, items_per_blob);
+        metrics.update(size, pruning_boundary, cfg.items_per_blob.get());
 
-        Ok(Self {
-            inner: AsyncRwLock::new(inner),
-            op_lock: AsyncMutex::new(()),
-            items_per_blob,
+        Ok(Self::from_blobs(
+            blobs,
+            checkpoint,
+            pruning_boundary..size,
+            dirty_from_blob,
+            cfg.items_per_blob,
             metrics,
-        })
+        ))
     }
 
-    /// Recover `(pruning_boundary, size, recovery_watermark, repair)` from metadata and blob state.
+    /// Complete an interrupted clear: discard all blob partitions and start fresh at
+    /// `clear_target`, then finalize the checkpoint the crashed clear left staged.
+    async fn complete_staged_clear(
+        context: E,
+        cfg: Config,
+        mut checkpoint: Checkpoint<E>,
+        clear_target: u64,
+    ) -> Result<Self, Error> {
+        warn!(clear_target, "crash repair: completing interrupted clear");
+        let new_partition = format!("{}-blobs", cfg.partition);
+        Partition::<E>::remove_all(&context, &cfg.partition).await?;
+        Partition::<E>::remove_all(&context, &new_partition).await?;
+        let partition = Partition::new(
+            context.child("blobs"),
+            new_partition,
+            cfg.page_cache,
+            cfg.write_buffer,
+        );
+        let tail_blob = super::position_to_blob(clear_target, cfg.items_per_blob.get());
+        let blobs = Writable::recover(partition, BTreeMap::new(), tail_blob).await?;
+        checkpoint
+            .finish_clear(cfg.items_per_blob.get(), clear_target)
+            .await?;
+
+        let metrics = Metrics::new(context);
+        metrics.update(clear_target, clear_target, cfg.items_per_blob.get());
+        Ok(Self::from_blobs(
+            blobs,
+            checkpoint,
+            clear_target..clear_target,
+            None,
+            cfg.items_per_blob,
+            metrics,
+        ))
+    }
+
+    /// Recover the journal bounds and any tail repair from the checkpoint and blob state.
     ///
-    /// Pruning metadata that lags blob state is repaired from the blob boundary; pruning metadata
-    /// ahead of blob state or a watermark beyond the recovered size is corruption. The caller
-    /// persists metadata before applying the returned repair (see comment at the call site).
-    async fn recover_bounds(
-        inner: &mut SegmentedJournal<E, A>,
+    /// A boundary hint that lags blob state is repaired from the blob boundary; a hint ahead of
+    /// blob state or a watermark beyond the recovered size is corruption. The caller persists the
+    /// checkpoint before applying the returned repair (see comment at the call site).
+    fn recover_bounds(
+        pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
-        meta_pruning_boundary: Option<u64>,
-        meta_recovery_watermark: Option<u64>,
-    ) -> Result<(u64, u64, u64, Option<RecoveryRepair>), Error> {
+        boundary_hint: Option<u64>,
+        watermark_hint: Option<u64>,
+    ) -> Result<RecoveredBounds, Error> {
         let pruning_boundary = Self::recover_pruning_boundary(
-            meta_pruning_boundary,
-            inner.oldest_section(),
+            boundary_hint,
+            pending.keys().next().copied(),
             items_per_blob,
         )?;
 
         let (size, repair) =
-            Self::recover_by_walking_lengths(inner, items_per_blob, pruning_boundary).await?;
+            Self::recover_by_walking_lengths(pending, items_per_blob, pruning_boundary)?;
 
-        let recovery_watermark = match meta_recovery_watermark {
+        let recovery_watermark = match watermark_hint {
             Some(watermark) if watermark > size => {
                 // The dual-CRC page mechanism prevents losing previously-synced data, and
-                // clear_to_size updates the watermark atomically via CLEAR_TARGET_KEY. A
+                // clear_to_size updates the watermark atomically via the staged clear intent. A
                 // watermark beyond the recoverable size indicates external corruption.
                 return Err(Error::Corruption(format!(
                     "recovery watermark {watermark} exceeds recoverable size {size}"
@@ -784,150 +564,154 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             }
             Some(watermark) => watermark,
             None if repair.is_some() => {
-                // A legacy journal with a short non-tail section violates the old rollover-sync
-                // invariant (each section was fsynced before the next received writes).
+                // A legacy journal with a short non-tail blob violates the old rollover-sync
+                // invariant (each blob was fsynced before the next received writes).
                 return Err(Error::Corruption(
-                    "legacy journal has a short non-tail section".into(),
+                    "legacy journal has a short non-tail blob".into(),
                 ));
             }
             // Legacy journals have no watermark. Under the old rollover-sync invariant, all
-            // non-tail sections are durable; only the tail may have unfsynced data.
-            None => first_in_section(pruning_boundary, size / items_per_blob, items_per_blob)?,
+            // non-tail blobs are durable; only the tail may have unfsynced data.
+            None => first_in_blob(
+                pruning_boundary,
+                super::position_to_blob(size, items_per_blob),
+                items_per_blob,
+            )?,
         };
 
-        Ok((pruning_boundary, size, recovery_watermark, repair))
+        Ok(RecoveredBounds {
+            pruning_boundary,
+            size,
+            recovery_watermark,
+            repair,
+        })
     }
 
-    /// Recover the pruning boundary from metadata if it still matches the oldest retained section.
+    /// Recover the pruning boundary from the checkpoint hint if it still matches the oldest
+    /// retained blob.
     ///
-    /// Missing or section-aligned metadata means the blob boundary is authoritative. Mid-section
-    /// metadata is trusted only when it belongs to the current oldest section.
+    /// A missing or blob-aligned hint means the blob boundary is authoritative. A mid-blob hint
+    /// is trusted only when it belongs to the current oldest blob.
     fn recover_pruning_boundary(
-        meta_pruning_boundary: Option<u64>,
-        oldest_section: Option<u64>,
+        boundary_hint: Option<u64>,
+        oldest_blob: Option<u64>,
         items_per_blob: u64,
     ) -> Result<u64, Error> {
-        let blob_boundary = match oldest_section {
-            Some(oldest) => oldest
-                .checked_mul(items_per_blob)
-                .ok_or(Error::OffsetOverflow)?,
+        let blob_boundary = match oldest_blob {
+            Some(oldest) => super::blob_first_position(oldest, items_per_blob)?,
             None => 0,
         };
 
-        let Some(meta_pruning_boundary) = meta_pruning_boundary else {
+        let Some(boundary_hint) = boundary_hint else {
             return Ok(blob_boundary);
         };
-        if meta_pruning_boundary.is_multiple_of(items_per_blob) {
+        if boundary_hint.is_multiple_of(items_per_blob) {
             return Ok(blob_boundary);
         }
 
-        let meta_oldest_section = meta_pruning_boundary / items_per_blob;
-        match oldest_section {
-            Some(oldest_section) if meta_oldest_section == oldest_section => {
-                Ok(meta_pruning_boundary)
-            }
-            Some(oldest_section) if meta_oldest_section < oldest_section => {
+        let hint_blob = super::position_to_blob(boundary_hint, items_per_blob);
+        match oldest_blob {
+            Some(oldest_blob) if hint_blob == oldest_blob => Ok(boundary_hint),
+            Some(oldest_blob) if hint_blob < oldest_blob => {
                 warn!(
-                    meta_oldest_section,
-                    oldest_section, "crash repair: pruning metadata stale, computing from blobs"
+                    hint_blob,
+                    oldest_blob, "crash repair: boundary hint stale, computing from blobs"
                 );
                 Ok(blob_boundary)
             }
-            Some(oldest_section) => {
-                // Metadata ahead of blob state should never arise: prune removes blobs before
-                // sync persists metadata, and clear_to_size uses CLEAR_TARGET_KEY.
+            Some(oldest_blob) => {
+                // A hint ahead of blob state should never arise: prune removes blobs before
+                // sync persists the checkpoint, and clear_to_size stages a clear intent.
                 Err(Error::Corruption(format!(
-                    "pruning metadata references section {meta_oldest_section} \
-                     but oldest blob is section {oldest_section}"
+                    "boundary hint references blob {hint_blob} \
+                     but oldest blob is blob {oldest_blob}"
                 )))
             }
             None => {
-                // Mid-section pruning metadata with no blobs should never arise:
-                // complete_clear_to_size handles CLEAR_TARGET_KEY before we get here,
-                // and no other operation removes all blobs without updating metadata.
+                // A mid-blob hint with no blobs should never arise: a staged clear is completed
+                // before we get here, and no other operation removes all blobs without updating
+                // the checkpoint.
                 Err(Error::Corruption(format!(
-                    "pruning metadata references section {meta_oldest_section} but no blobs exist"
+                    "boundary hint references blob {hint_blob} but no blobs exist"
                 )))
             }
         }
     }
 
-    async fn section_len_within_capacity(
-        inner: &SegmentedJournal<E, A>,
+    /// Classify a blob's untrusted on-disk length against its capacity. A missing blob counts
+    /// as zero length, surfacing as a gap.
+    fn classify_fill(
+        pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
-        section: u64,
-    ) -> Result<(u64, u64), Error> {
-        let len = inner.section_len(section).await?;
-        let capacity = section_capacity(pruning_boundary, section, items_per_blob)?;
-        if len > capacity {
-            return Err(Error::Corruption(format!(
-                "section {section} has too many items: expected at most {capacity}, got {len}"
-            )));
-        }
-        Ok((len, capacity))
+        blob: u64,
+    ) -> Result<BlobFill, Error> {
+        let len = pending
+            .get(&blob)
+            .map_or(0, |writer| writer.size() / Self::CHUNK_SIZE_U64);
+        // A blob's capacity is `items_per_blob`, unless the pruning boundary falls mid-blob
+        // (from `init_at_size`), in which case the skipped prefix reduces it.
+        let start = super::blob_first_position(blob, items_per_blob)?;
+        let skipped = pruning_boundary.saturating_sub(start).min(items_per_blob);
+        let capacity = items_per_blob - skipped;
+        Ok(match len.cmp(&capacity) {
+            std::cmp::Ordering::Less => BlobFill::Short { len },
+            std::cmp::Ordering::Equal => BlobFill::Full { len },
+            std::cmp::Ordering::Greater => BlobFill::Overfull { len, capacity },
+        })
     }
 
-    /// Recover logical size by walking section lengths from oldest to newest, truncating at the
-    /// first short or missing non-tail section.
-    async fn recover_by_walking_lengths(
-        inner: &mut SegmentedJournal<E, A>,
+    /// Recover size by walking blob lengths from oldest to newest, truncating at the
+    /// first short or missing non-tail blob.
+    ///
+    /// `pruning_boundary` is trusted (already reconciled by `recover_pruning_boundary`); blob
+    /// lengths are untrusted disk state. The returned size is chunk-exact and the retained
+    /// prefix is contiguous.
+    fn recover_by_walking_lengths(
+        pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
-    ) -> Result<(u64, Option<RecoveryRepair>), Error> {
-        let oldest = inner.oldest_section();
-        let newest = inner.newest_section();
+    ) -> Result<(u64, Option<u64>), Error> {
+        let oldest = pending.keys().next().copied();
+        let newest = pending.keys().next_back().copied();
 
         let (Some(oldest), Some(newest)) = (oldest, newest) else {
             return Ok((pruning_boundary, None));
         };
 
         let mut size = pruning_boundary;
-        for section in oldest..=newest {
-            let (len, capacity) =
-                Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, section)
-                    .await?;
-
-            size = size.checked_add(len).ok_or(Error::OffsetOverflow)?;
-            if len < capacity {
-                if section == newest {
+        for blob in oldest..=newest {
+            let fill = Self::classify_fill(pending, items_per_blob, pruning_boundary, blob)?;
+            match fill {
+                // Complete: count its items and keep walking.
+                BlobFill::Full { len } => {
+                    size = size.checked_add(len).ok_or(Error::OffsetOverflow)?;
+                }
+                // The newest blob is the append frontier; short is normal.
+                BlobFill::Short { len } if blob == newest => {
+                    size = size.checked_add(len).ok_or(Error::OffsetOverflow)?;
                     return Ok((size, None));
                 }
-                return Ok((
-                    size,
-                    Some(RecoveryRepair {
-                        section,
-                        byte_offset: len
-                            .checked_mul(Self::CHUNK_SIZE_U64)
-                            .ok_or(Error::OffsetOverflow)?,
-                    }),
-                ));
+                // A short or missing interior blob is a gap in durable data: everything newer
+                // is unreachable. Truncate here.
+                BlobFill::Short { len } => {
+                    size = size.checked_add(len).ok_or(Error::OffsetOverflow)?;
+                    return Ok((size, Some(Self::items_to_bytes(len)?)));
+                }
+                BlobFill::Overfull { len, capacity } => {
+                    return Err(Error::Corruption(format!(
+                        "blob {blob} has too many items: expected at most {capacity}, got {len}"
+                    )));
+                }
             }
         }
 
         Ok((size, None))
     }
 
-    /// Initialize a new `Journal` instance in a pruned state at a given size.
-    ///
-    /// This is used for state sync to create a journal that appears to have had `size` items
-    /// appended and then pruned up to that point.
-    ///
-    /// # Arguments
-    /// * `context` - The storage context
-    /// * `cfg` - Configuration for the journal
-    /// * `size` - The number of operations that have been "pruned"
-    ///
-    /// # Behavior
-    /// - Clears any existing data in the partition
-    /// - Creates an empty tail blob where the next append (at position `size`) will go
-    /// - `bounds().is_empty()` returns `true` (fully pruned state)
-    /// - The next `append()` will write to position `size`
-    ///
-    /// # Post-conditions
-    /// - `bounds().end` returns `size`
-    /// - `bounds().is_empty()` returns `true`
-    /// - `bounds.start` equals `size` (no data exists)
+    /// Initialize a `Journal` in a fully-pruned state at `size`: existing data is cleared and the
+    /// journal behaves as if `size` items were appended then pruned. It is empty (`bounds` is
+    /// `size..size`) and the next `append` writes at position `size`. Used for state sync.
     ///
     /// # Crash Safety
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
@@ -935,7 +719,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         // Fail before writing intent if existing blob partitions are already inconsistent.
-        Self::select_blob_partition(&context, &cfg).await?;
+        Partition::select(&context, &cfg.partition).await?;
         Self::init_at_size_cleared(context, cfg, size, || async { Ok(()) }).await
     }
 
@@ -946,7 +730,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// with the reset. A crash at any point leaves a durable intent that the next `init` (or
     /// [Self::init_cleared]) finishes.
     #[commonware_macros::stability(ALPHA)]
-    pub(super) async fn init_at_size_cleared<F, Fut>(
+    pub(in crate::journal::contiguous) async fn init_at_size_cleared<F, Fut>(
         context: E,
         cfg: Config,
         size: u64,
@@ -962,25 +746,21 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Err(Error::SizeOverflow);
         }
 
-        // Stage the reset intent durably. Lower the recovery watermark first so external
-        // consumers never see a persisted checkpoint beyond `size`. `init_with_metadata` will
-        // detect CLEAR_TARGET_KEY and complete the clear via complete_clear_to_size before
-        // recovering bounds.
-        let mut metadata = Self::open_metadata(context.child("meta"), &cfg).await?;
-        Self::update_metadata_watermark_before_clear(&mut metadata, size);
-        metadata.put(CLEAR_TARGET_KEY, size.into());
-        metadata.sync().await?;
+        // Stage the reset intent durably. `init_with_checkpoint` will detect the intent and
+        // complete the clear before recovering bounds.
+        let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        checkpoint.stage_clear(size).await?;
         clear_dependents().await?;
-        Self::init_with_metadata(context, cfg, metadata).await
+        Self::init_with_checkpoint(context, cfg, checkpoint).await
     }
 
     /// Like [Self::init], but awaits `clear_dependents` before completing a staged clear.
     ///
     /// If a prior (possibly crashed) [Self::init_at_size_cleared] or
-    /// [Self::stage_clear_intent] staged a `CLEAR_TARGET_KEY` reset, `clear_dependents` runs before
-    /// recovery so callers can discard dependent state that the staged clear must reconcile against.
-    /// With no staged reset this behaves exactly like [Self::init].
-    pub(super) async fn init_cleared<F, Fut>(
+    /// [Self::stage_clear_intent] staged a reset, `clear_dependents` runs before recovery so
+    /// callers can discard dependent state that the staged clear must reconcile against. With no
+    /// staged reset this behaves exactly like [Self::init].
+    pub(in crate::journal::contiguous) async fn init_cleared<F, Fut>(
         context: E,
         cfg: Config,
         clear_dependents: F,
@@ -989,42 +769,19 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), Error>>,
     {
-        let metadata = Self::open_metadata(context.child("meta"), &cfg).await?;
-        if metadata.get(&CLEAR_TARGET_KEY).is_some() {
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        if checkpoint.clear_target().is_some() {
             clear_dependents().await?;
         }
-        Self::init_with_metadata(context, cfg, metadata).await
+        Self::init_with_checkpoint(context, cfg, checkpoint).await
     }
 
-    /// Convert a global position to (section, position_in_section).
-    #[inline]
-    const fn position_to_section(&self, position: u64) -> (u64, u64) {
-        let section = position / self.items_per_blob;
-        let pos_in_section = position % self.items_per_blob;
-        (section, pos_in_section)
-    }
-
-    /// Flush dirty sections to storage under the read lock, allowing concurrent reads.
-    ///
-    /// Sections are synced concurrently. Ordering is not required for recovery: appends only add
-    /// data, so committed sections are never at risk, and recovery truncates at the first short or
-    /// missing section, so a crash that leaves a gap still recovers a contiguous prefix no shorter
-    /// than the last completed commit.
-    async fn flush_dirty_sections(&self) -> Result<(), Error> {
-        let inner = self.inner.read().await;
-        if let Some(start_section) = inner.dirty_from_section {
-            let tail_section = inner.size / self.items_per_blob;
-            let start_section = inner
-                .journal
-                .oldest_section()
-                .map(|oldest| start_section.max(oldest))
-                // With no retained blobs, any earlier dirty section was cleared or pruned.
-                // Syncing the tail section is harmless when it does not exist.
-                .unwrap_or(tail_section);
-            try_join_all((start_section..=tail_section).map(|section| inner.journal.sync(section)))
-                .await?;
-        }
-        Ok(())
+    /// Make dirty blobs durable.
+    async fn flush_dirty_blobs(&mut self) -> Result<(), Error> {
+        let Some(start_blob) = self.dirty_from_blob else {
+            return Ok(());
+        };
+        self.blobs.sync_from(start_blob).await
     }
 
     /// Durably persists the current state of the structure.
@@ -1032,14 +789,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Does not advance the recovery watermark, so external consumers may need to replay entries
     /// beyond the previous `sync()`. Use `sync()` to advance the watermark and to ensure that a
     /// crash after this call doesn't require any recovery.
-    pub async fn commit(&self) -> Result<(), Error> {
+    pub async fn commit(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.record_commit();
-        let _op_guard = self.op_lock.lock().await;
-        self.flush_dirty_sections().await?;
-
-        let mut inner = self.inner.write().await;
-        inner.dirty_from_section = None;
+        self.flush_dirty_blobs().await?;
+        self.dirty_from_blob = None;
         Ok(())
     }
 
@@ -1047,54 +801,65 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// event of a crash following this call.
     ///
     /// Advances the recovery watermark to the current size.
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn sync(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
-        let _op_guard = self.op_lock.lock().await;
-        self.flush_dirty_sections().await?;
-
-        let mut inner = self.inner.write().await;
-        inner.dirty_from_section = None;
-        let pruning_boundary = inner.pruning_boundary;
-        let size = inner.size;
-        Self::update_metadata_entries(&mut inner, self.items_per_blob, pruning_boundary, size);
-        drop(inner);
-
-        let inner = self.inner.read().await;
-        inner.metadata.sync().await?;
-
-        Ok(())
+        self.flush_dirty_blobs().await?;
+        self.dirty_from_blob = None;
+        self.checkpoint
+            .persist(
+                self.items_per_blob.get(),
+                self.bounds.start,
+                self.bounds.end,
+            )
+            .await
     }
 
-    /// Acquire a reader guard that holds a consistent view of the journal.
-    pub async fn reader(&self) -> Reader<'_, E, A> {
-        Reader {
-            guard: self.inner.read().await,
+    /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
+    /// creation, and the snapshot stays readable across concurrent appends and prunes.
+    ///
+    /// If the journal later rewinds or truncates into the returned reader's range, subsequent reads
+    /// from that range may observe unspecified contents.
+    pub async fn snapshot(&mut self) -> Result<Reader<'static, E, A>, Error> {
+        Ok(Reader {
+            blobs: self.blobs.snapshot().await?,
+            bounds: self.bounds.clone(),
             items_per_blob: self.items_per_blob,
-            metrics: &self.metrics,
+            metrics: self.metrics.clone(),
+            _phantom: PhantomData,
+        })
+    }
+
+    /// A reader borrowing the journal's live state.
+    pub(super) fn reader(&self) -> Reader<'_, E, A> {
+        Reader {
+            blobs: self.blobs.reader(),
+            bounds: self.bounds.clone(),
+            items_per_blob: self.items_per_blob,
+            metrics: self.metrics.clone(),
+            _phantom: PhantomData,
         }
     }
 
     /// Return the recovery watermark.
-    pub(crate) async fn recovery_watermark(&self) -> u64 {
-        let inner = self.inner.read().await;
-        inner
-            .metadata
-            .get(&RECOVERY_WATERMARK_KEY)
-            .copied()
-            .map(u64::from)
+    pub(super) fn recovery_watermark(&self) -> u64 {
+        self.checkpoint
+            .watermark()
             .expect("recovery watermark must exist after init")
     }
 
     /// Return the total number of items in the journal, irrespective of pruning. The next value
     /// appended to the journal will be at this position.
-    pub async fn size(&self) -> u64 {
-        self.inner.read().await.size
+    pub const fn size(&self) -> u64 {
+        self.bounds.end
     }
 
-    /// Append a new item to the journal. Return the item's position in the journal, or error if the
-    /// operation fails.
-    pub async fn append(&self, item: &A) -> Result<u64, Error> {
+    /// Append a new item to the journal, returning its position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage operation fails.
+    pub async fn append(&mut self, item: &A) -> Result<u64, Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
         self.append_many_inner(Many::Flat(std::slice::from_ref(item)))
@@ -1103,17 +868,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Append items to the journal, returning the position of the last item appended.
     ///
-    /// Acquires the write lock once for all items instead of per-item.
     /// Returns [Error::EmptyAppend] if items is empty.
-    pub async fn append_many<'a>(&'a self, items: Many<'a, A>) -> Result<u64, Error> {
+    pub async fn append_many<'a>(&'a mut self, items: Many<'a, A>) -> Result<u64, Error> {
         let _timer = self.metrics.append_many_timer();
         self.metrics.append_many_calls.inc();
         self.append_many_inner(items).await
     }
 
     // Shared implementation for `append` and `append_many`; public wrappers record metrics.
-    async fn append_many_inner<'a>(&'a self, items: Many<'a, A>) -> Result<u64, Error> {
-        self.write_encoded(self.prepare_append(items)).await
+    async fn append_many_inner<'a>(&'a mut self, items: Many<'a, A>) -> Result<u64, Error> {
+        let prepared = self.prepare_append(items);
+        self.write_encoded(prepared).await
     }
 
     /// Encode `items` into a buffer that can be appended later with [`Self::append_prepared`].
@@ -1121,6 +886,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// This lets callers serialize borrowed items synchronously, release those borrows, and
     /// perform the append without holding unrelated locks across journal I/O.
     pub fn prepare_append(&self, items: Many<'_, A>) -> PreparedAppend<A> {
+        // Encode all items into a single contiguous buffer up front.
+        // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
         let mut buf = Vec::with_capacity(items.len() * A::SIZE);
         match items {
             Many::Flat(items) => {
@@ -1146,14 +913,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// appended.
     ///
     /// Returns [Error::EmptyAppend] if `prepared` contains no items.
-    pub async fn append_prepared(&self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+    pub async fn append_prepared(&mut self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
         let _timer = self.metrics.append_prepared_timer();
         self.metrics.append_prepared_calls.inc();
         self.write_encoded(prepared).await
     }
 
     // Write pre-encoded items; shared by all append paths. Records no call metrics.
-    async fn write_encoded(&self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+    async fn write_encoded(&mut self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
         let items_buf = prepared.buf;
         let items_count = items_buf.len() / A::SIZE;
         if items_count == 0 {
@@ -1161,135 +928,138 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
         let items_buf = IoBuf::from(items_buf);
 
-        let _op_guard = self.op_lock.lock().await;
-        let mut inner = self.inner.write().await;
-
         // Reject the append before writing anything if it would push the size past `u64::MAX`.
-        // This keeps the in-loop `inner.size += batch_count` and `section + 1` arithmetic safe.
-        inner
-            .size
+        // This keeps the in-loop size arithmetic safe.
+        self.bounds
+            .end
             .checked_add(items_count as u64)
             .ok_or(Error::SizeOverflow)?;
 
-        let first_dirty_section = inner.size / self.items_per_blob;
-        Self::mark_dirty_from(&mut inner, first_dirty_section);
+        let first_dirty_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
+        self.mark_dirty_from(first_dirty_blob);
         let mut written = 0;
         while written < items_count {
-            let (section, pos_in_section) = self.position_to_section(inner.size);
-            let remaining_space = (self.items_per_blob - pos_in_section) as usize;
-            let batch_count = remaining_space.min(items_count - written);
+            let batch_count = super::batch_count_to_blob_boundary(
+                self.bounds.end,
+                items_count - written,
+                self.items_per_blob.get(),
+            );
             let start = written * A::SIZE;
             let end = start + batch_count * A::SIZE;
+            // Overflow checked above.
+            let new_size = self.bounds.end + batch_count as u64;
 
-            inner
-                .journal
-                .append_raw(section, items_buf.slice(start..end))
-                .await?;
-            inner.size += batch_count as u64;
+            self.blobs
+                .tail_writer()
+                .append_owned(items_buf.slice(start..end))
+                .await
+                .map_err(Error::Runtime)?;
+            self.bounds.end = new_size;
             written += batch_count;
 
-            if inner.size.is_multiple_of(self.items_per_blob) {
-                inner.journal.ensure_section_exists(section + 1).await?;
+            // Seal the just-filled tail and open the next blob as the new tail. This does not
+            // fsync the old blob; dirty tracking still covers it until commit/sync.
+            if new_size.is_multiple_of(self.items_per_blob.get()) {
+                self.blobs.seal_tail().await?;
             }
         }
 
-        self.metrics
-            .update(inner.size, inner.pruning_boundary, self.items_per_blob);
-        Ok(inner.size - 1)
+        self.metrics.update(
+            self.bounds.end,
+            self.bounds.start,
+            self.items_per_blob.get(),
+        );
+        Ok(self.bounds.end - 1)
     }
 
-    /// Rewind the journal to the given `size`. Returns [Error::InvalidRewind] if the rewind point
-    /// precedes the oldest retained element. The journal is not synced after rewinding.
+    /// Rewind the journal to the given `size`. Returns [Error::InvalidRewind] if `size` is beyond
+    /// the current size, or [Error::ItemPruned] if it precedes the pruning boundary. The journal
+    /// is not synced after rewinding.
     ///
     /// # Warnings
     ///
     /// * This operation is not guaranteed to survive restarts until `commit()` or `sync()` is
     ///   called.
-    /// * This operation is not atomic, but it will always leave the journal in a consistent state
-    ///   in the event of failure since blobs are always removed from newest to oldest.
-    pub async fn rewind(&self, size: u64) -> Result<(), Error> {
-        let _op_guard = self.op_lock.lock().await;
-        let mut inner = self.inner.write().await;
-
-        match size.cmp(&inner.size) {
+    /// * This operation is not atomic. Its on-disk updates are ordered (blobs removed
+    ///   newest-to-oldest) so that restart recovery always rebuilds a contiguous retained prefix.
+    /// * Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
+    ///   rewind truncates into their range.
+    pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        match size.cmp(&self.bounds.end) {
             std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
             std::cmp::Ordering::Equal => return Ok(()),
             std::cmp::Ordering::Less => {}
         }
 
-        if size < inner.pruning_boundary {
-            return Err(Error::InvalidRewind(size));
+        if size < self.bounds.start {
+            return Err(Error::ItemPruned(size));
         }
 
-        let section = size / self.items_per_blob;
-        let pos_in_section =
-            size - first_in_section(inner.pruning_boundary, section, self.items_per_blob)?;
-        let byte_offset = pos_in_section
-            .checked_mul(Self::CHUNK_SIZE_U64)
-            .ok_or(Error::OffsetOverflow)?;
+        let blob = super::position_to_blob(size, self.items_per_blob.get());
+        let pos_in_blob = size - first_in_blob(self.bounds.start, blob, self.items_per_blob.get())?;
+        let byte_offset = Self::items_to_bytes(pos_in_blob)?;
 
-        let should_sync_metadata = Self::lower_recovery_watermark(&mut inner, size);
-        drop(inner);
-
-        if should_sync_metadata {
-            let inner = self.inner.read().await;
-            inner.metadata.sync().await?;
+        // Persist a lowered recovery watermark before blob state moves backward.
+        if self.checkpoint.lower_watermark(size) {
+            self.checkpoint.sync().await?;
         }
 
-        let mut inner = self.inner.write().await;
-        inner.journal.rewind(section, byte_offset).await?;
-        inner.size = size;
-        Self::mark_dirty_from(&mut inner, section);
-        self.metrics
-            .update(inner.size, inner.pruning_boundary, self.items_per_blob);
+        if blob == self.blobs.tail_blob_index() {
+            self.blobs.rewind_tail(byte_offset).await?;
+        } else {
+            self.blobs.rewind_into_sealed(blob, byte_offset).await?;
+        }
+
+        self.bounds.end = size;
+        self.mark_dirty_from(blob);
+        self.metrics.update(
+            self.bounds.end,
+            self.bounds.start,
+            self.items_per_blob.get(),
+        );
 
         Ok(())
     }
 
     /// Return the location before which all items have been pruned.
-    pub async fn pruning_boundary(&self) -> u64 {
-        let inner = self.inner.read().await;
-        inner.pruning_boundary
+    pub const fn pruning_boundary(&self) -> u64 {
+        self.bounds.start
     }
 
     /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
     /// such items in order to preserve blob boundaries, but the amount of such items will always be
     /// less than the configured number of items per blob. Returns true if any items were pruned.
     ///
+    /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
+    /// later snapshots observe [Error::ItemPruned].
+    ///
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
-    pub async fn prune(&self, min_item_pos: u64) -> Result<bool, Error> {
-        let _op_guard = self.op_lock.lock().await;
-        let mut inner = self.inner.write().await;
+    pub async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
+        // Calculate the blob that would contain min_item_pos, capped to the tail (which is
+        // guaranteed to exist by our invariant).
+        let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
+        let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
+        let min_blob = std::cmp::min(target_blob, tail_blob);
 
-        // Calculate the section that would contain min_item_pos
-        let target_section = min_item_pos / self.items_per_blob;
-
-        // Calculate the tail section.
-        let tail_section = inner.size / self.items_per_blob;
-
-        // Cap to tail section. The tail section is guaranteed to exist by our invariant.
-        let min_section = std::cmp::min(target_section, tail_section);
-
-        let pruned = inner.journal.prune(min_section).await?;
-
-        // After pruning, update pruning_boundary to the start of the oldest remaining section
-        if pruned {
-            let new_oldest = inner
-                .journal
-                .oldest_section()
-                .expect("all sections pruned - violates tail section invariant");
-            // Pruning boundary only moves forward
-            assert!(inner.pruning_boundary < new_oldest * self.items_per_blob);
-            inner.pruning_boundary = new_oldest * self.items_per_blob;
-            if let Some(dirty_from) = inner.dirty_from_section {
-                inner.dirty_from_section = Some(dirty_from.max(new_oldest));
-            }
-            self.metrics
-                .update(inner.size, inner.pruning_boundary, self.items_per_blob);
+        if min_blob <= self.blobs.oldest_blob_index() {
+            return Ok(false);
         }
 
-        Ok(pruned)
+        let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
+        self.blobs.prune(min_blob).await?;
+        self.bounds.start = new_boundary;
+
+        if let Some(dirty_from) = self.dirty_from_blob {
+            self.dirty_from_blob = Some(dirty_from.max(min_blob));
+        }
+        self.metrics.update(
+            self.bounds.end,
+            self.bounds.start,
+            self.items_per_blob.get(),
+        );
+
+        Ok(true)
     }
 
     /// Remove any persisted data created by the journal.
@@ -1300,13 +1070,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// reopening the same partition may observe partially removed state. Use [Self::init_at_size]
     /// for a recoverable reset.
     pub async fn destroy(self) -> Result<(), Error> {
-        // Destroy inner journal
-        let inner = self.inner.into_inner();
-        inner.journal.destroy().await?;
-
-        // Destroy metadata
-        inner.metadata.destroy().await?;
-
+        self.blobs.destroy().await?;
+        self.checkpoint.destroy().await?;
         Ok(())
     }
 
@@ -1319,91 +1084,244 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `new_size..new_size`.
-    pub(crate) async fn clear_to_size(&self, new_size: u64) -> Result<(), Error> {
-        let _op_guard = self.op_lock.lock().await;
-        let mut inner = self.inner.write().await;
+    pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
+        // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
+        if new_size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
 
-        // Lower the watermark in-memory and stage the clear intent in the same metadata sync, so
-        // external consumers never see a persisted recovery checkpoint beyond `new_size`.
-        Self::lower_recovery_watermark(&mut inner, new_size);
-        inner.metadata.put(CLEAR_TARGET_KEY, new_size.into());
-        inner.metadata.sync().await?;
+        // Durably record the intent first, so a crash mid-clear is finished on reopen.
+        self.checkpoint.stage_clear(new_size).await?;
 
-        let Inner {
-            journal, metadata, ..
-        } = &mut *inner;
-        Self::complete_clear_to_size(journal, metadata, self.items_per_blob, new_size).await?;
+        // Remove every blob, then start fresh at the new size.
+        self.blobs
+            .clear(super::position_to_blob(new_size, self.items_per_blob.get()))
+            .await?;
+        self.bounds = new_size..new_size;
+        self.dirty_from_blob = None;
 
-        inner.size = new_size;
-        inner.pruning_boundary = new_size;
-        inner.dirty_from_section = None;
+        // Complete the clear in the checkpoint.
+        self.checkpoint
+            .finish_clear(self.items_per_blob.get(), new_size)
+            .await?;
 
-        self.metrics
-            .update(inner.size, inner.pruning_boundary, self.items_per_blob);
+        self.metrics.update(
+            self.bounds.end,
+            self.bounds.start,
+            self.items_per_blob.get(),
+        );
         Ok(())
     }
 
     /// Durably stage a clear to `new_size` without completing it.
     ///
-    /// This lowers the recovery watermark and persists `CLEAR_TARGET_KEY`, leaving a recoverable
-    /// intent so a caller can clear dependent sibling state before calling `clear_to_size` to
-    /// finish. If a crash interrupts the sequence, the next `init` completes the staged clear.
-    /// The follow-up `clear_to_size` re-stages the same target idempotently.
+    /// This records a recoverable intent so a caller can clear dependent sibling state before
+    /// calling `clear_to_size` to finish. If a crash interrupts the sequence, the next `init`
+    /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
+    /// idempotently.
     #[commonware_macros::stability(ALPHA)]
-    pub(super) async fn stage_clear_intent(&self, new_size: u64) -> Result<(), Error> {
-        let _op_guard = self.op_lock.lock().await;
-        let mut inner = self.inner.write().await;
-
-        Self::lower_recovery_watermark(&mut inner, new_size);
-        inner.metadata.put(CLEAR_TARGET_KEY, new_size.into());
-        inner.metadata.sync().await.map_err(Into::into)
-    }
-
-    /// Test helper: Read the item at the given position.
-    #[cfg(test)]
-    pub(crate) async fn read(&self, pos: u64) -> Result<A, Error> {
-        self.reader().await.read(pos).await
-    }
-
-    /// Test helper: Return the bounds of the journal.
-    #[cfg(test)]
-    pub(crate) async fn bounds(&self) -> std::ops::Range<u64> {
-        self.reader().await.bounds()
-    }
-
-    /// Test helper: Get the oldest section from the internal segmented journal.
-    #[cfg(test)]
-    pub(crate) async fn test_oldest_section(&self) -> Option<u64> {
-        let inner = self.inner.read().await;
-        inner.journal.oldest_section()
-    }
-
-    /// Test helper: Get the newest section from the internal segmented journal.
-    #[cfg(test)]
-    pub(crate) async fn test_newest_section(&self) -> Option<u64> {
-        let inner = self.inner.read().await;
-        inner.journal.newest_section()
-    }
-
-    /// Test helper: Set and persist the recovery watermark directly.
-    #[cfg(test)]
-    pub(crate) async fn test_set_recovery_watermark(&self, watermark: u64) -> Result<(), Error> {
-        let mut inner = self.inner.write().await;
-        inner.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
-        inner.metadata.sync().await.map_err(Into::into)
+    pub(super) async fn stage_clear_intent(&mut self, new_size: u64) -> Result<(), Error> {
+        // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
+        if new_size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+        self.checkpoint.stage_clear(new_size).await
     }
 }
 
-// Implement Contiguous trait for fixed-length journals
+/// A reader over a fixed journal.
+pub struct Reader<'a, E: Context, A> {
+    blobs: Blobs<'a, E::Blob>,
+    bounds: Range<u64>,
+    items_per_blob: NonZeroU64,
+    metrics: Arc<Metrics<E>>,
+    _phantom: PhantomData<A>,
+}
+
+impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
+    /// Validate a position to be read: must lie within `bounds`.
+    const fn validate_readable(&self, pos: u64) -> Result<(), Error> {
+        if pos >= self.bounds.end {
+            return Err(Error::ItemOutOfRange(pos));
+        }
+        if pos < self.bounds.start {
+            return Err(Error::ItemPruned(pos));
+        }
+        Ok(())
+    }
+
+    /// Resolve `pos` to its blob and byte offset within the blob.
+    fn locate(&self, pos: u64) -> Result<(Blob<'_, E::Blob>, u64), Error> {
+        self.validate_readable(pos)?;
+        let items_per_blob = self.items_per_blob.get();
+        let blob = super::position_to_blob(pos, items_per_blob);
+        let pos_in_blob = pos - first_in_blob(self.bounds.start, blob, items_per_blob)?;
+        let offset = Journal::<E, A>::items_to_bytes(pos_in_blob)?;
+        let blob = self
+            .blobs
+            .get(blob)
+            .expect("position in bounds maps to a retained blob");
+        Ok((blob, offset))
+    }
+
+    /// Read the item at `pos` synchronously if its bytes are cached, else `None`.
+    fn try_read_sync_cached(&self, pos: u64) -> Option<A> {
+        let (blob, offset) = self.locate(pos).ok()?;
+        let mut buf = vec![0u8; A::SIZE];
+        if !blob.try_read_sync(offset, &mut buf) {
+            return None;
+        }
+        A::decode(&buf[..]).ok()
+    }
+}
+
+impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
+    type Item = A;
+
+    fn bounds(&self) -> Range<u64> {
+        self.bounds.clone()
+    }
+
+    async fn read(&self, pos: u64) -> Result<A, Error> {
+        self.metrics.read_calls.inc();
+
+        // Serve from the page cache synchronously when possible, avoiding the async storage path.
+        if let Some(item) = self.try_read_sync_cached(pos) {
+            self.metrics.record_cache_hits(1);
+            self.metrics.items_read.inc();
+            return Ok(item);
+        }
+        self.metrics.record_cache_misses(1);
+
+        let _timer = self.metrics.read_timer();
+        let (blob, offset) = self.locate(pos)?;
+        let bufs = blob.read_at(offset, A::SIZE).await?;
+        let item = A::decode(bufs.coalesce()).map_err(Error::Codec)?;
+        self.metrics.items_read.inc();
+        Ok(item)
+    }
+
+    async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _timer = self.metrics.read_many_timer();
+        self.metrics.read_many_calls.inc();
+        let mut prev: Option<u64> = None;
+        for &pos in positions {
+            if prev.is_some_and(|p| pos <= p) {
+                return Err(Error::PositionsNotIncreasing);
+            }
+            prev = Some(pos);
+            self.validate_readable(pos)?;
+        }
+
+        let items_per_blob = self.items_per_blob.get();
+        let pruning_boundary = self.bounds.start;
+        let chunk_size = A::SIZE;
+
+        // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
+        // maximal runs that share one blob. Each group goes through the blob's batched read,
+        // which serves page-cache and tip-buffer hits under a single lock acquisition and reads only
+        // true misses from the blob (concurrently).
+        let mut result: Vec<A> = Vec::with_capacity(positions.len());
+        let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
+        let mut hits = 0u64;
+        for group in positions.chunk_by(|a, b| {
+            super::position_to_blob(*a, items_per_blob)
+                == super::position_to_blob(*b, items_per_blob)
+        }) {
+            let blob = super::position_to_blob(group[0], items_per_blob);
+            let first_position = first_in_blob(pruning_boundary, blob, items_per_blob)?;
+            let blob_offsets: Vec<u64> = group
+                .iter()
+                .map(|&pos| Journal::<E, A>::items_to_bytes(pos - first_position))
+                .collect::<Result<_, _>>()?;
+
+            let blob = self
+                .blobs
+                .get(blob)
+                .expect("positions in bounds map to a retained blob");
+            let buf = &mut reusable_buf[..group.len() * chunk_size];
+            let group_hits = blob
+                .read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+                .await?;
+            hits += group_hits as u64;
+
+            for slice in buf.chunks_exact(chunk_size) {
+                result.push(A::decode(slice).map_err(Error::Codec)?);
+            }
+        }
+
+        self.metrics.record_cache_hits(hits);
+        self.metrics
+            .record_cache_misses(positions.len() as u64 - hits);
+        self.metrics.items_read.inc_by(positions.len() as u64);
+        Ok(result)
+    }
+
+    fn try_read_sync(&self, pos: u64) -> Option<A> {
+        self.try_read_sync_cached(pos).map_or_else(
+            || {
+                self.metrics.record_cache_misses(1);
+                None
+            },
+            |item| {
+                self.metrics.record_cache_hits(1);
+                self.metrics.try_read_sync_hits.inc();
+                self.metrics.items_read.inc();
+                Some(item)
+            },
+        )
+    }
+
+    async fn replay(
+        &self,
+        start_pos: u64,
+        buffer: NonZeroUsize,
+    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
+        replay_stream(
+            &self.blobs,
+            self.bounds.clone(),
+            self.items_per_blob,
+            start_pos,
+            buffer,
+        )
+    }
+}
+
 impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
-    async fn reader(&self) -> impl super::Reader<Item = A> + '_ {
-        Self::reader(self).await
+    fn bounds(&self) -> Range<u64> {
+        self.bounds.clone()
     }
 
-    async fn size(&self) -> u64 {
-        Self::size(self).await
+    async fn read(&self, pos: u64) -> Result<A, Error> {
+        self.reader().read(pos).await
+    }
+
+    async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        self.reader().read_many(positions).await
+    }
+
+    fn try_read_sync(&self, pos: u64) -> Option<A> {
+        self.reader().try_read_sync(pos)
+    }
+
+    async fn replay(
+        &self,
+        start_pos: u64,
+        buffer: NonZeroUsize,
+    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
+        let blobs = self.blobs.reader();
+        replay_stream(
+            &blobs,
+            self.bounds.clone(),
+            self.items_per_blob,
+            start_pos,
+            buffer,
+        )
     }
 }
 
@@ -1424,11 +1342,11 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
         Self::rewind(self, size).await
     }
 
-    async fn commit(&self) -> Result<(), Error> {
+    async fn commit(&mut self) -> Result<(), Error> {
         Self::commit(self).await
     }
 
-    async fn sync(&self) -> Result<(), Error> {
+    async fn sync(&mut self) -> Result<(), Error> {
         Self::sync(self).await
     }
 
@@ -1438,24 +1356,21 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> for Journal<E, A> {
+impl<E: Context, A: CodecFixedShared> authenticated::Inner<E> for Journal<E, A> {
     type Config = Config;
 
     async fn init<
-        F: crate::merkle::Family,
+        F: merkle::Family,
         H: commonware_cryptography::Hasher,
         S: commonware_parallel::Strategy,
     >(
         context: E,
-        merkle_cfg: crate::merkle::full::Config<S>,
+        merkle_cfg: merkle::full::Config<S>,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&A) -> bool,
-        bagging: crate::merkle::Bagging,
-    ) -> Result<
-        crate::journal::authenticated::Journal<F, E, Self, H, S>,
-        crate::journal::authenticated::Error<F>,
-    > {
-        crate::journal::authenticated::Journal::<F, E, Self, H, S>::new(
+        bagging: merkle::Bagging,
+    ) -> Result<authenticated::Journal<F, E, Self, H, S>, authenticated::Error<F>> {
+        authenticated::Journal::<F, E, Self, H, S>::new(
             context,
             merkle_cfg,
             journal_cfg,
@@ -1469,12 +1384,15 @@ impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> fo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::contiguous::Contiguous as _;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
+        buffer::paged::Writer,
         deterministic::{self, Context},
-        Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Storage, Supervisor as _,
+        Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
+        Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};
@@ -1501,6 +1419,42 @@ mod tests {
         format!("{}-blobs", cfg.partition)
     }
 
+    impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
+        /// Test helper: Get the oldest blob from the blob store.
+        pub(crate) const fn test_oldest_blob(&self) -> Option<u64> {
+            Some(self.blobs.oldest_blob_index())
+        }
+
+        /// Test helper: Get the newest blob from the blob store.
+        pub(crate) fn test_newest_blob(&self) -> Option<u64> {
+            Some(self.blobs.tail_blob_index())
+        }
+
+        /// Test helper: Make one blob durable (sealed history or the tail).
+        pub(crate) async fn test_sync_blob(&mut self, blob: u64) -> Result<(), Error> {
+            self.blobs.sync_blob(blob).await
+        }
+
+        /// Test helper: Set and persist the recovery watermark directly.
+        pub(crate) async fn test_set_recovery_watermark(
+            &mut self,
+            watermark: u64,
+        ) -> Result<(), Error> {
+            self.checkpoint.set_watermark(Some(watermark));
+            self.checkpoint.sync().await
+        }
+
+        /// Test helper: Durably stage a clear intent in the journal's checkpoint.
+        pub(crate) async fn test_stage_clear(
+            context: E,
+            partition: &str,
+            target: u64,
+        ) -> Result<(), Error> {
+            let mut checkpoint = Checkpoint::open(context, partition).await?;
+            checkpoint.stage_clear(target).await
+        }
+    }
+
     #[test_traced]
     fn test_fixed_init_marks_suffix_past_recovery_watermark_dirty() {
         let executor = deterministic::Runner::default();
@@ -1508,7 +1462,7 @@ mod tests {
             let mut cfg = test_cfg(&context, NZU64!(10));
             cfg.partition = "init-adopted-fixed".into();
 
-            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             journal.append(&1).await.unwrap();
@@ -1519,14 +1473,14 @@ mod tests {
             journal.test_set_recovery_watermark(1).await.unwrap();
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.size().await, 2);
+            assert_eq!(journal.size(), 2);
 
-            // Regression: init used to recover size 2 while marking no data sections dirty.
-            // commit() would then skip section syncs and succeed even though the recovered suffix
-            // had not been durably adopted. With the fix, item 2's section is dirty, so the forced
+            // Regression: init used to recover size 2 while marking no data blobs dirty.
+            // commit() would then skip blob syncs and succeed even though the recovered suffix
+            // had not been durably adopted. With the fix, item 2's blob is dirty, so the forced
             // sync failure below must surface.
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 sync_rate: Some(1.0),
@@ -1596,7 +1550,7 @@ mod tests {
                 .await
                 .expect("Failed to write legacy blob");
 
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             journal.append(&test_digest(1)).await.unwrap();
@@ -1618,7 +1572,7 @@ mod tests {
             let legacy_partition = cfg.partition.clone();
             let blobs_partition = blob_partition(&cfg);
 
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             journal.append(&test_digest(1)).await.unwrap();
@@ -1641,7 +1595,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
             let cfg = test_cfg(&context, NZU64!(2));
-            let journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1657,10 +1611,10 @@ mod tests {
             drop(journal);
 
             let cfg = test_cfg(&context, NZU64!(2));
-            let journal = Journal::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
-            assert_eq!(journal.size().await, 1);
+            assert_eq!(journal.size(), 1);
 
             // Append two more items to the journal to trigger a new blob creation
             pos = journal
@@ -1692,7 +1646,7 @@ mod tests {
 
             // Pruning to 2 should allow the first blob to be pruned.
             journal.prune(2).await.expect("failed to prune journal 2");
-            assert_eq!(journal.bounds().await.start, 2);
+            assert_eq!(journal.bounds().start, 2);
 
             // Reading from the first blob should fail since it's now pruned
             let result0 = journal.read(0).await;
@@ -1715,51 +1669,51 @@ mod tests {
 
             // Check no-op pruning
             journal.prune(0).await.expect("no-op pruning failed");
-            assert_eq!(journal.inner.read().await.journal.oldest_section(), Some(1));
-            assert_eq!(journal.inner.read().await.journal.newest_section(), Some(5));
-            assert_eq!(journal.bounds().await.start, 2);
+            assert_eq!(journal.test_oldest_blob(), Some(1));
+            assert_eq!(journal.test_newest_blob(), Some(5));
+            assert_eq!(journal.bounds().start, 2);
 
             // Prune first 3 blobs (6 items)
             journal
                 .prune(3 * cfg.items_per_blob.get())
                 .await
                 .expect("failed to prune journal 2");
-            assert_eq!(journal.inner.read().await.journal.oldest_section(), Some(3));
-            assert_eq!(journal.inner.read().await.journal.newest_section(), Some(5));
-            assert_eq!(journal.bounds().await.start, 6);
+            assert_eq!(journal.test_oldest_blob(), Some(3));
+            assert_eq!(journal.test_newest_blob(), Some(5));
+            assert_eq!(journal.bounds().start, 6);
 
             // Try pruning (more than) everything in the journal.
             journal
                 .prune(10000)
                 .await
                 .expect("failed to max-prune journal");
-            let size = journal.size().await;
+            let size = journal.size();
             assert_eq!(size, 10);
-            assert_eq!(journal.test_oldest_section().await, Some(5));
-            assert_eq!(journal.test_newest_section().await, Some(5));
+            assert_eq!(journal.test_oldest_blob(), Some(5));
+            assert_eq!(journal.test_newest_blob(), Some(5));
             // Since the size of the journal is currently a multiple of items_per_blob, the newest blob
             // will be empty, and there will be no retained items.
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert!(bounds.is_empty());
             // bounds.start should equal bounds.end when empty.
             assert_eq!(bounds.start, size);
 
             // Replaying from 0 should fail since all items before bounds.start are pruned
             {
-                let reader = journal.reader().await;
-                let result = reader.replay(NZUsize!(1024), 0).await;
+                let reader = journal.snapshot().await.unwrap();
+                let result = reader.replay(0, NZUsize!(1024)).await;
                 assert!(matches!(result, Err(Error::ItemPruned(0))));
             }
 
             // Replaying from pruning_boundary should return empty stream
             {
-                let reader = journal.reader().await;
-                let res = reader.replay(NZUsize!(1024), 0).await;
+                let reader = journal.snapshot().await.unwrap();
+                let res = reader.replay(0, NZUsize!(1024)).await;
                 assert!(matches!(res, Err(Error::ItemPruned(_))));
 
-                let reader = journal.reader().await;
+                let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), journal.bounds().await.start)
+                    .replay(journal.bounds().start, NZUsize!(1024))
                     .await
                     .expect("failed to replay journal from pruning boundary");
                 pin_mut!(stream);
@@ -1788,7 +1742,7 @@ mod tests {
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10000);
         executor.start(|context| async move {
             let cfg = test_cfg(&context, ITEMS_PER_BLOB);
-            let journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             // Append 2 blobs worth of items.
@@ -1822,7 +1776,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(&context, ITEMS_PER_BLOB);
-            let journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1843,9 +1797,9 @@ mod tests {
 
             // Replay should return all items
             {
-                let reader = journal.reader().await;
+                let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), 0)
+                    .replay(0, NZUsize!(1024))
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -1886,7 +1840,7 @@ mod tests {
                 .expect("Failed to write bad bytes");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1900,9 +1854,9 @@ mod tests {
             // Replay all items.
             {
                 let mut error_found = false;
-                let reader = journal.reader().await;
+                let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), 0)
+                    .replay(0, NZUsize!(1024))
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -1916,6 +1870,7 @@ mod tests {
                         Err(err) => {
                             error_found = true;
                             assert!(matches!(err, Error::Runtime(_)));
+                            assert!(stream.next().await.is_none());
                             break;
                         }
                     }
@@ -1926,11 +1881,56 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_fixed_replay_stops_after_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0u64..30 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let (blob, _) = context
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                .await
+                .unwrap();
+            blob.write_at_sync(1, 123456789u32.to_be_bytes().to_vec())
+                .await
+                .unwrap();
+
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            let reader = journal.snapshot().await.unwrap();
+            let stream = reader.replay(0, NZUsize!(1024)).await.unwrap();
+            pin_mut!(stream);
+
+            for i in 0u64..10 {
+                let (pos, item) = stream.next().await.unwrap().unwrap();
+                assert_eq!(pos, i);
+                assert_eq!(item, test_digest(i));
+            }
+            assert!(matches!(
+                stream.next().await.unwrap(),
+                Err(Error::Runtime(_))
+            ));
+            assert!(stream.next().await.is_none());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_fixed_journal_replay_with_missing_historical_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(2));
-            let journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for i in 0u64..5 {
@@ -1964,7 +1964,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(&context, ITEMS_PER_BLOB);
-            let journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1979,9 +1979,9 @@ mod tests {
 
             // Replay should return all items except the first `START_POS`.
             {
-                let reader = journal.reader().await;
+                let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), START_POS)
+                    .replay(START_POS, NZUsize!(1024))
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -2022,7 +2022,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
-            let journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for i in 0..5 {
@@ -2046,7 +2046,7 @@ mod tests {
     }
 
     /// Simulate a crash after recovery persists metadata but before the rewind repair completes.
-    /// The stale sections beyond the repair point still exist. The next init must succeed: it
+    /// The stale blobs beyond the repair point still exist. The next init must succeed: it
     /// re-derives the same size from blob lengths, and the persisted watermark is still within
     /// the recovered size.
     #[test_traced]
@@ -2054,60 +2054,64 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
-            // Fill 3 sections (0..15), sync everything.
+            // Fill 3 blobs (0..15), sync everything.
             for i in 0..15u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
             journal.sync().await.unwrap();
-            assert_eq!(journal.recovery_watermark().await, 15);
+            assert_eq!(journal.recovery_watermark(), 15);
 
-            // Shorten section 1 to simulate a short non-tail section. Recovery will compute
-            // size=9 (section 0 full + 4 items in section 1) and generate a repair.
-            {
-                let mut inner = journal.inner.write().await;
-                inner
-                    .journal
-                    .rewind_section(1, 4 * Digest::SIZE as u64)
-                    .await
-                    .unwrap();
-                inner.journal.sync(1).await.unwrap();
-            }
-
-            // Persist the recovered metadata (watermark=9) as init_with_metadata does before
+            // Persist the recovered metadata (watermark=9) as init_with_checkpoint does before
             // applying the rewind repair. This simulates a crash after metadata sync but before
-            // the repair removes stale sections.
-            {
-                let mut inner = journal.inner.write().await;
-                Journal::<_, Digest>::update_metadata_entries(
-                    &mut inner,
-                    cfg.items_per_blob.get(),
-                    0,
-                    9,
-                );
-                inner.metadata.sync().await.unwrap();
-            }
+            // the repair removes stale blobs.
+            journal
+                .checkpoint
+                .persist(cfg.items_per_blob.get(), 0, 9)
+                .await
+                .unwrap();
             drop(journal);
 
-            // Sections 2 (and the empty tail at 3) still exist. Init must succeed and the
-            // rewind must remove the stale sections.
+            // Shorten blob 1 to simulate a short non-tail blob. Recovery will compute
+            // size=9 (blob 0 full + 4 items in blob 1) and generate a repair.
+            {
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+                let (blob, blob_size) = context
+                    .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                    .await
+                    .expect("failed to open blob 1");
+                let mut append = Writer::new(blob, blob_size, 2048, cache_ref)
+                    .await
+                    .expect("failed to wrap blob 1");
+                append
+                    .resize(4 * Digest::SIZE as u64)
+                    .await
+                    .expect("failed to shorten blob 1");
+                append
+                    .sync()
+                    .await
+                    .expect("failed to sync shortened blob 1");
+            }
+
+            // Blobs 2 (and the empty tail at 3) still exist. Init must succeed and the
+            // rewind must remove the stale blobs.
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("init should succeed after crash during recovery repair");
-            assert_eq!(journal.bounds().await, 0..9);
-            assert_eq!(journal.recovery_watermark().await, 9);
+            assert_eq!(journal.bounds(), 0..9);
+            assert_eq!(journal.recovery_watermark(), 9);
             assert_eq!(journal.read(8).await.unwrap(), test_digest(8));
             assert!(matches!(
                 journal.read(9).await,
                 Err(Error::ItemOutOfRange(9))
             ));
             assert_eq!(
-                journal.test_newest_section().await,
+                journal.test_newest_blob(),
                 Some(1),
-                "stale sections beyond the repair point should be removed"
+                "stale blobs beyond the repair point should be removed"
             );
 
             journal.destroy().await.unwrap();
@@ -2119,31 +2123,28 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let segmented_cfg = SegmentedConfig {
-                partition: blob_partition(&cfg),
-                page_cache: cfg.page_cache.clone(),
-                write_buffer: cfg.write_buffer,
-            };
-            let mut inner =
-                SegmentedJournal::<_, Digest>::init(context.child("blobs"), segmented_cfg)
-                    .await
-                    .unwrap();
 
-            for i in 0..5 {
-                inner.append(0, &test_digest(i)).await.unwrap();
-            }
-            for i in 5..7 {
-                inner.append(1, &test_digest(i)).await.unwrap();
-            }
-            inner.sync(0).await.unwrap();
-            inner.sync(1).await.unwrap();
-
-            let (size, repair) = Journal::<_, Digest>::recover_by_walking_lengths(&mut inner, 5, 0)
+            // Set up via the public API: 5 items in blob 0 (full) + 2 items in blob 1
+            // (partial), then sync and drop.
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(size, 7);
-            assert!(repair.is_none());
-            inner.destroy().await.unwrap();
+            for i in 0..7 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen and verify the size is exactly 7 with no repair (a clean short tail).
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.size(), 7);
+            // Blobs 0 and 1 exist and we can read every position.
+            for i in 0..7u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -2152,38 +2153,79 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let segmented_cfg = SegmentedConfig {
-                partition: blob_partition(&cfg),
-                page_cache: cfg.page_cache.clone(),
-                write_buffer: cfg.write_buffer,
-            };
-            let mut inner =
-                SegmentedJournal::<_, Digest>::init(context.child("blobs"), segmented_cfg)
-                    .await
-                    .unwrap();
 
-            for i in 0..5 {
-                inner.append(0, &test_digest(i)).await.unwrap();
-            }
-            inner.ensure_section_exists(1).await.unwrap();
-            inner.sync(0).await.unwrap();
-            inner.sync(1).await.unwrap();
-
-            let (size, repair) = Journal::<_, Digest>::recover_by_walking_lengths(&mut inner, 5, 0)
+            // Set up via the public API: 5 items in blob 0 (full); rolling over implicitly
+            // creates an empty blob 1 as the tail. Sync and drop.
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(size, 5);
-            assert!(repair.is_none());
-            inner.destroy().await.unwrap();
+            for i in 0..5 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen: blob 0 is full, blob 1 is the empty tail. Size = 5, no repair.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.size(), 5);
+            for i in 0..5u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            assert_eq!(journal.test_newest_blob(), Some(1));
+            journal.destroy().await.unwrap();
         });
     }
 
     #[test_traced]
-    fn test_fixed_journal_recover_fallback_truncates_after_short_oldest_section() {
+    fn test_fixed_journal_recover_sparse_blob_ids_repairs_at_gap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(1));
+            let blob_partition = blob_partition(&cfg);
+
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            journal.append(&test_digest(0)).await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Add a far-future blob directly. Recovery should inspect actual blob ids and
+            // repair at the first missing boundary instead of walking the entire numeric range.
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let (blob, blob_size) = context
+                .open(&blob_partition, &u64::MAX.to_be_bytes())
+                .await
+                .unwrap();
+            let mut append = Writer::new(blob, blob_size, 2048, cache_ref).await.unwrap();
+            let extra = test_digest(999);
+            append.append(extra.as_ref()).await.unwrap();
+            append.sync().await.unwrap();
+            drop(append);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..1);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(0));
+            assert!(matches!(
+                journal.read(1).await,
+                Err(Error::ItemOutOfRange(1))
+            ));
+            assert_eq!(journal.test_newest_blob(), Some(1));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_recover_fallback_truncates_after_short_oldest_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .expect("failed to initialize journal at size");
@@ -2195,13 +2237,12 @@ mod tests {
                     .expect("failed to append data");
             }
             journal.sync().await.expect("failed to sync journal");
-            assert_eq!(journal.bounds().await, 7..15);
+            assert_eq!(journal.bounds(), 7..15);
 
             {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.put(RECOVERY_WATERMARK_KEY, 6u64.into());
-                inner
-                    .metadata
+                journal.checkpoint.set_watermark(Some(6));
+                journal
+                    .checkpoint
                     .sync()
                     .await
                     .expect("failed to sync lower recovery watermark");
@@ -2218,15 +2259,15 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to recover journal");
-            assert_eq!(journal.bounds().await, 7..9);
+            assert_eq!(journal.bounds(), 7..9);
             assert_eq!(journal.read(7).await.unwrap(), test_digest(100));
             assert_eq!(journal.read(8).await.unwrap(), test_digest(101));
             assert!(matches!(
                 journal.read(9).await,
                 Err(Error::ItemOutOfRange(9))
             ));
-            assert_eq!(journal.test_oldest_section().await, Some(1));
-            assert_eq!(journal.inner.read().await.journal.newest_section(), Some(1));
+            assert_eq!(journal.test_oldest_blob(), Some(1));
+            assert_eq!(journal.test_newest_blob(), Some(1));
 
             journal.destroy().await.unwrap();
         });
@@ -2237,7 +2278,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .expect("failed to initialize journal at size");
@@ -2249,41 +2290,50 @@ mod tests {
                     .expect("failed to append data");
             }
             journal.sync().await.expect("failed to sync journal");
-            assert_eq!(journal.bounds().await, 7..17);
+            assert_eq!(journal.bounds(), 7..17);
 
+            // Stage the stale forward-looking watermark while the journal is alive (so we go
+            // through the public metadata path), then drop and corrupt the underlying blob.
             {
-                let mut inner = journal.inner.write().await;
-                inner
-                    .journal
-                    .rewind_section(2, 2 * Digest::SIZE as u64)
-                    .await
-                    .expect("failed to shorten anchored section");
-                inner
-                    .journal
-                    .sync(2)
-                    .await
-                    .expect("failed to sync shortened anchored section");
-                inner.metadata.put(RECOVERY_WATERMARK_KEY, 12u64.into());
-                inner
-                    .metadata
+                journal.checkpoint.set_watermark(Some(12));
+                journal
+                    .checkpoint
                     .sync()
                     .await
                     .expect("failed to sync recovery watermark");
             }
             drop(journal);
 
-            // Remove the metadata's oldest section so PRUNING_BOUNDARY_KEY=7 is stale. The
+            // Shorten blob 2 to two items via Append::resize so the on-disk logical view
+            // matches the staged watermark of 12.
+            {
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+                let (blob, blob_size) = context
+                    .open(&blob_partition(&cfg), &2u64.to_be_bytes())
+                    .await
+                    .expect("failed to open blob 2");
+                let mut append = Writer::new(blob, blob_size, 2048, cache_ref)
+                    .await
+                    .expect("failed to wrap blob 2");
+                append
+                    .resize(2 * Digest::SIZE as u64)
+                    .await
+                    .expect("failed to shorten anchored blob");
+                append.sync().await.expect("failed to sync blob 2");
+            }
+
+            // Remove the checkpoint's oldest blob so the boundary hint of 7 is stale. The
             // watermark is preserved because length-based recovery ends at the same point.
             context
                 .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
                 .await
-                .expect("failed to remove stale oldest section");
+                .expect("failed to remove stale oldest blob");
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to recover journal");
-            assert_eq!(journal.bounds().await, 10..12);
-            assert_eq!(journal.recovery_watermark().await, 12);
+            assert_eq!(journal.bounds(), 10..12);
+            assert_eq!(journal.recovery_watermark(), 12);
             assert_eq!(journal.read(10).await.unwrap(), test_digest(3));
             assert_eq!(journal.read(11).await.unwrap(), test_digest(4));
             assert!(matches!(
@@ -2300,7 +2350,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .expect("failed to initialize journal at size");
@@ -2312,72 +2362,70 @@ mod tests {
                     .expect("failed to append data");
             }
             journal.sync().await.expect("failed to sync journal");
-            assert_eq!(journal.bounds().await, 7..17);
+            assert_eq!(journal.bounds(), 7..17);
 
             {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.remove(&RECOVERY_WATERMARK_KEY);
-                inner
-                    .metadata
+                journal.checkpoint.set_watermark(None);
+                journal
+                    .checkpoint
                     .sync()
                     .await
                     .expect("failed to remove recovery watermark");
             }
             drop(journal);
 
-            // Remove the metadata's oldest section so PRUNING_BOUNDARY_KEY=7 is stale. Without a
+            // Remove the checkpoint's oldest blob so the boundary hint of 7 is stale. Without a
             // recovery watermark, recovery must still walk lengths from the recovered blob boundary.
             context
                 .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
                 .await
-                .expect("failed to remove stale oldest section");
+                .expect("failed to remove stale oldest blob");
 
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to recover journal");
-            assert_eq!(journal.bounds().await, 10..17);
-            // No watermark: watermark at the tail section start, not size.
-            assert_eq!(journal.recovery_watermark().await, 15);
+            assert_eq!(journal.bounds(), 10..17);
+            // No watermark: watermark at the tail blob start, not size.
+            assert_eq!(journal.recovery_watermark(), 15);
             assert_eq!(journal.read(10).await.unwrap(), test_digest(3));
             assert_eq!(journal.read(16).await.unwrap(), test_digest(9));
 
             // After sync, watermark advances to the full recovered size.
             journal.sync().await.expect("failed to sync");
-            assert_eq!(journal.recovery_watermark().await, 17);
+            assert_eq!(journal.recovery_watermark(), 17);
 
             journal.destroy().await.unwrap();
         });
     }
 
-    /// Pruning metadata ahead of the oldest blob is not a reachable crash state: prune removes
-    /// blobs before sync persists metadata, and clear_to_size uses CLEAR_TARGET_KEY for atomicity.
-    /// Verify it is rejected as corruption.
+    /// A boundary hint ahead of the oldest blob is not a reachable crash state: prune removes
+    /// blobs before sync persists the checkpoint, and clear_to_size stages a clear intent for
+    /// atomicity. Verify it is rejected as corruption.
     #[test_traced]
-    fn test_fixed_journal_pruning_metadata_ahead_of_blobs_is_corruption() {
+    fn test_fixed_journal_boundary_hint_ahead_of_blobs_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 3)
                     .await
                     .unwrap();
 
-            // Append 12 items (positions 3..15) spanning sections 0, 1, 2.
+            // Append 12 items (positions 3..15) spanning blobs 0, 1, 2.
             for i in 0..12u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
             journal.sync().await.unwrap();
-            assert_eq!(journal.bounds().await, 3..15);
+            assert_eq!(journal.bounds(), 3..15);
 
-            // Set PRUNING_BOUNDARY_KEY to 8 (section 1) and lower the watermark so it won't
-            // independently trigger the watermark > size corruption check. Then remove section 1's
-            // blob so section 0 is the oldest. The pruning metadata now references a section ahead
+            // Set the boundary hint to 8 (blob 1) and lower the watermark so it won't
+            // independently trigger the watermark > size corruption check. Then remove blob 1's
+            // blob so blob 0 is the oldest. The boundary hint now references a blob ahead
             // of the oldest blob, which is the corruption we're testing.
             {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.put(PRUNING_BOUNDARY_KEY, 8u64.into());
-                inner.metadata.put(RECOVERY_WATERMARK_KEY, 3u64.into());
-                inner.metadata.sync().await.unwrap();
+                journal.checkpoint.set_boundary_hint(8);
+                journal.checkpoint.set_watermark(Some(3));
+                journal.checkpoint.sync().await.unwrap();
             }
             drop(journal);
 
@@ -2391,14 +2439,14 @@ mod tests {
         });
     }
 
-    /// Mid-section pruning metadata with no blobs is not a reachable crash state (see comment in
+    /// A mid-blob boundary hint with no blobs is not a reachable crash state (see comment in
     /// `recover_bounds`). Verify it is rejected as corruption rather than silently recovering empty.
     #[test_traced]
-    fn test_fixed_journal_pruning_metadata_with_no_blobs_is_corruption() {
+    fn test_fixed_journal_boundary_hint_with_no_blobs_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
@@ -2409,7 +2457,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Remove all blobs but leave metadata (with PRUNING_BOUNDARY_KEY=7) intact.
+            // Remove all blobs but leave the checkpoint (with a boundary hint of 7) intact.
             for name in scan_partition(&context, &blob_partition(&cfg)).await {
                 context
                     .remove(&blob_partition(&cfg), Some(&name))
@@ -2427,7 +2475,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2440,44 +2488,43 @@ mod tests {
             journal.sync().await.expect("failed to sync journal");
 
             {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.remove(&RECOVERY_WATERMARK_KEY);
-                inner
-                    .metadata
+                journal.checkpoint.set_watermark(None);
+                journal
+                    .checkpoint
                     .sync()
                     .await
                     .expect("failed to remove recovery watermark");
             }
             drop(journal);
 
-            // Legacy recovery sets watermark to the tail section start, not size, so the tail
+            // Legacy recovery sets watermark to the tail blob start, not size, so the tail
             // is marked dirty and fsynced before the watermark advances.
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to recover legacy journal");
-            assert_eq!(journal.bounds().await, 0..12);
-            assert_eq!(journal.recovery_watermark().await, 10);
+            assert_eq!(journal.bounds(), 0..12);
+            assert_eq!(journal.recovery_watermark(), 10);
 
             // After sync, the watermark advances to the full size.
             journal
                 .sync()
                 .await
                 .expect("failed to sync after legacy recovery");
-            assert_eq!(journal.recovery_watermark().await, 12);
+            assert_eq!(journal.recovery_watermark(), 12);
 
             journal.destroy().await.unwrap();
         });
     }
 
-    /// Regression: legacy upgrade (no RECOVERY_WATERMARK_KEY) must mark all recovered sections
+    /// Regression: legacy upgrade (no recovery watermark) must mark all recovered blobs
     /// dirty so they are fsynced before the watermark advances. Without this, init could install
     /// a durable watermark for data that was only in the OS page cache.
     #[test_traced]
-    fn test_fixed_journal_legacy_upgrade_marks_recovered_sections_dirty() {
+    fn test_fixed_journal_legacy_upgrade_marks_recovered_blobs_dirty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2488,20 +2535,19 @@ mod tests {
 
             // Remove the watermark to simulate a legacy journal.
             {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.remove(&RECOVERY_WATERMARK_KEY);
-                inner.metadata.sync().await.unwrap();
+                journal.checkpoint.set_watermark(None);
+                journal.checkpoint.sync().await.unwrap();
             }
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.size().await, 7);
-            // Watermark at tail section start (section 1 = position 5).
-            assert_eq!(journal.recovery_watermark().await, 5);
+            assert_eq!(journal.size(), 7);
+            // Watermark at tail blob start (blob 1 = position 5).
+            assert_eq!(journal.recovery_watermark(), 5);
 
-            // Inject sync faults. If recovered sections were not marked dirty, commit would
+            // Inject sync faults. If recovered blobs were not marked dirty, commit would
             // skip the data sync and succeed despite the fault.
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 sync_rate: Some(1.0),
@@ -2515,39 +2561,29 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_update_metadata_watermark_before_clear_lowers_only() {
+    fn test_fixed_journal_commit_does_not_advance_recovery_watermark() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let meta_cfg = MetadataConfig {
-                partition: format!("{}-metadata", cfg.partition),
-                codec_config: (),
-            };
-            let mut metadata =
-                Metadata::<_, u64, VecU64>::init(context.child("metadata"), meta_cfg)
-                    .await
-                    .expect("failed to initialize metadata");
-            metadata.put(RECOVERY_WATERMARK_KEY, 7u64.into());
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
 
-            let changed =
-                Journal::<_, Digest>::update_metadata_watermark_before_clear(&mut metadata, 9);
-            assert!(!changed);
-            let persisted_watermark = metadata
-                .get(&RECOVERY_WATERMARK_KEY)
-                .copied()
-                .map(u64::from)
-                .expect("missing recovery watermark");
-            assert_eq!(persisted_watermark, 7);
+            journal.append(&test_digest(0)).await.unwrap();
+            journal.sync().await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 1);
 
-            let changed =
-                Journal::<_, Digest>::update_metadata_watermark_before_clear(&mut metadata, 5);
-            assert!(changed);
-            let persisted_watermark = metadata
-                .get(&RECOVERY_WATERMARK_KEY)
-                .copied()
-                .map(u64::from)
-                .expect("missing recovery watermark");
-            assert_eq!(persisted_watermark, 5);
+            journal.append(&test_digest(1)).await.unwrap();
+            journal.commit().await.unwrap();
+            assert_eq!(
+                journal.recovery_watermark(),
+                1,
+                "commit must make dirty blobs durable without advancing the recovery watermark",
+            );
+
+            journal.sync().await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 2);
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -2556,7 +2592,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .expect("failed to initialize journal at size");
@@ -2568,38 +2604,34 @@ mod tests {
                     .expect("failed to append data");
             }
             journal.sync().await.expect("failed to sync journal");
-            assert_eq!(journal.bounds().await, 7..15);
+            assert_eq!(journal.bounds(), 7..15);
 
             journal.prune(10).await.expect("failed to prune journal");
             journal.sync().await.expect("failed to sync pruned journal");
-            assert_eq!(journal.bounds().await, 10..15);
+            assert_eq!(journal.bounds(), 10..15);
             drop(journal);
 
-            let meta_cfg = MetadataConfig {
-                partition: format!("{}-metadata", cfg.partition),
-                codec_config: (),
-            };
-            let metadata = Metadata::<_, u64, VecU64>::init(context.child("metadata"), meta_cfg)
+            let checkpoint = Checkpoint::open(context.child("metadata"), &cfg.partition)
                 .await
-                .expect("failed to reopen metadata");
-            assert!(metadata.get(&PRUNING_BOUNDARY_KEY).is_none());
-            drop(metadata);
+                .expect("failed to reopen checkpoint");
+            assert!(checkpoint.boundary_hint().is_none());
+            drop(checkpoint);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to reopen journal");
-            assert_eq!(journal.bounds().await, 10..15);
+            assert_eq!(journal.bounds(), 10..15);
             assert_eq!(journal.read(10).await.unwrap(), test_digest(3));
             journal.destroy().await.unwrap();
         });
     }
 
     #[test_traced]
-    fn test_fixed_journal_recover_rejects_overlong_section() {
+    fn test_fixed_journal_recover_rejects_overlong_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2610,22 +2642,26 @@ mod tests {
                     .expect("failed to append data");
             }
             journal.sync().await.expect("failed to sync journal");
+            drop(journal);
 
+            // Inject an extra item into blob 0 at the blob level so its length exceeds
+            // items_per_blob -- this is what `recover_bounds` validates and rejects as Corruption.
             {
                 let extra = test_digest(99);
-                let mut inner = journal.inner.write().await;
-                inner
-                    .journal
-                    .append_raw(0, IoBuf::copy_from_slice(extra.as_ref()))
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+                let (blob, blob_size) = context
+                    .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                    .await
+                    .expect("failed to open blob 0");
+                let mut append = Writer::new(blob, blob_size, 2048, cache_ref)
+                    .await
+                    .expect("failed to wrap blob 0");
+                append
+                    .append(extra.as_ref())
                     .await
                     .expect("failed to append extra item");
-                inner
-                    .journal
-                    .sync(0)
-                    .await
-                    .expect("failed to sync corrupted section");
+                append.sync().await.expect("failed to sync corrupted blob");
             }
-            drop(journal);
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
@@ -2638,7 +2674,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2647,7 +2683,7 @@ mod tests {
                 .append(&test_digest(0))
                 .await
                 .expect("failed to append data");
-            assert_eq!(journal.size().await, 1);
+            assert_eq!(journal.size(), 1);
             journal.sync().await.expect("Failed to sync journal");
             drop(journal);
 
@@ -2662,13 +2698,13 @@ mod tests {
                 .expect("Failed to extend blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
             // The zero-filled pages are detected as invalid (bad checksum) and truncated.
             // No items should be lost since we called sync before the corruption.
-            assert_eq!(journal.size().await, 1);
+            assert_eq!(journal.size(), 1);
 
             // Make sure journal still works for appending.
             journal
@@ -2686,7 +2722,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
             let cfg = test_cfg(&context, NZU64!(2));
-            let journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             assert!(matches!(journal.rewind(0).await, Ok(())));
@@ -2700,10 +2736,10 @@ mod tests {
                 .append(&test_digest(0))
                 .await
                 .expect("failed to append data 0");
-            assert_eq!(journal.size().await, 1);
+            assert_eq!(journal.size(), 1);
             assert!(matches!(journal.rewind(1).await, Ok(()))); // should be no-op
             assert!(matches!(journal.rewind(0).await, Ok(())));
-            assert_eq!(journal.size().await, 0);
+            assert_eq!(journal.size(), 0);
 
             // append 7 items
             for i in 0..7 {
@@ -2713,15 +2749,15 @@ mod tests {
                     .expect("failed to append data");
                 assert_eq!(pos, i);
             }
-            assert_eq!(journal.size().await, 7);
+            assert_eq!(journal.size(), 7);
 
             // rewind back to item #4, which should prune 2 blobs
             assert!(matches!(journal.rewind(4).await, Ok(())));
-            assert_eq!(journal.size().await, 4);
+            assert_eq!(journal.size(), 4);
 
             // rewind back to empty and ensure all blobs are rewound over
             assert!(matches!(journal.rewind(0).await, Ok(())));
-            assert_eq!(journal.size().await, 0);
+            assert_eq!(journal.size(), 0);
 
             // stress test: add 100 items, rewind 49, repeat x10.
             for _ in 0..10 {
@@ -2731,10 +2767,10 @@ mod tests {
                         .await
                         .expect("failed to append data");
                 }
-                journal.rewind(journal.size().await - 49).await.unwrap();
+                journal.rewind(journal.size() - 49).await.unwrap();
             }
             const ITEMS_REMAINING: u64 = 10 * (100 - 49);
-            assert_eq!(journal.size().await, ITEMS_REMAINING);
+            assert_eq!(journal.size(), ITEMS_REMAINING);
 
             journal.sync().await.expect("Failed to sync journal");
             drop(journal);
@@ -2742,7 +2778,7 @@ mod tests {
             // Repeat with a different blob size (3 items per blob)
             let mut cfg = test_cfg(&context, NZU64!(3));
             cfg.partition = "test-partition-2".into();
-            let journal = Journal::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for _ in 0..10 {
@@ -2752,31 +2788,32 @@ mod tests {
                         .await
                         .expect("failed to append data");
                 }
-                journal.rewind(journal.size().await - 49).await.unwrap();
+                journal.rewind(journal.size() - 49).await.unwrap();
             }
-            assert_eq!(journal.size().await, ITEMS_REMAINING);
+            assert_eq!(journal.size(), ITEMS_REMAINING);
 
             journal.sync().await.expect("Failed to sync journal");
             drop(journal);
 
             // Make sure re-opened journal is as expected
-            let journal: Journal<_, Digest> = Journal::init(context.child("third"), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
-            assert_eq!(journal.size().await, 10 * (100 - 49));
+            let mut journal: Journal<_, Digest> =
+                Journal::init(context.child("third"), cfg.clone())
+                    .await
+                    .expect("failed to re-initialize journal");
+            assert_eq!(journal.size(), 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
             journal.prune(300).await.expect("pruning failed");
-            assert_eq!(journal.size().await, ITEMS_REMAINING);
+            assert_eq!(journal.size(), ITEMS_REMAINING);
             // Rewinding prior to our prune point should fail.
             assert!(matches!(
                 journal.rewind(299).await,
-                Err(Error::InvalidRewind(299))
+                Err(Error::ItemPruned(299))
             ));
             // Rewinding to the prune point should work.
             // always remain in the journal.
             assert!(matches!(journal.rewind(300).await, Ok(())));
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 300);
             assert!(bounds.is_empty());
 
@@ -2789,7 +2826,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2808,7 +2845,7 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
-            assert_eq!(journal.bounds().await, 0..7);
+            assert_eq!(journal.bounds(), 0..7);
             for i in 0..7u64 {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
@@ -2826,7 +2863,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2840,20 +2877,14 @@ mod tests {
             journal.rewind(7).await.expect("failed to rewind journal");
             drop(journal);
 
-            let meta_cfg = MetadataConfig {
-                partition: format!("{}-metadata", cfg.partition),
-                codec_config: (),
-            };
-            let metadata = Metadata::<_, u64, VecU64>::init(context.child("metadata"), meta_cfg)
+            let checkpoint = Checkpoint::open(context.child("metadata"), &cfg.partition)
                 .await
-                .expect("failed to reopen metadata");
-            let persisted_watermark = metadata
-                .get(&RECOVERY_WATERMARK_KEY)
-                .copied()
-                .map(u64::from)
+                .expect("failed to reopen checkpoint");
+            let persisted_watermark = checkpoint
+                .watermark()
                 .expect("missing recovery watermark after rewind");
             assert_eq!(persisted_watermark, 7);
-            drop(metadata);
+            drop(checkpoint);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
@@ -2867,7 +2898,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2880,10 +2911,9 @@ mod tests {
             journal.sync().await.expect("failed to sync journal");
 
             {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.put(RECOVERY_WATERMARK_KEY, 7u64.into());
-                inner
-                    .metadata
+                journal.checkpoint.set_watermark(Some(7));
+                journal
+                    .checkpoint
                     .sync()
                     .await
                     .expect("failed to lower recovery watermark");
@@ -2893,8 +2923,8 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to recover journal");
-            assert_eq!(journal.bounds().await, 0..12);
-            assert_eq!(journal.recovery_watermark().await, 7);
+            assert_eq!(journal.bounds(), 0..12);
+            assert_eq!(journal.recovery_watermark(), 7);
             assert_eq!(journal.read(11).await.unwrap(), test_digest(11));
             journal.destroy().await.unwrap();
         });
@@ -2905,7 +2935,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2930,8 +2960,8 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
-            assert_eq!(journal.bounds().await, 0..10);
-            assert_eq!(journal.recovery_watermark().await, 7);
+            assert_eq!(journal.bounds(), 0..10);
+            assert_eq!(journal.recovery_watermark(), 7);
             for i in 0..7u64 {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
@@ -2948,16 +2978,16 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_recovery_handles_multiple_empty_data_tail_sections() {
+    fn test_fixed_recovery_handles_multiple_empty_data_tail_blobs() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(1));
-            let journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
                 .await
                 .unwrap();
 
-            // Persist a prefix, then append across multiple section boundaries without syncing. The
-            // unsynced item bytes are lost on drop, but their section blobs remain visible.
+            // Persist a prefix, then append across multiple blob boundaries without syncing. The
+            // unsynced item bytes are lost on drop, but their blobs remain visible.
             assert_eq!(journal.append(&test_digest(10)).await.unwrap(), 0);
             journal.sync().await.unwrap();
             assert_eq!(journal.append(&test_digest(20)).await.unwrap(), 1);
@@ -2967,23 +2997,23 @@ mod tests {
             let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
             assert!(
                 blobs.len() > 2,
-                "expected multiple empty trailing sections, got {}",
+                "expected multiple empty trailing blobs, got {}",
                 blobs.len()
             );
 
             let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds().await, 0..1);
+            assert_eq!(journal.bounds(), 0..1);
             assert_eq!(journal.read(0).await.unwrap(), test_digest(10));
             drop(journal);
 
-            // Recovery should remove the empty trailing sections, leaving only the durable prefix's
-            // section and the recreated tail.
+            // Recovery should remove the empty trailing blobs, leaving only the durable prefix's
+            // blob and the recreated tail.
             let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
             assert_eq!(blobs.len(), 2);
 
-            let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(journal.append(&test_digest(42)).await.unwrap(), 1);
@@ -2997,12 +3027,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(1));
-            let journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
                 .await
                 .unwrap();
 
-            // Append across multiple section boundaries without ever syncing. No item bytes become
-            // durable, so recovery sees multiple empty sections and no durable data.
+            // Append across multiple blob boundaries without ever syncing. No item bytes become
+            // durable, so recovery sees multiple empty blobs and no durable data.
             assert_eq!(journal.append(&test_digest(10)).await.unwrap(), 0);
             assert_eq!(journal.append(&test_digest(20)).await.unwrap(), 1);
             drop(journal);
@@ -3010,21 +3040,21 @@ mod tests {
             let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
             assert!(
                 blobs.len() > 1,
-                "expected multiple empty sections, got {}",
+                "expected multiple empty blobs, got {}",
                 blobs.len()
             );
 
             let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds().await, 0..0);
+            assert_eq!(journal.bounds(), 0..0);
             drop(journal);
 
-            // Recovery should remove the extra empty sections, leaving only the recreated tail.
+            // Recovery should remove the extra empty blobs, leaving only the recreated tail.
             let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
             assert_eq!(blobs.len(), 1);
 
-            let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(journal.append(&test_digest(42)).await.unwrap(), 0);
@@ -3033,55 +3063,53 @@ mod tests {
         });
     }
 
-    /// Test that a crash partway through a multi-section sync leaves a contiguous durable prefix
+    /// Test that a crash partway through a multi-blob sync leaves a contiguous durable prefix
     /// that recovery preserves.
     ///
-    /// `flush_dirty_sections` syncs dirty sections, and all mutating operations serialize on
-    /// `op_lock` so no concurrent sync can interleave. This reproduces a crash after sections 0 and
-    /// 1 were synced but before section 2, then asserts recovery keeps exactly the contiguous
-    /// prefix 0..20.
+    /// `flush_dirty_blobs` syncs dirty blobs, and mutators take `&mut self` so no concurrent
+    /// sync can interleave. This reproduces a crash after blobs 0 and 1 were synced but before
+    /// blob 2, then asserts recovery keeps exactly the contiguous prefix 0..20.
     #[test_traced]
     fn test_fixed_recovery_partial_sync_loop_keeps_contiguous_prefix() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
-            // Fill sections 0 and 1 and partially fill section 2 (positions 20..25). Nothing is
-            // synced yet, so only the created section blobs are durable, all still empty.
+            // Fill blobs 0 and 1 and partially fill blob 2 (positions 20..25). Nothing is
+            // synced yet, so only the created blobs are durable, all still empty.
             for i in 0..25u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
 
-            // Sync sections 0 and 1 but not section 2, simulating a crash after part of a
-            // multi-section sync became durable.
+            // Sync blobs 0 and 1 but not blob 2, simulating a crash after part of a
+            // multi-blob sync became durable.
             {
-                let inner = journal.inner.write().await;
-                inner.journal.sync(0).await.unwrap();
-                inner.journal.sync(1).await.unwrap();
+                journal.test_sync_blob(0).await.unwrap();
+                journal.test_sync_blob(1).await.unwrap();
             }
             drop(journal);
 
-            // The durable data is exactly the contiguous prefix: sections 0 and 1 hold items and
-            // section 2 is an empty trailing blob.
+            // The durable data is exactly the contiguous prefix: blobs 0 and 1 hold items and
+            // blob 2 is an empty trailing blob.
             let names = scan_partition(&context, &blob_partition(&cfg)).await;
             assert_eq!(names.len(), 3);
-            for (section, name) in names.iter().enumerate() {
+            for (blob, name) in names.iter().enumerate() {
                 let (_blob, size) = context.open(&blob_partition(&cfg), name).await.unwrap();
-                if section < 2 {
-                    assert!(size > 0, "section {section} should be durable");
+                if blob < 2 {
+                    assert!(size > 0, "blob {blob} should be durable");
                 } else {
-                    assert_eq!(size, 0, "section {section} should be empty");
+                    assert_eq!(size, 0, "blob {blob} should be empty");
                 }
             }
 
             // Recovery preserves exactly the contiguous prefix 0..20.
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds().await, 0..20);
+            assert_eq!(journal.bounds(), 0..20);
             for i in 0..20u64 {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
@@ -3098,41 +3126,40 @@ mod tests {
         });
     }
 
-    /// Test that a durable section above the sync watermark, sitting beyond an empty intermediate
-    /// section, is rolled back to the contiguous boundary during recovery.
+    /// Test that a durable blob above the sync watermark, sitting beyond an empty intermediate
+    /// blob, is rolled back to the contiguous boundary during recovery.
     ///
     /// Since #3790 removed the append-time sync when crossing blob boundaries, a process crash can
-    /// leave a later section incidentally durable while an earlier section stayed buffered and was
-    /// lost, producing a physical gap. Length-based recovery walks sections from oldest and
-    /// truncates at the first short non-tail section, so the post-gap section is discarded and only
+    /// leave a later blob incidentally durable while an earlier blob stayed buffered and was
+    /// lost, producing a physical gap. Length-based recovery walks blobs from oldest and
+    /// truncates at the first short non-tail blob, so the post-gap blob is discarded and only
     /// the synced prefix survives.
     #[test_traced]
-    fn test_fixed_recovery_rolls_back_durable_section_after_gap() {
+    fn test_fixed_recovery_rolls_back_durable_blob_after_gap() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
-            // Durably commit section 0 (positions 0..10), advancing the recovery watermark to 10.
+            // Durably commit blob 0 (positions 0..10), advancing the recovery watermark to 10.
             for i in 0..10u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
             journal.sync().await.unwrap();
 
-            // Append section 1 and part of section 2 without committing. Manually sync only section
-            // 2 to mimic its writes surviving a crash, while section 1 stays buffered and is lost.
+            // Append blob 1 and part of blob 2 without committing. Manually sync only blob
+            // 2 to mimic its writes surviving a crash, while blob 1 stays buffered and is lost.
             for i in 10..28u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
             {
-                let inner = journal.inner.write().await;
-                inner.journal.sync(2).await.unwrap();
+                journal.test_sync_blob(2).await.unwrap();
             }
             drop(journal);
 
-            // Durable state: section 0 (10 items), section 1 (empty gap), section 2 (8 items).
+            // Durable state: blob 0 (10 items), blob 1 (empty gap), blob 2 (8 items).
             let names = scan_partition(&context, &blob_partition(&cfg)).await;
             assert_eq!(names.len(), 3);
             let mut sizes = Vec::new();
@@ -3140,16 +3167,16 @@ mod tests {
                 let (_blob, size) = context.open(&blob_partition(&cfg), name).await.unwrap();
                 sizes.push(size);
             }
-            assert!(sizes[0] > 0, "section 0 should be durable");
-            assert_eq!(sizes[1], 0, "section 1 should be the gap");
-            assert!(sizes[2] > 0, "section 2 should be incidentally durable");
+            assert!(sizes[0] > 0, "blob 0 should be durable");
+            assert_eq!(sizes[1], 0, "blob 1 should be the gap");
+            assert!(sizes[2] > 0, "blob 2 should be incidentally durable");
 
             // Recovery rolls back to the watermark boundary: only the synced prefix survives and the
-            // gapped section 2 is truncated away.
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            // gapped blob 2 is truncated away.
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds().await, 0..10);
+            assert_eq!(journal.bounds(), 0..10);
             for i in 0..10u64 {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
@@ -3158,7 +3185,7 @@ mod tests {
                 Err(Error::ItemOutOfRange(10))
             ));
 
-            // The orphaned section 2 is gone; the truncated section 1 remains as the recovered tail.
+            // The orphaned blob 2 is gone; the truncated blob 1 remains as the recovered tail.
             let names = scan_partition(&context, &blob_partition(&cfg)).await;
             assert_eq!(names.len(), 2);
 
@@ -3170,21 +3197,21 @@ mod tests {
         });
     }
 
-    /// Test recovery when the oldest section is empty but a newer section still holds durable items.
+    /// Test recovery when the oldest blob is empty but a newer blob still holds durable items.
     ///
-    /// This is the fixed-journal analog of the variable-journal empty-oldest-section gap bug. A
-    /// contiguous journal can only populate a later section after filling the earlier one, so an
-    /// empty oldest section with a populated newer section is an orphaned gap. Length-based recovery
-    /// walks from the oldest section, finds it short (empty), and truncates everything from there,
+    /// This is the fixed-journal analog of the variable-journal empty-oldest-blob gap bug. A
+    /// contiguous journal can only populate a later blob after filling the earlier one, so an
+    /// empty oldest blob with a populated newer blob is an orphaned gap. Length-based recovery
+    /// walks from the oldest blob, finds it short (empty), and truncates everything from there,
     /// aligning the journal to empty without panicking.
     #[test_traced]
-    fn test_fixed_recovery_empty_oldest_section_orphaned_newer_section() {
+    fn test_fixed_recovery_empty_oldest_blob_orphaned_newer_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
 
-            // Durably persist sections 0 and 1 (positions 0..20).
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            // Durably persist blobs 0 and 1 (positions 0..20).
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for i in 0..20u64 {
@@ -3193,15 +3220,15 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Empty the oldest section (external corruption). The watermark (20) now exceeds the
+            // Empty the oldest blob (external corruption). The watermark (20) now exceeds the
             // recoverable size (0), which is corruption.
-            let (section0, size0) = context
+            let (blob0, size0) = context
                 .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .await
                 .unwrap();
             assert!(size0 > 0);
-            section0.resize(0).await.unwrap();
-            section0.sync().await.unwrap();
+            blob0.resize(0).await.unwrap();
+            blob0.sync().await.unwrap();
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
@@ -3225,12 +3252,12 @@ mod tests {
             };
 
             // === Test 1: Basic single item operation ===
-            let journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
             // Verify empty state
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 0);
             assert!(bounds.is_empty());
 
@@ -3240,14 +3267,14 @@ mod tests {
                 .await
                 .expect("failed to append");
             assert_eq!(pos, 0);
-            assert_eq!(journal.size().await, 1);
+            assert_eq!(journal.size(), 1);
 
             // Sync
             journal.sync().await.expect("failed to sync");
 
             // Read from size() - 1
             let value = journal
-                .read(journal.size().await - 1)
+                .read(journal.size() - 1)
                 .await
                 .expect("failed to read");
             assert_eq!(value, test_digest(0));
@@ -3259,11 +3286,11 @@ mod tests {
                     .await
                     .expect("failed to append");
                 assert_eq!(pos, i);
-                assert_eq!(journal.size().await, i + 1);
+                assert_eq!(journal.size(), i + 1);
 
                 // Verify we can read the just-appended item at size() - 1
                 let value = journal
-                    .read(journal.size().await - 1)
+                    .read(journal.size() - 1)
                     .await
                     .expect("failed to read");
                 assert_eq!(value, test_digest(i));
@@ -3281,14 +3308,14 @@ mod tests {
             journal.prune(5).await.expect("failed to prune");
 
             // Size should still be 10
-            assert_eq!(journal.size().await, 10);
+            assert_eq!(journal.size(), 10);
 
             // bounds.start should be 5
-            assert_eq!(journal.bounds().await.start, 5);
+            assert_eq!(journal.bounds().start, 5);
 
             // Reading from size() - 1 (position 9) should still work
             let value = journal
-                .read(journal.size().await - 1)
+                .read(journal.size() - 1)
                 .await
                 .expect("failed to read");
             assert_eq!(value, test_digest(9));
@@ -3313,7 +3340,7 @@ mod tests {
 
                 // Verify we can read from size() - 1
                 let value = journal
-                    .read(journal.size().await - 1)
+                    .read(journal.size() - 1)
                     .await
                     .expect("failed to read");
                 assert_eq!(value, test_digest(i));
@@ -3328,14 +3355,14 @@ mod tests {
                 .expect("failed to re-initialize journal");
 
             // Verify size is preserved
-            assert_eq!(journal.size().await, 15);
+            assert_eq!(journal.size(), 15);
 
             // Verify bounds.start is preserved
-            assert_eq!(journal.bounds().await.start, 5);
+            assert_eq!(journal.bounds().start, 5);
 
             // Reading from size() - 1 should work after restart
             let value = journal
-                .read(journal.size().await - 1)
+                .read(journal.size() - 1)
                 .await
                 .expect("failed to read");
             assert_eq!(value, test_digest(14));
@@ -3349,7 +3376,7 @@ mod tests {
 
             // === Test 5: Restart after pruning with non-zero index ===
             // Fresh journal for this test
-            let journal = Journal::init(context.child("third"), cfg.clone())
+            let mut journal = Journal::init(context.child("third"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -3360,7 +3387,7 @@ mod tests {
 
             // Prune to position 5 (removes positions 0-4)
             journal.prune(5).await.unwrap();
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 10);
             assert_eq!(bounds.start, 5);
 
@@ -3374,12 +3401,12 @@ mod tests {
                 .expect("failed to re-initialize journal");
 
             // Verify state after restart
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 10);
             assert_eq!(bounds.start, 5);
 
             // Reading from size() - 1 (position 9) should work
-            let value = journal.read(journal.size().await - 1).await.unwrap();
+            let value = journal.read(journal.size() - 1).await.unwrap();
             assert_eq!(value, test_digest(109));
 
             // Verify all retained positions (5-9) work
@@ -3390,7 +3417,7 @@ mod tests {
             journal.destroy().await.expect("failed to destroy journal");
 
             // === Test 6: Prune all items (edge case) ===
-            let journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -3401,19 +3428,19 @@ mod tests {
 
             // Prune all items
             journal.prune(5).await.unwrap();
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 5); // Size unchanged
             assert!(bounds.is_empty()); // All pruned
 
             // size() - 1 = 4, but position 4 is pruned
-            let result = journal.read(journal.size().await - 1).await;
+            let result = journal.read(journal.size() - 1).await;
             assert!(matches!(result, Err(Error::ItemPruned(4))));
 
             // After appending, reading works again
             journal.append(&test_digest(205)).await.unwrap();
-            assert_eq!(journal.bounds().await.start, 5);
+            assert_eq!(journal.bounds().start, 5);
             assert_eq!(
-                journal.read(journal.size().await - 1).await.unwrap(),
+                journal.read(journal.size() - 1).await.unwrap(),
                 test_digest(205)
             );
 
@@ -3426,19 +3453,19 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 0)
                     .await
                     .unwrap();
 
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 0);
             assert!(bounds.is_empty());
 
             // Next append should get position 0
             let pos = journal.append(&test_digest(100)).await.unwrap();
             assert_eq!(pos, 0);
-            assert_eq!(journal.size().await, 1);
+            assert_eq!(journal.size(), 1);
             assert_eq!(journal.read(0).await.unwrap(), test_digest(100));
 
             journal.destroy().await.unwrap();
@@ -3446,25 +3473,96 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_init_at_size_section_boundary() {
+    fn test_fixed_journal_init_at_max_size_rejected() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(1));
+            cfg.partition = "max-size-rejected".into();
+
+            // A journal sized at `u64::MAX` could never accept an append, so init rejects it.
+            assert!(matches!(
+                Journal::<_, Digest>::init_at_size(context.child("storage"), cfg, u64::MAX).await,
+                Err(Error::SizeOverflow)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_append_size_overflow() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(1));
+            cfg.partition = "append-size-overflow".into();
+
+            // Initialize one item shy of the maximum size.
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.child("near_max"), cfg, u64::MAX - 1)
+                    .await
+                    .unwrap();
+
+            // The first append fills the last representable position.
+            assert_eq!(journal.append(&test_digest(7)).await.unwrap(), u64::MAX - 1);
+            assert_eq!(journal.size(), u64::MAX);
+
+            // The next append would overflow the size; it must return a recoverable error
+            // rather than panicking.
+            assert!(matches!(
+                journal.append(&test_digest(8)).await,
+                Err(Error::SizeOverflow)
+            ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_replay_near_max_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(10));
+            cfg.partition = "replay-near-max-size".into();
+
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.child("near_max"), cfg, u64::MAX - 1)
+                    .await
+                    .unwrap();
+            let expected = test_digest(7);
+            assert_eq!(journal.append(&expected).await.unwrap(), u64::MAX - 1);
+
+            {
+                let reader = journal.snapshot().await.unwrap();
+                let stream = reader.replay(u64::MAX - 1, NZUsize!(1024)).await.unwrap();
+                pin_mut!(stream);
+                let (pos, item) = stream.next().await.unwrap().unwrap();
+                assert_eq!(pos, u64::MAX - 1);
+                assert_eq!(item, expected);
+                assert!(stream.next().await.is_none());
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_blob_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
 
-            // Initialize at position 10 (exactly at section 2 boundary with items_per_blob=5)
-            let journal =
+            // Initialize at position 10 (exactly at blob 2 boundary with items_per_blob=5)
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 10)
                     .await
                     .unwrap();
 
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 10);
             assert!(bounds.is_empty());
 
             // Next append should get position 10
             let pos = journal.append(&test_digest(1000)).await.unwrap();
             assert_eq!(pos, 10);
-            assert_eq!(journal.size().await, 11);
+            assert_eq!(journal.size(), 11);
             assert_eq!(journal.read(10).await.unwrap(), test_digest(1000));
 
             // Can continue appending
@@ -3477,18 +3575,18 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_init_at_size_mid_section() {
+    fn test_fixed_journal_init_at_size_mid_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
 
-            // Initialize at position 7 (middle of section 1 with items_per_blob=5)
-            let journal =
+            // Initialize at position 7 (middle of blob 1 with items_per_blob=5)
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 7)
                     .await
                     .unwrap();
 
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 7);
             // No data exists yet after init_at_size
             assert!(bounds.is_empty());
@@ -3500,21 +3598,21 @@ mod tests {
             // Next append should get position 7
             let pos = journal.append(&test_digest(700)).await.unwrap();
             assert_eq!(pos, 7);
-            assert_eq!(journal.size().await, 8);
+            assert_eq!(journal.size(), 8);
             assert_eq!(journal.read(7).await.unwrap(), test_digest(700));
             // Now bounds.start should be 7 (first data position)
-            assert_eq!(journal.bounds().await.start, 7);
+            assert_eq!(journal.bounds().start, 7);
 
             journal.destroy().await.unwrap();
         });
     }
 
     #[test_traced]
-    fn test_fixed_journal_append_many_after_mid_section_start() {
+    fn test_fixed_journal_append_many_after_mid_blob_start() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(100));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 150)
                     .await
                     .unwrap();
@@ -3522,7 +3620,7 @@ mod tests {
             let items: Vec<_> = (0..100u64).map(|i| test_digest(1500 + i)).collect();
             let last = journal.append_many(Many::Flat(&items)).await.unwrap();
             assert_eq!(last, 249);
-            assert_eq!(journal.bounds().await, 150..250);
+            assert_eq!(journal.bounds(), 150..250);
 
             for (position, index) in [(150, 0), (199, 49), (200, 50), (249, 99)] {
                 assert_eq!(
@@ -3538,60 +3636,12 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds().await, 150..250);
+            assert_eq!(journal.bounds(), 150..250);
             for (position, index) in [(150, 0), (199, 49), (200, 50), (249, 99)] {
                 assert_eq!(
                     journal.read(position).await.unwrap(),
                     items[index],
                     "item at position {position} did not match after reopen"
-                );
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_append_many_exceeding_write_buffer() {
-        // A batch much larger than the write buffer (2048 bytes = 64 digests) takes the direct
-        // blob-write path and spans multiple sections.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(100));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Start mid-page with a couple of single appends so the batch begins unaligned.
-            journal.append(&test_digest(0)).await.unwrap();
-            journal.append(&test_digest(1)).await.unwrap();
-
-            let items: Vec<_> = (2..252u64).map(test_digest).collect();
-            let last = journal.append_many(Many::Flat(&items)).await.unwrap();
-            assert_eq!(last, 251);
-            assert_eq!(journal.bounds().await, 0..252);
-
-            // Every item is readable before any sync.
-            for pos in 0..252u64 {
-                assert_eq!(
-                    journal.read(pos).await.unwrap(),
-                    test_digest(pos),
-                    "item at position {pos} did not match"
-                );
-            }
-
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds().await, 0..252);
-            for pos in 0..252u64 {
-                assert_eq!(
-                    journal.read(pos).await.unwrap(),
-                    test_digest(pos),
-                    "item at position {pos} did not match after reopen"
                 );
             }
 
@@ -3606,7 +3656,7 @@ mod tests {
             let cfg = test_cfg(&context, NZU64!(5));
 
             // Initialize at position 15
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 15)
                     .await
                     .unwrap();
@@ -3617,18 +3667,18 @@ mod tests {
                 assert_eq!(pos, 15 + i);
             }
 
-            assert_eq!(journal.size().await, 20);
+            assert_eq!(journal.size(), 20);
 
             // Sync and reopen
             journal.sync().await.unwrap();
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
             // Size and data should be preserved
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 20);
             assert_eq!(bounds.start, 15);
 
@@ -3658,7 +3708,7 @@ mod tests {
                     .await
                     .unwrap();
 
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 15);
             assert!(bounds.is_empty());
 
@@ -3666,11 +3716,11 @@ mod tests {
             drop(journal);
 
             // Reopen and verify size persisted
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 15);
             assert!(bounds.is_empty());
 
@@ -3690,12 +3740,12 @@ mod tests {
             let cfg = test_cfg(&context, NZU64!(5));
 
             // Initialize at a large position (position 1000)
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 1000)
                     .await
                     .unwrap();
 
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 1000);
             assert!(bounds.is_empty());
 
@@ -3715,7 +3765,7 @@ mod tests {
             let cfg = test_cfg(&context, NZU64!(5));
 
             // Initialize at position 20
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 20)
                     .await
                     .unwrap();
@@ -3725,12 +3775,12 @@ mod tests {
                 journal.append(&test_digest(2000 + i)).await.unwrap();
             }
 
-            assert_eq!(journal.size().await, 30);
+            assert_eq!(journal.size(), 30);
 
             // Prune to position 25
             journal.prune(25).await.unwrap();
 
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 30);
             assert_eq!(bounds.start, 25);
 
@@ -3752,7 +3802,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::init(context.child("journal"), cfg.clone())
+            let mut journal = Journal::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -3760,12 +3810,12 @@ mod tests {
             for i in 0..25u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.size().await, 25);
+            assert_eq!(journal.size(), 25);
             journal.sync().await.unwrap();
 
             // Clear to position 100, effectively resetting the journal
             journal.clear_to_size(100).await.unwrap();
-            assert_eq!(journal.size().await, 100);
+            assert_eq!(journal.size(), 100);
 
             // Old positions should fail
             for i in 0..25 {
@@ -3774,18 +3824,18 @@ mod tests {
 
             // Verify size persists after restart without writing any data
             drop(journal);
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init(context.child("journal_after_clear"), cfg.clone())
                     .await
                     .expect("failed to re-initialize journal after clear");
-            assert_eq!(journal.size().await, 100);
+            assert_eq!(journal.size(), 100);
 
             // Append new data starting at position 100
             for i in 100..105u64 {
                 let pos = journal.append(&test_digest(i)).await.unwrap();
                 assert_eq!(pos, i);
             }
-            assert_eq!(journal.size().await, 105);
+            assert_eq!(journal.size(), 105);
 
             // New positions should be readable
             for i in 100..105u64 {
@@ -3800,11 +3850,33 @@ mod tests {
                 .await
                 .expect("failed to re-initialize journal");
 
-            assert_eq!(journal.size().await, 105);
+            assert_eq!(journal.size(), 105);
             for i in 100..105u64 {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_clear_to_size_rejects_max() {
+        // `clear_to_size` must reject `u64::MAX` like `init_at_size`: such a journal could never
+        // accept an append.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            assert!(matches!(
+                journal.clear_to_size(u64::MAX).await,
+                Err(Error::SizeOverflow)
+            ));
+            assert!(matches!(
+                journal.stage_clear_intent(u64::MAX).await,
+                Err(Error::SizeOverflow)
+            ));
             journal.destroy().await.unwrap();
         });
     }
@@ -3815,7 +3887,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -3828,7 +3900,7 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.start, 0);
             assert_eq!(bounds.end, 5);
             journal.destroy().await.unwrap();
@@ -3836,13 +3908,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_missing_metadata_with_short_section_is_corruption() {
+    fn test_fixed_journal_missing_metadata_with_short_blob_is_corruption() {
         // Clearing all metadata leaves no watermark. Recovery falls back to the blob boundary
-        // and finds a short non-tail section, violating the legacy rollover-sync invariant.
+        // and finds a short non-tail blob, violating the legacy rollover-sync invariant.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
@@ -3852,10 +3924,8 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Simulate metadata deletion (corruption).
-            let mut inner = journal.inner.write().await;
-            inner.metadata.clear();
-            inner.metadata.sync().await.unwrap();
-            drop(inner);
+            journal.checkpoint.clear();
+            journal.checkpoint.sync().await.unwrap();
             drop(journal);
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
@@ -3865,11 +3935,11 @@ mod tests {
 
     #[test_traced]
     fn test_fixed_journal_sync_crash_meta_mid_boundary_unchanged() {
-        // Old meta = Some(mid), new boundary = mid-section (same value).
+        // Old meta = Some(mid), new boundary = mid-blob (same value).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
@@ -3882,7 +3952,7 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.start, 7);
             assert_eq!(bounds.end, 10);
             journal.destroy().await.unwrap();
@@ -3894,14 +3964,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
             for i in 0..10u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.size().await, 17);
+            assert_eq!(journal.size(), 17);
             journal.prune(10).await.unwrap();
 
             journal.commit().await.unwrap();
@@ -3910,7 +3980,7 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.start, 10);
             assert_eq!(bounds.end, 17);
             journal.destroy().await.unwrap();
@@ -3919,55 +3989,78 @@ mod tests {
 
     #[test_traced]
     fn test_fixed_journal_prune_does_not_move_boundary_backwards() {
-        // Pruning to a position earlier than pruning_boundary (within the same section)
+        // Pruning to a position earlier than pruning_boundary (within the same blob)
         // should not move the boundary backwards.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            // init_at_size(7) sets pruning_boundary = 7 (mid-section in section 1)
-            let journal =
+            // init_at_size(7) sets pruning_boundary = 7 (mid-blob in blob 1)
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
-            // Append 5 items at positions 7-11, filling section 1 and part of section 2
+            // Append 5 items at positions 7-11, filling blob 1 and part of blob 2
             for i in 0..5u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            // Prune to position 5 (section 1 start) should NOT move boundary back from 7 to 5
+            // Prune to position 5 (blob 1 start) should NOT move boundary back from 7 to 5
             journal.prune(5).await.unwrap();
-            assert_eq!(journal.bounds().await.start, 7);
+            assert_eq!(journal.bounds().start, 7);
             journal.destroy().await.unwrap();
         });
     }
 
     #[test_traced]
-    fn test_fixed_journal_replay_after_init_at_size_spanning_sections() {
-        // Test replay when first section begins mid-section: init_at_size creates a journal
-        // where pruning_boundary is mid-section, then we append across multiple sections.
+    fn test_fixed_journal_prune_adjusts_dirty_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..12 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            journal.prune(5).await.unwrap();
+            journal
+                .commit()
+                .await
+                .expect("commit should not try to sync pruned dirty blobs");
+            assert_eq!(journal.bounds(), 5..12);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_replay_after_init_at_size_spanning_blobs() {
+        // Test replay when first blob begins mid-blob: init_at_size creates a journal
+        // where pruning_boundary is mid-blob, then we append across multiple blobs.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
 
-            // Initialize at position 7 (mid-section with items_per_blob=5)
-            // Section 1 (positions 5-9) begins mid-section: only positions 7, 8, 9 have data
-            let journal =
+            // Initialize at position 7 (mid-blob with items_per_blob=5)
+            // Blob 1 (positions 5-9) begins mid-blob: only positions 7, 8, 9 have data
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 7)
                     .await
                     .unwrap();
 
-            // Append 13 items (positions 7-19), spanning sections 1, 2, 3
+            // Append 13 items (positions 7-19), spanning blobs 1, 2, 3
             for i in 0..13u64 {
                 let pos = journal.append(&test_digest(100 + i)).await.unwrap();
                 assert_eq!(pos, 7 + i);
             }
-            assert_eq!(journal.size().await, 20);
+            assert_eq!(journal.size(), 20);
             journal.sync().await.unwrap();
 
             // Replay from pruning_boundary
             {
-                let reader = journal.reader().await;
+                let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), 7)
+                    .replay(7, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -3986,9 +4079,9 @@ mod tests {
 
             // Replay from mid-stream (position 12)
             {
-                let reader = journal.reader().await;
+                let reader = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(NZUsize!(1024), 12)
+                    .replay(12, NZUsize!(1024))
                     .await
                     .expect("failed to replay from mid-stream");
                 pin_mut!(stream);
@@ -4016,7 +4109,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
 
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 10)
                     .await
                     .unwrap();
@@ -4025,19 +4118,19 @@ mod tests {
             for i in 0..3u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.size().await, 13);
+            assert_eq!(journal.size(), 13);
 
             // Rewind to position 11 should work
             journal.rewind(11).await.unwrap();
-            assert_eq!(journal.size().await, 11);
+            assert_eq!(journal.size(), 11);
 
             // Rewind to position 10 (pruning_boundary) should work
             journal.rewind(10).await.unwrap();
-            assert_eq!(journal.size().await, 10);
+            assert_eq!(journal.size(), 10);
 
             // Rewind to before pruning_boundary should fail
             let result = journal.rewind(9).await;
-            assert!(matches!(result, Err(Error::InvalidRewind(9))));
+            assert!(matches!(result, Err(Error::ItemPruned(9))));
 
             journal.destroy().await.unwrap();
         });
@@ -4049,8 +4142,8 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
 
-            // Setup: Create a journal with some data and mid-section metadata
-            let journal =
+            // Setup: Create a journal with some data and mid-blob metadata
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
@@ -4063,17 +4156,12 @@ mod tests {
             // Crash Scenario 1: after clear intent is synced and blobs are removed, but before
             // the new tail blob is created.
             let blob_part = blob_partition(&cfg);
-            let meta_cfg = MetadataConfig {
-                partition: format!("{}-metadata", cfg.partition),
-                codec_config: (),
-            };
-            let mut metadata =
-                Metadata::<_, u64, VecU64>::init(context.child("intent_meta"), meta_cfg.clone())
-                    .await
-                    .unwrap();
-            metadata.put(CLEAR_TARGET_KEY, 12u64.into());
-            metadata.sync().await.unwrap();
-            drop(metadata);
+            let mut checkpoint = Checkpoint::open(context.child("intent_meta"), &cfg.partition)
+                .await
+                .unwrap();
+            checkpoint.set_clear_target(12);
+            checkpoint.sync().await.unwrap();
+            drop(checkpoint);
             context.remove(&blob_part, None).await.unwrap();
 
             // Recovery should complete the interrupted init_at_size(12).
@@ -4083,20 +4171,19 @@ mod tests {
             )
             .await
             .expect("init failed after clear crash");
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.end, 12);
             assert_eq!(bounds.start, 12);
             drop(journal);
 
             // Restore metadata for next scenario (it might have been removed by init)
-            let mut metadata =
-                Metadata::<_, u64, VecU64>::init(context.child("restore_meta"), meta_cfg.clone())
-                    .await
-                    .unwrap();
-            metadata.put(PRUNING_BOUNDARY_KEY, 7u64.into());
-            metadata.put(CLEAR_TARGET_KEY, 2u64.into());
-            metadata.sync().await.unwrap();
-            drop(metadata);
+            let mut checkpoint = Checkpoint::open(context.child("restore_meta"), &cfg.partition)
+                .await
+                .unwrap();
+            checkpoint.set_boundary_hint(7);
+            checkpoint.set_clear_target(2);
+            checkpoint.sync().await.unwrap();
+            drop(checkpoint);
 
             // Crash Scenario 2: after the new tail blob is created, but before final metadata
             // replaces the clear intent.
@@ -4112,7 +4199,7 @@ mod tests {
             .await
             .expect("init failed after create crash");
 
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.start, 2);
             assert_eq!(bounds.end, 2);
             journal.destroy().await.unwrap();
@@ -4125,9 +4212,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
 
-            // Setup: Init at 12 (Section 2, offset 2)
+            // Setup: Init at 12 (Blob 2, offset 2)
             // Metadata = 12
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 12)
                     .await
                     .unwrap();
@@ -4138,16 +4225,12 @@ mod tests {
             // but before final metadata replaces the clear intent.
 
             let blob_part = blob_partition(&cfg);
-            let meta_cfg = MetadataConfig {
-                partition: format!("{}-metadata", cfg.partition),
-                codec_config: (),
-            };
-            let mut metadata = Metadata::<_, u64, VecU64>::init(context.child("meta"), meta_cfg)
+            let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition)
                 .await
                 .unwrap();
-            metadata.put(CLEAR_TARGET_KEY, 2u64.into());
-            metadata.sync().await.unwrap();
-            drop(metadata);
+            checkpoint.set_clear_target(2);
+            checkpoint.sync().await.unwrap();
+            drop(checkpoint);
 
             context.remove(&blob_part, None).await.unwrap();
 
@@ -4158,7 +4241,7 @@ mod tests {
                 .await
                 .expect("init failed after clear_to_size crash");
 
-            let bounds = journal.bounds().await;
+            let bounds = journal.bounds();
             assert_eq!(bounds.start, 2);
             assert_eq!(bounds.end, 2);
             journal.destroy().await.unwrap();
@@ -4170,7 +4253,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for i in 0..12u64 {
@@ -4178,22 +4261,18 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            let meta_cfg = MetadataConfig {
-                partition: format!("{}-metadata", cfg.partition),
-                codec_config: (),
-            };
-            let mut metadata = Metadata::<_, u64, VecU64>::init(context.child("meta"), meta_cfg)
+            let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition)
                 .await
                 .unwrap();
-            metadata.put(CLEAR_TARGET_KEY, 100u64.into());
-            metadata.sync().await.unwrap();
-            drop(metadata);
+            checkpoint.set_clear_target(100);
+            checkpoint.sync().await.unwrap();
+            drop(checkpoint);
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("init failed after clear intent crash");
-            assert_eq!(journal.bounds().await, 100..100);
+            assert_eq!(journal.bounds(), 100..100);
             let pos = journal.append(&test_digest(100)).await.unwrap();
             assert_eq!(pos, 100);
             journal.destroy().await.unwrap();
@@ -4201,11 +4280,39 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_clear_to_size_crash_after_mid_section_intent_with_old_blobs_present() {
+    fn test_fixed_journal_clear_intent_skips_corrupt_stale_blobs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let blob_part = blob_partition(&cfg);
+            let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition)
+                .await
+                .unwrap();
+            checkpoint.set_clear_target(12);
+            checkpoint.sync().await.unwrap();
+            drop(checkpoint);
+
+            // This name would fail `Partition::open_all` if init tried to parse stale blobs before
+            // honoring the clear intent.
+            let (blob, _) = context.open(&blob_part, b"not-u64").await.unwrap();
+            blob.write_at_sync(0, vec![1, 2, 3]).await.unwrap();
+            drop(blob);
+
+            let journal = Journal::<_, Digest>::init(context.child("recover"), cfg.clone())
+                .await
+                .expect("clear intent should discard stale corrupt blobs before blob parsing");
+            assert_eq!(journal.bounds(), 12..12);
+            assert_eq!(journal.recovery_watermark(), 12);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_clear_to_size_crash_after_mid_blob_intent_with_old_blobs_present() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 10)
                     .await
                     .unwrap();
@@ -4216,28 +4323,24 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            let meta_cfg = MetadataConfig {
-                partition: format!("{}-metadata", cfg.partition),
-                codec_config: (),
-            };
-            let mut metadata = Metadata::<_, u64, VecU64>::init(context.child("meta"), meta_cfg)
+            let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition)
                 .await
                 .unwrap();
-            metadata.put(CLEAR_TARGET_KEY, 15u64.into());
-            metadata.sync().await.unwrap();
-            drop(metadata);
+            checkpoint.set_clear_target(15);
+            checkpoint.sync().await.unwrap();
+            drop(checkpoint);
             drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
-                .expect("init failed after mid-section clear intent crash");
-            assert_eq!(journal.bounds().await, 15..15);
+                .expect("init failed after mid-blob clear intent crash");
+            assert_eq!(journal.bounds(), 15..15);
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
                 .await
-                .expect("init failed after completing mid-section clear intent");
-            assert_eq!(journal.bounds().await, 15..15);
+                .expect("init failed after completing mid-blob clear intent");
+            assert_eq!(journal.bounds(), 15..15);
             assert!(matches!(journal.read(14).await, Err(Error::ItemPruned(14))));
             let pos = journal.append(&test_digest(100)).await.unwrap();
             assert_eq!(pos, 15);
@@ -4253,7 +4356,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
 
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for i in 0..10u64 {
@@ -4262,7 +4365,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Remove all blobs and create a single empty section 1, leaving
+            // Remove all blobs and create a single empty blob 1, leaving
             // recovery_watermark=10 in metadata.
             let blob_part = blob_partition(&cfg);
             context.remove(&blob_part, None).await.unwrap();
@@ -4276,12 +4379,12 @@ mod tests {
 
     #[test_traced]
     fn test_fixed_journal_rejects_far_watermark_with_aligned_empty_tail() {
-        // Same as above but the watermark is multiple sections past the empty tail.
+        // Same as above but the watermark is multiple blobs past the empty tail.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
 
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for i in 0..10u64 {
@@ -4290,7 +4393,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Remove all blobs and create a single empty section 0, leaving
+            // Remove all blobs and create a single empty blob 0, leaving
             // recovery_watermark=10 in metadata.
             let blob_part = blob_partition(&cfg);
             context.remove(&blob_part, None).await.unwrap();
@@ -4307,11 +4410,17 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+            let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
 
-            let items = journal.reader().await.read_many(&[]).await.unwrap();
+            let items = journal
+                .snapshot()
+                .await
+                .unwrap()
+                .read_many(&[])
+                .await
+                .unwrap();
             assert!(items.is_empty());
 
             journal.destroy().await.unwrap();
@@ -4324,15 +4433,46 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..5u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.size().await, 5);
+            assert_eq!(journal.size(), 5);
 
-            let items = journal.reader().await.read_many(&[0, 2, 4]).await.unwrap();
+            let items = journal
+                .snapshot()
+                .await
+                .unwrap()
+                .read_many(&[0, 2, 4])
+                .await
+                .unwrap();
             assert_eq!(items, vec![test_digest(0), test_digest(2), test_digest(4)]);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_rejects_unsorted_positions() {
+        // Non-increasing positions return an error rather than panicking.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
+            for i in 0..5u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            assert!(matches!(
+                journal.snapshot().await.unwrap().read_many(&[2, 1]).await,
+                Err(Error::PositionsNotIncreasing)
+            ));
+            // Duplicates are not strictly increasing either.
+            assert!(matches!(
+                journal.snapshot().await.unwrap().read_many(&[1, 1]).await,
+                Err(Error::PositionsNotIncreasing)
+            ));
 
             journal.destroy().await.unwrap();
         });
@@ -4344,15 +4484,21 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
-            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..9u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.size().await, 9);
+            assert_eq!(journal.size(), 9);
             // Blobs: [0,1,2], [3,4,5], [6,7,8]
 
-            let items = journal.reader().await.read_many(&[1, 4, 7]).await.unwrap();
+            let items = journal
+                .snapshot()
+                .await
+                .unwrap()
+                .read_many(&[1, 4, 7])
+                .await
+                .unwrap();
             assert_eq!(items, vec![test_digest(1), test_digest(4), test_digest(7)]);
 
             journal.destroy().await.unwrap();
@@ -4365,23 +4511,35 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
-            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..9u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.size().await, 9);
+            assert_eq!(journal.size(), 9);
             journal.sync().await.unwrap();
 
             // Prune first blob [0,1,2].
             journal.prune(3).await.unwrap();
-            assert_eq!(journal.bounds().await, 3..9);
+            assert_eq!(journal.bounds(), 3..9);
 
-            let items = journal.reader().await.read_many(&[3, 5, 8]).await.unwrap();
+            let items = journal
+                .snapshot()
+                .await
+                .unwrap()
+                .read_many(&[3, 5, 8])
+                .await
+                .unwrap();
             assert_eq!(items, vec![test_digest(3), test_digest(5), test_digest(8)]);
 
             // Pruned position should error.
-            let err = journal.reader().await.read_many(&[1]).await.unwrap_err();
+            let err = journal
+                .snapshot()
+                .await
+                .unwrap()
+                .read_many(&[1])
+                .await
+                .unwrap_err();
             assert!(matches!(err, Error::ItemPruned(1)));
 
             journal.destroy().await.unwrap();
@@ -4393,14 +4551,20 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..3u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.size().await, 3);
+            assert_eq!(journal.size(), 3);
 
-            let err = journal.reader().await.read_many(&[0, 5]).await.unwrap_err();
+            let err = journal
+                .snapshot()
+                .await
+                .unwrap()
+                .read_many(&[0, 5])
+                .await
+                .unwrap_err();
             assert!(matches!(err, Error::ItemOutOfRange(5)));
 
             journal.destroy().await.unwrap();
@@ -4413,16 +4577,16 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(4));
-            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..20u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.size().await, 20);
+            assert_eq!(journal.size(), 20);
             journal.sync().await.unwrap();
 
             let positions: Vec<u64> = (0..20).collect();
-            let reader = journal.reader().await;
+            let reader = journal.snapshot().await.unwrap();
             let batch = reader.read_many(&positions).await.unwrap();
 
             for &pos in &positions {
@@ -4436,23 +4600,240 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_fixed_journal_metrics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(2));
+            let mut journal =
+                Journal::<_, Digest>::init(context.child("fixed_metrics"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            let items: Vec<_> = (0..5).map(test_digest).collect();
+            journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal.append(&test_digest(5)).await.unwrap();
+            journal.commit().await.unwrap();
+            journal.sync().await.unwrap();
+            journal.snapshot().await.unwrap().read(0).await.unwrap();
+            journal.snapshot().await.unwrap().try_read_sync(0).unwrap();
+            journal
+                .snapshot()
+                .await
+                .unwrap()
+                .read_many(&[1, 2, 4])
+                .await
+                .unwrap();
+            journal.prune(2).await.unwrap();
+            journal.rewind(4).await.unwrap();
+
+            let buffer = context.encode();
+            for expected in [
+                "fixed_metrics_size 4",
+                "fixed_metrics_pruning_boundary 2",
+                "fixed_metrics_retained 2",
+                "fixed_metrics_tail_items 2",
+                "fixed_metrics_append_calls_total 1",
+                "fixed_metrics_append_many_calls_total 1",
+                "fixed_metrics_read_calls_total 1",
+                "fixed_metrics_read_many_calls_total 1",
+                "fixed_metrics_try_read_sync_hits_total 1",
+                "fixed_metrics_items_read_total 5",
+                "fixed_metrics_commit_calls_total 1",
+                "fixed_metrics_sync_calls_total 1",
+                "fixed_metrics_append_duration_count 1",
+                "fixed_metrics_append_many_duration_count 1",
+                "fixed_metrics_read_duration_count 0",
+                "fixed_metrics_read_many_duration_count 1",
+                "fixed_metrics_commit_duration_count 1",
+                "fixed_metrics_sync_duration_count 1",
+                "fixed_metrics_cache_hits_total",
+                "fixed_metrics_cache_misses_total",
+                "fixed_metrics_blobs_tracked",
+            ] {
+                assert!(buffer.contains(expected), "{expected}\n{buffer}");
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+    /// A snapshot's bounds and contents are frozen across appends and rolls.
+    #[test_traced]
+    fn test_snapshot_frozen_across_roll() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            for i in 0..7u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            let snapshot = journal.snapshot().await.unwrap();
+            assert_eq!(snapshot.bounds(), 0..7);
+
+            // Appending past the blob boundary rolls the snapshot's tail blob into
+            // history; the snapshot keeps reading it through its own handle.
+            for i in 7..23u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            assert_eq!(snapshot.bounds(), 0..7);
+            for i in 0..7u64 {
+                assert_eq!(snapshot.read(i).await.unwrap(), test_digest(i));
+            }
+            assert!(matches!(
+                snapshot.read(7).await,
+                Err(Error::ItemOutOfRange(7))
+            ));
+
+            let fresh = journal.snapshot().await.unwrap();
+            assert_eq!(fresh.bounds(), 0..23);
+            assert_eq!(fresh.read(22).await.unwrap(), test_digest(22));
+
+            drop(snapshot);
+            drop(fresh);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A snapshot taken before a prune keeps reading the pruned range; later snapshots observe
+    /// the new boundary.
+    #[test_traced]
+    fn test_prune_under_snapshot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            for i in 0..17u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let snapshot = journal.snapshot().await.unwrap();
+            assert!(journal.prune(12).await.unwrap());
+
+            // The straggler reads the pruned range through its own handles.
+            assert_eq!(snapshot.bounds(), 0..17);
+            for i in 0..17u64 {
+                assert_eq!(snapshot.read(i).await.unwrap(), test_digest(i));
+            }
+
+            let fresh = journal.snapshot().await.unwrap();
+            assert_eq!(fresh.bounds(), 10..17);
+            assert!(matches!(fresh.read(3).await, Err(Error::ItemPruned(3))));
+
+            drop(snapshot);
+            drop(fresh);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Every snapshot shipped to a concurrent task is fully readable while the writer keeps
+    /// appending and rolling.
+    #[test_traced]
+    fn test_snapshots_readable_during_concurrent_appends() {
+        let executor = deterministic::Runner::seeded(7);
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+
+            let (mut tx, mut rx) =
+                futures::channel::mpsc::channel::<Reader<'static, Context, Digest>>(8);
+            let validator = context.child("validator").spawn(|_| async move {
+                let mut validated = 0usize;
+                while let Some(snapshot) = rx.next().await {
+                    let bounds = snapshot.bounds();
+                    for i in bounds.clone() {
+                        assert_eq!(snapshot.read(i).await.unwrap(), test_digest(i));
+                    }
+                    validated += (bounds.end - bounds.start) as usize;
+                }
+                validated
+            });
+
+            for i in 0..40u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+                if i % 7 == 0 {
+                    let snapshot = journal.snapshot().await.unwrap();
+                    if tx.try_send(snapshot).is_err() {
+                        break;
+                    }
+                }
+            }
+            drop(tx);
+            assert!(validator.await.unwrap() > 0);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A snapshot taken before rolls and a prune replays its full frozen range, streaming its
+    /// then-tail blob through the snapshot's own handle.
+    #[test_traced]
+    fn test_replay_from_stale_snapshot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            for i in 0..7u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            // Positions 5..7 live in the snapshot's tail blob.
+            let snapshot = journal.snapshot().await.unwrap();
+            assert_eq!(snapshot.bounds(), 0..7);
+
+            // Roll the snapshot's tail into history, then prune both of its blobs away.
+            for i in 7..23u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            assert!(journal.prune(12).await.unwrap());
+
+            {
+                let stream = snapshot.replay(0, NZUsize!(1024)).await.unwrap();
+                pin_mut!(stream);
+                let mut expected = 0u64;
+                while let Some(result) = stream.next().await {
+                    let (pos, item) = result.unwrap();
+                    assert_eq!(pos, expected);
+                    assert_eq!(item, test_digest(pos));
+                    expected += 1;
+                }
+                assert_eq!(expected, 7);
+            }
+
+            drop(snapshot);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_read_many_sparse_sections_and_hit_accounting() {
         // Verify the batched read path is byte-identical to per-item reads across multiple
-        // sections, with a mid-section pruning boundary, a sparse subset of positions, and
+        // blobs, with a mid-blob pruning boundary, a sparse subset of positions, and
         // exact hit/miss accounting over a mixed cached/uncached batch.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(8));
-            let journal = Journal::init(context.child("j"), cfg).await.unwrap();
+            let mut cfg = test_cfg(&context, NZU64!(8));
+            // Keep the whole batch resident so hit accounting is stable. Otherwise, the batch may
+            // evict a page that a later per-item probe still expects to hit.
+            cfg.page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..50u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
             journal.sync().await.unwrap();
-            // Prune mid-section so first_in_section differs from section start.
+            // Prune mid-blob so first_in_blob differs from the blob start.
             journal.prune(11).await.unwrap();
 
-            let reader = journal.reader().await;
+            let reader = journal.snapshot().await.unwrap();
 
             fn counter(buffer: &str, name: &str) -> u64 {
                 buffer
@@ -4463,7 +4844,7 @@ mod tests {
                     .expect("counter missing")
             }
 
-            // Sparse subset spanning multiple sections, including the pruning boundary.
+            // Sparse subset spanning multiple blobs, including the pruning boundary.
             // `try_read_sync` probes do not populate the cache, so the cached subset is
             // whatever the append path left resident; derive the expected hit count from
             // probes so the batch read's hit/miss accounting is asserted exactly.
@@ -4505,62 +4886,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_metrics() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
-            let journal = Journal::<_, Digest>::init(context.child("fixed_metrics"), cfg.clone())
-                .await
-                .unwrap();
-
-            let items: Vec<_> = (0..5).map(test_digest).collect();
-            journal.append_many(Many::Flat(&items)).await.unwrap();
-            journal.append(&test_digest(5)).await.unwrap();
-            journal.commit().await.unwrap();
-            journal.sync().await.unwrap();
-            journal.reader().await.read(0).await.unwrap();
-            journal.reader().await.try_read_sync(0).unwrap();
-            journal.reader().await.read_many(&[1, 2, 4]).await.unwrap();
-            journal.prune(2).await.unwrap();
-            journal.rewind(4).await.unwrap();
-
-            let buffer = context.encode();
-            for expected in [
-                "fixed_metrics_size 4",
-                "fixed_metrics_pruning_boundary 2",
-                "fixed_metrics_retained 2",
-                "fixed_metrics_tail_items 2",
-                "fixed_metrics_append_calls_total 1",
-                "fixed_metrics_append_many_calls_total 1",
-                "fixed_metrics_read_calls_total 1",
-                "fixed_metrics_read_many_calls_total 1",
-                "fixed_metrics_try_read_sync_hits_total 1",
-                "fixed_metrics_items_read_total 5",
-                "fixed_metrics_commit_calls_total 1",
-                "fixed_metrics_sync_calls_total 1",
-                "fixed_metrics_append_duration_count 1",
-                "fixed_metrics_append_many_duration_count 1",
-                "fixed_metrics_read_duration_count 0",
-                "fixed_metrics_read_many_duration_count 1",
-                "fixed_metrics_commit_duration_count 1",
-                "fixed_metrics_sync_duration_count 1",
-                "fixed_metrics_cache_hits_total",
-                "fixed_metrics_cache_misses_total",
-                "fixed_metrics_blobs_tracked",
-            ] {
-                assert!(buffer.contains(expected), "{expected}\n{buffer}");
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
     fn test_fixed_journal_read_miss_timed() {
         // Reads served from storage record a read_duration sample; cache hits do not.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let journal =
+            let mut journal =
                 Journal::<_, Digest>::init(context.child("miss"), test_cfg(&context, NZU64!(2)))
                     .await
                     .unwrap();
@@ -4570,7 +4900,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // The page cache cannot hold every page, so some position must be cold.
-            let reader = journal.reader().await;
+            let reader = journal.snapshot().await.unwrap();
             let pos = (0..20)
                 .find(|&pos| reader.try_read_sync(pos).is_none())
                 .expect("some position should be cold");

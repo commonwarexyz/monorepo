@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_concurrent_sync_does_not_report_success_while_flush_fails() {
+    fn test_sync_does_not_report_success_while_flush_fails() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -240,10 +240,8 @@ mod tests {
                 .await
                 .expect("Failed to remove blob");
 
-            // Both concurrent sync calls must observe the in-flight durability failure.
-            let (first, second) = futures::future::join(store.sync(), store.sync()).await;
-            assert!(first.is_err(), "first sync unexpectedly succeeded");
-            assert!(second.is_err(), "second sync unexpectedly succeeded");
+            // Sync must observe the durability failure.
+            assert!(store.sync().await.is_err(), "sync unexpectedly succeeded");
         });
     }
 

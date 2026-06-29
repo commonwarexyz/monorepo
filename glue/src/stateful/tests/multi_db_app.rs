@@ -664,7 +664,7 @@ impl EngineDefinition for MultiDbEngine {
             let mailbox = prune_observer.clone();
             Box::pin(async move {
                 let (a, _b) = mailbox.subscribe_databases().await;
-                let oldest_a = *a.read().await.bounds().await.start;
+                let oldest_a = *a.read().await.bounds().start;
                 oldest_a
             })
         });

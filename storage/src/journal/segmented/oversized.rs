@@ -145,12 +145,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         let sections: Vec<u64> = self.index.sections().collect();
 
         for section in sections {
-            let index_size = self.index.size(section).await?;
+            let index_size = self.index.size(section)?;
             if index_size == 0 {
                 continue;
             }
 
-            let glob_size = match self.values.size(section).await {
+            let glob_size = match self.values.size(section) {
                 Ok(size) => size,
                 Err(Error::AlreadyPrunedToSection(oldest)) => {
                     // This shouldn't happen in normal operation: prune() prunes the index
@@ -331,7 +331,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     ///
     /// Returns a stream of `(section, position, entry)` tuples.
     pub async fn replay(
-        &self,
+        &mut self,
         start_section: u64,
         start_position: u64,
         buffer: NonZeroUsize,
@@ -341,15 +341,16 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             .await
     }
 
-    /// Sync both journals for given section.
-    pub async fn sync(&self, section: u64) -> Result<(), Error> {
-        try_join(self.index.sync(section), self.values.sync(section))
+    /// Sync both journals for the given `sections`.
+    pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
+        let sections = sections.sections().collect::<Vec<_>>();
+        try_join(self.index.sync(&sections), self.values.sync(&sections))
             .await
             .map(|_| ())
     }
 
     /// Start syncing both journals for given section.
-    pub async fn start_sync(&self, section: u64) -> Result<Handle<()>, Error> {
+    pub async fn start_sync(&mut self, section: u64) -> Result<Handle<()>, Error> {
         let (index, values) = try_join(
             self.index.start_sync(section),
             self.values.start_sync(section),
@@ -364,7 +365,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     }
 
     /// Sync all sections.
-    pub async fn sync_all(&self) -> Result<(), Error> {
+    pub async fn sync_all(&mut self) -> Result<(), Error> {
         try_join(self.index.sync_all(), self.values.sync_all())
             .await
             .map(|_| ())
@@ -434,8 +435,8 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// Get index size for checkpoint.
     ///
     /// The value size can be derived from the last entry's location when needed.
-    pub async fn size(&self, section: u64) -> Result<u64, Error> {
-        self.index.size(section).await
+    pub fn size(&self, section: u64) -> Result<u64, Error> {
+        self.index.size(section)
     }
 
     /// Get the value size for a section, derived from the last entry's location.
@@ -692,6 +693,60 @@ mod tests {
                 .await
                 .expect("Failed to get value");
             assert_eq!(retrieved_value, value);
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            // One sub-page entry/value per section stays buffered until synced.
+            let mut located = Vec::new();
+            for section in 1u64..=3 {
+                let value: TestValue = [section as u8; 16];
+                let entry = TestEntry::new(section, 0, 0);
+                let (position, offset, size) = oversized
+                    .append(section, entry, &value)
+                    .await
+                    .expect("Failed to append");
+                located.push((section, position, offset, size, value));
+            }
+
+            // Sync sections 1 and 3 (both index and values); a nonexistent section (99) is
+            // skipped, not an error.
+            oversized
+                .sync(&[1, 3, 99])
+                .await
+                .expect("Failed to sync sections");
+            drop(oversized);
+
+            // Only the synced sections survive the unclean drop, with both index and value durable.
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("second"), cfg)
+                    .await
+                    .expect("Failed to reinit");
+            for &(section, position, offset, size, value) in &located {
+                let result = oversized.get(section, position).await;
+                if section == 2 {
+                    assert!(result.is_err(), "unsynced section 2 must not be durable");
+                    continue;
+                }
+                assert_eq!(result.expect("synced entry durable").id, section);
+                let retrieved = oversized
+                    .get_value(section, offset, size)
+                    .await
+                    .expect("synced value durable");
+                assert_eq!(retrieved, value);
+            }
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -3007,7 +3062,7 @@ mod tests {
                 .expect("rewind to zero index_size must not fail");
 
             assert_eq!(oversized.last(0).await.unwrap(), None);
-            assert_eq!(oversized.size(0).await.unwrap(), 0);
+            assert_eq!(oversized.size(0).unwrap(), 0);
             assert_eq!(oversized.value_size(0).await.unwrap(), 0);
 
             oversized.destroy().await.expect("Failed to destroy");

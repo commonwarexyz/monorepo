@@ -29,7 +29,7 @@ where
                     let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
 
                     // Setup: populate the blob
-                    let append = create_append(&ctx, &name, cache_ref.clone()).await;
+                    let mut append = create_append(&ctx, &name, cache_ref.clone()).await;
                     let data = vec![0xABu8; TOTAL_SIZE];
                     append.append(&data).await.unwrap();
                     append.sync().await.unwrap();

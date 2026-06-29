@@ -220,7 +220,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                 }
 
                 Operation::SyncFull { fetch_batch_size } => {
-                    if db.bounds().await.end == 0 {
+                    if db.bounds().end == 0 {
                         continue;
                     }
                     input.commit_counter += 1;
@@ -240,7 +240,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                     db.commit().await.expect("Commit should not fail");
                     let target = sync::Target::new(
                         db.root(),
-                        non_empty_range!(db.sync_boundary(), db.bounds().await.end),
+                        non_empty_range!(db.sync_boundary(), db.bounds().end),
                     );
 
                     let wrapped_src = Arc::new(db);

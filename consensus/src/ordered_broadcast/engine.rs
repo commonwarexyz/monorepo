@@ -496,7 +496,7 @@ impl<
 
         // Sync and drop all journals, regardless of how we exit the loop
         self.pending_verifies.cancel_all();
-        while let Some((_, journal)) = self.journals.pop_first() {
+        while let Some((_, mut journal)) = self.journals.pop_first() {
             journal.sync_all().await.expect("unable to sync journal");
         }
     }
@@ -1022,7 +1022,7 @@ impl<
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
+        let mut journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
             self.context
                 .child("journal")
                 .with_attribute("sequencer", sequencer),

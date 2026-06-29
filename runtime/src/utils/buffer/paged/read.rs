@@ -31,7 +31,7 @@ pub(super) struct PageReader<B: Blob> {
     logical_page_size: usize,
     /// The physical size of the blob.
     physical_blob_size: u64,
-    /// The logical size of the blob.
+    /// The size of the blob.
     logical_blob_size: u64,
     /// Next page index to read from the blob.
     blob_page: u64,
@@ -48,7 +48,7 @@ impl<B: Blob> PageReader<B> {
     /// The last page may be logically partial (CRC length < logical page size), but
     /// all preceding pages must be logically full. A logically partial non-last page
     /// indicates corruption and will cause an `Error::InvalidChecksum`.
-    pub(super) const fn new(
+    pub(super) fn new(
         blob: B,
         physical_blob_size: u64,
         logical_blob_size: u64,
@@ -57,6 +57,14 @@ impl<B: Blob> PageReader<B> {
     ) -> Self {
         let logical_page_size = logical_page_size.get() as usize;
         let page_size = logical_page_size + Checksum::SIZE;
+        let physical_pages = physical_blob_size / page_size as u64;
+        let logical_pages = if logical_blob_size == 0 {
+            0
+        } else {
+            ((logical_blob_size - 1) / logical_page_size as u64) + 1
+        };
+        assert_eq!(physical_blob_size % page_size as u64, 0);
+        assert_eq!(physical_pages, logical_pages);
 
         Self {
             blob,
@@ -69,7 +77,7 @@ impl<B: Blob> PageReader<B> {
         }
     }
 
-    /// Returns the logical size of the blob.
+    /// Returns the size of the blob.
     pub(super) const fn blob_size(&self) -> u64 {
         self.logical_blob_size
     }
@@ -141,8 +149,16 @@ impl<B: Blob> PageReader<B> {
                 return Err(Error::InvalidChecksum);
             }
 
-            total_logical += len;
-            last_len = len;
+            let logical_start = (self.blob_page + page_idx as u64)
+                .checked_mul(self.logical_page_size as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            let logical_remaining = self.logical_blob_size.saturating_sub(logical_start);
+            let logical_remaining_in_page =
+                logical_remaining.min(self.logical_page_size as u64) as usize;
+            let exposed_len = len.min(logical_remaining_in_page);
+
+            total_logical += exposed_len;
+            last_len = exposed_len;
         }
         self.blob_page += pages_to_read as u64;
 
@@ -294,7 +310,7 @@ impl<B: Blob> Replay<B> {
         }
     }
 
-    /// Returns the logical size of the blob.
+    /// Returns the size of the blob.
     pub const fn blob_size(&self) -> u64 {
         self.reader.blob_size()
     }
@@ -366,7 +382,7 @@ impl<B: Blob> Buf for Replay<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::append::Append, *};
+    use super::{super::writer::Writer, *};
     use crate::{deterministic, Runner as _, Storage as _};
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
@@ -383,7 +399,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 
@@ -421,7 +437,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 
@@ -450,7 +466,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 
@@ -506,12 +522,12 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 
             // Don't write any data - blob remains empty
-            assert_eq!(append.size().await, 0);
+            assert_eq!(append.size(), 0);
 
             // Create Replay on empty blob
             let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
@@ -545,7 +561,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let mut append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 
