@@ -161,10 +161,8 @@ fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option
     }
     let cfg = Config::default().with_storage_directory(folder);
     let elapsed = Runner::new(cfg).start(|ctx| async move {
-        // Generate with the flat index: it is much faster to build than P=3 at this keyspace (P=3 is
-        // ~3 keys/partition here, so its merkleize floor-scan crawls), and the on-disk log is
-        // P-agnostic, so `bench`/`parallel`/`one` still reopen it as P=3 to exercise the parallel build.
-        let mut db = AnyOFixDb::<Mmr>::init(
+        // Generate with the same P=3 index the bench reopens with.
+        let mut db = AnyOFixP3Db::<Mmr>::init(
             ctx.child("storage"),
             any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
         )
