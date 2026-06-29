@@ -383,9 +383,8 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
-    /// How the ordered-partitioned snapshot build parallelizes during init (other index types ignore
-    /// it). Returns can diminish once the main replay/routing task becomes the bottleneck; benchmark
-    /// representative workloads before configuring more than two workers.
+    /// How the ordered-partitioned snapshot build parallelizes during init. Note that only certain
+    /// index types (such as the ordered-partitioned index) support parallel construction.
     pub init_parallelism: super::InitParallelism,
 }
 
