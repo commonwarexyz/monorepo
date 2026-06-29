@@ -210,7 +210,7 @@ impl<
 {
     type Digest = D;
 
-    async fn size(&self) -> Position<F> {
+    fn size(&self) -> Position<F> {
         self.batch.size()
     }
     async fn get_node(&self, pos: Position<F>) -> Result<Option<D>, merkle::Error<F>> {

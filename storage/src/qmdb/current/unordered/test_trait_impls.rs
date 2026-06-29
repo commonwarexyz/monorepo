@@ -81,7 +81,7 @@ impl<
         self.any.bitmap.get_bit(index)
     }
 
-    async fn oldest_retained(&self) -> u64 {
+    fn oldest_retained(&self) -> u64 {
         *self.any.bounds().start
     }
 }
@@ -107,7 +107,7 @@ where
         self.any.bitmap.get_bit(index)
     }
 
-    async fn oldest_retained(&self) -> u64 {
+    fn oldest_retained(&self) -> u64 {
         *self.any.bounds().start
     }
 }
@@ -151,7 +151,7 @@ impl<
         self.any.bitmap.get_bit(index)
     }
 
-    async fn oldest_retained(&self) -> u64 {
+    fn oldest_retained(&self) -> u64 {
         *self.any.bounds().start
     }
 }
@@ -198,7 +198,7 @@ where
         self.any.bitmap.get_bit(index)
     }
 
-    async fn oldest_retained(&self) -> u64 {
+    fn oldest_retained(&self) -> u64 {
         *self.any.bounds().start
     }
 }

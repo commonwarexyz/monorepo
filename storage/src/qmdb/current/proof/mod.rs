@@ -199,7 +199,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     ) -> Result<Self, Error<F>> {
         // Snapshot ops_leaves once and thread through every derivation that needs it so the
         // pruned <= graftable <= complete invariant holds across all derivations.
-        let ops_leaves = Location::try_from(storage.size().await)?;
+        let ops_leaves = Location::try_from(storage.size())?;
         let grafting_height = grafting::height::<N>();
         let inactive_peaks = grafting::chunk_aligned_inactive_peaks::<F>(
             ops_leaves,

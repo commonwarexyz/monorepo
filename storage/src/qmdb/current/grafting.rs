@@ -427,8 +427,8 @@ impl<
 {
     type Digest = D;
 
-    async fn size(&self) -> Position<F> {
-        self.ops_tree.size().await
+    fn size(&self) -> Position<F> {
+        self.ops_tree.size()
     }
 
     async fn get_node(&self, pos: Position<F>) -> Result<Option<D>, merkle::Error<F>> {
@@ -866,7 +866,7 @@ mod tests {
 
             {
                 let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr, hasher.clone());
-                assert_eq!(combined.size().await, ops_mmr.size());
+                assert_eq!(combined.size(), ops_mmr.size());
 
                 // Compute the grafted root by iterating ops peaks.
                 let grafted_root = {
@@ -1033,7 +1033,7 @@ mod tests {
             ops_mmr.apply_batch(&batch).unwrap();
 
             let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr, hasher.clone());
-            assert_eq!(combined.size().await, ops_mmr.size());
+            assert_eq!(combined.size(), ops_mmr.size());
 
             // Compute the grafted root.
             let grafted_root = {

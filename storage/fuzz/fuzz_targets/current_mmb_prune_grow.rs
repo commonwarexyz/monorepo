@@ -179,7 +179,7 @@ async fn apply_pending(db: &mut Db, writes: &[(Key, Option<Value>)]) {
     db.commit().await.expect("commit fsync should not fail");
 }
 
-async fn assert_matches_reference(db: &Db, reference_db: &Db, context: &str) {
+fn assert_matches_reference(db: &Db, reference_db: &Db, context: &str) {
     assert_eq!(
         db.bounds().end,
         reference_db.bounds().end,
@@ -205,7 +205,7 @@ async fn commit_pending(
     pending_expected: &mut HashMap<LogicalKey, Option<RawValue>>,
 ) {
     if pending_writes.is_empty() {
-        assert_matches_reference(db, reference_db, "empty commit").await;
+        assert_matches_reference(db, reference_db, "empty commit");
         return;
     }
 
@@ -213,14 +213,14 @@ async fn commit_pending(
     apply_pending(db, &writes).await;
     apply_pending(reference_db, &writes).await;
     committed_state.extend(pending_expected.drain());
-    assert_matches_reference(db, reference_db, "commit").await;
+    assert_matches_reference(db, reference_db, "commit");
 }
 
 async fn prune_to_floor(db: &mut Db, reference_db: &Db, context: &str) {
     db.prune(db.sync_boundary())
         .await
         .expect("prune should not fail");
-    assert_matches_reference(db, reference_db, context).await;
+    assert_matches_reference(db, reference_db, context);
 }
 
 async fn reopen_pruned_db(
@@ -262,7 +262,7 @@ async fn reopen_pruned_db(
         pruned_bits_before,
         "pruned bits changed after reopen"
     );
-    assert_matches_reference(&reopened, reference_db, "reopen").await;
+    assert_matches_reference(&reopened, reference_db, "reopen");
     reopened
 }
 

@@ -222,11 +222,7 @@ where
     // Get the current database state
     let (root, sync_boundary, size) = {
         let database = state.database.read().await;
-        (
-            database.root(),
-            database.sync_boundary().await,
-            database.size().await,
-        )
+        (database.root(), database.sync_boundary(), database.size())
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
@@ -249,7 +245,7 @@ where
 
     let target = {
         let database = state.database.read().await;
-        database.target().await
+        database.target()
     };
     let response = wire::GetCompactTargetResponse::<Key> {
         request_id: request.request_id,
@@ -274,7 +270,7 @@ where
     let database = state.database.read().await;
 
     // Check if we have enough operations
-    let db_size = database.size().await;
+    let db_size = database.size();
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
             "start_loc ({}) >= database size ({})",
@@ -561,8 +557,8 @@ where
     database.add_operations(initial_ops).await?;
 
     // Display database state
-    let size = database.size().await;
-    let sync_boundary = database.sync_boundary().await;
+    let size = database.size();
+    let sync_boundary = database.sync_boundary();
     let root = database.root();
     info!(size = ?size, sync_boundary = ?sync_boundary, root = %format_root(&root), "{} database ready", DB::name());
 
@@ -590,7 +586,7 @@ where
     );
     database.add_operations(initial_ops).await?;
 
-    let target = database.target().await;
+    let target = database.target();
     let root = target.root;
     info!(
         leaf_count = ?target.leaf_count,
