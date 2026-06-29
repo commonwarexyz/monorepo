@@ -862,6 +862,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let tail_blob = position_to_blob(bounds.end, items_per_blob);
         let blobs = Writable::recover(partition, pending, tail_blob).await?;
 
+        // `align` synced any repaired or adopted data before `offsets.sync()`.
+        // `Writable::recover` only seals already-recovered writers; sealing an unchanged recovered
+        // partial page emits no new write, so init has no dirty data to carry forward.
+
         let metrics = Metrics::new(context);
         metrics.update(bounds.end, bounds.start, items_per_blob);
 

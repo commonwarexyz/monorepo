@@ -869,4 +869,55 @@ mod tests {
             assert_eq!(buf, data);
         });
     }
+
+    /// Sealing a recovered, already-synced partial page must not rewrite it.
+    #[test_traced("DEBUG")]
+    fn test_seal_recovered_synced_partial_page_no_write() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let data: Vec<u8> = (0u8..=255)
+                .cycle()
+                .take(PAGE_SIZE.get() as usize - 17)
+                .collect();
+
+            {
+                let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref.clone())
+                    .await
+                    .unwrap();
+                writer.append(&data).await.unwrap();
+                writer.sync().await.unwrap();
+            }
+
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            let mut recovered =
+                Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+                    .await
+                    .unwrap();
+            assert_eq!(recovered.size(), data.len() as u64);
+
+            recovered.sync().await.unwrap();
+            let (_, writes_after_sync, full_after_sync, range_after_sync) = blob.snapshot();
+            assert_eq!(
+                writes_after_sync, writes,
+                "syncing an unchanged recovered partial page must not rewrite it"
+            );
+            assert_eq!(full_after_sync, full_syncs + 1);
+            assert_eq!(range_after_sync, range_syncs);
+
+            let sealed = recovered.seal().await.unwrap();
+            let (_, writes_after_seal, full_after_seal, range_after_seal) = blob.snapshot();
+            assert_eq!(
+                writes_after_seal, writes_after_sync,
+                "sealing an unchanged recovered partial page must not rewrite it"
+            );
+            assert_eq!(full_after_seal, full_after_sync);
+            assert_eq!(range_after_seal, range_after_sync);
+
+            let read = sealed.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
+    }
 }
