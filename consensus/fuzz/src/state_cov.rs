@@ -30,9 +30,11 @@ use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme::Scheme,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_runtime::telemetry::traces::collector::RecordedEvent;
 use rand_core::CryptoRngCore;
 use sancov::Counters;
 use std::collections::{BTreeMap, BTreeSet};
+use tracing::Level;
 
 fn lower_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -210,6 +212,11 @@ pub fn observe_with_metrics(states: &BTreeMap<String, ReporterReplicaStateData>,
     observe_tokens(tokens);
 }
 
+/// Lights bounded tokens for WARN tracing events emitted by Simplex actors.
+pub fn observe_warn_events(events: &[RecordedEvent]) {
+    observe_tokens(warn_event_tokens(events));
+}
+
 fn observe_tokens(tokens: impl IntoIterator<Item = String>) {
     for token in tokens {
         let idx = (fnv1a_hash(token.as_bytes()) % STATE_COUNTERS as u64) as usize;
@@ -324,6 +331,142 @@ pub fn alpha(states: &BTreeMap<String, ReporterReplicaStateData>) -> Vec<String>
     }
 
     tokens.into_iter().collect()
+}
+
+fn warn_event_tokens(events: &[RecordedEvent]) -> Vec<String> {
+    let mut tokens = BTreeSet::new();
+    let mut counts: BTreeMap<(&'static str, &'static str), u64> = BTreeMap::new();
+
+    for event in events {
+        if event.level != Level::WARN {
+            continue;
+        }
+        let Some(actor) = warn_actor(event) else {
+            continue;
+        };
+        let kind = warn_kind(&event.metadata.content);
+        tokens.insert(format!("warn_event:{actor}:{kind}"));
+        *counts.entry((actor, kind)).or_default() += 1;
+        if let Some(view) = event_view(event) {
+            tokens.insert(format!(
+                "warn_event_view_bucket:{actor}:{kind}:{}",
+                span_bucket(view)
+            ));
+        }
+    }
+
+    for ((actor, kind), count) in counts {
+        tokens.insert(format!(
+            "warn_event_count:{actor}:{kind}:{}",
+            span_bucket(count)
+        ));
+    }
+
+    tokens.into_iter().collect()
+}
+
+fn warn_actor(event: &RecordedEvent) -> Option<&'static str> {
+    event
+        .spans
+        .iter()
+        .find_map(|span| simplex_span_actor(&span.content))
+        .or_else(|| simplex_actor(&event.target))
+}
+
+fn simplex_actor(target: &str) -> Option<&'static str> {
+    if target.contains("commonware_consensus::simplex::actors::batcher") {
+        Some("batcher")
+    } else if target.contains("commonware_consensus::simplex::actors::resolver") {
+        Some("resolver")
+    } else if target.contains("commonware_consensus::simplex::actors::voter") {
+        Some("voter")
+    } else {
+        None
+    }
+}
+
+fn simplex_span_actor(name: &str) -> Option<&'static str> {
+    if name.contains("simplex.batcher") {
+        Some("batcher")
+    } else if name.contains("simplex.resolver") {
+        Some("resolver")
+    } else if name.contains("simplex.voter") {
+        Some("voter")
+    } else {
+        None
+    }
+}
+
+fn warn_kind(message: &str) -> &'static str {
+    match message {
+        "broadcasting nullification floor" => "broadcasting_nullification_floor",
+        "dropped our proposal" => "dropped_our_proposal",
+        "proposal failed verification" => "proposal_failed_verification",
+        "proposal failed certification" => "proposal_failed_certification",
+        "entry certificate not found" => "entry_certificate_not_found",
+        "ignoring verified proposal because slot already populated" => {
+            "ignoring_verified_proposal_slot_populated"
+        }
+        "blocking equivocator" => "blocking_equivocator",
+        "unknown participant" => "unknown_participant",
+        "notarize signer mismatch" => "notarize_signer_mismatch",
+        "conflicting notarize" => "conflicting_notarize",
+        "invalid signature" => "invalid_signature",
+        "nullify signer mismatch" => "nullify_signer_mismatch",
+        "nullify after finalize" => "nullify_after_finalize",
+        "conflicting nullify" => "conflicting_nullify",
+        "finalize signer mismatch" => "finalize_signer_mismatch",
+        "finalize after nullify" => "finalize_after_nullify",
+        "conflicting finalize" => "conflicting_finalize",
+        "decoding error" => "decoding_error",
+        "epoch mismatch" => "epoch_mismatch",
+        "invalid notarization" => "invalid_notarization",
+        "invalid nullification" => "invalid_nullification",
+        "invalid finalization" => "invalid_finalization",
+        _ => "other",
+    }
+}
+
+fn event_view(event: &RecordedEvent) -> Option<u64> {
+    event_fields(event)
+        .find_map(|(name, value)| match name.as_str() {
+            "view" | "updated_view" => parse_u64(value),
+            "round" => parse_view(value),
+            _ => None,
+        })
+        .or_else(|| {
+            event
+                .spans
+                .iter()
+                .flat_map(|span| span.fields.iter())
+                .find_map(|(name, value)| (name == "view").then(|| parse_u64(value)).flatten())
+        })
+}
+
+fn event_fields(event: &RecordedEvent) -> impl Iterator<Item = &(String, String)> {
+    event.metadata.fields.iter()
+}
+
+fn parse_u64(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .parse()
+        .ok()
+}
+
+fn parse_view(value: &str) -> Option<u64> {
+    parse_u64(value).or_else(|| parse_after(value, "View("))
+}
+
+fn parse_after(value: &str, marker: &str) -> Option<u64> {
+    let start = value.find(marker)? + marker.len();
+    let digits: String = value[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 /// Emits a replica's local state as independent, bounded tokens (one per fact),
@@ -782,6 +925,72 @@ simplex_voter_timeouts{leader="d",reason="IgnoredProposal"} 1
         assert!(tokens.contains(&"timeout_reason:IgnoredProposal".to_string()));
         assert!(tokens.contains(&"timeout_reason_count:IgnoredProposal:1".to_string()));
         assert!(!tokens.contains(&"timeout_reason:CertificationTimeout".to_string()));
+    }
+
+    #[test]
+    fn warn_events_are_tokenized() {
+        use commonware_runtime::telemetry::traces::collector::EventMetadata;
+
+        let events = vec![
+            RecordedEvent {
+                level: Level::WARN,
+                target: "commonware_consensus::simplex::actors::voter::actor".into(),
+                spans: Vec::new(),
+                metadata: EventMetadata {
+                    content: "proposal failed certification".into(),
+                    fields: vec![(
+                        "round".into(),
+                        "Rnd { epoch: Epoch(333), view: View(5) }".into(),
+                    )],
+                },
+            },
+            RecordedEvent {
+                level: Level::WARN,
+                target: "commonware_p2p".into(),
+                spans: vec![EventMetadata {
+                    content: "simplex.resolver.fetch".into(),
+                    fields: vec![("view".into(), "7".into())],
+                }],
+                metadata: EventMetadata {
+                    content: "invalid signature".into(),
+                    fields: Vec::new(),
+                },
+            },
+            RecordedEvent {
+                level: Level::WARN,
+                target: "commonware_p2p".into(),
+                spans: vec![EventMetadata {
+                    content: "simplex.batcher.verify_notarizes".into(),
+                    fields: vec![("view".into(), "9".into())],
+                }],
+                metadata: EventMetadata {
+                    content: "new warning from block macro".into(),
+                    fields: Vec::new(),
+                },
+            },
+            RecordedEvent {
+                level: Level::INFO,
+                target: "commonware_consensus::simplex::actors::voter::actor".into(),
+                spans: Vec::new(),
+                metadata: EventMetadata {
+                    content: "consensus initialized".into(),
+                    fields: Vec::new(),
+                },
+            },
+        ];
+
+        let tokens = warn_event_tokens(&events);
+        assert!(tokens.contains(&"warn_event:voter:proposal_failed_certification".to_string()));
+        assert!(
+            tokens.contains(&"warn_event_count:voter:proposal_failed_certification:1".to_string())
+        );
+        assert!(tokens
+            .contains(&"warn_event_view_bucket:voter:proposal_failed_certification:4".to_string()));
+        assert!(tokens.contains(&"warn_event:resolver:invalid_signature".to_string()));
+        assert!(tokens.contains(&"warn_event_view_bucket:resolver:invalid_signature:4".to_string()));
+        assert!(tokens.contains(&"warn_event:batcher:other".to_string()));
+        assert!(tokens.contains(&"warn_event_view_bucket:batcher:other:5".to_string()));
+        assert!(!tokens.contains(&"warn_event:voter:consensus_initialized".to_string()));
     }
 
     #[test]

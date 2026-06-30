@@ -55,7 +55,10 @@ use commonware_p2p::{
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner, Supervisor as _,
+    buffer::paged::CacheRef,
+    deterministic,
+    telemetry::traces::collector::{CollectingLayer, TraceStorage},
+    Clock, IoBuf, Metrics, Runner, Spawner, Supervisor as _,
 };
 use commonware_utils::{
     channel::mpsc::{self, Receiver},
@@ -72,13 +75,15 @@ pub use simplex::{
     SimplexEd25519CustomRoundRobin, SimplexId, SimplexSecp256r1,
 };
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt,
     num::{NonZeroU16, NonZeroUsize},
     panic,
     sync::Arc,
     time::Duration,
 };
+use tracing::{dispatcher, Dispatch, Level};
+use tracing_subscriber::{filter::filter_fn, layer::SubscriberExt, Layer as _};
 pub const EPOCH: u64 = 333;
 
 const FUZZ_LOG_ENV: &str = "CONSENSUS_FUZZ_LOG";
@@ -463,6 +468,12 @@ type ReporterOf<P> = reporter::Reporter<
 >;
 
 type ReporterEntry<P> = (PublicKeyOf<P>, ReporterOf<P>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunAudit {
+    auditor_state: String,
+    reporter_states: BTreeMap<String, types::ReporterReplicaStateData>,
+}
 
 type NetworkChannels<P> = (
     (
@@ -1026,10 +1037,39 @@ fn messaging_faults(
     }
 }
 
-fn run<P: simplex::Simplex>(mut input: FuzzInput, state_coverage: bool) {
-    if state_coverage {
-        state_cov::reset();
-    }
+/// Collect WARN events from the whole protocol run and feed bounded tokens into
+/// state coverage.
+///
+/// Reporter-derived state is filtered to honest reporters in twins modes because
+/// those tokens model protocol-state correctness. WARN events intentionally stay
+/// whole-network: tracing events do not carry the emitting validator identity
+/// without adding protocol instrumentation, and adversarial twin engines hitting
+/// rejection paths is useful reachability feedback.
+fn run_with_warn_trace_collection<T>(run: impl FnOnce() -> T) -> T {
+    let trace_store = TraceStorage::default();
+    let collecting_layer =
+        CollectingLayer::new(trace_store.clone()).with_filter(filter_fn(|metadata| {
+            (metadata.is_span()
+                && metadata
+                    .target()
+                    .contains("commonware_consensus::simplex::actors::"))
+                || (metadata.is_event() && *metadata.level() == Level::WARN)
+        }));
+    let subscriber = tracing_subscriber::registry().with(collecting_layer);
+    let dispatch = Dispatch::new(subscriber);
+
+    let output = dispatcher::with_default(&dispatch, run);
+
+    let events = trace_store.get_all();
+    state_cov::observe_warn_events(&events);
+    output
+}
+
+fn run_standard_once<P: simplex::Simplex>(
+    mut input: FuzzInput,
+    state_coverage: bool,
+    collect_audit: bool,
+) -> Option<RunAudit> {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -1133,16 +1173,40 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput, state_coverage: bool) {
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(config.faults as usize, &reporter_only);
+            let reporter_states = (state_coverage || collect_audit)
+                .then(|| state_cov::encode_reporter_states(&reporter_only, config.n as usize));
             if state_coverage {
-                let reporter_states =
-                    state_cov::encode_reporter_states(&reporter_only, config.n as usize);
                 let metrics = context.encode();
-                state_cov::observe_with_metrics(&reporter_states, &metrics);
+                state_cov::observe_with_metrics(
+                    reporter_states
+                        .as_ref()
+                        .expect("state coverage needs reporter states"),
+                    &metrics,
+                );
             }
+            let audit = collect_audit.then(|| RunAudit {
+                auditor_state: context.auditor().state(),
+                reporter_states: reporter_states.unwrap_or_default(),
+            });
             let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);
+            audit
+        } else {
+            None
         }
-    });
+    })
+}
+
+fn run<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool) {
+    if state_coverage {
+        state_cov::reset();
+    }
+    let execute = || run_standard_once::<P>(input, state_coverage, false);
+    if state_coverage {
+        let _ = run_with_warn_trace_collection(execute);
+    } else {
+        let _ = execute();
+    }
 }
 
 fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
@@ -1323,422 +1387,436 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
-    executor.start(|mut context| async move {
-        let (mut oracle, participants, schemes, mut registrations) =
-            setup_network::<P>(&mut context, &input).await;
-        let participants: Arc<[_]> = participants.into();
-        let n = input.configuration.n as usize;
-        let faults = input.configuration.faults as usize;
+    let execute = || {
+        executor.start(|mut context| async move {
+            let (mut oracle, participants, schemes, mut registrations) =
+                setup_network::<P>(&mut context, &input).await;
+            let participants: Arc<[_]> = participants.into();
+            let n = input.configuration.n as usize;
+            let faults = input.configuration.faults as usize;
 
-        link_peers(
-            &mut oracle,
-            participants.as_ref(),
-            Action::Update(Link {
-                latency: Duration::from_millis(500),
-                jitter: Duration::from_millis(500),
-                success_rate: 1.0,
-            }),
-            input.partition.set_partition(),
-        )
-        .await;
-
-        let relay = Arc::new(relay::Relay::new());
-        let mut reporters = Vec::new();
-        let config = input.configuration;
-
-        // Sample a multi-round twins scenario from the deterministic FuzzRng. Both
-        // the scenario (per-round partitions and scripted leaders) and the
-        // compromised-assignment from the case are consumed: twin indices come from
-        // `case.compromised` and the byzantine set is forwarded to
-        // `check_vote_invariants_with_byzantine`.
-        let mode = if rand::Rng::gen_bool(&mut context, 0.5) {
-            twins::Mode::Sampled
-        } else {
-            twins::Mode::Sustained
-        };
-        let rounds = (input.required_containers as usize).clamp(1, 8);
-        let cases = twins::cases(
-            &mut context,
-            twins::Framework {
-                participants: n,
-                faults,
-                rounds,
-                mode,
-                max_cases: 16,
-            },
-        );
-        if cases.is_empty() {
-            return;
-        }
-        let case_idx = rand::Rng::gen_range(&mut context, 0..cases.len());
-        let case = cases.into_iter().nth(case_idx).unwrap();
-        let scenario = case.scenario.clone();
-        let compromised: std::collections::HashSet<usize> =
-            case.compromised.iter().copied().collect();
-
-        // Twins-aware elector with scripted leaders for the first `rounds` views.
-        let twin_elector = twins::Elector::new(P::Elector::default(), &scenario, n);
-
-        // Spawn Byzantine twins (indices from `case.compromised`):
-        // primary (legitimate engine) + secondary (Disrupter).
-        for idx in case.compromised.iter().copied() {
-            let validator = participants[idx].clone();
-            let context = context.child("twin").with_attribute("index", idx);
-            let scheme = schemes[idx].clone();
-            let (vote_network, certificate_network, resolver_network) = registrations
-                .remove(&validator)
-                .expect("validator should be registered");
-
-            let make_vote_forwarder = || {
-                let participants = participants.clone();
-                let scenario = scenario.clone();
-                move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
-                    let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
-                        return None;
-                    };
-                    let (primary, secondary) =
-                        scenario.partitions(msg.view(), participants.as_ref());
-                    match origin {
-                        SplitOrigin::Primary => Some(Recipients::Some(primary)),
-                        SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-                    }
-                }
-            };
-            let make_certificate_forwarder = || {
-                let codec = schemes[idx].certificate_codec_config();
-                let participants = participants.clone();
-                let scenario = scenario.clone();
-                move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
-                    let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
-                        &mut message.as_ref(),
-                        &codec,
-                    ) else {
-                        return None;
-                    };
-                    let (primary, secondary) =
-                        scenario.partitions(msg.view(), participants.as_ref());
-                    match origin {
-                        SplitOrigin::Primary => Some(Recipients::Some(primary)),
-                        SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-                    }
-                }
-            };
-            let make_vote_router = || {
-                let participants = participants.clone();
-                let scenario = scenario.clone();
-                move |(sender, message): &(_, IoBuf)| {
-                    let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
-                        return SplitTarget::None;
-                    };
-                    scenario.route(msg.view(), sender, participants.as_ref())
-                }
-            };
-            let make_certificate_router = || {
-                let codec = schemes[idx].certificate_codec_config();
-                let participants = participants.clone();
-                let scenario = scenario.clone();
-                move |(sender, message): &(_, IoBuf)| {
-                    let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
-                        &mut message.as_ref(),
-                        &codec,
-                    ) else {
-                        return SplitTarget::None;
-                    };
-                    scenario.route(msg.view(), sender, participants.as_ref())
-                }
-            };
-            let make_resolver_forwarder = || {
-                let codec = schemes[idx].certificate_codec_config();
-                let participants = participants.clone();
-                let scenario = scenario.clone();
-                move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
-                    let view = twins_resolver_view::<P>(message, &codec)?;
-                    let (primary, secondary) = scenario.partitions(view, participants.as_ref());
-                    match origin {
-                        SplitOrigin::Primary => Some(Recipients::Some(primary)),
-                        SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-                    }
-                }
-            };
-            let make_resolver_router = || {
-                let codec = schemes[idx].certificate_codec_config();
-                let participants = participants.clone();
-                let scenario = scenario.clone();
-                move |(sender, message): &(_, IoBuf)| {
-                    let Some(view) = twins_resolver_view::<P>(message, &codec) else {
-                        return SplitTarget::None;
-                    };
-                    scenario.route(view, sender, participants.as_ref())
-                }
-            };
-            let (vote_sender, vote_receiver) = vote_network;
-            let (certificate_sender, certificate_receiver) = certificate_network;
-            let (resolver_sender, resolver_receiver) = resolver_network;
-
-            let (vote_sender_primary, vote_sender_secondary) =
-                vote_sender.split_with(make_vote_forwarder());
-            let (vote_receiver_primary, vote_receiver_secondary) =
-                vote_receiver.split_with(context.child("pending_split"), make_vote_router());
-            let (certificate_sender_primary, certificate_sender_secondary) =
-                certificate_sender.split_with(make_certificate_forwarder());
-            let (certificate_receiver_primary, certificate_receiver_secondary) =
-                certificate_receiver
-                    .split_with(context.child("recovered_split"), make_certificate_router());
-            let (resolver_sender_primary, resolver_sender_secondary) =
-                resolver_sender.split_with(make_resolver_forwarder());
-            let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(context.child("resolver_split"), make_resolver_router());
-
-            // Primary: legitimate engine driven by the twins-aware elector.
-            let primary_context = context.child("primary");
-            let primary_elector = twin_elector.clone();
-            let reporter_cfg = reporter::Config {
-                participants: participants
-                    .as_ref()
-                    .try_into()
-                    .expect("public keys are unique"),
-                scheme: scheme.clone(),
-                elector: primary_elector.clone(),
-            };
-            let reporter = reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
-
-            let app_cfg = application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: validator.clone(),
-                propose_latency: (10.0, 5.0),
-                verify_latency: (10.0, 5.0),
-                certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Always,
-            };
-            let (actor, application) =
-                application::Application::new(primary_context.child("application"), app_cfg);
-            actor.start();
-
-            let blocker = oracle.control(validator.clone());
-            let engine_cfg = config::Config {
-                blocker,
-                scheme: scheme.clone(),
-                elector: primary_elector,
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
-                partition: format!("twin_{idx}_primary"),
-                mailbox_size: NZUsize!(1024),
-                epoch: Epoch::new(EPOCH),
-                floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_millis(1_500),
-                timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
-                activity_timeout: Delta::new(10),
-                skip_timeout: Delta::new(5),
-                fetch_concurrent: NZUsize!(1),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                strategy: Sequential,
-                forwarding: input.forwarding,
-            };
-            let engine = Engine::new(primary_context.child("engine"), engine_cfg);
-            engine.start(
-                (vote_sender_primary, vote_receiver_primary),
-                (certificate_sender_primary, certificate_receiver_primary),
-                (resolver_sender_primary, resolver_receiver_primary),
-            );
-            // Push the primary reporter only in `Campaign`; `Mutator` keeps
-            // its existing semantics where invariants run only on honest
-            // reporters and twin primary is excluded by construction.
-            if matches!(role, TwinsRole::Campaign) {
-                reporters.push(reporter.clone());
-            }
-
-            // Secondary: depends on role.
-            match role {
-                TwinsRole::Mutator => {
-                    start_disrupter::<P>(
-                        context.child("secondary"),
-                        scheme.clone(),
-                        &input.strategy,
-                        input.required_containers,
-                        (vote_sender_secondary, vote_receiver_secondary),
-                        (certificate_sender_secondary, certificate_receiver_secondary),
-                        (resolver_sender_secondary, resolver_receiver_secondary),
-                    );
-                }
-                TwinsRole::Campaign => {
-                    let secondary_label = format!("twin_{idx}_secondary");
-                    let secondary_context = context.child("secondary");
-                    let secondary_elector = twin_elector.clone();
-                    let secondary_reporter_cfg = reporter::Config {
-                        participants: participants
-                            .as_ref()
-                            .try_into()
-                            .expect("public keys are unique"),
-                        scheme: scheme.clone(),
-                        elector: secondary_elector.clone(),
-                    };
-                    let secondary_reporter = reporter::Reporter::new(
-                        secondary_context.child("reporter"),
-                        secondary_reporter_cfg,
-                    );
-                    reporters.push(secondary_reporter.clone());
-
-                    let secondary_app_cfg = application::Config {
-                        hasher: Sha256::default(),
-                        relay: relay.clone(),
-                        me: validator.clone(),
-                        propose_latency: (10.0, 5.0),
-                        verify_latency: (10.0, 5.0),
-                        certify_latency: (10.0, 5.0),
-                        should_certify: application::Certifier::Always,
-                    };
-                    let (secondary_actor, secondary_application) = application::Application::new(
-                        secondary_context.child("application"),
-                        secondary_app_cfg,
-                    );
-                    secondary_actor.start();
-
-                    let secondary_blocker = oracle.control(validator.clone());
-                    let secondary_engine_cfg = config::Config {
-                        blocker: secondary_blocker,
-                        scheme: scheme.clone(),
-                        elector: secondary_elector,
-                        automaton: secondary_application.clone(),
-                        relay: secondary_application.clone(),
-                        reporter: secondary_reporter,
-                        partition: secondary_label,
-                        mailbox_size: NZUsize!(1024),
-                        epoch: Epoch::new(EPOCH),
-                        floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
-                        leader_timeout: Duration::from_secs(1),
-                        certification_timeout: Duration::from_millis(1_500),
-                        timeout_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
-                        activity_timeout: Delta::new(10),
-                        skip_timeout: Delta::new(5),
-                        fetch_concurrent: NZUsize!(1),
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(
-                            &secondary_context,
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
-                        strategy: Sequential,
-                        forwarding: input.forwarding,
-                    };
-                    let secondary_engine =
-                        Engine::new(secondary_context.child("engine"), secondary_engine_cfg);
-                    secondary_engine.start(
-                        (vote_sender_secondary, vote_receiver_secondary),
-                        (certificate_sender_secondary, certificate_receiver_secondary),
-                        (resolver_sender_secondary, resolver_receiver_secondary),
-                    );
-                }
-            }
-        }
-
-        // Boundary in `reporters`. For `Mutator` no twin reporters were pushed,
-        // so `honest_start = 0`; for `Campaign` it's `2 * compromised.len()`.
-        let honest_start = reporters.len();
-
-        // Spawn honest validators (every index NOT in `case.compromised`).
-        // They share the twins-aware elector so leaders agree across twin and
-        // honest engines for the scripted prefix.
-        for (idx, validator) in participants.iter().enumerate() {
-            if compromised.contains(&idx) {
-                continue;
-            }
-            let ctx = context.child("honest").with_attribute("index", idx);
-            let (pending, recovered, resolver) = registrations
-                .remove(validator)
-                .expect("validator should be registered");
-            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
-                ctx,
-                &oracle,
+            link_peers(
+                &mut oracle,
                 participants.as_ref(),
-                schemes[idx].clone(),
-                validator.clone(),
-                twin_elector.clone(),
-                relay.clone(),
-                Duration::from_secs(1),
-                Duration::from_millis(1_500),
-                input.forwarding,
-                pending,
-                recovered,
-                resolver,
-                input.certify,
-                input.reporting,
-            );
-            reporters.push(reporter);
-        }
+                Action::Update(Link {
+                    latency: Duration::from_millis(500),
+                    jitter: Duration::from_millis(500),
+                    success_rate: 1.0,
+                }),
+                input.partition.set_partition(),
+            )
+            .await;
 
-        // Wait for liveness on honest reporters only. The wait shape depends on
-        // role: `Mutator` uses absolute view targets, `Campaign` counts
-        // finalizations after the adversarial prefix.
-        if config.is_valid() {
-            let prefix_end = View::new(scenario.rounds().len() as u64);
-            let mut finalizers = Vec::new();
-            for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
-                let required = input.required_containers;
+            let relay = Arc::new(relay::Relay::new());
+            let mut reporters = Vec::new();
+            let config = input.configuration;
+
+            // Sample a multi-round twins scenario from the deterministic FuzzRng. Both
+            // the scenario (per-round partitions and scripted leaders) and the
+            // compromised-assignment from the case are consumed: twin indices come from
+            // `case.compromised` and the byzantine set is forwarded to
+            // `check_vote_invariants_with_byzantine`.
+            let mode = if rand::Rng::gen_bool(&mut context, 0.5) {
+                twins::Mode::Sampled
+            } else {
+                twins::Mode::Sustained
+            };
+            let rounds = (input.required_containers as usize).clamp(1, 8);
+            let cases = twins::cases(
+                &mut context,
+                twins::Framework {
+                    participants: n,
+                    faults,
+                    rounds,
+                    mode,
+                    max_cases: 16,
+                },
+            );
+            if cases.is_empty() {
+                return;
+            }
+            let case_idx = rand::Rng::gen_range(&mut context, 0..cases.len());
+            let case = cases.into_iter().nth(case_idx).unwrap();
+            let scenario = case.scenario.clone();
+            let compromised: std::collections::HashSet<usize> =
+                case.compromised.iter().copied().collect();
+
+            // Twins-aware elector with scripted leaders for the first `rounds` views.
+            let twin_elector = twins::Elector::new(P::Elector::default(), &scenario, n);
+
+            // Spawn Byzantine twins (indices from `case.compromised`):
+            // primary (legitimate engine) + secondary (Disrupter).
+            for idx in case.compromised.iter().copied() {
+                let validator = participants[idx].clone();
+                let context = context.child("twin").with_attribute("index", idx);
+                let scheme = schemes[idx].clone();
+                let (vote_network, certificate_network, resolver_network) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+
+                let make_vote_forwarder = || {
+                    let participants = participants.clone();
+                    let scenario = scenario.clone();
+                    move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
+                        let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone())
+                        else {
+                            return None;
+                        };
+                        let (primary, secondary) =
+                            scenario.partitions(msg.view(), participants.as_ref());
+                        match origin {
+                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                        }
+                    }
+                };
+                let make_certificate_forwarder = || {
+                    let codec = schemes[idx].certificate_codec_config();
+                    let participants = participants.clone();
+                    let scenario = scenario.clone();
+                    move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
+                        let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
+                            &mut message.as_ref(),
+                            &codec,
+                        ) else {
+                            return None;
+                        };
+                        let (primary, secondary) =
+                            scenario.partitions(msg.view(), participants.as_ref());
+                        match origin {
+                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                        }
+                    }
+                };
+                let make_vote_router = || {
+                    let participants = participants.clone();
+                    let scenario = scenario.clone();
+                    move |(sender, message): &(_, IoBuf)| {
+                        let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone())
+                        else {
+                            return SplitTarget::None;
+                        };
+                        scenario.route(msg.view(), sender, participants.as_ref())
+                    }
+                };
+                let make_certificate_router = || {
+                    let codec = schemes[idx].certificate_codec_config();
+                    let participants = participants.clone();
+                    let scenario = scenario.clone();
+                    move |(sender, message): &(_, IoBuf)| {
+                        let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
+                            &mut message.as_ref(),
+                            &codec,
+                        ) else {
+                            return SplitTarget::None;
+                        };
+                        scenario.route(msg.view(), sender, participants.as_ref())
+                    }
+                };
+                let make_resolver_forwarder = || {
+                    let codec = schemes[idx].certificate_codec_config();
+                    let participants = participants.clone();
+                    let scenario = scenario.clone();
+                    move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
+                        let view = twins_resolver_view::<P>(message, &codec)?;
+                        let (primary, secondary) = scenario.partitions(view, participants.as_ref());
+                        match origin {
+                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                        }
+                    }
+                };
+                let make_resolver_router = || {
+                    let codec = schemes[idx].certificate_codec_config();
+                    let participants = participants.clone();
+                    let scenario = scenario.clone();
+                    move |(sender, message): &(_, IoBuf)| {
+                        let Some(view) = twins_resolver_view::<P>(message, &codec) else {
+                            return SplitTarget::None;
+                        };
+                        scenario.route(view, sender, participants.as_ref())
+                    }
+                };
+                let (vote_sender, vote_receiver) = vote_network;
+                let (certificate_sender, certificate_receiver) = certificate_network;
+                let (resolver_sender, resolver_receiver) = resolver_network;
+
+                let (vote_sender_primary, vote_sender_secondary) =
+                    vote_sender.split_with(make_vote_forwarder());
+                let (vote_receiver_primary, vote_receiver_secondary) =
+                    vote_receiver.split_with(context.child("pending_split"), make_vote_router());
+                let (certificate_sender_primary, certificate_sender_secondary) =
+                    certificate_sender.split_with(make_certificate_forwarder());
+                let (certificate_receiver_primary, certificate_receiver_secondary) =
+                    certificate_receiver
+                        .split_with(context.child("recovered_split"), make_certificate_router());
+                let (resolver_sender_primary, resolver_sender_secondary) =
+                    resolver_sender.split_with(make_resolver_forwarder());
+                let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
+                    .split_with(context.child("resolver_split"), make_resolver_router());
+
+                // Primary: legitimate engine driven by the twins-aware elector.
+                let primary_context = context.child("primary");
+                let primary_elector = twin_elector.clone();
+                let reporter_cfg = reporter::Config {
+                    participants: participants
+                        .as_ref()
+                        .try_into()
+                        .expect("public keys are unique"),
+                    scheme: scheme.clone(),
+                    elector: primary_elector.clone(),
+                };
+                let reporter =
+                    reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
+
+                let app_cfg = application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: application::Certifier::Always,
+                };
+                let (actor, application) =
+                    application::Application::new(primary_context.child("application"), app_cfg);
+                actor.start();
+
+                let blocker = oracle.control(validator.clone());
+                let engine_cfg = config::Config {
+                    blocker,
+                    scheme: scheme.clone(),
+                    elector: primary_elector,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: format!("twin_{idx}_primary"),
+                    mailbox_size: NZUsize!(1024),
+                    epoch: Epoch::new(EPOCH),
+                    floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_millis(1_500),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: Delta::new(10),
+                    skip_timeout: Delta::new(5),
+                    fetch_concurrent: NZUsize!(1),
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    strategy: Sequential,
+                    forwarding: input.forwarding,
+                };
+                let engine = Engine::new(primary_context.child("engine"), engine_cfg);
+                engine.start(
+                    (vote_sender_primary, vote_receiver_primary),
+                    (certificate_sender_primary, certificate_receiver_primary),
+                    (resolver_sender_primary, resolver_receiver_primary),
+                );
+                // Push the primary reporter only in `Campaign`; `Mutator` keeps
+                // its existing semantics where invariants run only on honest
+                // reporters and twin primary is excluded by construction.
+                if matches!(role, TwinsRole::Campaign) {
+                    reporters.push(reporter.clone());
+                }
+
+                // Secondary: depends on role.
                 match role {
                     TwinsRole::Mutator => {
-                        let (mut latest, mut monitor): (View, Receiver<View>) =
-                            reporter.subscribe().await;
-                        finalizers.push(
-                            context.child("finalizer").with_attribute("index", i).spawn(
-                                move |_| async move {
-                                    while latest.get() < required {
-                                        latest = monitor.recv().await.expect("event missing");
-                                    }
-                                },
-                            ),
+                        start_disrupter::<P>(
+                            context.child("secondary"),
+                            scheme.clone(),
+                            &input.strategy,
+                            input.required_containers,
+                            (vote_sender_secondary, vote_receiver_secondary),
+                            (certificate_sender_secondary, certificate_receiver_secondary),
+                            (resolver_sender_secondary, resolver_receiver_secondary),
                         );
                     }
                     TwinsRole::Campaign => {
-                        let (_latest, mut monitor) = reporter.subscribe().await;
-                        finalizers.push(
-                            context.child("finalizer").with_attribute("index", i).spawn(
-                                move |_| async move {
-                                    let mut count = 0u64;
-                                    while count < required {
-                                        let view = monitor.recv().await.expect("event missing");
-                                        if view > prefix_end {
-                                            count += 1;
-                                        }
-                                    }
-                                },
+                        let secondary_label = format!("twin_{idx}_secondary");
+                        let secondary_context = context.child("secondary");
+                        let secondary_elector = twin_elector.clone();
+                        let secondary_reporter_cfg = reporter::Config {
+                            participants: participants
+                                .as_ref()
+                                .try_into()
+                                .expect("public keys are unique"),
+                            scheme: scheme.clone(),
+                            elector: secondary_elector.clone(),
+                        };
+                        let secondary_reporter = reporter::Reporter::new(
+                            secondary_context.child("reporter"),
+                            secondary_reporter_cfg,
+                        );
+                        reporters.push(secondary_reporter.clone());
+
+                        let secondary_app_cfg = application::Config {
+                            hasher: Sha256::default(),
+                            relay: relay.clone(),
+                            me: validator.clone(),
+                            propose_latency: (10.0, 5.0),
+                            verify_latency: (10.0, 5.0),
+                            certify_latency: (10.0, 5.0),
+                            should_certify: application::Certifier::Always,
+                        };
+                        let (secondary_actor, secondary_application) =
+                            application::Application::new(
+                                secondary_context.child("application"),
+                                secondary_app_cfg,
+                            );
+                        secondary_actor.start();
+
+                        let secondary_blocker = oracle.control(validator.clone());
+                        let secondary_engine_cfg = config::Config {
+                            blocker: secondary_blocker,
+                            scheme: scheme.clone(),
+                            elector: secondary_elector,
+                            automaton: secondary_application.clone(),
+                            relay: secondary_application.clone(),
+                            reporter: secondary_reporter,
+                            partition: secondary_label,
+                            mailbox_size: NZUsize!(1024),
+                            epoch: Epoch::new(EPOCH),
+                            floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(
+                                EPOCH,
+                            ))),
+                            leader_timeout: Duration::from_secs(1),
+                            certification_timeout: Duration::from_millis(1_500),
+                            timeout_retry: Duration::from_secs(10),
+                            fetch_timeout: Duration::from_secs(1),
+                            activity_timeout: Delta::new(10),
+                            skip_timeout: Delta::new(5),
+                            fetch_concurrent: NZUsize!(1),
+                            replay_buffer: NZUsize!(1024 * 1024),
+                            write_buffer: NZUsize!(1024 * 1024),
+                            page_cache: CacheRef::from_pooler(
+                                &secondary_context,
+                                PAGE_SIZE,
+                                PAGE_CACHE_SIZE,
                             ),
+                            strategy: Sequential,
+                            forwarding: input.forwarding,
+                        };
+                        let secondary_engine =
+                            Engine::new(secondary_context.child("engine"), secondary_engine_cfg);
+                        secondary_engine.start(
+                            (vote_sender_secondary, vote_receiver_secondary),
+                            (certificate_sender_secondary, certificate_receiver_secondary),
+                            (resolver_sender_secondary, resolver_receiver_secondary),
                         );
                     }
                 }
             }
-            join_all(finalizers).await;
-        } else {
-            context.sleep(MAX_SLEEP_DURATION).await;
-        }
 
-        // Invariants on honest reporters only. Twin halves (when present) are
-        // expected to disagree internally per the scenario; checking them in
-        // global-agreement / equivocation invariants would reject valid Twins
-        // configurations.
-        if config.is_valid() {
-            let honest_reporters = &reporters[honest_start..];
-            invariants::check_vote_invariants_with_byzantine(&compromised, honest_reporters);
-            if state_coverage {
-                let reporter_states =
-                    state_cov::encode_reporter_states(honest_reporters, config.n as usize);
-                let metrics = context.encode();
-                state_cov::observe_with_metrics(&reporter_states, &metrics);
+            // Boundary in `reporters`. For `Mutator` no twin reporters were pushed,
+            // so `honest_start = 0`; for `Campaign` it's `2 * compromised.len()`.
+            let honest_start = reporters.len();
+
+            // Spawn honest validators (every index NOT in `case.compromised`).
+            // They share the twins-aware elector so leaders agree across twin and
+            // honest engines for the scripted prefix.
+            for (idx, validator) in participants.iter().enumerate() {
+                if compromised.contains(&idx) {
+                    continue;
+                }
+                let ctx = context.child("honest").with_attribute("index", idx);
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                    ctx,
+                    &oracle,
+                    participants.as_ref(),
+                    schemes[idx].clone(),
+                    validator.clone(),
+                    twin_elector.clone(),
+                    relay.clone(),
+                    Duration::from_secs(1),
+                    Duration::from_millis(1_500),
+                    input.forwarding,
+                    pending,
+                    recovered,
+                    resolver,
+                    input.certify,
+                    input.reporting,
+                );
+                reporters.push(reporter);
             }
-            let states = invariants::extract(
-                reporters.into_iter().skip(honest_start).collect(),
-                config.n as usize,
-            );
-            invariants::check::<P>(config.n, states);
-        }
-    });
+
+            // Wait for liveness on honest reporters only. The wait shape depends on
+            // role: `Mutator` uses absolute view targets, `Campaign` counts
+            // finalizations after the adversarial prefix.
+            if config.is_valid() {
+                let prefix_end = View::new(scenario.rounds().len() as u64);
+                let mut finalizers = Vec::new();
+                for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
+                    let required = input.required_containers;
+                    match role {
+                        TwinsRole::Mutator => {
+                            let (mut latest, mut monitor): (View, Receiver<View>) =
+                                reporter.subscribe().await;
+                            finalizers.push(
+                                context.child("finalizer").with_attribute("index", i).spawn(
+                                    move |_| async move {
+                                        while latest.get() < required {
+                                            latest = monitor.recv().await.expect("event missing");
+                                        }
+                                    },
+                                ),
+                            );
+                        }
+                        TwinsRole::Campaign => {
+                            let (_latest, mut monitor) = reporter.subscribe().await;
+                            finalizers.push(
+                                context.child("finalizer").with_attribute("index", i).spawn(
+                                    move |_| async move {
+                                        let mut count = 0u64;
+                                        while count < required {
+                                            let view = monitor.recv().await.expect("event missing");
+                                            if view > prefix_end {
+                                                count += 1;
+                                            }
+                                        }
+                                    },
+                                ),
+                            );
+                        }
+                    }
+                }
+                join_all(finalizers).await;
+            } else {
+                context.sleep(MAX_SLEEP_DURATION).await;
+            }
+
+            // Invariants on honest reporters only. Twin halves (when present) are
+            // expected to disagree internally per the scenario; checking them in
+            // global-agreement / equivocation invariants would reject valid Twins
+            // configurations.
+            if config.is_valid() {
+                let honest_reporters = &reporters[honest_start..];
+                invariants::check_vote_invariants_with_byzantine(&compromised, honest_reporters);
+                if state_coverage {
+                    let reporter_states =
+                        state_cov::encode_reporter_states(honest_reporters, config.n as usize);
+                    let metrics = context.encode();
+                    state_cov::observe_with_metrics(&reporter_states, &metrics);
+                }
+                let states = invariants::extract(
+                    reporters.into_iter().skip(honest_start).collect(),
+                    config.n as usize,
+                );
+                invariants::check::<P>(config.n, states);
+            }
+        });
+    };
+
+    if state_coverage {
+        run_with_warn_trace_collection(execute);
+    } else {
+        execute();
+    }
 }
 
 fn run_fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput)
@@ -1955,6 +2033,41 @@ fn install_byzzfuzz_panic_hook() {
             prev(info);
         }));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn audit_input() -> FuzzInput {
+        FuzzInput {
+            raw_bytes: 0u64.to_be_bytes().to_vec(),
+            required_containers: MIN_REQUIRED_CONTAINERS,
+            degraded_network: false,
+            configuration: N4F0C4,
+            partition: Partition::Connected,
+            strategy: StrategyChoice::AnyScope,
+            messaging_faults: Vec::new(),
+            forwarding: ForwardingPolicy::Disabled,
+            certify: CertifyChoice::Always,
+            reporting: ReporterWiring::Solo,
+        }
+    }
+
+    #[test]
+    fn warn_trace_collection_does_not_perturb_standard_run() {
+        let input = audit_input();
+
+        let unwrapped = run_standard_once::<simplex::SimplexId>(input.clone(), false, true)
+            .expect("valid connected run should produce audit data");
+        let wrapped = run_with_warn_trace_collection(|| {
+            run_standard_once::<simplex::SimplexId>(input, false, true)
+        })
+        .expect("valid connected run should produce audit data");
+
+        assert_eq!(unwrapped.auditor_state, wrapped.auditor_state);
+        assert_eq!(unwrapped.reporter_states, wrapped.reporter_states);
+    }
 }
 
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput) {
