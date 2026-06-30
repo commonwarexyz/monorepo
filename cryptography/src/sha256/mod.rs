@@ -9,7 +9,7 @@
 //! // Create a new SHA-256 hasher
 //! let mut hasher = Sha256::new();
 //!
-//! // Hash some messages in a fluent chain
+//! // Hash messages by chaining updates
 //! let digest = hasher.begin().update(b"hello,").update(b"world!").finalize();
 //!
 //! // Print the digest
