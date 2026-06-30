@@ -168,9 +168,7 @@ impl Entry {
             Execution::Serial if self.can_sample(Execution::Parallel) => {
                 (Execution::Parallel, true)
             }
-            Execution::Parallel if self.can_sample(Execution::Serial) => {
-                (Execution::Serial, true)
-            }
+            Execution::Parallel if self.can_sample(Execution::Serial) => (Execution::Serial, true),
             _ => (preferred, true),
         }
     }
