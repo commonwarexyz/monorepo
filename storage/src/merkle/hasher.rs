@@ -143,12 +143,13 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     }
 }
 
-/// The standard hasher for Merkle-family structures. Leverages no external data.
+/// The standard hasher for Merkle-family structures.
+///
+/// `Standard<H>` carries no hash state: it is a configuration value holding only a peak-bagging
+/// policy. Constructing and cloning are cheap.
 ///
 /// A single `Standard<H>` implements `Hasher<F>` for every Merkle family `F`, so
 /// one instance can be used with MMR, MMB, or any future family.
-///
-/// The `bagging` field selects how peaks are folded into the root.
 #[derive(Clone)]
 pub struct Standard<H: CodecHasher> {
     bagging: Bagging,
@@ -183,7 +184,7 @@ impl<H: CodecHasher> Standard<H> {
     /// Create reusable hashing state for a local batch of Merkle operations.
     #[cfg(any(feature = "std", test))]
     pub(crate) fn state(&self) -> StandardState<H> {
-        StandardState { hasher: H::new() }
+        StandardState::new()
     }
 }
 
@@ -195,6 +196,11 @@ pub(crate) struct StandardState<H: CodecHasher> {
 
 #[cfg(any(feature = "std", test))]
 impl<H: CodecHasher> StandardState<H> {
+    /// Create reusable hashing state.
+    pub(crate) fn new() -> Self {
+        Self { hasher: H::new() }
+    }
+
     /// Hash a fixed-position Merkle node.
     pub(crate) fn node_digest<F: Family>(
         &mut self,

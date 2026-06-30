@@ -80,11 +80,11 @@
 //! mmr.apply_batch(&a1).unwrap();
 //! ```
 
+#[cfg(feature = "std")]
+use crate::merkle::hasher::StandardState;
 use crate::merkle::{
     hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
 };
-#[cfg(feature = "std")]
-use crate::merkle::{hasher::Standard, Bagging};
 use ahash::RandomState;
 use alloc::{
     sync::{Arc, Weak},
@@ -458,7 +458,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         M: Fn(Position<F>) -> Position<F> + Copy + Send + Sync,
     {
         if positions.len() < SEQUENTIAL_BUCKET_THRESHOLD {
-            let mut state = Standard::<H>::new(Bagging::ForwardFold).state();
+            let mut state = StandardState::<H>::new();
             for &pos in positions {
                 let (left, right) = F::children(pos, height);
                 let left_d = self.get_node(base, left).expect("left child missing");
@@ -471,7 +471,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
         let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
             positions,
-            || Standard::<H>::new(Bagging::ForwardFold).state(),
+            || StandardState::<H>::new(),
             |state, &pos| {
                 let (left, right) = F::children(pos, height);
                 let left_d = self.get_node(base, left).expect("left child missing");
