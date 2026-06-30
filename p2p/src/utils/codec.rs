@@ -120,13 +120,8 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
 /// A background receiver that receives raw bytes from a [`Receiver`] and spawns concurrent
 /// decode tasks using a [`Codec`].
 ///
-/// Decode work is submitted to the provided [`Strategy`]. A multi-worker [`Rayon`](commonware_parallel::Rayon)
-/// strategy runs each decode on a pool worker, pipelining network I/O (receiving bytes) with CPU
-/// work (decoding messages) so the receive loop keeps draining the network buffer; this is
-/// particularly useful for expensive decodes such as signature verification or decryption. Note
-/// that decode then shares the strategy's thread pool with the rest of that strategy's work.
-/// Strategies that execute inline ([`Sequential`](commonware_parallel::Sequential) or a
-/// single-worker pool) decode synchronously on the receive loop, with no pipelining.
+/// Decode work is submitted to the provided [`Strategy`], so callers can offload expensive
+/// decodes from the receive loop by choosing a parallel strategy.
 ///
 /// The receiver bounds in-flight decode jobs to the strategy's manual parallelism hint before
 /// reading more bytes. Successfully decoded messages are forwarded through a bounded mailbox; if
