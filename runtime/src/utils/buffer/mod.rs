@@ -1,5 +1,7 @@
 //! Buffers for reading and writing to [crate::Blob]s.
 
+use futures::future::{BoxFuture, FutureExt as _, Shared};
+
 pub mod paged;
 mod read;
 mod tip;
@@ -9,22 +11,71 @@ pub use read::Read;
 pub use write::Write;
 
 /// Tracks whether plain blob mutations still need a full durability barrier.
-struct SyncState {
-    needs_sync: bool,
+enum Durability {
+    Clean,
+    Dirty,
+    Pending(Completion),
 }
 
-impl SyncState {
+#[derive(Clone)]
+struct Completion {
+    inner: Shared<BoxFuture<'static, Result<(), crate::Error>>>,
+}
+
+impl Completion {
+    fn start(handle: crate::Handle<()>) -> Self {
+        Self {
+            inner: async move { handle.await }.boxed().shared(),
+        }
+    }
+
+    fn handle(&self) -> crate::Handle<()> {
+        let inner = self.inner.clone();
+        crate::Handle::from_future(async move { inner.await })
+    }
+
+    async fn wait(&self) -> Result<(), crate::Error> {
+        self.inner.clone().await
+    }
+}
+
+impl Durability {
     /// Create a new sync state.
     ///
     /// Use `needs_sync = true` when wrapping an existing blob because prior plain mutations may
     /// still need a full [`crate::Blob::sync`] barrier. [`Self::write_at_sync`] can use
     /// [`crate::Blob::write_at_sync`] only when this is false.
     const fn new(needs_sync: bool) -> Self {
-        Self { needs_sync }
+        if needs_sync {
+            Self::Dirty
+        } else {
+            Self::Clean
+        }
     }
 
-    const fn mark_unsynced(&mut self) {
-        self.needs_sync = true;
+    fn mark_dirty(&mut self) {
+        assert!(
+            !matches!(self, Self::Pending(_)),
+            "pending sync must be joined before marking dirty"
+        );
+        *self = Self::Dirty;
+    }
+
+    async fn wait_for_pending(&mut self) -> Result<(), crate::Error> {
+        let Self::Pending(pending) = self else {
+            return Ok(());
+        };
+        let pending = pending.clone();
+        match pending.wait().await {
+            Ok(()) => {
+                *self = Self::Clean;
+                Ok(())
+            }
+            Err(err) => {
+                *self = Self::Dirty;
+                Err(err)
+            }
+        }
     }
 
     async fn write_at(
@@ -33,8 +84,9 @@ impl SyncState {
         offset: u64,
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
+        self.wait_for_pending().await?;
         blob.write_at(offset, bufs).await?;
-        self.needs_sync = true;
+        *self = Self::Dirty;
         Ok(())
     }
 
@@ -44,34 +96,46 @@ impl SyncState {
         offset: u64,
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
-        if self.needs_sync {
-            self.write_at(blob, offset, bufs).await?;
-            self.sync(blob).await
-        } else {
-            // If `write_at_sync` fails, a later sync must not treat the drained buffer as durable.
-            self.needs_sync = true;
-            blob.write_at_sync(offset, bufs).await?;
-            self.needs_sync = false;
-            Ok(())
+        self.wait_for_pending().await?;
+        match self {
+            Self::Dirty => {
+                blob.write_at(offset, bufs).await?;
+                blob.sync().await?;
+                *self = Self::Clean;
+                Ok(())
+            }
+            Self::Clean => {
+                // If `write_at_sync` fails, a later sync must not treat the drained buffer as durable.
+                *self = Self::Dirty;
+                blob.write_at_sync(offset, bufs).await?;
+                *self = Self::Clean;
+                Ok(())
+            }
+            Self::Pending(_) => unreachable!("pending sync waited above"),
         }
     }
 
     async fn sync(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
-        if !self.needs_sync {
+        self.wait_for_pending().await?;
+        if matches!(self, Self::Clean) {
             return Ok(());
         }
         blob.sync().await?;
-        self.needs_sync = false;
+        *self = Self::Clean;
         Ok(())
     }
 
     async fn start_sync(&mut self, blob: &impl crate::Blob) -> crate::Handle<()> {
-        if !self.needs_sync {
-            return crate::Handle::ready(Ok(()));
+        match self {
+            Self::Clean => crate::Handle::ready(Ok(())),
+            Self::Dirty => {
+                let pending = Completion::start(blob.start_sync().await);
+                let handle = pending.handle();
+                *self = Self::Pending(pending);
+                handle
+            }
+            Self::Pending(pending) => pending.handle(),
         }
-        let handle = blob.start_sync().await;
-        self.needs_sync = false;
-        handle
     }
 }
 

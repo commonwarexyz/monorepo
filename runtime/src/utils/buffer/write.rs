@@ -1,5 +1,5 @@
 use crate::{
-    buffer::{tip::Buffer, SyncState},
+    buffer::{tip::Buffer, Durability},
     Blob, Buf, BufferPool, BufferPooler, Error, IoBufs,
 };
 use std::num::NonZeroUsize;
@@ -63,7 +63,7 @@ pub struct Write<B: Blob> {
     buffer: Buffer,
 
     /// Durability state for plain writes and range-sync writes.
-    sync_state: SyncState,
+    durability: Durability,
 }
 
 impl<B: Blob> Write<B> {
@@ -73,7 +73,7 @@ impl<B: Blob> Write<B> {
         Self {
             blob,
             buffer: Buffer::new(size, capacity.get(), pool),
-            sync_state: SyncState::new(true), // ensure pending writes on the wrapped blob are synced
+            durability: Durability::new(true), // ensure pending writes on the wrapped blob are synced
         }
     }
 
@@ -213,9 +213,11 @@ impl<B: Blob> Write<B> {
             self.write_blob(offset, buf).await?;
         }
 
+        self.durability.wait_for_pending().await?;
+
         // Resize the underlying blob.
         self.blob.resize(len).await?;
-        self.sync_state.mark_unsynced();
+        self.durability.mark_dirty();
 
         Ok(())
     }
@@ -235,7 +237,7 @@ impl<B: Blob> Write<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.sync_state.write_at(&self.blob, offset, bufs).await
+        self.durability.write_at(&self.blob, offset, bufs).await
     }
 
     /// Write bytes to the underlying blob and make them durable.
@@ -247,13 +249,13 @@ impl<B: Blob> Write<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.sync_state
+        self.durability
             .write_at_sync(&self.blob, offset, bufs)
             .await
     }
 
     /// Sync the underlying blob if there are unsynced mutations.
     async fn sync_blob(&mut self) -> Result<(), Error> {
-        self.sync_state.sync(&self.blob).await
+        self.durability.sync(&self.blob).await
     }
 }
