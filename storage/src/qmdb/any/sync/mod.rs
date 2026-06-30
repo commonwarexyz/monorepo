@@ -46,6 +46,7 @@ use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::{range::NonEmptyRange, Array};
+use core::num::NonZeroUsize;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -60,6 +61,7 @@ async fn build_db<F, E, U, I, H, C, T, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
+    cache_size: Option<NonZeroUsize>,
 ) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
@@ -94,7 +96,7 @@ where
     )
     .await?;
     let metrics = Metrics::new(context);
-    let db = Db::init_from_log(index, log, None, metrics).await?;
+    let db = Db::init_from_log(index, log, None, cache_size, metrics).await?;
 
     Ok(db)
 }
@@ -133,6 +135,7 @@ macro_rules! impl_sync_database {
             ) -> Result<Self, qmdb::Error<F>> {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
+                let cache_size = config.init_cache_size;
                 build_db::<F, _, $update<K, V>, _, H, _, T, S>(
                     context,
                     merkle_config,
@@ -141,6 +144,7 @@ macro_rules! impl_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
+                    cache_size,
                 )
                 .await
             }

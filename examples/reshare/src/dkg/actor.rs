@@ -14,7 +14,7 @@ use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{
-            observe, DealerPrivMsg, DealerPubMsg, Info, Logs, Output, PlayerAck,
+            observe, DealerPrivMsg, DealerPubMsg, Info, Logs, Output, PlayerAck, Verdict,
         },
         primitives::{
             group::Share,
@@ -28,7 +28,9 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
-use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, TrackedPeers};
+use commonware_p2p::{
+    utils::mux::Muxer, Blocker, Manager, Receiver, Recipients, Sender, TrackedPeers,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     spawn_cell,
@@ -100,8 +102,9 @@ impl<V: Variant, P: PublicKey> Read for Message<V, P> {
     }
 }
 
-pub struct Config<C: Signer, P> {
+pub struct Config<C: Signer, P, B> {
     pub manager: P,
+    pub blocker: B,
     pub signer: C,
     pub mailbox_size: NonZeroUsize,
     pub partition_prefix: String,
@@ -109,16 +112,18 @@ pub struct Config<C: Signer, P> {
     pub max_supported_mode: ModeVersion,
 }
 
-pub struct Actor<E, P, H, C, V>
+pub struct Actor<E, P, B, H, C, V>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey>,
+    B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     C: Signer,
     V: Variant,
 {
     context: ContextCell<E>,
     manager: P,
+    blocker: B,
     mailbox: ActorReceiver<MailboxMessage<H, C, V>>,
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
@@ -133,17 +138,18 @@ where
     latest_ack: GaugeFamily<Peer<C::PublicKey>>,
 }
 
-impl<E, P, H, C, V> Actor<E, P, H, C, V>
+impl<E, P, B, H, C, V> Actor<E, P, B, H, C, V>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey>,
+    B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     C: Signer,
     Batch: BatchVerifier<PublicKey = C::PublicKey>,
     V: Variant,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
-    pub fn new(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
+    pub fn new(context: E, config: Config<C, P, B>) -> (Self, Mailbox<H, C, V>) {
         // Create mailbox
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
 
@@ -165,6 +171,7 @@ where
             Self {
                 context: ContextCell::new(context),
                 manager: config.manager,
+                blocker: config.blocker,
                 mailbox,
                 signer: config.signer,
                 peer_config: config.peer_config,
@@ -320,7 +327,7 @@ where
                 epoch.get(),
                 epoch_state.output.clone(),
                 Mode::NonZeroCounter,
-                dealers,
+                dealers.clone(),
                 players.clone(),
             )
             .expect("round info configuration should be correct");
@@ -360,14 +367,20 @@ where
                             ) {
                                 Ok(m) => m,
                                 Err(e) => {
-                                    warn!(?epoch, ?sender_pk, ?e, "failed to parse message");
+                                    commonware_p2p::block!(
+                                        self.blocker,
+                                        sender_pk,
+                                        ?epoch,
+                                        ?e,
+                                        "failed to parse message"
+                                    );
                                     continue;
                                 }
                             };
                             match msg {
                                 Message::Dealer(pub_msg, priv_msg) => {
                                     if let Some(ref mut ps) = player_state {
-                                        let response = ps
+                                        match ps
                                             .handle::<_, N3f1>(
                                                 &mut storage,
                                                 epoch,
@@ -375,41 +388,77 @@ where
                                                 pub_msg,
                                                 priv_msg,
                                             )
-                                            .await;
-                                        if let Some(ack) = response {
-                                            let _ = self
-                                                .latest_share
-                                                .get_or_create_by(&sender_pk)
-                                                .try_set_max(epoch.get());
+                                            .await
+                                        {
+                                            Verdict::Valid(ack) => {
+                                                let _ = self
+                                                    .latest_share
+                                                    .get_or_create_by(&sender_pk)
+                                                    .try_set_max(epoch.get());
 
-                                            let payload =
-                                                Message::<V, C::PublicKey>::Ack(ack).encode();
-                                            let sent = round_sender.send(
-                                                Recipients::One(sender_pk.clone()),
-                                                payload,
-                                                true,
-                                            );
-                                            if sent.is_empty() {
-                                                warn!(
+                                                let payload =
+                                                    Message::<V, C::PublicKey>::Ack(ack).encode();
+                                                let sent = round_sender.send(
+                                                    Recipients::One(sender_pk.clone()),
+                                                    payload,
+                                                    true,
+                                                );
+                                                if sent.is_empty() {
+                                                    warn!(
+                                                        ?epoch,
+                                                        dealer = ?sender_pk,
+                                                        "failed to send ack"
+                                                    );
+                                                }
+                                            }
+                                            Verdict::Skip => {}
+                                            Verdict::Fault => {
+                                                commonware_p2p::block!(
+                                                    self.blocker,
+                                                    sender_pk,
                                                     ?epoch,
-                                                    dealer = ?sender_pk,
-                                                    "failed to send ack"
+                                                    "invalid dealing"
                                                 );
                                             }
                                         }
+                                    } else if !am_player {
+                                        commonware_p2p::block!(
+                                            self.blocker,
+                                            sender_pk,
+                                            ?epoch,
+                                            "dealing sent to non-player"
+                                        );
                                     }
                                 }
                                 Message::Ack(ack) => {
                                     if let Some(ref mut ds) = dealer_state {
-                                        let added = ds
+                                        match ds
                                             .handle(&mut storage, epoch, sender_pk.clone(), ack)
-                                            .await;
-                                        if added {
-                                            let _ = self
-                                                .latest_ack
-                                                .get_or_create_by(&sender_pk)
-                                                .try_set_max(epoch.get());
+                                            .await
+                                        {
+                                            Verdict::Valid(()) => {
+                                                let _ = self
+                                                    .latest_ack
+                                                    .get_or_create_by(&sender_pk)
+                                                    .try_set_max(epoch.get());
+                                            }
+                                            Verdict::Skip => {}
+                                            Verdict::Fault => {
+                                                commonware_p2p::block!(
+                                                    self.blocker,
+                                                    sender_pk,
+                                                    ?epoch,
+                                                    "invalid ack"
+                                                );
+                                            }
                                         }
+                                    } else if !am_dealer {
+                                        commonware_p2p::block!(
+                                            self.blocker,
+                                            sender_pk,
+                                            ?epoch,
+                                            "ack sent to non-dealer"
+                                        );
                                     }
                                 }
                             }
@@ -453,15 +502,23 @@ where
                         // Process dealer log from block if present
                         if let Some(log) = block.log {
                             if let Some((dealer, dealer_log)) = log.check(&round) {
-                                // If we see our dealing outcome in a finalized block,
-                                // make sure to take it, so that we don't post
-                                // it in subsequent blocks
-                                if dealer == self_pk {
-                                    if let Some(ref mut ds) = dealer_state {
-                                        ds.take_finalized();
+                                // `log.check` only authenticates the self-signature, not
+                                // dealer-set membership. A validly self-signed log from a
+                                // key outside the round's dealer set is never selected, so
+                                // skip it rather than persisting junk under that key.
+                                if dealers.position(&dealer).is_none() {
+                                    warn!(?epoch, "ignoring dealer log from non-dealer");
+                                } else {
+                                    // If we see our dealing outcome in a finalized block,
+                                    // make sure to take it, so that we don't post
+                                    // it in subsequent blocks
+                                    if dealer == self_pk {
+                                        if let Some(ref mut ds) = dealer_state {
+                                            ds.take_finalized();
+                                        }
                                     }
+                                    storage.append_log(epoch, dealer, dealer_log).await;
                                 }
-                                storage.append_log(epoch, dealer, dealer_log).await;
                             }
                         }
 
@@ -611,16 +668,15 @@ where
             if player == *self_pk {
                 if let Some(ref mut ps) = player_state {
                     // Handle as player
-                    let ack = match ps
+                    let Verdict::Valid(ack) = ps
                         .handle::<_, N3f1>(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
                         .await
-                    {
-                        Some(ack) => ack,
-                        _ => continue,
+                    else {
+                        continue;
                     };
 
-                    // Handle our own ack as dealer
-                    dealer_state
+                    // Handle our own ack as dealer (we never block ourselves).
+                    let _ = dealer_state
                         .handle(storage, epoch, self_pk.clone(), ack)
                         .await;
                 }
@@ -652,7 +708,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
+    use commonware_p2p::{utils::mocks::inert_channel, Blocker, PeerSetSubscription, Provider};
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32};
     use core::marker::PhantomData;
@@ -685,6 +741,14 @@ mod tests {
         where
             R: Into<TrackedPeers<Self::PublicKey>> + Send,
         {
+            Feedback::Ok
+        }
+    }
+
+    impl<P: PublicKey> Blocker for NoopManager<P> {
+        type PublicKey = P;
+
+        fn block(&mut self, _: Self::PublicKey) -> Feedback {
             Feedback::Ok
         }
     }
@@ -763,10 +827,11 @@ mod tests {
 
             // Restart the actor with stale bootstrap inputs (output=None, share=None). The
             // recovered epoch must override these.
-            let (actor, _mailbox) = Actor::<_, _, Sha256, _, MinSig>::new(
+            let (actor, _mailbox) = Actor::<_, _, _, Sha256, _, MinSig>::new(
                 context.child("actor"),
                 Config {
                     manager: NoopManager::<Ed25519PublicKey>::default(),
+                    blocker: NoopManager::<Ed25519PublicKey>::default(),
                     signer,
                     mailbox_size: NZUsize!(8),
                     partition_prefix,

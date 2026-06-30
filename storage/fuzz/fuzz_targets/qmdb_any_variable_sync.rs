@@ -164,6 +164,7 @@ fn test_config(
             page_cache,
         },
         translator: TwoCap,
+        init_cache_size: Some(NZUsize!(3)),
     }
 }
 

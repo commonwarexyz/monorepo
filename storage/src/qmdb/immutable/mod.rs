@@ -99,7 +99,8 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use std::{num::NonZeroU64, ops::Range, sync::Arc};
+use core::num::{NonZeroU64, NonZeroUsize};
+use std::{ops::Range, sync::Arc};
 use tracing::warn;
 
 /// Metrics for Immutable QMDBs.
@@ -148,6 +149,10 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// The translator used by the compressed index.
     pub translator: T,
+
+    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
+    /// collisions without re-reading the log; `None` disables it.
+    pub init_cache_size: Option<NonZeroUsize>,
 }
 
 /// An authenticated database that only supports adding new keyed values (no updates or
@@ -217,6 +222,7 @@ where
         mut journal: authenticated::Journal<F, E, C, H, S>,
         context: E,
         translator: T,
+        cache_size: Option<NonZeroUsize>,
     ) -> Result<Self, Error<F>> {
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
@@ -247,6 +253,7 @@ where
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
+                cache_size,
                 |_, _| {},
             )
             .await?;

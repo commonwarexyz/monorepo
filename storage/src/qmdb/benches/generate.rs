@@ -42,6 +42,10 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
         elements,
         operations,
         Some(commit_frequency),
+        None, // seed_batch
+        None, // prune_frequency
+        None, // key_zipf_exponent (uniform churn)
+        None, // keyspace (all keys seeded)
         make_value,
     )
     .await;

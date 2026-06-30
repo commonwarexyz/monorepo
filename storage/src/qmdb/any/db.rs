@@ -25,7 +25,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
-use core::num::NonZeroU64;
+use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
 
 /// Estimate of the number of keys per shard at which parallelizing [`Db::get_many_map`]'s
@@ -669,6 +669,7 @@ where
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
+        cache_size: Option<NonZeroUsize>,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>> {
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
@@ -720,6 +721,7 @@ where
                     inactivity_floor_loc,
                     &log,
                     &mut index,
+                    cache_size,
                     |is_active, old_loc| {
                         let mut guard = bitmap.write();
                         guard.push(is_active);

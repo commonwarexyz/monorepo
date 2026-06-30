@@ -365,6 +365,7 @@ impl EngineDefinition for SingleDbEngine {
                 write_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         };
 
         // Destructure the 7 channels.
