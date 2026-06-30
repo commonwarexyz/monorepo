@@ -384,11 +384,11 @@ where
     /// Record upserts for unread keys and updates for staged reads.
     pub fn set(
         self,
-        new: &[(U::Key, U::Value)],
+        upserts: &[(U::Key, U::Value)],
         updates: &[(usize, U::Value)],
     ) -> UnmerkleizedBatch<F, H, U, N, S> {
         UnmerkleizedBatch {
-            inner: self.inner.set(new, updates),
+            inner: self.inner.set(upserts, updates),
             grafted_parent: self.grafted_parent,
             bitmap_parent: self.bitmap_parent,
         }

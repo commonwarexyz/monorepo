@@ -24,7 +24,7 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         any::{
-            batch::{MerkleizedBatch, Staged as BatchStaged, UnmerkleizedBatch},
+            batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
             db::Db,
             operation::{Operation, Update},
             ordered, unordered,
@@ -76,7 +76,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    staged: BatchStaged<F, H, U, S>,
+    staged: Staged<F, H, U, S>,
     db: AnyDbHandle<F, E, C, I, H, U, S>,
     metadata: Option<U::Value>,
 }
@@ -131,9 +131,10 @@ where
             db,
             metadata,
         } = self;
-        let guard = db.read().await;
-        let (values, staged) = batch.get_many_staged(keys, &*guard).await?;
-        drop(guard);
+        let (values, staged) = {
+            let guard = db.read().await;
+            batch.get_many_staged(keys, &*guard).await?
+        };
         Ok((
             values,
             AnyStaged {
@@ -218,11 +219,11 @@ where
     /// Record upserts for unread keys and updates for staged reads.
     pub fn set(
         self,
-        new: &[(U::Key, U::Value)],
+        upserts: &[(U::Key, U::Value)],
         updates: &[(usize, U::Value)],
     ) -> AnyUnmerkleized<F, E, C, I, H, U, S> {
         AnyUnmerkleized {
-            batch: self.staged.set(new, updates),
+            batch: self.staged.set(upserts, updates),
             db: self.db,
             metadata: self.metadata,
         }
@@ -279,9 +280,10 @@ where
             db,
             metadata,
         } = self;
-        let guard = db.read().await;
-        let (values, staged) = batch.get_many_staged(keys, &*guard).await?;
-        drop(guard);
+        let (values, staged) = {
+            let guard = db.read().await;
+            batch.get_many_staged(keys, &*guard).await?
+        };
         Ok((
             values,
             AnyStaged {
