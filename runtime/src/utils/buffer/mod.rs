@@ -1530,6 +1530,7 @@ mod tests {
         });
     }
 
+    // Verifies start_sync flushes current bytes, completes durability, and marks the writer clean.
     #[test_traced]
     fn test_write_start_sync_persists_and_marks_clean() {
         let executor = deterministic::Runner::default();
@@ -1537,10 +1538,12 @@ mod tests {
             let blob = SyncTrackingBlob::new();
             let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
 
+            // Start a sync for buffered bytes and wait for the returned handle.
             writer.write_at(0, b"abc").await.unwrap();
             let handle = writer.start_sync().await;
             handle.await.unwrap();
 
+            // The buffered write required a full sync because the fresh writer starts dirty.
             let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(durable.as_slice(), b"abc");
             assert_eq!(writes, 1);
@@ -1566,6 +1569,7 @@ mod tests {
         });
     }
 
+    // Verifies sync waits for an outstanding start_sync instead of starting new disk work.
     #[test_traced]
     fn test_write_sync_waits_for_outstanding_start_sync() {
         let executor = deterministic::Runner::default();
@@ -1575,9 +1579,11 @@ mod tests {
                 DelayedStartSyncBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
+            // Hold the started sync open so a later sync cannot finish right away.
             let handle = writer.start_sync().await;
             started_rx.await.expect("started sync was not issued");
 
+            // The attempted sync reaches the pending handle and cannot complete yet.
             let mut sync = Box::pin(writer.sync());
             assert!(
                 sync.as_mut().now_or_never().is_none(),
@@ -1590,6 +1596,7 @@ mod tests {
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
+            // Releasing the original handle lets sync observe the completed disk sync.
             release_tx.send(Ok(())).unwrap();
             writer.sync().await.unwrap();
             handle.await.unwrap();
@@ -1599,6 +1606,7 @@ mod tests {
         });
     }
 
+    // Verifies writes made after start_sync wait before they are flushed.
     #[test_traced]
     fn test_write_sync_after_start_sync_and_small_write_waits_before_range_sync() {
         let executor = deterministic::Runner::default();
@@ -1608,14 +1616,16 @@ mod tests {
                 DelayedStartSyncBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
+            // Begin syncing the initial dirty state and keep that sync blocked.
             let handle = writer.start_sync().await;
             started_rx.await.expect("started sync was not issued");
 
+            // New bytes stay buffered while sync waits on the earlier sync.
             writer.write_at(0, b"abc").await.unwrap();
             let mut sync = Box::pin(writer.sync());
             assert!(
                 sync.as_mut().now_or_never().is_none(),
-                "sync must join the outstanding barrier before flushing the small write"
+                "sync must wait for the outstanding start_sync before flushing the small write"
             );
             blocked_rx.await.expect("sync never waited on start_sync");
             drop(sync);
@@ -1625,6 +1635,7 @@ mod tests {
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
+            // After the earlier sync completes, the buffered write can be persisted.
             release_tx.send(Ok(())).unwrap();
             writer.sync().await.unwrap();
             handle.await.unwrap();
@@ -1637,6 +1648,7 @@ mod tests {
         });
     }
 
+    // Verifies resize does not mutate the blob before an outstanding start_sync completes.
     #[test_traced]
     fn test_write_resize_waits_for_outstanding_start_sync_before_resizing() {
         let executor = deterministic::Runner::default();
@@ -1652,6 +1664,7 @@ mod tests {
             started_rx.await.expect("started sync was not issued");
             let original_size = inner.size();
 
+            // Resize reaches the pending sync wait before it can shrink the blob.
             let mut resize = Box::pin(writer.resize(3));
             assert!(
                 resize.as_mut().now_or_never().is_none(),
@@ -1665,6 +1678,7 @@ mod tests {
             );
             drop(resize);
 
+            // Releasing the sync lets the resize apply.
             release_tx.send(Ok(())).unwrap();
             writer.resize(3).await.unwrap();
             handle.await.unwrap();
