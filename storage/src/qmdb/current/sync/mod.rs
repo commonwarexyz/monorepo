@@ -206,13 +206,14 @@ where
     )
     .await?;
     let ops_root = any.root();
+    let mut scratch = H::new();
     let partial_digest = partial.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(&chunk);
+        let digest = scratch.hash_parts([chunk.as_slice()]);
         (next_bit, digest)
     });
     let pending_digest =
         db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
-            .map(|chunk| hasher.digest(&chunk));
+            .map(|chunk| scratch.hash_parts([chunk.as_slice()]));
     let root = db::combine_roots::<H>(
         &ops_root,
         &grafted_root,

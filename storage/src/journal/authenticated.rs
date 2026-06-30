@@ -11,8 +11,11 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self, batch, full::Merkle, hasher::Standard as StandardHasher, mem::Mem, Bagging, Family,
-        Location, Position, Proof, Readable,
+        self, batch,
+        full::Merkle,
+        hasher::{Standard as StandardHasher, StandardState},
+        mem::Mem,
+        Bagging, Family, Location, Position, Proof, Readable,
     },
     Context,
 };
@@ -52,6 +55,8 @@ pub struct UnmerkleizedBatch<F: Family, H: CodecHasher, Item: Send + Sync, S: St
     inner: batch::UnmerkleizedBatch<F, H::Digest, S>,
     // The hasher to use for hashing the items.
     hasher: StandardHasher<H>,
+    // Reusable state for hashing single items added through `add`.
+    state: StandardState<H>,
     // The items to append from this batch.
     items: Vec<Item>,
     // This batch's parent, or None if the parent is the journal itself.
@@ -66,8 +71,7 @@ impl<F: Family, H: CodecHasher, Item: Encode + Send + Sync, S: Strategy>
     /// Add an item to the batch.
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, item: Item) -> Self {
-        let mut state = self.hasher.state();
-        let digest = state.leaf_encoded(self.inner.size(), &item);
+        let digest = self.state.leaf_encoded(self.inner.size(), &item);
         self.inner = self.inner.add_leaf_digest(digest);
         self.items.push(item);
         self
@@ -101,6 +105,7 @@ impl<F: Family, H: CodecHasher, Item: Encode + Send + Sync, S: Strategy>
         let Self {
             inner,
             hasher,
+            state: _,
             items,
             parent,
         } = self;
@@ -213,9 +218,12 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     where
         Item: Encode,
     {
+        let hasher = StandardHasher::new(self.bagging);
+        let state = hasher.state();
         UnmerkleizedBatch {
             inner: self.inner.new_batch(),
-            hasher: StandardHasher::new(self.bagging),
+            hasher,
+            state,
             items: Vec::new(),
             parent: Some(Arc::clone(self)),
         }
@@ -305,9 +313,12 @@ where
         C::Item: Encode,
     {
         let root = self.merkle.to_batch();
+        let hasher = StandardHasher::new(self.hasher.root_bagging());
+        let state = hasher.state();
         UnmerkleizedBatch {
             inner: root.new_batch(),
-            hasher: StandardHasher::new(self.hasher.root_bagging()),
+            hasher,
+            state,
             items: Vec::new(),
             parent: None,
         }
@@ -419,17 +430,28 @@ where
 
             while merkle_leaves < journal_size {
                 let batch = {
-                    let mut batch = merkle.new_batch();
+                    let batch = merkle.new_batch();
+                    let first = batch.leaves();
+                    let mut items = Vec::new();
                     let mut count = 0u64;
                     while count < apply_batch_size && merkle_leaves < journal_size {
                         let op = journal.read(*merkle_leaves).await?;
-                        batch = batch.add(hasher, &op.encode());
+                        items.push(op);
                         merkle_leaves += 1;
                         count += 1;
                     }
-                    batch
+                    let digests = batch.strategy().map_init_collect_vec(
+                        items.iter().enumerate(),
+                        || hasher.state(),
+                        |state, (i, item)| {
+                            let pos =
+                                Position::try_from(first + i as u64).expect("valid leaf location");
+                            state.leaf_encoded(pos, item)
+                        },
+                    );
+                    batch.add_leaf_digests(digests)
                 };
-                let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
+                let batch = merkle.with_mem(|mem| batch.merkleize_reusing::<H>(mem));
                 merkle.apply_batch(&batch)?;
             }
             return Ok(());
@@ -443,14 +465,18 @@ where
 
     /// Append an item to the journal and update the Merkle structure.
     pub async fn append(&mut self, item: &C::Item) -> Result<Location<F>, Error<F>> {
-        let encoded_item = item.encode();
-
         // Append item to the journal, then update the Merkle structure state.
         let loc = self.journal.append(item).await?;
-        let unmerkleized_batch = self.merkle.new_batch().add(&self.hasher, &encoded_item);
+        let unmerkleized_batch = {
+            let batch = self.merkle.new_batch();
+            let pos = Position::try_from(batch.leaves()).expect("valid leaf location");
+            let mut state = self.hasher.state();
+            let digest = state.leaf_encoded(pos, item);
+            batch.add_leaf_digest(digest)
+        };
         let batch = self
             .merkle
-            .with_mem(|mem| unmerkleized_batch.merkleize(mem, &self.hasher));
+            .with_mem(|mem| unmerkleized_batch.merkleize_reusing::<H>(mem));
         self.merkle.apply_batch(&batch)?;
 
         Ok(Location::new(loc))

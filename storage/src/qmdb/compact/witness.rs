@@ -16,7 +16,8 @@
 use crate::{
     journal::contiguous::{variable, Contiguous},
     merkle::{
-        self, compact, Family, Location, Proof, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT,
+        self, compact, Family, Location, Position, Proof, MAX_PINNED_NODES,
+        MAX_PROOF_DIGESTS_PER_ELEMENT,
     },
     qmdb::{self, sync::compact::Target, Error},
     Context,
@@ -584,8 +585,12 @@ where
 {
     let hasher = qmdb::hasher::<H>();
     let batch = {
-        let batch = merkle.new_batch().add(&hasher, &last_commit_op_bytes);
-        merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
+        let batch = merkle.new_batch();
+        let pos = Position::try_from(batch.leaves()).expect("valid leaf location");
+        let mut state = hasher.state();
+        let digest = state.leaf_digest(pos, &last_commit_op_bytes);
+        let batch = batch.add_leaf_digests([digest]);
+        merkle.with_mem(|mem| batch.merkleize_reusing::<H>(mem))
     };
     merkle.apply_batch(&batch)?;
 

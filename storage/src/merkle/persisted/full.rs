@@ -23,7 +23,7 @@ use crate::{
     metadata::{Config as MConfig, Metadata},
 };
 use commonware_codec::DecodeExt;
-use commonware_cryptography::Digest;
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
@@ -60,6 +60,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
+    /// Add a run of pre-computed leaf digests, in order.
+    pub(crate) fn add_leaf_digests(self, digests: impl IntoIterator<Item = D>) -> Self {
+        Self {
+            inner: self.inner.add_leaf_digests(digests),
+        }
+    }
+
     /// The number of leaves visible through this batch.
     pub fn leaves(&self) -> Location<F> {
         self.inner.leaves()
@@ -78,6 +85,14 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<batch::MerkleizedBatch<F, D, S>> {
         self.inner.merkleize(base, hasher)
+    }
+
+    /// Consume this batch and produce an immutable [`batch::MerkleizedBatch`] using reusable hash state.
+    pub(crate) fn merkleize_reusing<H: CodecHasher<Digest = D>>(
+        self,
+        base: &Mem<F, D>,
+    ) -> Arc<batch::MerkleizedBatch<F, D, S>> {
+        self.inner.merkleize_reusing::<H>(base)
     }
 }
 

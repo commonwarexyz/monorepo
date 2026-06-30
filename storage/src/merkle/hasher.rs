@@ -211,6 +211,12 @@ impl<H: CodecHasher> StandardState<H> {
         self.hasher.hash_u64_digest_pair(*pos, left, right)
     }
 
+    /// Hash a fixed-position leaf from bytes.
+    pub(crate) fn leaf_digest<F: Family>(&mut self, pos: Position<F>, element: &[u8]) -> H::Digest {
+        let pos = (*pos).to_be_bytes();
+        self.hasher.hash_parts([pos.as_slice(), element])
+    }
+
     /// Hash a fixed-position leaf from an encoded value.
     pub(crate) fn leaf_encoded<F: Family, E: Encode>(
         &mut self,
