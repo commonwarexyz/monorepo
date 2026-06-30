@@ -110,8 +110,7 @@ where
 
     /// Read multiple values by key, falling back to committed state.
     ///
-    /// Returns results in the same order as the input keys. Each unique read is cached on the
-    /// batch for reuse at merkleize, so memory grows with the number of unique keys read.
+    /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &*db).await
@@ -151,7 +150,6 @@ where
         self.batch = self.batch.write(key, value);
         self
     }
-
 }
 
 /// Wraps a QMDB [`MerkleizedBatch`] with a reference to the parent
@@ -218,10 +216,13 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Record values for the keys returned by `get_many_staged`.
-    pub fn update_many(self, values: &[U::Value]) -> CurrentUnmerkleized<F, E, C, I, H, U, N, S> {
+    /// Record updates for keys returned by `get_many_staged`.
+    pub fn update_many(
+        self,
+        updates: &[(usize, U::Value)],
+    ) -> CurrentUnmerkleized<F, E, C, I, H, U, N, S> {
         CurrentUnmerkleized {
-            batch: self.update.update_many(values),
+            batch: self.update.update_many(updates),
             db: self.db,
             metadata: self.metadata,
         }
@@ -297,7 +298,6 @@ where
         self.batch = self.batch.write(key, value);
         self
     }
-
 }
 
 /// Read-through operations for the `current` merkleized batch.

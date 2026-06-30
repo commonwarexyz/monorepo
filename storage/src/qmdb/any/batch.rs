@@ -47,6 +47,7 @@ type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 /// mutations, and cache-resolved keys are always in `updated`.
 type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
+/// Updates whose old committed location was already resolved by a staged read.
 type CachedUpdates<F, U> = Vec<(
     <U as update::Update>::Key,
     Location<F>,
@@ -54,6 +55,7 @@ type CachedUpdates<F, U> = Vec<(
     <U as update::Update>::Value,
 )>;
 
+/// Committed locations resolved by `get_many_staged`, keyed by the original input slot.
 struct Staged<F: Family, U: update::Update> {
     cached: Vec<(usize, Location<F>, U::Cached)>,
 }
@@ -992,57 +994,80 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Record values for the keys returned by `get_many_staged`.
+    /// Record updates for keys returned by `get_many_staged`.
     ///
-    /// Duplicate keys retain last-write-wins semantics according to the read order.
-    pub fn update_many(mut self, values: &[U::Value]) -> UnmerkleizedBatch<F, H, U, S> {
-        assert_eq!(
-            self.keys.len(),
-            values.len(),
-            "updates must match loaded key count"
-        );
+    /// Each update is `(read_index, value)`, where `read_index` is the position of the key in
+    /// the original `get_many_staged` input. Duplicate keys retain last-write-wins semantics
+    /// according to the update order.
+    pub fn update_many(mut self, updates: &[(usize, U::Value)]) -> UnmerkleizedBatch<F, H, U, S> {
+        if updates.is_empty() {
+            return self.batch;
+        }
 
+        let mut latest = vec![None; self.keys.len()];
+        let mut seen = AHashMap::with_capacity(updates.len());
+        for (update_idx, (slot, _)) in updates.iter().enumerate() {
+            assert!(*slot < self.keys.len(), "update index out of staged read range");
+            if let Some(prev) = seen.insert(&self.keys[*slot], update_idx) {
+                latest[updates[prev].0] = None;
+            }
+            latest[*slot] = Some(update_idx);
+        }
+        let selected_count = latest.iter().filter(|idx| idx.is_some()).count();
+
+        // The Constantinople-shaped path has no prior writes and every key came from the
+        // committed DB. Materialize cached updates directly in location order.
         if self.batch.mutations.is_empty()
             && self.batch.cached_updates.is_empty()
-            && self.cache.cached.len() == values.len()
-            && self.cache.cached.windows(2).all(|pair| pair[0].1 != pair[1].1)
+            && self
+                .cache
+                .cached
+                .iter()
+                .filter(|(slot, ..)| latest[*slot].is_some())
+                .count()
+                == selected_count
+            && {
+                let mut prev = None;
+                self.cache
+                    .cached
+                    .iter()
+                    .filter(|(slot, ..)| latest[*slot].is_some())
+                    .all(|(_, loc, _)| {
+                        let unique = prev != Some(*loc);
+                        prev = Some(*loc);
+                        unique
+                    })
+            }
         {
-            self.batch.cached_updates.reserve(self.cache.cached.len());
+            self.batch.cached_updates.reserve(selected_count);
             for (slot, loc, payload) in self.cache.cached {
+                let Some(update_idx) = latest[slot] else {
+                    continue;
+                };
                 self.batch.cached_updates.push((
                     self.keys[slot].clone(),
                     loc,
                     payload,
-                    values[slot].clone(),
+                    updates[update_idx].1.clone(),
                 ));
             }
             self.batch.cached_updates_sorted = true;
             return self.batch;
         }
 
-        let mut latest = None;
-        let mut seen = AHashMap::with_capacity(self.keys.len());
-        for (idx, key) in self.keys.iter().enumerate() {
-            if let Some(prev) = seen.insert(key, idx) {
-                let latest = latest.get_or_insert_with(|| vec![true; self.keys.len()]);
-                latest[prev] = false;
-            }
-        }
-        let is_latest =
-            |idx| latest.as_ref().is_none_or(|latest: &Vec<bool>| latest[idx]);
-
+        // Staged writes override any prior local writes for the same latest keys.
         if !self.batch.mutations.is_empty() {
-            for (idx, key) in self.keys.iter().enumerate() {
-                if is_latest(idx) {
-                    self.batch.mutations.remove(key);
+            for (slot, update_idx) in latest.iter().enumerate() {
+                if update_idx.is_some() {
+                    self.batch.mutations.remove(&self.keys[slot]);
                 }
             }
         }
         if !self.batch.cached_updates.is_empty() {
-            let mut keys = AHashSet::with_capacity(self.keys.len());
-            for (idx, key) in self.keys.iter().enumerate() {
-                if is_latest(idx) {
-                    keys.insert(key);
+            let mut keys = AHashSet::with_capacity(selected_count);
+            for (slot, update_idx) in latest.iter().enumerate() {
+                if update_idx.is_some() {
+                    keys.insert(&self.keys[slot]);
                 }
             }
             self.batch
@@ -1051,28 +1076,31 @@ where
             self.batch.cached_updates_sorted = false;
         }
 
+        // Keys resolved from the committed DB keep their cached location/payload; keys resolved
+        // from ancestors or missing committed state fall back to normal mutations.
         let had_cached = !self.batch.cached_updates.is_empty();
         let mut cached_slots = vec![false; self.keys.len()];
-        self.batch
-            .cached_updates
-            .reserve(self.cache.cached.len());
+        self.batch.cached_updates.reserve(selected_count);
         for (slot, loc, payload) in self.cache.cached {
-            if !is_latest(slot) {
+            let Some(update_idx) = latest[slot] else {
                 continue;
-            }
+            };
             cached_slots[slot] = true;
             self.batch.cached_updates.push((
                 self.keys[slot].clone(),
                 loc,
                 payload,
-                values[slot].clone(),
+                updates[update_idx].1.clone(),
             ));
         }
-        for (slot, cached) in cached_slots.into_iter().enumerate() {
-            if !cached && is_latest(slot) {
+        for (slot, update_idx) in latest.into_iter().enumerate() {
+            if !cached_slots[slot] {
+                let Some(update_idx) = update_idx else {
+                    continue;
+                };
                 self.batch
                     .mutations
-                    .insert(self.keys[slot].clone(), Some(values[slot].clone()));
+                    .insert(self.keys[slot].clone(), Some(updates[update_idx].1.clone()));
             }
         }
         self.batch.cached_updates_sorted = self.batch.cached_updates_sorted && !had_cached;
@@ -1087,6 +1115,14 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    fn cached_update(&self, key: &U::Key) -> Option<(Location<F>, &U::Cached, &U::Value)> {
+        self.cached_updates
+            .iter()
+            .find_map(|(cached_key, loc, cached, value)| {
+                (cached_key == key).then_some((*loc, cached, value))
+            })
+    }
+
     /// Read through: mutations -> ancestor diffs -> committed DB.
     pub async fn get<E, C, I, const N: usize>(
         &self,
@@ -1130,6 +1166,10 @@ where
                 results.push(value.clone());
                 continue;
             }
+            if let Some((_, _, value)) = self.cached_update(*key) {
+                results.push(Some(value.clone()));
+                continue;
+            }
 
             // Check parent diff chain.
             let mut found = false;
@@ -1171,8 +1211,8 @@ where
 
     /// Batch read multiple keys and return a staged updater for the same keys.
     ///
-    /// Returns results in the same order as the input keys. The staged updater consumes values in
-    /// that same order.
+    /// Returns results in the same order as the input keys. The staged updater records updates by
+    /// input position, so callers may load a broad read set and then update only a subset of it.
     pub async fn get_many_staged<E, C, I, const N: usize>(
         self,
         keys: &[&U::Key],
@@ -1182,6 +1222,7 @@ where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
+        U::Cached: Clone,
     {
         if keys.is_empty() {
             return Ok((
@@ -1197,11 +1238,19 @@ where
         let mut results: Vec<Option<U::Value>> = Vec::with_capacity(keys.len());
         let mut db_indices = Vec::new();
         let mut db_keys = Vec::new();
+        let mut cache = Staged {
+            cached: Vec::new(),
+        };
 
         for (i, key) in keys.iter().enumerate() {
             // Check local mutations.
             if let Some(value) = self.mutations.get(*key) {
                 results.push(value.clone());
+                continue;
+            }
+            if let Some((loc, cached, value)) = self.cached_update(*key) {
+                cache.cached.push((i, loc, cached.clone()));
+                results.push(Some(value.clone()));
                 continue;
             }
 
@@ -1233,9 +1282,6 @@ where
             results.push(None);
         }
 
-        let mut cache = Staged {
-            cached: Vec::new(),
-        };
         if !db_keys.is_empty() {
             let db_results = db
                 .get_many_map(&db_keys, |data, loc| {
@@ -1249,9 +1295,10 @@ where
                     value
                 });
             }
-            if !cache.cached.is_empty() {
-                db.strategy().sort_by(&mut cache.cached, |a, b| a.1.cmp(&b.1));
-            }
+        }
+        if !cache.cached.is_empty() {
+            db.strategy()
+                .sort_by(&mut cache.cached, |a, b| a.1.cmp(&b.1));
         }
 
         Ok((
@@ -1275,8 +1322,8 @@ where
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
-    /// Consumes the locations cached by this batch's reads: keys loaded via `get`/`get_many`
-    /// before being written skip the journal re-read their resolution would otherwise require.
+    /// Consumes updates recorded by [`UpdateMany::update_many`], allowing loaded keys to skip the
+    /// journal re-read their resolution would otherwise require.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.unordered.batch.merkleize",
@@ -2959,15 +3006,18 @@ mod tests {
             let k1 = colliding_digest(0x40, 1);
             let k2 = colliding_digest(0x41, 0);
             let missing = colliding_digest(0x40, 9);
+            let read_only = colliding_digest(0x41, 1);
             let v0 = colliding_digest(0x50, 0);
             let v1 = colliding_digest(0x50, 1);
             let v2 = colliding_digest(0x51, 0);
+            let read_only_value = colliding_digest(0x51, 1);
 
             let seed = db
                 .new_batch()
                 .write(k0, Some(v0))
                 .write(k1, Some(v1))
                 .write(k2, Some(v2))
+                .write(read_only, Some(read_only_value))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
@@ -2982,8 +3032,34 @@ mod tests {
                 (missing, colliding_digest(0x60, 4)),
                 (k2, colliding_digest(0x60, 5)),
             ];
-            let keys: Vec<_> = updates.iter().map(|(key, _)| key).collect();
-            let update_values: Vec<_> = updates.iter().map(|(_, value)| *value).collect();
+            let read_keys = vec![k0, read_only, missing, k1, k0, missing, k2];
+            let keys: Vec<_> = read_keys.iter().collect();
+            let indexed_updates = vec![
+                (0, updates[0].1),
+                (2, updates[1].1),
+                (3, updates[2].1),
+                (4, updates[3].1),
+                (5, updates[4].1),
+                (6, updates[5].1),
+            ];
+            let loaded_values = vec![
+                Some(v0),
+                Some(read_only_value),
+                None,
+                Some(v1),
+                Some(v0),
+                None,
+                Some(v2),
+            ];
+            let updated_values = vec![
+                Some(updates[3].1),
+                Some(read_only_value),
+                Some(updates[4].1),
+                Some(updates[2].1),
+                Some(updates[3].1),
+                Some(updates[4].1),
+                Some(updates[5].1),
+            ];
 
             let mut explicit = db.new_batch();
             let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
@@ -2995,14 +3071,17 @@ mod tests {
             let cached_token = db.new_batch();
             let (cached_token_values, update) =
                 cached_token.get_many_staged(&keys, &db).await.unwrap();
-            let cached_token = update.update_many(&update_values);
+            let cached_token = update.update_many(&indexed_updates);
+
+            assert_eq!(explicit_values, loaded_values);
+            assert_eq!(explicit_values, cached_token_values);
+            assert_eq!(cached_token.get(&k0, &db).await.unwrap(), Some(updates[3].1));
+            assert_eq!(cached_token.get_many(&keys, &db).await.unwrap(), updated_values);
+            let (updated_reads, update) = cached_token.get_many_staged(&keys, &db).await.unwrap();
+            assert_eq!(updated_reads, updated_values);
+            let cached_token = update.update_many(&indexed_updates);
             let cached_token = cached_token.merkleize(&db, None).await.unwrap();
 
-            assert_eq!(
-                explicit_values,
-                vec![Some(v0), None, Some(v1), Some(v0), None, Some(v2)]
-            );
-            assert_eq!(explicit_values, cached_token_values);
             assert_eq!(explicit.root(), cached_token.root());
 
             db.apply_batch(cached_token).await.unwrap();
@@ -3010,6 +3089,7 @@ mod tests {
             assert_eq!(db.get(&missing).await.unwrap(), Some(updates[4].1));
             assert_eq!(db.get(&k1).await.unwrap(), Some(updates[2].1));
             assert_eq!(db.get(&k2).await.unwrap(), Some(updates[5].1));
+            assert_eq!(db.get(&read_only).await.unwrap(), Some(read_only_value));
 
             db.destroy().await.unwrap();
         });
@@ -3036,15 +3116,18 @@ mod tests {
             let k1 = colliding_digest(0x42, 1);
             let k2 = colliding_digest(0x43, 0);
             let missing = colliding_digest(0x42, 9);
+            let read_only = colliding_digest(0x43, 1);
             let v0 = colliding_digest(0x52, 0);
             let v1 = colliding_digest(0x52, 1);
             let v2 = colliding_digest(0x53, 0);
+            let read_only_value = colliding_digest(0x53, 1);
 
             let seed = db
                 .new_batch()
                 .write(k0, Some(v0))
                 .write(k1, Some(v1))
                 .write(k2, Some(v2))
+                .write(read_only, Some(read_only_value))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
@@ -3059,8 +3142,34 @@ mod tests {
                 (missing, colliding_digest(0x62, 4)),
                 (k2, colliding_digest(0x62, 5)),
             ];
-            let keys: Vec<_> = updates.iter().map(|(key, _)| key).collect();
-            let update_values: Vec<_> = updates.iter().map(|(_, value)| *value).collect();
+            let read_keys = vec![k0, read_only, missing, k1, k0, missing, k2];
+            let keys: Vec<_> = read_keys.iter().collect();
+            let indexed_updates = vec![
+                (0, updates[0].1),
+                (2, updates[1].1),
+                (3, updates[2].1),
+                (4, updates[3].1),
+                (5, updates[4].1),
+                (6, updates[5].1),
+            ];
+            let loaded_values = vec![
+                Some(v0),
+                Some(read_only_value),
+                None,
+                Some(v1),
+                Some(v0),
+                None,
+                Some(v2),
+            ];
+            let updated_values = vec![
+                Some(updates[3].1),
+                Some(read_only_value),
+                Some(updates[4].1),
+                Some(updates[2].1),
+                Some(updates[3].1),
+                Some(updates[4].1),
+                Some(updates[5].1),
+            ];
 
             let mut explicit = db.new_batch();
             let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
@@ -3072,14 +3181,17 @@ mod tests {
             let cached_token = db.new_batch();
             let (cached_token_values, update) =
                 cached_token.get_many_staged(&keys, &db).await.unwrap();
-            let cached_token = update.update_many(&update_values);
+            let cached_token = update.update_many(&indexed_updates);
+
+            assert_eq!(explicit_values, loaded_values);
+            assert_eq!(explicit_values, cached_token_values);
+            assert_eq!(cached_token.get(&k0, &db).await.unwrap(), Some(updates[3].1));
+            assert_eq!(cached_token.get_many(&keys, &db).await.unwrap(), updated_values);
+            let (updated_reads, update) = cached_token.get_many_staged(&keys, &db).await.unwrap();
+            assert_eq!(updated_reads, updated_values);
+            let cached_token = update.update_many(&indexed_updates);
             let cached_token = cached_token.merkleize(&db, None).await.unwrap();
 
-            assert_eq!(
-                explicit_values,
-                vec![Some(v0), None, Some(v1), Some(v0), None, Some(v2)]
-            );
-            assert_eq!(explicit_values, cached_token_values);
             assert_eq!(explicit.root(), cached_token.root());
 
             db.apply_batch(cached_token).await.unwrap();
@@ -3087,6 +3199,7 @@ mod tests {
             assert_eq!(db.get(&missing).await.unwrap(), Some(updates[4].1));
             assert_eq!(db.get(&k1).await.unwrap(), Some(updates[2].1));
             assert_eq!(db.get(&k2).await.unwrap(), Some(updates[5].1));
+            assert_eq!(db.get(&read_only).await.unwrap(), Some(read_only_value));
 
             db.destroy().await.unwrap();
         });

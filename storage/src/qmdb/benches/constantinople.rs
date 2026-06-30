@@ -223,22 +223,26 @@ macro_rules! run_pipeline {
 
             let muts = gen_muts(&mut rng, args.num_updates, args.num_keys);
             let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
-            let update_values: Vec<_> = muts.iter().map(|(_, v)| *v).collect();
+            let updates: Vec<_> = muts
+                .iter()
+                .enumerate()
+                .map(|(idx, (_, v))| (idx, *v))
+                .collect();
             let new_batch = || {
                 chain
                     .last()
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 
-            // Timed: load all touched keys, write them, merkleize, read root. The load returns a
-            // staged updater that consumes values in the same order after the caller has computed
-            // them.
+            // Timed: load all touched keys, write the selected keys, merkleize, read root. The
+            // load returns a staged updater that consumes `(read_index, value)` pairs after the
+            // caller has computed them.
             let start = Instant::now();
             let b = new_batch();
             let (values, update) = b.get_many_staged(&keys, &db).await.unwrap();
             black_box(&values);
             let t_load = start.elapsed();
-            let b = update.update_many(&update_values);
+            let b = update.update_many(&updates);
             let t_write = start.elapsed();
             let merkleized = b.merkleize(&db, None).await.unwrap();
             let root = merkleized.root();

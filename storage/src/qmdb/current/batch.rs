@@ -382,10 +382,10 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Record values for the keys returned by `get_many_staged`.
-    pub fn update_many(self, values: &[U::Value]) -> UnmerkleizedBatch<F, H, U, N, S> {
+    /// Record updates for keys returned by `get_many_staged`.
+    pub fn update_many(self, updates: &[(usize, U::Value)]) -> UnmerkleizedBatch<F, H, U, N, S> {
         UnmerkleizedBatch {
-            inner: self.inner.update_many(values),
+            inner: self.inner.update_many(updates),
             grafted_parent: self.grafted_parent,
             bitmap_parent: self.bitmap_parent,
         }

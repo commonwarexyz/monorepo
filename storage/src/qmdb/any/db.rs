@@ -308,7 +308,7 @@ where
             while positions[op_idx] < pos {
                 op_idx += 1;
             }
-            debug_assert_eq!(positions[op_idx], pos);
+            assert_eq!(positions[op_idx], pos);
             let Operation::Update(data) = &ops[op_idx] else {
                 panic!("location does not reference update operation. loc={pos}");
             };
