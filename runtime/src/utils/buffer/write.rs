@@ -73,7 +73,8 @@ impl<B: Blob> Write<B> {
         Self {
             blob,
             buffer: Buffer::new(size, capacity.get(), pool),
-            sync_state: SyncState::new(true), // ensure pending writes on the wrapped blob are synced
+            // Existing blob contents may not be durable yet.
+            sync_state: SyncState::Dirty,
         }
     }
 
@@ -215,7 +216,7 @@ impl<B: Blob> Write<B> {
 
         // Resize the underlying blob.
         self.blob.resize(len).await?;
-        self.sync_state.mark_unsynced();
+        self.sync_state.mark_dirty();
 
         Ok(())
     }
