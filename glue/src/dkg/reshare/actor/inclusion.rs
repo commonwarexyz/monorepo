@@ -309,10 +309,13 @@ where
             if height >= final_height {
                 continue;
             }
-            if epocher
-                .containing(height)
-                .is_none_or(|bounds| bounds.epoch() != epoch)
-            {
+            let Some(bounds) = epocher.containing(height) else {
+                continue;
+            };
+            if bounds.epoch() != epoch {
+                continue;
+            }
+            if !matches!(bounds.phase(), EpochPhase::Midpoint | EpochPhase::Late) {
                 continue;
             }
             blocks.push(block);
