@@ -241,7 +241,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         versions: std::ops::RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
         if self.ctx.should_fail(Op::Open) {
-            return Err(Error::Io(injected_io_error().into()));
+            return Err(injected_io_error().into());
         }
         self.inner
             .open_versioned(partition, name, versions)
@@ -253,14 +253,14 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         if self.ctx.should_fail(Op::Remove) {
-            return Err(Error::Io(injected_io_error().into()));
+            return Err(injected_io_error().into());
         }
         self.inner.remove(partition, name).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         if self.ctx.should_fail(Op::Scan) {
-            return Err(Error::Io(injected_io_error().into()));
+            return Err(injected_io_error().into());
         }
         self.inner.scan(partition).await
     }
@@ -288,7 +288,7 @@ impl<B: crate::Blob> Blob<B> {
 impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
         if self.ctx.should_fail(Op::Read) {
-            return Err(Error::Io(injected_io_error().into()));
+            return Err(injected_io_error().into());
         }
         self.inner.read_at(offset, len).await
     }
@@ -300,7 +300,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         if self.ctx.should_fail(Op::Read) {
-            return Err(Error::Io(injected_io_error().into()));
+            return Err(injected_io_error().into());
         }
         self.inner.read_at_buf(offset, len, bufs.into()).await
     }
@@ -319,9 +319,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
                 self.inner.sync().await?;
                 self.size
                     .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
-                return Err(Error::Io(injected_io_error().into()));
+                return Err(injected_io_error().into());
             }
-            return Err(Error::Io(injected_io_error().into()));
+            return Err(injected_io_error().into());
         }
 
         self.inner.write_at(offset, bufs).await?;
@@ -349,16 +349,16 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
                     .await?;
                 self.size
                     .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
-                return Err(Error::Io(injected_io_error().into()));
+                return Err(injected_io_error().into());
             }
-            return Err(Error::Io(injected_io_error().into()));
+            return Err(injected_io_error().into());
         }
 
         if self.ctx.should_fail(Op::Sync) {
             self.inner.write_at(offset, bufs).await?;
             self.size
                 .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
-            return Err(Error::Io(injected_io_error().into()));
+            return Err(injected_io_error().into());
         }
 
         self.inner.write_at_sync(offset, bufs).await?;
@@ -376,9 +376,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
                 self.inner.resize(len).await?;
                 self.inner.sync().await?;
                 self.size.store(len, Ordering::Relaxed);
-                return Err(Error::Io(injected_io_error().into()));
+                return Err(injected_io_error().into());
             }
-            return Err(Error::Io(injected_io_error().into()));
+            return Err(injected_io_error().into());
         }
         self.inner.resize(len).await?;
         self.size.store(len, Ordering::Relaxed);
@@ -387,14 +387,14 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 
     async fn sync(&self) -> Result<(), Error> {
         if self.ctx.should_fail(Op::Sync) {
-            return Err(Error::Io(injected_io_error().into()));
+            return Err(injected_io_error().into());
         }
         self.inner.sync().await
     }
 
     async fn start_sync(&self) -> Handle<()> {
         if self.ctx.should_fail(Op::Sync) {
-            return Handle::ready(Err(Error::Io(injected_io_error().into())));
+            return Handle::ready(Err(injected_io_error().into()));
         }
         self.inner.start_sync().await
     }
