@@ -18,9 +18,7 @@
 //!
 //! // Using the Hasher trait
 //! let mut hasher = Crc32::new();
-//! let mut pending = hasher.update(b"hello ");
-//! pending.update(b"world");
-//! let digest = pending.finalize();
+//! let digest = hasher.begin().update(b"hello ").update(b"world").finalize();
 //!
 //! // Convert digest to u32
 //! assert_eq!(digest.as_u32(), checksum);
@@ -336,9 +334,9 @@ mod tests {
         // Test chunk sizes from 1 to 64 bytes
         for chunk_size in 1..=64 {
             let mut hasher = Crc32::new();
-            let mut pending = hasher.pending();
+            let mut pending = hasher.begin();
             for chunk in data.chunks(chunk_size) {
-                pending.update(chunk);
+                pending = pending.update(chunk);
             }
             assert_eq!(pending.finalize().as_u32(), expected);
         }
@@ -372,7 +370,7 @@ mod tests {
 
         // Generate initial hash using Hasher trait
         let mut hasher = Crc32::new();
-        let digest = hasher.update(msg).finalize();
+        let digest = hasher.begin().update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
 
         // Verify against reference
@@ -380,7 +378,7 @@ mod tests {
         assert_eq!(digest.as_u32(), expected);
 
         // Reuse hasher (should auto-reset after finalize)
-        let digest2 = hasher.update(msg).finalize();
+        let digest2 = hasher.begin().update(msg).finalize();
         assert_eq!(digest, digest2);
 
         // Test Hasher::hash convenience method
@@ -398,7 +396,7 @@ mod tests {
     fn test_codec() {
         let msg = b"hello world";
         let mut hasher = Crc32::new();
-        let digest = hasher.update(msg).finalize();
+        let digest = hasher.begin().update(msg).finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), SIZE);

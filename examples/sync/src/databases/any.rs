@@ -63,17 +63,13 @@ where
         let mut hasher = <Hasher as CryptoHasher>::new();
         let mut operations = Vec::new();
         for i in 0..count {
-            let key = {
-                let mut pending = hasher.update(&i.to_be_bytes());
-                pending.update(&seed.to_be_bytes());
-                pending.finalize()
-            };
+            let key = hasher
+                .begin()
+                .update(&i.to_be_bytes())
+                .update(&seed.to_be_bytes())
+                .finalize();
 
-            let value = {
-                let mut pending = hasher.update(&key);
-                pending.update(b"value");
-                pending.finalize()
-            };
+            let value = hasher.begin().update(&key).update(b"value").finalize();
 
             operations.push(Operation::Update(Update(key, value)));
 

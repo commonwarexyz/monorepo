@@ -116,6 +116,7 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 pub fn genesis<H: Hasher>(epoch: Epoch) -> H::Digest {
     let mut hasher = H::default();
     let digest = hasher
+        .begin()
         .update(&(Bytes::from(GENESIS_BYTES), epoch).encode())
         .finalize();
     digest
@@ -301,7 +302,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         // Generate the payload
         let rand = self.context.gen::<u64>();
         let payload = (context.round, context.parent.1, rand).encode();
-        let digest = self.hasher.update(&payload).finalize();
+        let digest = self.hasher.begin().update(&payload).finalize();
 
         // Mark verified
         self.verified.insert(digest);

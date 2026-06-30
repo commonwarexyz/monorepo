@@ -9,12 +9,8 @@
 //! // Create a new BLAKE3 hasher
 //! let mut hasher = Blake3::new();
 //!
-//! // Update the hasher with some messages
-//! let mut pending = hasher.update(b"hello,");
-//! pending.update(b"world!");
-//!
-//! // Finalize the pending hash to get the digest
-//! let digest = pending.finalize();
+//! // Hash some messages in a fluent chain
+//! let digest = hasher.begin().update(b"hello,").update(b"world!").finalize();
 //!
 //! // Print the digest
 //! println!("digest: {:?}", digest);
@@ -195,12 +191,12 @@ mod tests {
 
         // Generate initial hash
         let mut hasher = Blake3::new();
-        let digest = hasher.update(msg).finalize();
+        let digest = hasher.begin().update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Reuse hasher
-        let digest = hasher.update(msg).finalize();
+        let digest = hasher.begin().update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
@@ -218,7 +214,7 @@ mod tests {
     fn test_codec() {
         let msg = b"hello world";
         let mut hasher = Blake3::new();
-        let digest = hasher.update(msg).finalize();
+        let digest = hasher.begin().update(msg).finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), DIGEST_LENGTH);

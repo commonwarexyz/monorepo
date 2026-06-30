@@ -205,11 +205,14 @@ impl Entry {
     /// Compute a checksum for [Entry].
     fn compute_crc(epoch: u64, section: u64, position: u64, added: u8) -> u32 {
         let mut hasher = Crc32::new();
-        let mut pending = hasher.update(&epoch.to_be_bytes());
-        pending.update(&section.to_be_bytes());
-        pending.update(&position.to_be_bytes());
-        pending.update(&added.to_be_bytes());
-        pending.finalize().as_u32()
+        hasher
+            .begin()
+            .update(&epoch.to_be_bytes())
+            .update(&section.to_be_bytes())
+            .update(&position.to_be_bytes())
+            .update(&added.to_be_bytes())
+            .finalize()
+            .as_u32()
     }
 
     /// Create a new [Entry].

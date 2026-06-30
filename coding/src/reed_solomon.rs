@@ -380,7 +380,7 @@ fn encode<H: CodecHasher, S: Strategy>(
         &shard_slices,
         shard_len,
         H::new,
-        |hasher, shard| hasher.update(shard).finalize(),
+        |hasher, shard| hasher.begin().update(shard).finalize(),
     );
     for hash in &shard_hashes {
         builder.add(hash);
@@ -761,7 +761,7 @@ fn verify_root<H: CodecHasher, S: Strategy>(
         missing_shards,
         shard_len,
         H::new,
-        |hasher, (i, shard)| (i, hasher.update(shard).finalize()),
+        |hasher, (i, shard)| (i, hasher.begin().update(shard).finalize()),
     ) {
         shard_digests[i] = Some(digest);
     }
@@ -1775,9 +1775,9 @@ mod tests {
         let encoding = encoder.encode().unwrap();
 
         let mut hasher = Sha256::new();
-        let mut pending = hasher.pending();
+        let mut pending = hasher.begin();
         for shard in encoding.recovery_iter() {
-            pending.update(shard);
+            pending = pending.update(shard);
         }
         let digest = pending.finalize();
         assert_eq!(
@@ -1837,6 +1837,7 @@ mod tests {
         // Create a malicious/fake root (simulating a malicious encoder)
         let mut hasher = Sha256::new();
         let malicious_root = hasher
+            .begin()
             .update(b"malicious_data_that_wasnt_actually_encoded")
             .finalize();
 

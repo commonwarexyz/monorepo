@@ -19,7 +19,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub fn genesis<H: Hasher>() -> H::Digest {
     // Use the digest of the genesis message as the initial payload.
     let mut hasher = H::default();
-    let digest = hasher.update(GENESIS).finalize();
+    let digest = hasher.begin().update(GENESIS).finalize();
     digest
 }
 

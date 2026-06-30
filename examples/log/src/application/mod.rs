@@ -22,7 +22,7 @@ pub fn genesis<H: Hasher>() -> H::Digest {
     // Since this example does not verify that proposed messages link to a
     // parent, this only seeds the consensus floor.
     let mut hasher = H::default();
-    let digest = hasher.update(GENESIS).finalize();
+    let digest = hasher.begin().update(GENESIS).finalize();
     digest
 }
 

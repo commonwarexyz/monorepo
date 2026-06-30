@@ -12,7 +12,7 @@ fn bench_hash_message(c: &mut Criterion) {
         c.bench_function(&format!("{}/msg_len={}", module_path!(), msg.len()), |b| {
             b.iter(|| {
                 let mut hasher = Sha256::new();
-                hasher.update(msg).finalize();
+                hasher.begin().update(msg).finalize();
             });
         });
     }

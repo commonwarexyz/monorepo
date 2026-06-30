@@ -30,11 +30,11 @@ impl<P: PublicKey> A for Automaton<P> {
         let Self::Context { sequencer, height } = context;
         let payload = Bytes::from(format!("hello world, {sequencer} {height}"));
         let mut hasher = Sha256::default();
-        let mut pending = hasher.update(&payload);
+        let mut pending = hasher.begin().update(&payload);
 
         // Inject an invalid digest by updating with the payload again.
         if (self.invalid_when)(height) {
-            pending.update(&payload);
+            pending = pending.update(&payload);
         }
 
         let digest = pending.finalize();

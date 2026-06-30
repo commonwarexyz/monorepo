@@ -249,7 +249,7 @@ commonware_macros::stability_scope!(BETA {
     impl<H: Hasher> Pending<'_, H> {
         /// Append message to previously recorded data.
         #[inline]
-        pub fn update(&mut self, message: &[u8]) -> &mut Self {
+        pub fn update(self, message: &[u8]) -> Self {
             assert!(!self.finalized, "pending hash already finalized");
             self.hasher.update_inner(message);
             self
@@ -293,23 +293,13 @@ commonware_macros::stability_scope!(BETA {
             Self::default()
         }
 
-        /// Append message to a new hash.
-        ///
-        /// The returned [Pending] state holds a mutable reference to the hasher until it is
-        /// finalized or dropped.
-        #[inline]
-        fn update(&mut self, message: &[u8]) -> Pending<'_, Self> {
-            let mut pending = self.pending();
-            pending.update(message);
-            pending
-        }
-
         /// Start a new empty hash.
         ///
+        /// Append data with [Pending::update] and produce the digest with [Pending::finalize].
         /// The returned [Pending] state holds a mutable reference to the hasher until it is
         /// finalized or dropped.
         #[inline]
-        fn pending(&mut self) -> Pending<'_, Self> {
+        fn begin(&mut self) -> Pending<'_, Self> {
             Pending {
                 hasher: self,
                 finalized: false,
@@ -331,7 +321,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Hash a single message with a one-time-use hasher.
         fn hash(message: &[u8]) -> Self::Digest {
-            Self::new().update(message).finalize()
+            Self::new().begin().update(message).finalize()
         }
     }
 
@@ -344,9 +334,9 @@ commonware_macros::stability_scope!(BETA {
         #[inline]
         fn hash_parts<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
             self.reset();
-            let mut pending = self.pending();
+            let mut pending = self.begin();
             for part in parts {
-                pending.update(part);
+                pending = pending.update(part);
             }
             pending.finalize()
         }
@@ -413,13 +403,13 @@ mod tests {
     macro_rules! hasher {
         ($h:ty $(,)?) => {{
             let mut hasher = <$h>::new();
-            hasher.pending().finalize()
+            hasher.begin().finalize()
         }};
         ($h:ty, $($part:expr),+ $(,)?) => {{
             let mut hasher = <$h>::new();
-            let mut pending = hasher.pending();
+            let mut pending = hasher.begin();
             $(
-                pending.update($part);
+                pending = pending.update($part);
             )+
             pending.finalize()
         }};
@@ -682,53 +672,51 @@ mod tests {
     fn test_hasher_multiple_runs<H: Hasher>() {
         // Generate initial hash
         let mut hasher = H::new();
-        let digest = hasher.update(b"hello world").finalize();
+        let digest = hasher.begin().update(b"hello world").finalize();
         assert!(H::Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref().len(), H::Digest::SIZE);
 
         // Reuse hasher without reset
-        let digest_again = hasher.update(b"hello world").finalize();
+        let digest_again = hasher.begin().update(b"hello world").finalize();
         assert!(H::Digest::decode(digest_again.as_ref()).is_ok());
         assert_eq!(digest, digest_again);
 
         // Reuse hasher with reset
-        drop(hasher.update(b"hello mars"));
+        drop(hasher.begin().update(b"hello mars"));
         hasher.reset();
-        let digest_reset = hasher.update(b"hello world").finalize();
+        let digest_reset = hasher.begin().update(b"hello world").finalize();
         assert!(H::Digest::decode(digest_reset.as_ref()).is_ok());
         assert_eq!(digest, digest_reset);
 
         // Hash different data
-        let digest_mars = hasher.update(b"hello mars").finalize();
+        let digest_mars = hasher.begin().update(b"hello mars").finalize();
         assert!(H::Digest::decode(digest_mars.as_ref()).is_ok());
         assert_ne!(digest, digest_mars);
     }
 
     fn test_hasher_multiple_updates<H: Hasher>() {
-        // Generate initial hash
+        // Generate initial hash (fluent multi-part chain)
         let mut hasher = H::new();
-        let mut pending = hasher.update(b"hello");
-        pending.update(b" world");
-        let digest = pending.finalize();
+        let digest = hasher.begin().update(b"hello").update(b" world").finalize();
         assert!(H::Digest::decode(digest.as_ref()).is_ok());
 
         // Generate hash in oneshot
         let mut hasher = H::new();
-        let digest_oneshot = hasher.update(b"hello world").finalize();
+        let digest_oneshot = hasher.begin().update(b"hello world").finalize();
         assert!(H::Digest::decode(digest_oneshot.as_ref()).is_ok());
         assert_eq!(digest, digest_oneshot);
     }
 
     fn test_hasher_empty_input<H: Hasher>() {
         let mut hasher = H::new();
-        let digest = hasher.pending().finalize();
+        let digest = hasher.begin().finalize();
         assert!(H::Digest::decode(digest.as_ref()).is_ok());
     }
 
     fn test_hasher_large_input<H: Hasher>() {
         let mut hasher = H::new();
         let data = vec![1; 1024];
-        let digest = hasher.update(&data).finalize();
+        let digest = hasher.begin().update(&data).finalize();
         assert!(H::Digest::decode(digest.as_ref()).is_ok());
     }
 
@@ -741,7 +729,7 @@ mod tests {
             hasher!(H, first, second)
         );
 
-        drop(hasher.update(b"discarded"));
+        drop(hasher.begin().update(b"discarded"));
         assert_eq!(
             hasher.hash_parts([first, second]),
             hasher!(H, first, second)

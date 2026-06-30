@@ -9,12 +9,8 @@
 //! // Create a new SHA-256 hasher
 //! let mut hasher = Sha256::new();
 //!
-//! // Update the hasher with some messages
-//! let mut pending = hasher.update(b"hello,");
-//! pending.update(b"world!");
-//!
-//! // Finalize the pending hash to get the digest
-//! let digest = pending.finalize();
+//! // Hash some messages in a fluent chain
+//! let digest = hasher.begin().update(b"hello,").update(b"world!").finalize();
 //!
 //! // Print the digest
 //! println!("digest: {:?}", digest);
@@ -369,12 +365,12 @@ mod tests {
 
         // Generate initial hash
         let mut hasher = Sha256::new();
-        let digest = hasher.update(msg).finalize();
+        let digest = hasher.begin().update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Reuse hasher
-        let digest = hasher.update(msg).finalize();
+        let digest = hasher.begin().update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
@@ -392,7 +388,7 @@ mod tests {
     fn test_codec() {
         let msg = b"hello world";
         let mut hasher = Sha256::new();
-        let digest = hasher.update(msg).finalize();
+        let digest = hasher.begin().update(msg).finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), DIGEST_LENGTH);
@@ -404,9 +400,9 @@ mod tests {
 
     fn streaming_hash_parts(parts: &[&[u8]]) -> Digest {
         let mut hasher = Sha256::new();
-        let mut pending = hasher.pending();
+        let mut pending = hasher.begin();
         for part in parts {
-            pending.update(part);
+            pending = pending.update(part);
         }
         pending.finalize()
     }
@@ -437,7 +433,7 @@ mod tests {
             streaming_hash_parts(&[left.as_ref(), right.as_ref()])
         );
 
-        drop(hasher.update(b"discarded"));
+        drop(hasher.begin().update(b"discarded"));
         assert_eq!(
             hasher.hash_parts([b"fresh".as_slice()]),
             streaming_hash_parts(&[b"fresh".as_slice()])

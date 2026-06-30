@@ -317,14 +317,14 @@ pub async fn hash_file(path: &Path) -> Result<String, Error> {
         let file_size = file.metadata()?.len() as usize;
         let buffer_size = file_size.min(MAX_HASH_BUFFER_SIZE);
         let mut hasher = Sha256::new();
-        let mut pending = hasher.pending();
+        let mut pending = hasher.begin();
         let mut buffer = vec![0u8; buffer_size];
         loop {
             let bytes_read = file.read(&mut buffer)?;
             if bytes_read == 0 {
                 break;
             }
-            pending.update(&buffer[..bytes_read]);
+            pending = pending.update(&buffer[..bytes_read]);
         }
         Ok(pending.finalize().to_string())
     })

@@ -182,9 +182,9 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
 
 fn row_digest<H: CodecHasher>(row: &[F]) -> H::Digest {
     let mut h = H::new();
-    let mut pending = h.pending();
+    let mut pending = h.begin();
     for x in row {
-        pending.update(&x.to_le_bytes());
+        pending = pending.update(&x.to_le_bytes());
     }
     pending.finalize()
 }

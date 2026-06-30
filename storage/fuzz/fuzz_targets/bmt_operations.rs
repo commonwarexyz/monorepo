@@ -445,11 +445,11 @@ fn fuzz(input: FuzzInput) {
                             .collect();
                         // Create a wrong root by hashing the real root with some modifier
                         let real_root = t.root();
-                        let wrong_root = {
-                            let mut pending = hasher.update(&real_root);
-                            pending.update(&root_modifier.to_be_bytes());
-                            pending.finalize()
-                        };
+                        let wrong_root = hasher
+                            .begin()
+                            .update(&real_root)
+                            .update(&root_modifier.to_be_bytes())
+                            .finalize();
                         let _ = mp.verify_multi_inclusion::<Sha256>(&correct_elements, &wrong_root);
                     }
                 }

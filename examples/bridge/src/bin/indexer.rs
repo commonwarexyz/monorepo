@@ -167,7 +167,7 @@ fn main() {
                         };
 
                         // Compute digest
-                        let digest = hasher.update(&incoming.block.encode()).finalize();
+                        let digest = hasher.begin().update(&incoming.block.encode()).finalize();
 
                         // Store block
                         network.insert(digest, incoming.block);

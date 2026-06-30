@@ -18,10 +18,10 @@ pub struct FuzzInput {
 fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurSha256::new();
     let mut ref_hasher = RefSha256::new();
-    let mut pending = our_hasher.pending();
+    let mut pending = our_hasher.begin();
 
     for chunk in chunks {
-        pending.update(chunk);
+        pending = pending.update(chunk);
         ref_hasher.update(chunk);
     }
 
@@ -34,11 +34,11 @@ fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
 fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurSha256::new();
     let mut ref_hasher = RefSha256::new();
-    let mut pending = our_hasher.pending();
+    let mut pending = our_hasher.begin();
 
     // First round
     for chunk in chunks {
-        pending.update(chunk);
+        pending = pending.update(chunk);
         ref_hasher.update(chunk);
     }
     let our_result = pending.finalize();
@@ -48,10 +48,10 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
     // Reset and second round
     our_hasher.reset();
     let mut ref_hasher = RefSha256::new();
-    let mut pending = our_hasher.pending();
+    let mut pending = our_hasher.begin();
 
     for chunk in chunks {
-        pending.update(chunk);
+        pending = pending.update(chunk);
         ref_hasher.update(chunk);
     }
 
@@ -68,11 +68,11 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
 fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurSha256::new();
     let mut all_data = Vec::new();
-    let mut pending = our_hasher.pending();
+    let mut pending = our_hasher.begin();
 
     for chunk in chunks {
         all_data.extend_from_slice(chunk);
-        pending.update(chunk);
+        pending = pending.update(chunk);
     }
 
     let our_final = pending.finalize();
@@ -90,7 +90,7 @@ fn fuzz_diff_hash(data: &[u8]) {
 // Encode/decode functionality
 fn fuzz_encode_decode(data: &[u8]) {
     let mut hasher = OurSha256::new();
-    let digest = hasher.update(data).finalize();
+    let digest = hasher.begin().update(data).finalize();
 
     let encoded = digest.encode();
     assert_eq!(encoded.len(), 32); // DIGEST_LENGTH = 32
@@ -106,8 +106,8 @@ fn fuzz_default_clone() {
     let mut hasher2 = hasher1.clone();
 
     // Both should produce the same result for empty input
-    let digest1 = hasher1.pending().finalize();
-    let digest2 = hasher2.pending().finalize();
+    let digest1 = hasher1.begin().finalize();
+    let digest2 = hasher2.begin().finalize();
     assert_eq!(digest1, digest2);
 }
 

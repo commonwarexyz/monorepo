@@ -170,10 +170,13 @@ mod hash {
     /// Used to mask the random sigma value.
     pub fn h2(gt: &GT) -> Block {
         let mut hasher = Sha256::new();
-        let mut pending = hasher.update(b"h2");
         let gt = Zeroizing::new(gt.as_slice());
-        pending.update(gt.as_ref());
-        pending.finalize().into()
+        hasher
+            .begin()
+            .update(b"h2")
+            .update(gt.as_ref())
+            .finalize()
+            .into()
     }
 
     /// H3: (sigma, M) -> Scalar
@@ -197,9 +200,12 @@ mod hash {
     /// Used to mask the message.
     pub fn h4(sigma: &Block) -> Block {
         let mut hasher = Sha256::new();
-        let mut pending = hasher.update(b"h4");
-        pending.update(sigma.as_ref());
-        pending.finalize().into()
+        hasher
+            .begin()
+            .update(b"h4")
+            .update(sigma.as_ref())
+            .finalize()
+            .into()
     }
 }
 
