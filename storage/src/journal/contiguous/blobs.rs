@@ -8,11 +8,17 @@ use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
-    Blob as RBlob, Buf, Error as RError, IoBufMut, IoBufs,
+    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs,
 };
-use futures::future::try_join_all;
+use futures::{
+    future::{self, BoxFuture, Shared},
+    FutureExt as _,
+};
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
+
+/// Shared completion for an in-flight runtime sync.
+type SyncCompletion = Shared<BoxFuture<'static, Result<(), RError>>>;
 
 /// Metrics for a journal's blobs.
 struct Metrics {
@@ -57,14 +63,8 @@ impl<E: Context> Partition<E> {
     /// Open the given blob as a [`Writer`], creating it if it does not exist.
     pub(super) async fn open(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
         let name = blob.to_be_bytes();
-        let (blob, size) = self
-            .context
-            .open(&self.name, &name)
-            .await
-            .map_err(Error::Runtime)?;
-        Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone())
-            .await
-            .map_err(Error::Runtime)
+        let (blob, size) = self.context.open(&self.name, &name).await?;
+        Ok(Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone()).await?)
     }
 
     /// Scan a partition's blob names, treating a missing partition as empty.
@@ -98,8 +98,8 @@ impl<E: Context> Partition<E> {
     pub(super) async fn remove(&self, blob: u64) -> Result<(), Error> {
         self.context
             .remove(&self.name, Some(&blob.to_be_bytes()))
-            .await
-            .map_err(Error::Runtime)
+            .await?;
+        Ok(())
     }
 
     /// Remove an entire partition by name, treating "already missing" as success.
@@ -149,10 +149,19 @@ pub(super) struct Writable<E: Context> {
 
     /// Cached owned snapshot of [Self::sealed].
     sealed_snapshot: Option<Arc<[Sealed<E::Blob>]>>,
+
+    /// Durability dependency for the blob immediately before the live tail.
+    ///
+    /// Rollover moves the tail sync here and joins it with the seal sync. Commit handles may
+    /// complete without clearing this slot.
+    predecessor_sync: Option<SyncCompletion>,
+
+    /// Sync for the live tail.
+    tail_sync: Option<SyncCompletion>,
 }
 
 impl<E: Context> Writable<E> {
-    /// Build from recovered writers: seal every blob below `tail_blob` and install the tail,
+    /// Build from recovered writers: seal every blob below `tail_blob` and use it as the tail,
     /// opening an empty one if absent.
     ///
     /// # Invariants
@@ -186,7 +195,9 @@ impl<E: Context> Writable<E> {
             if blob == tail_blob {
                 tail = Some(writer);
             } else {
-                sealed.push(writer.seal().await.map_err(Error::Runtime)?);
+                let (sealed_blob, sync) = writer.seal().await?;
+                sync.await?;
+                sealed.push(sealed_blob);
             }
         }
         let tail = match tail {
@@ -212,6 +223,8 @@ impl<E: Context> Writable<E> {
             tail,
             sealed,
             sealed_snapshot: None,
+            predecessor_sync: None,
+            tail_sync: None,
         })
     }
 
@@ -252,35 +265,52 @@ impl<E: Context> Writable<E> {
         Ok(Blobs {
             oldest_blob_index: self.oldest_blob_index,
             sealed: SealedBlobs::Owned(sealed),
-            tail: Blob::Sealed(self.tail.snapshot().await.map_err(Error::Runtime)?),
+            tail: Blob::Sealed(self.tail.snapshot().await?),
         })
     }
 
-    /// Seal the tail (no fsync) and open the next blob as the new tail.
+    /// Seal the tail, start syncing it, and open the next blob as the new tail.
     pub(super) async fn seal_tail(&mut self) -> Result<(), Error> {
-        // Open the next tail first so a failure leaves the current tail untouched.
+        self.drain_predecessor_sync().await?;
+
+        // If opening the next tail fails, the current tail is still untouched.
         let next_blob = self
             .tail_blob_index()
             .checked_add(1)
             .ok_or(Error::OffsetOverflow)?;
         let new_writer = self.partition.open(next_blob).await?;
         let old_writer = std::mem::replace(&mut self.tail, new_writer);
-        let sealed = old_writer.seal().await.map_err(Error::Runtime)?;
+        let (sealed, handle) = old_writer.seal().await?;
         self.metrics.tracked.inc();
+        self.metrics.synced.inc();
         self.sealed.push(sealed);
         self.sealed_snapshot = None;
+        debug_assert!(self.predecessor_sync.is_none());
+        let sync = handle.boxed().shared();
+        self.predecessor_sync = Some(match self.tail_sync.take() {
+            Some(tail_sync) => async move {
+                let (tail_sync, sync) = future::join(tail_sync, sync).await;
+                tail_sync?;
+                sync
+            }
+            .boxed()
+            .shared(),
+            None => sync,
+        });
         Ok(())
     }
 
-    /// Drop every blob below `min_blob` and remove its file, oldest-first. Safe with live readers:
-    /// snapshot readers keep their own handles, which the runtime's read-after-remove contract keeps
-    /// valid.
+    /// Prune every blob below `min_blob`, oldest-first. Readers holding the old slice keep reading
+    /// the removed blobs.
     ///
     /// # Invariants
     ///
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
     pub(super) async fn prune(&mut self, min_blob: u64) -> Result<(), Error> {
         assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
+        self.drain_predecessor_sync().await?;
+        self.drain_tail_sync().await?;
+
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
         let prev_oldest_blob_index = self.oldest_blob_index;
         self.sealed.drain(..drop_count);
@@ -305,10 +335,9 @@ impl<E: Context> Writable<E> {
         let current_bytes = self.tail.size();
         assert!(byte_offset <= current_bytes);
         if byte_offset < current_bytes {
-            self.tail
-                .resize(byte_offset)
-                .await
-                .map_err(Error::Runtime)?;
+            self.drain_predecessor_sync().await?;
+            self.drain_tail_sync().await?;
+            self.tail.resize(byte_offset).await?;
         }
         Ok(())
     }
@@ -324,16 +353,14 @@ impl<E: Context> Writable<E> {
         blob: u64,
         byte_offset: u64,
     ) -> Result<(), Error> {
+        self.drain_predecessor_sync().await?;
+        self.drain_tail_sync().await?;
+
         let idx = blob
             .checked_sub(self.oldest_blob_index)
             .map(|idx| idx as usize)
             .filter(|&idx| idx < self.sealed.len())
             .ok_or_else(|| Error::Corruption(format!("rewind target blob {blob} not retained")))?;
-
-        // Sync the target before destructive work so a crash recovers a size no shorter than
-        // the rewind target.
-        self.sealed[idx].sync().await.map_err(Error::Runtime)?;
-        self.metrics.synced.inc();
 
         // Reopen the target as the writable tail and truncate in place. The fresh Writer
         // gets a fresh page-cache id, so pages cached under the sealed handle's id are
@@ -341,10 +368,7 @@ impl<E: Context> Writable<E> {
         let mut new_writer = self.partition.open(blob).await?;
         let current_bytes = new_writer.size();
         if byte_offset < current_bytes {
-            new_writer
-                .resize(byte_offset)
-                .await
-                .map_err(Error::Runtime)?;
+            new_writer.resize(byte_offset).await?;
         }
 
         // Remove blobs newest-first so a crash leaves a contiguous prefix: the old tail, then
@@ -370,6 +394,9 @@ impl<E: Context> Writable<E> {
     /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
     /// the runtime's read-after-remove contract keeps valid.
     pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
+        self.drain_predecessor_sync().await?;
+        self.drain_tail_sync().await?;
+
         for blob in self.oldest_blob_index..=self.tail_blob_index() {
             self.partition.remove(blob).await?;
         }
@@ -379,25 +406,59 @@ impl<E: Context> Writable<E> {
         self.oldest_blob_index = tail_blob;
         self.sealed.clear();
         self.sealed_snapshot = None;
+        self.predecessor_sync = None;
+        self.tail_sync = None;
         Ok(())
     }
 
-    /// Make every blob from `start_blob` onward durable.
-    pub(super) async fn sync_from(&mut self, start_blob: u64) -> Result<(), Error> {
-        let start_blob = start_blob.max(self.oldest_blob_index);
-        let dirty_sealed = &self.sealed[(start_blob - self.oldest_blob_index) as usize..];
-        try_join_all(dirty_sealed.iter().map(|sealed| sealed.sync()))
-            .await
-            .map_err(Error::Runtime)?;
-        self.metrics.synced.inc_by(dirty_sealed.len() as u64);
-
-        self.tail.sync().await.map_err(Error::Runtime)?;
-        self.metrics.synced.inc();
+    /// Drain predecessor sync. Clear only on success.
+    async fn drain_predecessor_sync(&mut self) -> Result<(), Error> {
+        let Some(predecessor) = self.predecessor_sync.clone() else {
+            return Ok(());
+        };
+        predecessor.await?;
+        self.predecessor_sync = None;
         Ok(())
+    }
+
+    /// Drain tail sync. Clear only on success.
+    async fn drain_tail_sync(&mut self) -> Result<(), Error> {
+        let Some(tail) = self.tail_sync.clone() else {
+            return Ok(());
+        };
+        tail.await?;
+        self.tail_sync = None;
+        Ok(())
+    }
+
+    /// Start syncing the tail and its sealed predecessor.
+    pub(super) async fn start_sync(&mut self) -> Handle<()> {
+        // Keep one tail sync in flight.
+        if let Some(prior) = self.tail_sync.clone() {
+            if let Err(err) = prior.await {
+                return Handle::ready(Err(err));
+            }
+        }
+        let tail = self.tail.start_sync().await.boxed().shared();
+        self.metrics.synced.inc();
+        self.tail_sync = Some(tail.clone());
+        let predecessor = self.predecessor_sync.clone();
+        Handle::from_future(async move {
+            if let Some(predecessor) = predecessor {
+                let (predecessor, tail) = future::join(predecessor, tail).await;
+                predecessor?;
+                tail
+            } else {
+                tail.await
+            }
+        })
     }
 
     /// Remove every blob and the partition itself.
-    pub(super) async fn destroy(self) -> Result<(), Error> {
+    pub(super) async fn destroy(mut self) -> Result<(), Error> {
+        self.drain_predecessor_sync().await?;
+        self.drain_tail_sync().await?;
+
         let tail_blob = self.tail_blob_index();
         drop(self.tail);
         for blob in self.oldest_blob_index..=tail_blob {
@@ -473,8 +534,8 @@ impl<'a, B: RBlob> Blob<'a, B> {
     /// Read exactly `len` bytes at `offset`.
     pub(super) async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         match self {
-            Self::Writer(writer) => writer.read_at(offset, len).await.map_err(Error::Runtime),
-            Self::Sealed(sealed) => sealed.read_at(offset, len).await.map_err(Error::Runtime),
+            Self::Writer(writer) => Ok(writer.read_at(offset, len).await?),
+            Self::Sealed(sealed) => Ok(sealed.read_at(offset, len).await?),
         }
     }
 
@@ -486,14 +547,8 @@ impl<'a, B: RBlob> Blob<'a, B> {
         bufs: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
         match self {
-            Self::Writer(writer) => writer
-                .read_up_to(offset, len, bufs)
-                .await
-                .map_err(Error::Runtime),
-            Self::Sealed(sealed) => sealed
-                .read_up_to(offset, len, bufs)
-                .await
-                .map_err(Error::Runtime),
+            Self::Writer(writer) => Ok(writer.read_up_to(offset, len, bufs).await?),
+            Self::Sealed(sealed) => Ok(sealed.read_up_to(offset, len, bufs).await?),
         }
     }
 
@@ -513,8 +568,8 @@ impl<'a, B: RBlob> Blob<'a, B> {
         match self {
             Self::Writer(writer) => Replay::view(Self::Writer(writer), offset, buffer_size),
             Self::Sealed(sealed) => {
-                let mut replay = sealed.replay(buffer_size).map_err(Error::Runtime)?;
-                replay.seek_to(offset).map_err(Error::Runtime)?;
+                let mut replay = sealed.replay(buffer_size)?;
+                replay.seek_to(offset)?;
                 Ok(Replay::paged(replay))
             }
         }
@@ -528,14 +583,8 @@ impl<'a, B: RBlob> Blob<'a, B> {
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
         match self {
-            Self::Writer(writer) => writer
-                .read_many_into(buf, offsets, item_size)
-                .await
-                .map_err(Error::Runtime),
-            Self::Sealed(sealed) => sealed
-                .read_many_into(buf, offsets, item_size)
-                .await
-                .map_err(Error::Runtime),
+            Self::Writer(writer) => Ok(writer.read_many_into(buf, offsets, item_size).await?),
+            Self::Sealed(sealed) => Ok(sealed.read_many_into(buf, offsets, item_size).await?),
         }
     }
 }
@@ -596,7 +645,7 @@ impl<'a, B: RBlob> Replay<'a, B> {
     /// Ensure at least `n` logical bytes are buffered unless EOF is reached first.
     pub(super) async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
         match &mut self.inner {
-            ReplayInner::Paged(replay) => replay.ensure(n).await.map_err(Error::Runtime),
+            ReplayInner::Paged(replay) => Ok(replay.ensure(n).await?),
             ReplayInner::View(replay) => replay.ensure(n).await,
         }
     }
@@ -767,6 +816,10 @@ mod tests {
     }
 
     impl<E: Context> Writable<E> {
+        pub(in crate::journal::contiguous) const fn has_predecessor_sync(&self) -> bool {
+            self.predecessor_sync.is_some()
+        }
+
         /// Open `blob` as an independent writer, outside this journal's tracking
         /// (simulates a crash-artifact blob).
         pub(crate) async fn open_blob(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
@@ -776,15 +829,14 @@ mod tests {
         /// Make one blob durable.
         pub(crate) async fn sync_blob(&mut self, blob: u64) -> Result<(), Error> {
             if blob == self.tail_blob_index() {
-                return self.tail.sync().await.map_err(Error::Runtime);
+                self.tail.sync().await?;
+                return Ok(());
             }
-            match blob
-                .checked_sub(self.oldest_blob_index)
-                .and_then(|idx| self.sealed.get(idx as usize))
-            {
-                Some(sealed) => sealed.sync().await.map_err(Error::Runtime),
-                None => Ok(()),
+            if blob < self.oldest_blob_index || blob >= self.tail_blob_index() {
+                return Ok(());
             }
+            self.partition.open(blob).await?.sync().await?;
+            Ok(())
         }
     }
 
@@ -829,7 +881,8 @@ mod tests {
                 0
             );
 
-            let sealed = writer.seal().await.unwrap();
+            let (sealed, sync) = writer.seal().await.unwrap();
+            sync.await.unwrap();
             let sealed_blob = Blob::Sealed(sealed);
             assert_insufficient_length(
                 sealed_blob

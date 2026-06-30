@@ -908,8 +908,7 @@ impl<B: Blob> Writer<B> {
     /// writer.
     ///
     /// This writes buffered bytes to the blob layout but does not make them durable. Call
-    /// [`Self::sync`] or [`super::Sealed::sync`] if the returned handle's bytes must survive a
-    /// crash.
+    /// [`Self::sync`] if the returned handle's bytes must survive a crash.
     ///
     /// If this writer later rewinds or truncates into the returned handle's range, reads from that
     /// handle may observe unspecified contents.
@@ -946,6 +945,33 @@ impl<B: Blob> Writer<B> {
             return Handle::ready(Err(err));
         }
         self.sync_state.start_sync(&self.blob).await
+    }
+
+    /// Length of the longest contiguous prefix of well-formed pages on the blob.
+    ///
+    /// Scans pages front-to-back and stops at the first torn/invalid page, so it catches an
+    /// interior hole that [`Self::new`]'s backward scan can miss beneath a valid last page.
+    pub async fn recoverable_prefix_len(&self) -> Result<u64, Error> {
+        let logical_page_size = self.cache_ref.page_size();
+        let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
+        let mut valid_len = 0u64;
+        for page in 0..total_pages {
+            match super::get_page_with_checksum_from_blob(&self.blob, page, logical_page_size).await
+            {
+                Ok((logical, _)) => {
+                    let len = logical.len() as u64;
+                    valid_len += len;
+                    // A partial page can only legitimately be the last one; stop here.
+                    if len < logical_page_size {
+                        break;
+                    }
+                }
+                // First torn/invalid page: the contiguous valid prefix ends here.
+                Err(Error::InvalidChecksum) => break,
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(valid_len)
     }
 
     /// Resize the blob to the provided logical `size`.
@@ -1108,16 +1134,16 @@ impl<B: Blob> Writer<B> {
         )
     }
 
-    /// Consume the write handle and return an immutable [`super::Sealed`] handle for the same
-    /// blob.
+    /// Consume the write handle, flushing buffered bytes and beginning a sync of the blob.
     ///
-    /// Buffered bytes (full and partial pages) are written to the underlying blob, but the blob is
-    /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
-    /// [`super::Sealed::sync`].
-    pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
+    /// Returns an immutable [`super::Sealed`] read handle plus a completion handle for the started
+    /// sync. Reads through the [`super::Sealed`] handle observe flushed bytes immediately; durability isn't
+    /// guaranteed until the sync handle completes.
+    pub async fn seal(mut self) -> Result<(super::Sealed<B>, Handle<()>), Error> {
         self.sync_state.wait_for_pending().await?;
         self.flush_internal(true, false).await?;
-        Ok(self.sealed_handle(self.id))
+        let handle = self.sync_state.start_sync(&self.blob).await;
+        Ok((self.sealed_handle(self.id), handle))
     }
 }
 
@@ -2444,8 +2470,9 @@ mod tests {
 
             // Release the started sync so seal can flush.
             release_tx.send(Ok(())).unwrap();
-            let sealed = seal.await.unwrap().unwrap();
+            let (sealed, sync) = seal.await.unwrap().unwrap();
             prior.await.unwrap();
+            sync.await.unwrap();
             let read = sealed
                 .read_at(0, b"hello world".len())
                 .await
@@ -2454,7 +2481,7 @@ mod tests {
             assert_eq!(read.as_ref(), b"hello world");
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 0);
         });
     }
