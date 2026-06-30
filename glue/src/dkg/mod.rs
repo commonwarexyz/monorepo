@@ -46,6 +46,33 @@
 //! state (e.g., a staking contract). The chain can announce future players first,
 //! giving those nodes an epoch to state sync and enter the next ceremony normally.
 //!
+//! # Marshal Retention
+//!
+//! DKG startup relies on marshal's local finalized block archive unless the node
+//! is entering through one-time state sync. On an ordinary restart, the active
+//! epoch is derived from marshal's processed height, and the public
+//! [`types::EpochInfo`] for that epoch is loaded from the finalized boundary
+//! block that introduced it.
+//!
+//! For epoch zero, that boundary is height zero. For later epochs, the boundary
+//! is the final block of the previous epoch:
+//!
+//! ```text
+//! boundary(current_epoch) = last_block(current_epoch - 1)
+//! ```
+//!
+//! As a rule of thumb, keep marshal's finalized block retention wide enough to
+//! preserve at least `[last_block(current_epoch - 1), tip]`. DKG does not need
+//! blocks before that previous boundary for ordinary restart, but it does need
+//! the boundary block itself to recover the epoch's public threshold output,
+//! participant set, and Simplex floor commitment. Pruning that boundary before
+//! the current epoch finishes leaves a restarting validator without the local
+//! public material required for normal recovery.
+//!
+//! Nodes that serve `dkg::anchor` responses for other peers also need the
+//! corresponding boundary finalization and boundary block for every epoch they
+//! intend to serve.
+//!
 //! See [`anchor`], [`fence`], [`orchestrator`], [`reshare`], and [`types`] for
 //! the detailed actors, synchronization points, and wire artifacts.
 

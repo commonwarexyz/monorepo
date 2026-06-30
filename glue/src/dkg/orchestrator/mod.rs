@@ -42,7 +42,9 @@
 //! # Marshal Boundary
 //!
 //! Epoch zero is anchored by marshal's height-zero block. Later epochs are
-//! anchored by the last finalized block of the previous epoch.
+//! anchored by the last finalized block of the previous epoch. Ordinary restart
+//! expects that boundary block to remain in marshal's local finalized block
+//! archive; see [`crate::dkg`] for the marshal retention requirement.
 //!
 //! # Catching Up
 //!
