@@ -32,8 +32,8 @@ impl From<crate::Handle<()>> for Completion {
     }
 }
 
-/// Tracks whether blob state is durably persisted.
-enum Durability {
+/// Tracks whether blob mutations still need a sync.
+enum SyncState {
     // No unsynced mutations.
     Clean,
     // Unsynced mutations need a sync.
@@ -42,7 +42,7 @@ enum Durability {
     Pending(Completion),
 }
 
-impl Durability {
+impl SyncState {
     /// Mark a new unsynced mutation.
     fn mark_dirty(&mut self) {
         assert!(
@@ -172,7 +172,7 @@ mod tests {
 
     /// Test blob with separate visible and durable state.
     ///
-    /// Unsynced writes and resizes only update `data`. `write_at_sync` updates `data`
+    /// Writes and resizes only update `data`. `write_at_sync` updates `data`
     /// and then copies only that submitted range into `durable`. `sync` copies all
     /// of `data` to `durable`. This lets tests assert that `Write::sync` uses range
     /// sync only when no earlier unsynced mutation needs a full durability barrier.

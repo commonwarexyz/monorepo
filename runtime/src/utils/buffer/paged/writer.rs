@@ -43,7 +43,7 @@ use crate::{
     buffer::{
         paged::{CacheRef, Checksum, Slot, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
         tip::Buffer,
-        Durability,
+        SyncState,
     },
     Blob, Error, Handle, IoBuf, IoBufMut, IoBufs,
 };
@@ -104,8 +104,8 @@ pub struct Writer<B: Blob> {
     /// will contain its CRC record.
     partial_page_state: Option<Checksum>,
 
-    /// Durability state for writes, resizes, and range-sync writes.
-    durability: Durability,
+    /// Sync state for writes, resizes, and range-sync writes.
+    sync_state: SyncState,
 
     /// Unique id assigned to this blob by the page cache.
     id: u64,
@@ -121,7 +121,7 @@ pub struct Writer<B: Blob> {
 impl<B: Blob> Writer<B> {
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.durability.write_at(&self.blob, offset, bufs).await
+        self.sync_state.write_at(&self.blob, offset, bufs).await
     }
 
     /// Write bytes to the underlying blob and make them durable.
@@ -133,7 +133,7 @@ impl<B: Blob> Writer<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.durability
+        self.sync_state
             .write_at_sync(&self.blob, offset, bufs)
             .await
     }
@@ -193,10 +193,10 @@ impl<B: Blob> Writer<B> {
             blob,
             current_page,
             partial_page_state,
-            durability: if needs_sync {
-                Durability::Dirty
+            sync_state: if needs_sync {
+                SyncState::Dirty
             } else {
-                Durability::Clean
+                SyncState::Clean
             },
             id: cache_ref.next_id(),
             cache_ref,
@@ -345,7 +345,7 @@ impl<B: Blob> Writer<B> {
             "an empty tip implies no partial page state"
         );
         // Direct blob writes must not overtake an earlier started sync barrier.
-        self.durability.wait_for_pending().await?;
+        self.sync_state.wait_for_pending().await?;
 
         // Cache the pages before `replace` publishes the new size, so reads of the bulk range are
         // served from the cache while the blob write is still in flight. Insert in
@@ -396,7 +396,7 @@ impl<B: Blob> Writer<B> {
     /// If `sync` is true and the flush emits a single write, that write is made durable
     /// immediately: with [`Blob::write_at_sync`] when there are no earlier unsynced mutations, or
     /// by writing it and syncing the blob when there are. Flushes split around a protected CRC use
-    /// unsynced writes so the caller can make them durable with one sync.
+    /// plain writes so the caller can make them durable with one sync.
     ///
     /// Returns `true` if the flush made its writes durable, so no additional sync is needed.
     async fn flush_internal(
@@ -418,7 +418,7 @@ impl<B: Blob> Writer<B> {
         }
 
         // A flush mutates the blob, so first resolve any outstanding start_sync barrier.
-        self.durability.wait_for_pending().await?;
+        self.sync_state.wait_for_pending().await?;
 
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
         // partial page in tip for continued buffering.
@@ -929,9 +929,9 @@ impl<B: Blob> Writer<B> {
             return Ok(());
         }
 
-        // Otherwise, the flush either had no bytes to write or used unsynced writes. Sync only if a
+        // Otherwise, the flush either had no bytes to write or used plain writes. Sync only if a
         // durability barrier is still pending.
-        self.durability.sync(&self.blob).await
+        self.sync_state.sync(&self.blob).await
     }
 
     /// Flushes buffered data and begins making all pending mutations durable, returning a
@@ -944,7 +944,7 @@ impl<B: Blob> Writer<B> {
         if let Err(err) = self.flush_internal(true, false).await {
             return Handle::ready(Err(err));
         }
-        self.durability.start_sync(&self.blob).await
+        self.sync_state.start_sync(&self.blob).await
     }
 
     /// Resize the blob to the provided logical `size`.
@@ -1012,7 +1012,7 @@ impl<B: Blob> Writer<B> {
         // resizes need to create a pending sync.
         if new_physical_size != current_physical_size {
             self.blob.resize(new_physical_size).await?;
-            self.durability.mark_dirty();
+            self.sync_state.mark_dirty();
         }
 
         // Evict cached pages at or beyond the new full-page boundary. The page at
@@ -1114,7 +1114,7 @@ impl<B: Blob> Writer<B> {
     /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
     /// [`super::Sealed::sync`].
     pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
-        self.durability.wait_for_pending().await?;
+        self.sync_state.wait_for_pending().await?;
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.id))
     }

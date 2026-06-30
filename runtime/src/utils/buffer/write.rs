@@ -1,5 +1,5 @@
 use crate::{
-    buffer::{tip::Buffer, Durability},
+    buffer::{tip::Buffer, SyncState},
     Blob, Buf, BufferPool, BufferPooler, Error, IoBufs,
 };
 use std::num::NonZeroUsize;
@@ -62,8 +62,8 @@ pub struct Write<B: Blob> {
     /// Buffered bytes at the logical tip of the blob.
     buffer: Buffer,
 
-    /// Durability state for writes and range-sync writes.
-    durability: Durability,
+    /// Sync state for writes and range-sync writes.
+    sync_state: SyncState,
 }
 
 impl<B: Blob> Write<B> {
@@ -74,7 +74,7 @@ impl<B: Blob> Write<B> {
             blob,
             buffer: Buffer::new(size, capacity.get(), pool),
             // Existing blob contents may not be durable yet.
-            durability: Durability::Dirty,
+            sync_state: SyncState::Dirty,
         }
     }
 
@@ -214,11 +214,11 @@ impl<B: Blob> Write<B> {
             self.write_blob(offset, buf).await?;
         }
 
-        self.durability.wait_for_pending().await?;
+        self.sync_state.wait_for_pending().await?;
 
         // Resize the underlying blob.
         self.blob.resize(len).await?;
-        self.durability.mark_dirty();
+        self.sync_state.mark_dirty();
 
         Ok(())
     }
@@ -238,7 +238,7 @@ impl<B: Blob> Write<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.durability.write_at(&self.blob, offset, bufs).await
+        self.sync_state.write_at(&self.blob, offset, bufs).await
     }
 
     /// Write bytes to the underlying blob and make them durable.
@@ -250,13 +250,13 @@ impl<B: Blob> Write<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.durability
+        self.sync_state
             .write_at_sync(&self.blob, offset, bufs)
             .await
     }
 
     /// Sync the underlying blob if there are unsynced mutations.
     async fn sync_blob(&mut self) -> Result<(), Error> {
-        self.durability.sync(&self.blob).await
+        self.sync_state.sync(&self.blob).await
     }
 }
