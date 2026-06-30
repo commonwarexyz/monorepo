@@ -1050,7 +1050,7 @@ where
         }
         let selected_count = latest.iter().filter(|idx| idx.is_some()).count();
 
-        // The Constantinople-shaped path has no prior writes and every selected key came from the
+        // Fast path for batches with no prior writes where every selected key came from the
         // committed DB. Materialize staged updates directly in location order.
         if self.batch.mutations.is_empty()
             && self.batch.staged_updates.entries.is_empty()

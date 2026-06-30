@@ -7,7 +7,7 @@
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [updates] [threads]
+//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [updates] [reads] [threads]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
 //!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
