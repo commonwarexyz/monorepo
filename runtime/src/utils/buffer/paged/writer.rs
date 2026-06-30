@@ -53,7 +53,10 @@ use futures::{
     future::{BoxFuture, Shared},
     FutureExt as _,
 };
-use std::{future::Future, num::{NonZeroU16, NonZeroUsize}};
+use std::{
+    future::Future,
+    num::{NonZeroU16, NonZeroUsize},
+};
 use tracing::warn;
 
 /// Adjusts a requested write-buffer `capacity` upward to the value the buffer actually uses,
@@ -952,8 +955,7 @@ impl<B: Blob> Writer<B> {
         // Flush any buffered data (without fsync) so the reader sees all written data. If the
         // flush plainly rewrites the current partial page, a later rewrite must first make that
         // footer durable.
-        let rewrote_partial_page =
-            self.rewrites_current_page(true, logical_page_size as usize);
+        let rewrote_partial_page = self.rewrites_current_page(true, logical_page_size as usize);
         self.flush_internal(true, false).await?;
         if rewrote_partial_page && self.partial_page_state.is_some() {
             self.barrier.record_lazy(self.blob.clone());

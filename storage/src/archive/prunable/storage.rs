@@ -460,7 +460,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     async fn wait_syncing(&mut self) -> Result<(), Error> {
         let syncing = mem::take(&mut self.syncing);
         for result in join_all(syncing.into_values()).await {
-            result.map_err(RError::from).map_err(crate::journal::Error::from)?;
+            result
+                .map_err(RError::from)
+                .map_err(crate::journal::Error::from)?;
         }
         Ok(())
     }

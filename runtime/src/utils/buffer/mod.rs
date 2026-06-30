@@ -5,14 +5,13 @@ mod read;
 mod tip;
 mod write;
 
-pub use read::Read;
-pub use write::Write;
-
 use futures::{
     future::{BoxFuture, Shared},
     FutureExt as _,
 };
+pub use read::Read;
 use std::future::Future;
+pub use write::Write;
 
 type SharedSync = Shared<BoxFuture<'static, Result<(), SyncError>>>;
 
@@ -117,11 +116,7 @@ impl SyncState {
         }
     }
 
-    async fn resize(
-        &mut self,
-        blob: &impl crate::Blob,
-        len: u64,
-    ) -> Result<(), crate::Error> {
+    async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
         self.drain_in_flight().await?;
         blob.resize(len).await?;
         *self = Self::Dirty;
