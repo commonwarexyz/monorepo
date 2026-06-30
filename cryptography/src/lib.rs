@@ -356,21 +356,18 @@ commonware_macros::stability_scope!(BETA {
         }
 
         /// Hash an empty message.
-        #[doc(hidden)]
         #[inline]
         fn hash_empty(&mut self) -> Self::Digest {
             self.hash_parts(core::iter::empty::<&[u8]>())
         }
 
         /// Hash a `u32` followed by a digest.
-        #[doc(hidden)]
         #[inline]
         fn hash_u32_digest(&mut self, prefix: u32, digest: &Self::Digest) -> Self::Digest {
             self.hash_parts([prefix.to_be_bytes().as_slice(), digest.as_ref()])
         }
 
         /// Hash two digests.
-        #[doc(hidden)]
         #[inline]
         fn hash_digest_pair(
             &mut self,
@@ -381,7 +378,6 @@ commonware_macros::stability_scope!(BETA {
         }
 
         /// Hash a `u64` followed by two digests.
-        #[doc(hidden)]
         #[inline]
         fn hash_u64_digest_pair(
             &mut self,

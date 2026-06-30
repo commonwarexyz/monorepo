@@ -195,7 +195,7 @@ fn finalize_fixed_36(scratch: &mut [u8; SCRATCH_LEN]) -> Digest {
 
     let mut state = INITIAL_STATE;
     let (blocks, remainder) = scratch[..BLOCK_LENGTH].as_chunks::<BLOCK_LENGTH>();
-    debug_assert!(remainder.is_empty());
+    assert!(remainder.is_empty());
     compress256(&mut state, blocks);
     digest_from_state(state)
 }
@@ -208,7 +208,7 @@ fn finalize_fixed_64(scratch: &mut [u8; SCRATCH_LEN]) -> Digest {
 
     let mut state = INITIAL_STATE;
     let (blocks, remainder) = scratch[..SCRATCH_LEN].as_chunks::<BLOCK_LENGTH>();
-    debug_assert!(remainder.is_empty());
+    assert!(remainder.is_empty());
     compress256(&mut state, blocks);
     digest_from_state(state)
 }
@@ -221,7 +221,7 @@ fn finalize_fixed_72(scratch: &mut [u8; SCRATCH_LEN]) -> Digest {
 
     let mut state = INITIAL_STATE;
     let (blocks, remainder) = scratch[..SCRATCH_LEN].as_chunks::<BLOCK_LENGTH>();
-    debug_assert!(remainder.is_empty());
+    assert!(remainder.is_empty());
     compress256(&mut state, blocks);
     digest_from_state(state)
 }
@@ -236,13 +236,13 @@ fn finalize_fixed(scratch: &mut [u8; SCRATCH_LEN], message_len: usize) -> Digest
         scratch[message_len + 1..56].fill(0);
         write_scratch(&mut scratch[56..64], &bit_len);
         let (blocks, remainder) = scratch[..BLOCK_LENGTH].as_chunks::<BLOCK_LENGTH>();
-        debug_assert!(remainder.is_empty());
+        assert!(remainder.is_empty());
         compress256(&mut state, blocks);
     } else {
         scratch[message_len + 1..120].fill(0);
         write_scratch(&mut scratch[120..128], &bit_len);
         let (blocks, remainder) = scratch[..SCRATCH_LEN].as_chunks::<BLOCK_LENGTH>();
-        debug_assert!(remainder.is_empty());
+        assert!(remainder.is_empty());
         compress256(&mut state, blocks);
     }
     digest_from_state(state)
