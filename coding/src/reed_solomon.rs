@@ -380,9 +380,7 @@ fn encode<H: CodecHasher, S: Strategy>(
         &shard_slices,
         shard_len,
         H::new,
-        |hasher, shard| {
-            hasher.update(shard).finalize()
-        },
+        |hasher, shard| hasher.update(shard).finalize(),
     );
     for hash in &shard_hashes {
         builder.add(hash);
@@ -763,9 +761,7 @@ fn verify_root<H: CodecHasher, S: Strategy>(
         missing_shards,
         shard_len,
         H::new,
-        |hasher, (i, shard)| {
-            (i, hasher.update(shard).finalize())
-        },
+        |hasher, (i, shard)| (i, hasher.update(shard).finalize()),
     ) {
         shard_digests[i] = Some(digest);
     }
