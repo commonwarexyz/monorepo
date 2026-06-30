@@ -30,7 +30,7 @@ use commonware_storage::{
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         current::{
-            batch::{MerkleizedBatch, UnmerkleizedBatch, UpdateMany as BatchUpdateMany},
+            batch::{MerkleizedBatch, Staged as BatchStaged, UnmerkleizedBatch},
             db::Db,
             FixedConfig, VariableConfig,
         },
@@ -64,8 +64,8 @@ where
     metadata: Option<U::Value>,
 }
 
-/// Staged update for a [`CurrentUnmerkleized`] batch.
-pub struct CurrentUpdateMany<F, E, C, I, H, U, const N: usize, S>
+/// Staged batch for a [`CurrentUnmerkleized`] batch.
+pub struct CurrentStaged<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
     E: Storage + Clock + Metrics,
@@ -76,7 +76,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    update: BatchUpdateMany<F, H, U, N, S>,
+    staged: BatchStaged<F, H, U, N, S>,
     db: CurrentDbHandle<F, E, C, I, H, U, N, S>,
     metadata: Option<U::Value>,
 }
@@ -116,14 +116,14 @@ where
         self.batch.get_many(keys, &*db).await
     }
 
-    /// Read multiple values and return a staged updater for the same keys.
+    /// Read multiple values and return a staged batch for the same keys.
     pub async fn get_many_staged(
         self,
         keys: &[&K],
     ) -> Result<
         (
             Vec<Option<V::Value>>,
-            CurrentUpdateMany<F, E, C, I, H, unordered::Update<K, V>, N, S>,
+            CurrentStaged<F, E, C, I, H, unordered::Update<K, V>, N, S>,
         ),
         Error<F>,
     > {
@@ -133,12 +133,12 @@ where
             metadata,
         } = self;
         let guard = db.read().await;
-        let (values, update) = batch.get_many_staged(keys, &*guard).await?;
+        let (values, staged) = batch.get_many_staged(keys, &*guard).await?;
         drop(guard);
         Ok((
             values,
-            CurrentUpdateMany {
-                update,
+            CurrentStaged {
+                staged,
                 db,
                 metadata,
             },
@@ -205,7 +205,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> CurrentUpdateMany<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> CurrentStaged<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
     E: Storage + Clock + Metrics,
@@ -216,13 +216,14 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Record updates for keys returned by `get_many_staged`.
-    pub fn update_many(
+    /// Record upserts for unread keys and updates for staged reads.
+    pub fn set(
         self,
+        new: &[(U::Key, U::Value)],
         updates: &[(usize, U::Value)],
     ) -> CurrentUnmerkleized<F, E, C, I, H, U, N, S> {
         CurrentUnmerkleized {
-            batch: self.update.update_many(updates),
+            batch: self.staged.set(new, updates),
             db: self.db,
             metadata: self.metadata,
         }
@@ -264,14 +265,14 @@ where
         self.batch.get_many(keys, &*db).await
     }
 
-    /// Read multiple values and return a staged updater for the same keys.
+    /// Read multiple values and return a staged batch for the same keys.
     pub async fn get_many_staged(
         self,
         keys: &[&K],
     ) -> Result<
         (
             Vec<Option<V::Value>>,
-            CurrentUpdateMany<F, E, C, I, H, ordered::Update<K, V>, N, S>,
+            CurrentStaged<F, E, C, I, H, ordered::Update<K, V>, N, S>,
         ),
         Error<F>,
     > {
@@ -281,12 +282,12 @@ where
             metadata,
         } = self;
         let guard = db.read().await;
-        let (values, update) = batch.get_many_staged(keys, &*guard).await?;
+        let (values, staged) = batch.get_many_staged(keys, &*guard).await?;
         drop(guard);
         Ok((
             values,
-            CurrentUpdateMany {
-                update,
+            CurrentStaged {
+                staged,
                 db,
                 metadata,
             },

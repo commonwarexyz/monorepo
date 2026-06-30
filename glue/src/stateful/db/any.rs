@@ -24,7 +24,7 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         any::{
-            batch::{MerkleizedBatch, UnmerkleizedBatch, UpdateMany as BatchUpdateMany},
+            batch::{MerkleizedBatch, Staged as BatchStaged, UnmerkleizedBatch},
             db::Db,
             operation::{Operation, Update},
             ordered, unordered,
@@ -64,8 +64,8 @@ where
     metadata: Option<U::Value>,
 }
 
-/// Staged update for an [`AnyUnmerkleized`] batch.
-pub struct AnyUpdateMany<F, E, C, I, H, U, S>
+/// Staged batch for an [`AnyUnmerkleized`] batch.
+pub struct AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,
     E: Storage + Clock + Metrics,
@@ -76,7 +76,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    update: BatchUpdateMany<F, H, U, S>,
+    staged: BatchStaged<F, H, U, S>,
     db: AnyDbHandle<F, E, C, I, H, U, S>,
     metadata: Option<U::Value>,
 }
@@ -115,24 +115,29 @@ where
         self.batch.get_many(keys, &*db).await
     }
 
-    /// Read multiple values and return a staged updater for the same keys.
+    /// Read multiple values and return a staged batch for the same keys.
     pub async fn get_many_staged(
         self,
         keys: &[&K],
-    ) -> Result<(Vec<Option<V::Value>>, AnyUpdateMany<F, E, C, I, H, unordered::Update<K, V>, S>), Error<F>>
-    {
+    ) -> Result<
+        (
+            Vec<Option<V::Value>>,
+            AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>,
+        ),
+        Error<F>,
+    > {
         let Self {
             batch,
             db,
             metadata,
         } = self;
         let guard = db.read().await;
-        let (values, update) = batch.get_many_staged(keys, &*guard).await?;
+        let (values, staged) = batch.get_many_staged(keys, &*guard).await?;
         drop(guard);
         Ok((
             values,
-            AnyUpdateMany {
-                update,
+            AnyStaged {
+                staged,
                 db,
                 metadata,
             },
@@ -199,7 +204,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, S> AnyUpdateMany<F, E, C, I, H, U, S>
+impl<F, E, C, I, H, U, S> AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,
     E: Storage + Clock + Metrics,
@@ -210,10 +215,14 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Record updates for keys returned by `get_many_staged`.
-    pub fn update_many(self, updates: &[(usize, U::Value)]) -> AnyUnmerkleized<F, E, C, I, H, U, S> {
+    /// Record upserts for unread keys and updates for staged reads.
+    pub fn set(
+        self,
+        new: &[(U::Key, U::Value)],
+        updates: &[(usize, U::Value)],
+    ) -> AnyUnmerkleized<F, E, C, I, H, U, S> {
         AnyUnmerkleized {
-            batch: self.update.update_many(updates),
+            batch: self.staged.set(new, updates),
             db: self.db,
             metadata: self.metadata,
         }
@@ -254,24 +263,29 @@ where
         self.batch.get_many(keys, &*db).await
     }
 
-    /// Read multiple values and return a staged updater for the same keys.
+    /// Read multiple values and return a staged batch for the same keys.
     pub async fn get_many_staged(
         self,
         keys: &[&K],
-    ) -> Result<(Vec<Option<V::Value>>, AnyUpdateMany<F, E, C, I, H, ordered::Update<K, V>, S>), Error<F>>
-    {
+    ) -> Result<
+        (
+            Vec<Option<V::Value>>,
+            AnyStaged<F, E, C, I, H, ordered::Update<K, V>, S>,
+        ),
+        Error<F>,
+    > {
         let Self {
             batch,
             db,
             metadata,
         } = self;
         let guard = db.read().await;
-        let (values, update) = batch.get_many_staged(keys, &*guard).await?;
+        let (values, staged) = batch.get_many_staged(keys, &*guard).await?;
         drop(guard);
         Ok((
             values,
-            AnyUpdateMany {
-                update,
+            AnyStaged {
+                staged,
                 db,
                 metadata,
             },

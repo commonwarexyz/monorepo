@@ -13,7 +13,7 @@ use crate::{
         self,
         any::{
             self,
-            batch::{DiffCursors, DiffEntry, UpdateMany as AnyUpdateMany},
+            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
             operation::{update, Operation},
             ValueEncoding,
         },
@@ -273,15 +273,15 @@ where
     bitmap_parent: BitmapBatch<N>,
 }
 
-/// Staged update returned by [`UnmerkleizedBatch::get_many_staged`].
-pub struct UpdateMany<F, H, U, const N: usize, S: Strategy>
+/// Staged batch returned by [`UnmerkleizedBatch::get_many_staged`].
+pub struct Staged<F, H, U, const N: usize, S: Strategy>
 where
     F: Graftable,
     U: update::Update + Send + Sync,
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    inner: AnyUpdateMany<F, H, U, S>,
+    inner: AnyStaged<F, H, U, S>,
     grafted_parent: Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: BitmapBatch<N>,
 }
@@ -372,20 +372,23 @@ where
         self.inner = self.inner.write(key, value);
         self
     }
-
 }
 
-impl<F, H, U, const N: usize, S: Strategy> UpdateMany<F, H, U, N, S>
+impl<F, H, U, const N: usize, S: Strategy> Staged<F, H, U, N, S>
 where
     F: Graftable,
     U: update::Update + Send + Sync,
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Record updates for keys returned by `get_many_staged`.
-    pub fn update_many(self, updates: &[(usize, U::Value)]) -> UnmerkleizedBatch<F, H, U, N, S> {
+    /// Record upserts for unread keys and updates for staged reads.
+    pub fn set(
+        self,
+        new: &[(U::Key, U::Value)],
+        updates: &[(usize, U::Value)],
+    ) -> UnmerkleizedBatch<F, H, U, N, S> {
         UnmerkleizedBatch {
-            inner: self.inner.update_many(updates),
+            inner: self.inner.set(new, updates),
             grafted_parent: self.grafted_parent,
             bitmap_parent: self.bitmap_parent,
         }
@@ -431,12 +434,18 @@ where
         self.inner.get_many(keys, &db.any).await
     }
 
-    /// Batch read multiple keys and return a staged updater for the same keys.
+    /// Batch read multiple keys and return a staged batch for the same keys.
     pub async fn get_many_staged<E, C, I>(
         self,
         keys: &[&K],
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-    ) -> Result<(Vec<Option<V::Value>>, UpdateMany<F, H, update::Unordered<K, V>, N, S>), Error<F>>
+    ) -> Result<
+        (
+            Vec<Option<V::Value>>,
+            Staged<F, H, update::Unordered<K, V>, N, S>,
+        ),
+        Error<F>,
+    >
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -450,7 +459,7 @@ where
         let (values, inner) = inner.get_many_staged(keys, &db.any).await?;
         Ok((
             values,
-            UpdateMany {
+            Staged {
                 inner,
                 grafted_parent,
                 bitmap_parent,
@@ -529,12 +538,18 @@ where
         self.inner.get_many(keys, &db.any).await
     }
 
-    /// Batch read multiple keys and return a staged updater for the same keys.
+    /// Batch read multiple keys and return a staged batch for the same keys.
     pub async fn get_many_staged<E, C, I>(
         self,
         keys: &[&K],
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-    ) -> Result<(Vec<Option<V::Value>>, UpdateMany<F, H, update::Ordered<K, V>, N, S>), Error<F>>
+    ) -> Result<
+        (
+            Vec<Option<V::Value>>,
+            Staged<F, H, update::Ordered<K, V>, N, S>,
+        ),
+        Error<F>,
+    >
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -548,7 +563,7 @@ where
         let (values, inner) = inner.get_many_staged(keys, &db.any).await?;
         Ok((
             values,
-            UpdateMany {
+            Staged {
                 inner,
                 grafted_parent,
                 bitmap_parent,
