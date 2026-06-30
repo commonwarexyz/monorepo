@@ -223,23 +223,22 @@ macro_rules! run_pipeline {
 
             let muts = gen_muts(&mut rng, args.num_updates, args.num_keys);
             let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
+            let update_values: Vec<_> = muts.iter().map(|(_, v)| *v).collect();
             let new_batch = || {
                 chain
                     .last()
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 
-            // Timed: load all touched keys, write them, merkleize, read root. Reads cache
-            // resolved locations on the batch (consumed by unordered merkleize); load and
-            // writes must share one batch for that caching to apply.
+            // Timed: load all touched keys, write them, merkleize, read root. The load returns a
+            // staged updater that consumes values in the same order after the caller has computed
+            // them.
             let start = Instant::now();
-            let mut b = new_batch();
-            let values = b.get_many(&keys, &db).await.unwrap();
+            let b = new_batch();
+            let (values, update) = b.get_many_staged(&keys, &db).await.unwrap();
             black_box(&values);
             let t_load = start.elapsed();
-            for (k, v) in &muts {
-                b = b.write(*k, Some(*v));
-            }
+            let b = update.update_many(&update_values);
             let t_write = start.elapsed();
             let merkleized = b.merkleize(&db, None).await.unwrap();
             let root = merkleized.root();

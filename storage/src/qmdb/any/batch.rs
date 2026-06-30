@@ -26,7 +26,7 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap, sync::Mutex};
+use commonware_utils::bitmap;
 use core::{cmp::Ordering, ops::Range};
 use std::{
     collections::BTreeMap,
@@ -47,9 +47,30 @@ type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 /// mutations, and cache-resolved keys are always in `updated`.
 type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
-/// Committed-DB locations cached by a batch's reads, keyed by the resolved key.
-type ResolvedReads<F, U> =
-    AHashMap<<U as update::Update>::Key, (Location<F>, <U as update::Update>::Cached)>;
+type CachedUpdates<F, U> = Vec<(
+    <U as update::Update>::Key,
+    Location<F>,
+    <U as update::Update>::Cached,
+    <U as update::Update>::Value,
+)>;
+
+struct Staged<F: Family, U: update::Update> {
+    cached: Vec<(usize, Location<F>, U::Cached)>,
+}
+
+/// Staged update returned by [`UnmerkleizedBatch::get_many_staged`].
+///
+/// Owns the batch and its read cache, so the cache cannot be paired with a different batch.
+pub struct UpdateMany<F: Family, H, U: update::Update, S: Strategy>
+where
+    U: update::Update + Send + Sync,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    batch: UnmerkleizedBatch<F, H, U, S>,
+    keys: Vec<U::Key>,
+    cache: Staged<F, U>,
+}
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
@@ -188,21 +209,11 @@ where
     /// The committed DB or parent batch this batch was created from.
     base: Base<F, H::Digest, U, S>,
 
-    /// Committed-DB locations cached by this batch's reads (`get`/`get_many`), keyed by the
-    /// key they matched. Consumed by `merkleize`: when a mutation key is present here,
-    /// `merkleize` reuses the location (and, for ordered, the old next key) and skips the
-    /// redundant index probe and journal read.
-    ///
-    /// Only committed-snapshot resolutions are cached. A cached location doubles as the
-    /// key's previous committed location (`base_old_loc`), which holds because a
-    /// committed-resolved key was in no live ancestor diff and a legal intervening commit
-    /// (applying this batch's own ancestors) can only relocate keys present in an ancestor
-    /// diff. Ancestor-diff resolutions are never cached: their op-gen position is an
-    /// uncommitted location, and re-resolving them at merkleize is in-memory work (no journal
-    /// read is saved).
-    ///
-    /// Interior-mutable because reads take `&self`; never held across an await.
-    resolved: Mutex<ResolvedReads<F, U>>,
+    /// Resolved updates materialized directly by bulk load/update paths.
+    cached_updates: CachedUpdates<F, U>,
+
+    /// Whether `cached_updates` is sorted by committed location.
+    cached_updates_sorted: bool,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -921,13 +932,28 @@ where
     /// If the same key is written multiple times within a batch, the last
     /// value wins.
     pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
+        if let Some(idx) = self
+            .cached_updates
+            .iter()
+            .position(|(cached_key, ..)| cached_key == &key)
+        {
+            self.cached_updates.swap_remove(idx);
+            self.cached_updates_sorted = false;
+        }
         self.mutations.insert(key, value);
         self
     }
 
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
-    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
+    fn into_parts(
+        self,
+    ) -> (
+        BTreeMap<U::Key, Option<U::Value>>,
+        CachedUpdates<F, U>,
+        bool,
+        Merkleizer<F, H, U, S>,
+    ) {
         let ancestors: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
             let mut v = vec![Arc::clone(parent)];
             v.extend(parent.ancestors());
@@ -946,6 +972,8 @@ where
         });
         (
             self.mutations,
+            self.cached_updates,
+            self.cached_updates_sorted,
             Merkleizer {
                 journal_batch: self.journal_batch,
                 ancestors,
@@ -955,6 +983,100 @@ where
                 base_active_keys: self.base.active_keys(),
             },
         )
+    }
+}
+
+impl<F: Family, H, U, S: Strategy> UpdateMany<F, H, U, S>
+where
+    U: update::Update + Send + Sync,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Record values for the keys returned by `get_many_staged`.
+    ///
+    /// Duplicate keys retain last-write-wins semantics according to the read order.
+    pub fn update_many(mut self, values: &[U::Value]) -> UnmerkleizedBatch<F, H, U, S> {
+        assert_eq!(
+            self.keys.len(),
+            values.len(),
+            "updates must match loaded key count"
+        );
+
+        if self.batch.mutations.is_empty()
+            && self.batch.cached_updates.is_empty()
+            && self.cache.cached.len() == values.len()
+            && self.cache.cached.windows(2).all(|pair| pair[0].1 != pair[1].1)
+        {
+            self.batch.cached_updates.reserve(self.cache.cached.len());
+            for (slot, loc, payload) in self.cache.cached {
+                self.batch.cached_updates.push((
+                    self.keys[slot].clone(),
+                    loc,
+                    payload,
+                    values[slot].clone(),
+                ));
+            }
+            self.batch.cached_updates_sorted = true;
+            return self.batch;
+        }
+
+        let mut latest = None;
+        let mut seen = AHashMap::with_capacity(self.keys.len());
+        for (idx, key) in self.keys.iter().enumerate() {
+            if let Some(prev) = seen.insert(key, idx) {
+                let latest = latest.get_or_insert_with(|| vec![true; self.keys.len()]);
+                latest[prev] = false;
+            }
+        }
+        let is_latest =
+            |idx| latest.as_ref().is_none_or(|latest: &Vec<bool>| latest[idx]);
+
+        if !self.batch.mutations.is_empty() {
+            for (idx, key) in self.keys.iter().enumerate() {
+                if is_latest(idx) {
+                    self.batch.mutations.remove(key);
+                }
+            }
+        }
+        if !self.batch.cached_updates.is_empty() {
+            let mut keys = AHashSet::with_capacity(self.keys.len());
+            for (idx, key) in self.keys.iter().enumerate() {
+                if is_latest(idx) {
+                    keys.insert(key);
+                }
+            }
+            self.batch
+                .cached_updates
+                .retain(|(key, ..)| !keys.contains(key));
+            self.batch.cached_updates_sorted = false;
+        }
+
+        let had_cached = !self.batch.cached_updates.is_empty();
+        let mut cached_slots = vec![false; self.keys.len()];
+        self.batch
+            .cached_updates
+            .reserve(self.cache.cached.len());
+        for (slot, loc, payload) in self.cache.cached {
+            if !is_latest(slot) {
+                continue;
+            }
+            cached_slots[slot] = true;
+            self.batch.cached_updates.push((
+                self.keys[slot].clone(),
+                loc,
+                payload,
+                values[slot].clone(),
+            ));
+        }
+        for (slot, cached) in cached_slots.into_iter().enumerate() {
+            if !cached && is_latest(slot) {
+                self.batch
+                    .mutations
+                    .insert(self.keys[slot].clone(), Some(values[slot].clone()));
+            }
+        }
+        self.batch.cached_updates_sorted = self.batch.cached_updates_sorted && !had_cached;
+        self.batch
     }
 }
 
@@ -983,8 +1105,7 @@ where
     /// Batch read multiple keys (mutations -> ancestor diffs -> committed DB).
     ///
     /// Returns results in the same order as the input keys, with `None` for absent or deleted
-    /// keys. Each unique read resolved from the committed DB is cached on the batch for reuse
-    /// at merkleize.
+    /// keys.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -1039,22 +1160,108 @@ where
         }
 
         if !db_keys.is_empty() {
+            let db_results = db.get_many(&db_keys).await?;
+            for (slot, result) in db_indices.into_iter().zip(db_results) {
+                results[slot] = result;
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Batch read multiple keys and return a staged updater for the same keys.
+    ///
+    /// Returns results in the same order as the input keys. The staged updater consumes values in
+    /// that same order.
+    pub async fn get_many_staged<E, C, I, const N: usize>(
+        self,
+        keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<(Vec<Option<U::Value>>, UpdateMany<F, H, U, S>), crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        if keys.is_empty() {
+            return Ok((
+                Vec::new(),
+                UpdateMany {
+                    batch: self,
+                    keys: Vec::new(),
+                    cache: Staged { cached: Vec::new() },
+                },
+            ));
+        }
+
+        let mut results: Vec<Option<U::Value>> = Vec::with_capacity(keys.len());
+        let mut db_indices = Vec::new();
+        let mut db_keys = Vec::new();
+
+        for (i, key) in keys.iter().enumerate() {
+            // Check local mutations.
+            if let Some(value) = self.mutations.get(*key) {
+                results.push(value.clone());
+                continue;
+            }
+
+            // Check parent diff chain.
+            let mut found = false;
+            if let Some(parent) = self.base.parent() {
+                if let Some(entry) = lookup_sorted(parent.diff.as_slice(), *key) {
+                    results.push(entry.value().cloned());
+                    found = true;
+                }
+                if !found {
+                    for batch in parent.ancestors() {
+                        if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                            results.push(entry.value().cloned());
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if found {
+                continue;
+            }
+
+            // Need DB fallthrough.
+            db_indices.push(i);
+            db_keys.push(*key);
+            results.push(None);
+        }
+
+        let mut cache = Staged {
+            cached: Vec::new(),
+        };
+        if !db_keys.is_empty() {
             let db_results = db
                 .get_many_map(&db_keys, |data, loc| {
                     (data.value().clone(), loc, data.cached())
                 })
                 .await?;
-            let mut resolved = self.resolved.lock();
-            resolved.reserve(db_keys.len());
+            cache.cached.reserve(db_keys.len());
             for (slot, result) in db_indices.into_iter().zip(db_results) {
                 results[slot] = result.map(|(value, loc, cached)| {
-                    resolved.insert((*keys[slot]).clone(), (loc, cached));
+                    cache.cached.push((slot, loc, cached));
                     value
                 });
             }
+            if !cache.cached.is_empty() {
+                db.strategy().sort_by(&mut cache.cached, |a, b| a.1.cmp(&b.1));
+            }
         }
 
-        Ok(results)
+        Ok((
+            results,
+            UpdateMany {
+                batch: self,
+                keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+                cache,
+            },
+        ))
     }
 }
 
@@ -1110,29 +1317,14 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let mut resolved = core::mem::take(&mut *self.resolved.lock());
-        let (mut mutations, m) = self.into_parts();
-
-        // Pull mutations whose committed location this batch's reads already resolved. They
-        // skip the journal re-read and are emitted at their cached location by the merge
-        // below, exactly where the read path would have emitted them.
-        //
-        // The join drains `mutations` (sorted streaming) and probes `resolved` per key: a
-        // hash probe is much cheaper than the tree descent the inverse join would pay, and
-        // rebuilding the unconsumed remainder from a sorted stream is a linear bulk build.
+        let (mut mutations, cached_updates, cached_updates_sorted, m) = self.into_parts();
         let mut cached: Vec<(K, Location<F>, Option<V::Value>)> =
-            Vec::with_capacity(resolved.len().min(mutations.len()));
-        if !resolved.is_empty() {
-            mutations = mutations
-                .into_iter()
-                .filter_map(|(key, mutation)| match resolved.remove(&key) {
-                    Some((loc, ())) => {
-                        cached.push((key, loc, mutation));
-                        None
-                    }
-                    None => Some((key, mutation)),
-                })
-                .collect();
+            Vec::with_capacity(cached_updates.len());
+        for (key, loc, (), value) in cached_updates {
+            cached.push((key, loc, Some(value)));
+        }
+
+        if !cached.is_empty() && !cached_updates_sorted {
             db.strategy().sort_by(&mut cached, |a, b| a.1.cmp(&b.1));
         }
 
@@ -1175,10 +1367,9 @@ where
             user_steps += 1;
         };
 
-        // Process updates/deletes of existing keys in location order, merging cached
-        // entries into the read-resolved stream so the operation order matches the
-        // read-only path. This includes keys from both the committed snapshot and
-        // ancestor diffs.
+        // Process updates/deletes of existing keys in location order, merging cached entries
+        // into the read results. This includes keys from both the committed snapshot and ancestor
+        // diffs.
         let mut cached = cached.into_iter().peekable();
         for (op, &old_loc) in results.iter().zip(&locations) {
             while cached.peek().is_some_and(|&(_, loc, _)| loc < old_loc) {
@@ -1323,33 +1514,14 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let mut resolved = core::mem::take(&mut *self.resolved.lock());
-        let (mut mutations, m) = self.into_parts();
+        let (mut mutations, cached_updates, _cached_updates_sorted, m) = self.into_parts();
 
-        // Pull update mutations whose committed op this batch's reads already resolved: they
-        // skip the index probe and journal re-read, and their old op's next key feeds the
-        // candidate sets directly. Deletes never consume the cache: a deleted key's
-        // predecessor may be a colliding key in its snapshot bucket, so that bucket must be
-        // scanned regardless.
-        //
-        // The join drains `mutations` (sorted streaming) and probes `resolved` per key: a
-        // hash probe is much cheaper than the tree descent the inverse join would pay, and
-        // rebuilding the unconsumed remainder from a sorted stream is a linear bulk build.
-        // As a bonus, `cached` comes out key-sorted, so the candidate sorts below see
-        // mostly-sorted input.
+        // Cached updates skip the index probe and journal re-read, and their old op's next key
+        // feeds the candidate sets directly.
         let mut cached: Vec<(K, V::Value, Location<F>, K)> =
-            Vec::with_capacity(resolved.len().min(mutations.len()));
-        if !resolved.is_empty() {
-            mutations = mutations
-                .into_iter()
-                .filter_map(|(key, mutation)| match (resolved.remove(&key), mutation) {
-                    (Some((loc, old_next)), Some(value)) => {
-                        cached.push((key, value, loc, old_next));
-                        None
-                    }
-                    (_, mutation) => Some((key, mutation)),
-                })
-                .collect();
+            Vec::with_capacity(cached_updates.len());
+        for (key, loc, old_next, value) in cached_updates {
+            cached.push((key, value, loc, old_next));
         }
 
         // Resolve existing keys.
@@ -1751,7 +1923,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             base: Base::Child(Arc::clone(self)),
-            resolved: Mutex::new(AHashMap::new()),
+            cached_updates: Vec::new(),
+            cached_updates_sorted: true,
         }
     }
 
@@ -1873,7 +2046,8 @@ where
                 inactivity_floor_loc: self.inactivity_floor_loc,
                 active_keys: self.active_keys,
             },
-            resolved: Mutex::new(AHashMap::new()),
+            cached_updates: Vec::new(),
+            cached_updates_sorted: true,
         }
     }
 }
@@ -2765,6 +2939,160 @@ mod tests {
     }
 
     #[test]
+    fn unordered_bulk_update_paths_match_explicit_writes() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("unordered-bulk-load-update", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+
+            let k0 = colliding_digest(0x40, 0);
+            let k1 = colliding_digest(0x40, 1);
+            let k2 = colliding_digest(0x41, 0);
+            let missing = colliding_digest(0x40, 9);
+            let v0 = colliding_digest(0x50, 0);
+            let v1 = colliding_digest(0x50, 1);
+            let v2 = colliding_digest(0x51, 0);
+
+            let seed = db
+                .new_batch()
+                .write(k0, Some(v0))
+                .write(k1, Some(v1))
+                .write(k2, Some(v2))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            let updates = vec![
+                (k0, colliding_digest(0x60, 0)),
+                (missing, colliding_digest(0x60, 1)),
+                (k1, colliding_digest(0x60, 2)),
+                (k0, colliding_digest(0x60, 3)),
+                (missing, colliding_digest(0x60, 4)),
+                (k2, colliding_digest(0x60, 5)),
+            ];
+            let keys: Vec<_> = updates.iter().map(|(key, _)| key).collect();
+            let update_values: Vec<_> = updates.iter().map(|(_, value)| *value).collect();
+
+            let mut explicit = db.new_batch();
+            let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
+            for (key, value) in &updates {
+                explicit = explicit.write(*key, Some(*value));
+            }
+            let explicit = explicit.merkleize(&db, None).await.unwrap();
+
+            let cached_token = db.new_batch();
+            let (cached_token_values, update) =
+                cached_token.get_many_staged(&keys, &db).await.unwrap();
+            let cached_token = update.update_many(&update_values);
+            let cached_token = cached_token.merkleize(&db, None).await.unwrap();
+
+            assert_eq!(
+                explicit_values,
+                vec![Some(v0), None, Some(v1), Some(v0), None, Some(v2)]
+            );
+            assert_eq!(explicit_values, cached_token_values);
+            assert_eq!(explicit.root(), cached_token.root());
+
+            db.apply_batch(cached_token).await.unwrap();
+            assert_eq!(db.get(&k0).await.unwrap(), Some(updates[3].1));
+            assert_eq!(db.get(&missing).await.unwrap(), Some(updates[4].1));
+            assert_eq!(db.get(&k1).await.unwrap(), Some(updates[2].1));
+            assert_eq!(db.get(&k2).await.unwrap(), Some(updates[5].1));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn ordered_bulk_update_paths_match_explicit_writes() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-bulk-load-update", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+
+            let k0 = colliding_digest(0x42, 0);
+            let k1 = colliding_digest(0x42, 1);
+            let k2 = colliding_digest(0x43, 0);
+            let missing = colliding_digest(0x42, 9);
+            let v0 = colliding_digest(0x52, 0);
+            let v1 = colliding_digest(0x52, 1);
+            let v2 = colliding_digest(0x53, 0);
+
+            let seed = db
+                .new_batch()
+                .write(k0, Some(v0))
+                .write(k1, Some(v1))
+                .write(k2, Some(v2))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            let updates = vec![
+                (k0, colliding_digest(0x62, 0)),
+                (missing, colliding_digest(0x62, 1)),
+                (k1, colliding_digest(0x62, 2)),
+                (k0, colliding_digest(0x62, 3)),
+                (missing, colliding_digest(0x62, 4)),
+                (k2, colliding_digest(0x62, 5)),
+            ];
+            let keys: Vec<_> = updates.iter().map(|(key, _)| key).collect();
+            let update_values: Vec<_> = updates.iter().map(|(_, value)| *value).collect();
+
+            let mut explicit = db.new_batch();
+            let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
+            for (key, value) in &updates {
+                explicit = explicit.write(*key, Some(*value));
+            }
+            let explicit = explicit.merkleize(&db, None).await.unwrap();
+
+            let cached_token = db.new_batch();
+            let (cached_token_values, update) =
+                cached_token.get_many_staged(&keys, &db).await.unwrap();
+            let cached_token = update.update_many(&update_values);
+            let cached_token = cached_token.merkleize(&db, None).await.unwrap();
+
+            assert_eq!(
+                explicit_values,
+                vec![Some(v0), None, Some(v1), Some(v0), None, Some(v2)]
+            );
+            assert_eq!(explicit_values, cached_token_values);
+            assert_eq!(explicit.root(), cached_token.root());
+
+            db.apply_batch(cached_token).await.unwrap();
+            assert_eq!(db.get(&k0).await.unwrap(), Some(updates[3].1));
+            assert_eq!(db.get(&missing).await.unwrap(), Some(updates[4].1));
+            assert_eq!(db.get(&k1).await.unwrap(), Some(updates[2].1));
+            assert_eq!(db.get(&k2).await.unwrap(), Some(updates[5].1));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
     fn read_ops_resolves_committed_ancestor_and_current_sources() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
@@ -2816,7 +3144,9 @@ mod tests {
             let child = parent
                 .new_batch::<Sha256>()
                 .write(key_current, Some(value_current));
-            let (_mutations, merkleizer) = child.into_parts();
+            let (_mutations, cached_updates, _cached_updates_sorted, merkleizer) =
+                child.into_parts();
+            assert!(cached_updates.is_empty());
 
             let current_loc = Location::new(merkleizer.base_size);
             let batch_ops = vec![Operation::Update(update::Unordered(

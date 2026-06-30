@@ -30,7 +30,7 @@ use commonware_storage::{
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         current::{
-            batch::{MerkleizedBatch, UnmerkleizedBatch},
+            batch::{MerkleizedBatch, UnmerkleizedBatch, UpdateMany as BatchUpdateMany},
             db::Db,
             FixedConfig, VariableConfig,
         },
@@ -60,6 +60,23 @@ where
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, N, S>,
+    db: CurrentDbHandle<F, E, C, I, H, U, N, S>,
+    metadata: Option<U::Value>,
+}
+
+/// Staged update for a [`CurrentUnmerkleized`] batch.
+pub struct CurrentUpdateMany<F, E, C, I, H, U, const N: usize, S>
+where
+    F: Graftable,
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    update: BatchUpdateMany<F, H, U, N, S>,
     db: CurrentDbHandle<F, E, C, I, H, U, N, S>,
     metadata: Option<U::Value>,
 }
@@ -100,11 +117,41 @@ where
         self.batch.get_many(keys, &*db).await
     }
 
+    /// Read multiple values and return a staged updater for the same keys.
+    pub async fn get_many_staged(
+        self,
+        keys: &[&K],
+    ) -> Result<
+        (
+            Vec<Option<V::Value>>,
+            CurrentUpdateMany<F, E, C, I, H, unordered::Update<K, V>, N, S>,
+        ),
+        Error<F>,
+    > {
+        let Self {
+            batch,
+            db,
+            metadata,
+        } = self;
+        let guard = db.read().await;
+        let (values, update) = batch.get_many_staged(keys, &*guard).await?;
+        drop(guard);
+        Ok((
+            values,
+            CurrentUpdateMany {
+                update,
+                db,
+                metadata,
+            },
+        ))
+    }
+
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.
     pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
     }
+
 }
 
 /// Wraps a QMDB [`MerkleizedBatch`] with a reference to the parent
@@ -160,6 +207,27 @@ where
     }
 }
 
+impl<F, E, C, I, H, U, const N: usize, S> CurrentUpdateMany<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Record values for the keys returned by `get_many_staged`.
+    pub fn update_many(self, values: &[U::Value]) -> CurrentUnmerkleized<F, E, C, I, H, U, N, S> {
+        CurrentUnmerkleized {
+            batch: self.update.update_many(values),
+            db: self.db,
+            metadata: self.metadata,
+        }
+    }
+}
+
 /// Key-value operations for the `current` ordered update kind.
 impl<F, E, C, I, H, K, V, const N: usize, S>
     CurrentUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>
@@ -195,11 +263,41 @@ where
         self.batch.get_many(keys, &*db).await
     }
 
+    /// Read multiple values and return a staged updater for the same keys.
+    pub async fn get_many_staged(
+        self,
+        keys: &[&K],
+    ) -> Result<
+        (
+            Vec<Option<V::Value>>,
+            CurrentUpdateMany<F, E, C, I, H, ordered::Update<K, V>, N, S>,
+        ),
+        Error<F>,
+    > {
+        let Self {
+            batch,
+            db,
+            metadata,
+        } = self;
+        let guard = db.read().await;
+        let (values, update) = batch.get_many_staged(keys, &*guard).await?;
+        drop(guard);
+        Ok((
+            values,
+            CurrentUpdateMany {
+                update,
+                db,
+                metadata,
+            },
+        ))
+    }
+
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.
     pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
     }
+
 }
 
 /// Read-through operations for the `current` merkleized batch.

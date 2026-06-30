@@ -171,11 +171,10 @@ pub mod test {
         });
     }
 
-    /// Reads on a batch cache resolved locations that `merkleize` consumes to skip re-reading
-    /// those keys. The root must match a write-only batch's `merkleize`, both rooted at the DB
-    /// (D=0) and through one pending ancestor (D=1).
+    /// Reads on a batch must not perturb `merkleize`: the root must match a write-only batch's
+    /// `merkleize`, both rooted at the DB (D=0) and through one pending ancestor (D=1).
     #[test_traced("WARN")]
-    pub fn test_current_unordered_fixed_resolved_merkleize_parity() {
+    pub fn test_current_unordered_fixed_read_merkleize_parity() {
         fn key(i: u64) -> Digest {
             Sha256::hash(&i.to_be_bytes())
         }

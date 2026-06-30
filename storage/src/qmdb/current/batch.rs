@@ -13,7 +13,7 @@ use crate::{
         self,
         any::{
             self,
-            batch::{DiffCursors, DiffEntry},
+            batch::{DiffCursors, DiffEntry, UpdateMany as AnyUpdateMany},
             operation::{update, Operation},
             ValueEncoding,
         },
@@ -273,6 +273,19 @@ where
     bitmap_parent: BitmapBatch<N>,
 }
 
+/// Staged update returned by [`UnmerkleizedBatch::get_many_staged`].
+pub struct UpdateMany<F, H, U, const N: usize, S: Strategy>
+where
+    F: Graftable,
+    U: update::Update + Send + Sync,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    inner: AnyUpdateMany<F, H, U, S>,
+    grafted_parent: Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
+    bitmap_parent: BitmapBatch<N>,
+}
+
 /// A speculative batch of operations whose root digest has been computed, in contrast to
 /// [`UnmerkleizedBatch`].
 ///
@@ -359,6 +372,24 @@ where
         self.inner = self.inner.write(key, value);
         self
     }
+
+}
+
+impl<F, H, U, const N: usize, S: Strategy> UpdateMany<F, H, U, N, S>
+where
+    F: Graftable,
+    U: update::Update + Send + Sync,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Record values for the keys returned by `get_many_staged`.
+    pub fn update_many(self, values: &[U::Value]) -> UnmerkleizedBatch<F, H, U, N, S> {
+        UnmerkleizedBatch {
+            inner: self.inner.update_many(values),
+            grafted_parent: self.grafted_parent,
+            bitmap_parent: self.bitmap_parent,
+        }
+    }
 }
 
 // Unordered get + merkleize.
@@ -386,9 +417,7 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys. Committed-DB locations resolved by
-    /// the read are cached on the batch and consumed by [`merkleize`](Self::merkleize), which
-    /// skips re-reading those keys.
+    /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, I>(
         &self,
         keys: &[&K],
@@ -400,6 +429,33 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
         self.inner.get_many(keys, &db.any).await
+    }
+
+    /// Batch read multiple keys and return a staged updater for the same keys.
+    pub async fn get_many_staged<E, C, I>(
+        self,
+        keys: &[&K],
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+    ) -> Result<(Vec<Option<V::Value>>, UpdateMany<F, H, update::Unordered<K, V>, N, S>), Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        let (values, inner) = inner.get_many_staged(keys, &db.any).await?;
+        Ok((
+            values,
+            UpdateMany {
+                inner,
+                grafted_parent,
+                bitmap_parent,
+            },
+        ))
     }
 
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
@@ -471,6 +527,33 @@ where
         I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
         self.inner.get_many(keys, &db.any).await
+    }
+
+    /// Batch read multiple keys and return a staged updater for the same keys.
+    pub async fn get_many_staged<E, C, I>(
+        self,
+        keys: &[&K],
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<(Vec<Option<V::Value>>, UpdateMany<F, H, update::Ordered<K, V>, N, S>), Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        let (values, inner) = inner.get_many_staged(keys, &db.any).await?;
+        Ok((
+            values,
+            UpdateMany {
+                inner,
+                grafted_parent,
+                bitmap_parent,
+            },
+        ))
     }
 
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.

@@ -261,7 +261,7 @@ pub(crate) mod test {
     /// write-only batch's `merkleize` across updates/deletes/creates, both with the batch
     /// rooted directly at the DB (D=0) and through pending ancestors (D=1, D=2).
     #[test_traced("WARN")]
-    fn test_ordered_fixed_resolved_merkleize_parity() {
+    fn test_ordered_fixed_read_merkleize_parity() {
         type ParentChain = Vec<
             std::sync::Arc<
                 crate::qmdb::any::batch::MerkleizedBatch<
@@ -381,97 +381,6 @@ pub(crate) mod test {
                     "merged root mismatch at depth={depth}"
                 );
             }
-        });
-    }
-
-    /// A batch's cached read resolutions (location plus old next key) must stay valid when an
-    /// ancestor is committed and dropped between the read and merkleize. Keys resolved through
-    /// an uncommitted ancestor's diff cache nothing, so the merkleize-time re-resolution picks
-    /// up the post-commit location and linkage. Keys resolved through the committed snapshot
-    /// cache their location and next key, which the intervening commit cannot change (applying
-    /// an ancestor only relocates or relinks keys present in that ancestor's diff).
-    #[test_traced("WARN")]
-    fn test_ordered_fixed_caching_survives_ancestor_commit() {
-        fn key(i: u64) -> Digest {
-            Sha256::hash(&i.to_be_bytes())
-        }
-        fn val(i: u64) -> Digest {
-            Sha256::hash(&i.to_le_bytes())
-        }
-
-        deterministic::Runner::default().start(|ctx| async move {
-            let mut roots = Vec::new();
-            for read_first in [false, true] {
-                let label = if read_first { "db_read" } else { "db_write" };
-                let mut db = create_test_db(ctx.child(label)).await;
-
-                // Seed and commit keys 0..100.
-                let mut seed = db.new_batch();
-                for i in 0..100u64 {
-                    seed = seed.write(key(i), Some(val(i)));
-                }
-                let seed = seed.merkleize(&db, None).await.unwrap();
-                db.apply_batch(seed).await.unwrap();
-                db.commit().await.unwrap();
-
-                // Grandparent overwrites keys 0..10 (pending), parent touches disjoint keys.
-                let mut gp = db.new_batch();
-                for i in 0..10u64 {
-                    gp = gp.write(key(i), Some(val(i + 1000)));
-                }
-                let gp = gp.merkleize(&db, None).await.unwrap();
-                let mut p = gp.new_batch::<Sha256>();
-                for i in 50..60u64 {
-                    p = p.write(key(i), Some(val(i + 2000)));
-                }
-                let p = p.merkleize(&db, None).await.unwrap();
-
-                // Child reads the grandparent-touched keys (resolving through its diff,
-                // caching nothing) and keys 20..30 (committed-resolved, cached).
-                let b = p.new_batch::<Sha256>();
-                if read_first {
-                    let keys: Vec<Digest> = (0..10u64).chain(20..30u64).map(key).collect();
-                    let key_refs: Vec<&Digest> = keys.iter().collect();
-                    let values = b.get_many(&key_refs, &db).await.unwrap();
-                    for (i, v) in values.into_iter().enumerate() {
-                        let expected = if i < 10 {
-                            val(i as u64 + 1000)
-                        } else {
-                            val(i as u64 + 10)
-                        };
-                        assert_eq!(v, Some(expected));
-                    }
-                }
-
-                // Commit the grandparent and drop it before the child merkleizes.
-                db.apply_batch(gp).await.unwrap();
-                db.commit().await.unwrap();
-
-                let mut b = b;
-                for i in 0..10u64 {
-                    b = b.write(key(i), Some(val(i + 3000)));
-                }
-                for i in 20..30u64 {
-                    b = b.write(key(i), Some(val(i + 4000)));
-                }
-                let b = b.merkleize(&db, None).await.unwrap();
-                db.apply_batch(p).await.unwrap();
-                db.apply_batch(b).await.unwrap();
-                db.commit().await.unwrap();
-
-                for i in 0..10u64 {
-                    assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i + 3000)));
-                }
-                for i in 20..30u64 {
-                    assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i + 4000)));
-                }
-                roots.push(db.root());
-                db.destroy().await.unwrap();
-            }
-            assert_eq!(
-                roots[0], roots[1],
-                "read-then-write diverged from write-only"
-            );
         });
     }
 

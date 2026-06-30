@@ -24,7 +24,7 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         any::{
-            batch::{MerkleizedBatch, UnmerkleizedBatch},
+            batch::{MerkleizedBatch, UnmerkleizedBatch, UpdateMany as BatchUpdateMany},
             db::Db,
             operation::{Operation, Update},
             ordered, unordered,
@@ -64,6 +64,23 @@ where
     metadata: Option<U::Value>,
 }
 
+/// Staged update for an [`AnyUnmerkleized`] batch.
+pub struct AnyUpdateMany<F, E, C, I, H, U, S>
+where
+    F: Family,
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    update: BatchUpdateMany<F, H, U, S>,
+    db: AnyDbHandle<F, E, C, I, H, U, S>,
+    metadata: Option<U::Value>,
+}
+
 /// Key-value operations for the `any` unordered update kind.
 impl<F, E, C, I, H, K, V, S> AnyUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, S>
 where
@@ -99,11 +116,36 @@ where
         self.batch.get_many(keys, &*db).await
     }
 
+    /// Read multiple values and return a staged updater for the same keys.
+    pub async fn get_many_staged(
+        self,
+        keys: &[&K],
+    ) -> Result<(Vec<Option<V::Value>>, AnyUpdateMany<F, E, C, I, H, unordered::Update<K, V>, S>), Error<F>>
+    {
+        let Self {
+            batch,
+            db,
+            metadata,
+        } = self;
+        let guard = db.read().await;
+        let (values, update) = batch.get_many_staged(keys, &*guard).await?;
+        drop(guard);
+        Ok((
+            values,
+            AnyUpdateMany {
+                update,
+                db,
+                metadata,
+            },
+        ))
+    }
+
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.
     pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
     }
+
 }
 
 /// Wraps a QMDB [`MerkleizedBatch`] with a reference to the parent
@@ -159,6 +201,27 @@ where
     }
 }
 
+impl<F, E, C, I, H, U, S> AnyUpdateMany<F, E, C, I, H, U, S>
+where
+    F: Family,
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Record values for the keys returned by `get_many_staged`.
+    pub fn update_many(self, values: &[U::Value]) -> AnyUnmerkleized<F, E, C, I, H, U, S> {
+        AnyUnmerkleized {
+            batch: self.update.update_many(values),
+            db: self.db,
+            metadata: self.metadata,
+        }
+    }
+}
+
 /// Key-value operations for the `any` ordered update kind.
 impl<F, E, C, I, H, K, V, S> AnyUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, S>
 where
@@ -193,11 +256,36 @@ where
         self.batch.get_many(keys, &*db).await
     }
 
+    /// Read multiple values and return a staged updater for the same keys.
+    pub async fn get_many_staged(
+        self,
+        keys: &[&K],
+    ) -> Result<(Vec<Option<V::Value>>, AnyUpdateMany<F, E, C, I, H, ordered::Update<K, V>, S>), Error<F>>
+    {
+        let Self {
+            batch,
+            db,
+            metadata,
+        } = self;
+        let guard = db.read().await;
+        let (values, update) = batch.get_many_staged(keys, &*guard).await?;
+        drop(guard);
+        Ok((
+            values,
+            AnyUpdateMany {
+                update,
+                db,
+                metadata,
+            },
+        ))
+    }
+
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.
     pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
     }
+
 }
 
 /// Read-through operations for the `any` merkleized batch.

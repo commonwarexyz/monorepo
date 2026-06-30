@@ -299,14 +299,16 @@ where
         // Phase 3: Batch-read from the journal (one reader acquisition, one I/O batch).
         let ops = self.log.read_many(&positions).await?;
 
-        // Phase 4: Match operations back to keys via binary search (no HashMap).
+        // Phase 4: Match operations back to keys by walking the sorted position lists.
+        let mut op_idx = 0;
         for &(key_idx, pos) in &candidates {
             if results[key_idx].is_some() {
                 continue;
             }
-            let op_idx = positions
-                .binary_search(&pos)
-                .expect("position was deduped from candidates");
+            while positions[op_idx] < pos {
+                op_idx += 1;
+            }
+            debug_assert_eq!(positions[op_idx], pos);
             let Operation::Update(data) = &ops[op_idx] else {
                 panic!("location does not reference update operation. loc={pos}");
             };
