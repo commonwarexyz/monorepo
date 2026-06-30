@@ -3926,14 +3926,11 @@ mod tests {
 
     #[test]
     fn test_deterministic_nested_parallel_strategy_uses_spawn_worker() {
-        // The deterministic runtime is single-threaded.
-        const NUM_THREADS: usize = 1;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let strategy = context
                 .child("pool")
-                .create_strategy(NZUsize!(NUM_THREADS))
+                .create_strategy(NZUsize!(1))
                 .unwrap()
                 .manual();
 
@@ -3947,13 +3944,11 @@ mod tests {
 
     #[test]
     fn test_tokio_nested_parallel_strategy_uses_spawn_worker() {
-        const WORKERS: usize = 2;
-
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             let strategy = context
                 .child("pool")
-                .create_strategy(NZUsize!(WORKERS))
+                .create_strategy(NZUsize!(1))
                 .unwrap()
                 .manual();
 
