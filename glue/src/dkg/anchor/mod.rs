@@ -365,11 +365,7 @@ mod tests {
             digest: mocks::TestDigest,
         ) -> Finalization<mocks::TestScheme, mocks::TestDigest> {
             let target = finalization(
-                Proposal::new(
-                    Round::new(epoch, View::new(2)),
-                    View::new(1),
-                    digest,
-                ),
+                Proposal::new(Round::new(epoch, View::new(2)), View::new(1), digest),
                 &self.schemes,
             );
             self.source_certificate_sender.send(
@@ -689,8 +685,11 @@ mod tests {
                 Err(oneshot::error::TryRecvError::Empty)
             ));
 
-            let (newer_boundary, newer_sharing) =
-                boundary_block(Epoch::new(2), harness.participants[0].clone(), &harness.participants);
+            let (newer_boundary, newer_sharing) = boundary_block(
+                Epoch::new(2),
+                harness.participants[0].clone(),
+                &harness.participants,
+            );
             let newer_finalization =
                 harness.send_target_finalization_for(Epoch::new(2), newer_boundary.digest());
 
@@ -718,8 +717,11 @@ mod tests {
             harness.send_target_finalization();
             assert_eq!(harness.next_client_request().await, Epoch::new(1));
 
-            let (newer_boundary, _) =
-                boundary_block(Epoch::new(2), harness.participants[0].clone(), &harness.participants);
+            let (newer_boundary, _) = boundary_block(
+                Epoch::new(2),
+                harness.participants[0].clone(),
+                &harness.participants,
+            );
             harness.send_target_finalization_for(Epoch::new(2), newer_boundary.digest());
             assert_eq!(harness.next_client_request().await, Epoch::new(2));
 
@@ -739,7 +741,10 @@ mod tests {
 
             let blocked = harness.oracle.blocked().await.unwrap();
             assert!(
-                !blocked.contains(&(harness.participants[1].clone(), harness.participants[0].clone())),
+                !blocked.contains(&(
+                    harness.participants[1].clone(),
+                    harness.participants[0].clone()
+                )),
                 "late response for superseded boundary should not block source peer"
             );
             assert!(matches!(
