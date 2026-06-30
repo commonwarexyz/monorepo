@@ -586,17 +586,17 @@ pub mod tests {
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
-                let wrong_val = Sha256::hash(&[0xFF]);
+                let wrong_val = Sha256::hash(&[&[0xFF]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     &hasher, key, wrong_val, &proof, &root
                 ));
                 // Proof should fail against the wrong key.
-                let wrong_key = Sha256::hash(&[0xEE]);
+                let wrong_key = Sha256::hash(&[&[0xEE]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     &hasher, wrong_key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong root.
-                let wrong_root = Sha256::hash(&[0xDD]);
+                let wrong_root = Sha256::hash(&[&[0xDD]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     &hasher,
                     key,
@@ -889,11 +889,11 @@ pub mod tests {
             proof: Proof::<mmb::Family, Digest> {
                 leaves: mmb::Location::new(7),
                 inactive_peaks: 0,
-                digests: vec![Sha256::hash(b"sib")],
+                digests: vec![Sha256::hash(&[b"sib"])],
             },
             pending_chunk_digest: None,
             partial_chunk_digest: None,
-            ops_root: Sha256::hash(b"ops"),
+            ops_root: Sha256::hash(&[b"ops"]),
         };
         let chunk: [u8; 32] = core::array::from_fn(|i| i as u8);
         OperationProof {
@@ -916,7 +916,7 @@ pub mod tests {
     fn test_key_value_proof_codec_roundtrip() {
         let proof = CodecKeyValueProof {
             proof: sample_op_proof(),
-            next_key: Sha256::hash(b"next-key"),
+            next_key: Sha256::hash(&[b"next-key"]),
         };
 
         let encoded = proof.encode();
@@ -929,7 +929,7 @@ pub mod tests {
     fn test_key_value_proof_codec_enforces_merkle_digest_budget() {
         let proof = CodecKeyValueProof {
             proof: sample_op_proof(),
-            next_key: Sha256::hash(b"next-key"),
+            next_key: Sha256::hash(&[b"next-key"]),
         };
         let total_digests = op_proof_digest_count(&proof.proof);
 
@@ -946,12 +946,12 @@ pub mod tests {
             CodecExclusionProof::KeyValue(
                 sample_op_proof(),
                 Update {
-                    key: Sha256::hash(b"key"),
-                    value: Sha256::hash(b"value"),
-                    next_key: Sha256::hash(b"next-key"),
+                    key: Sha256::hash(&[b"key"]),
+                    value: Sha256::hash(&[b"value"]),
+                    next_key: Sha256::hash(&[b"next-key"]),
                 },
             ),
-            CodecExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(b"metadata"))),
+            CodecExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(&[b"metadata"]))),
             CodecExclusionProof::Commit(sample_op_proof(), None),
         ];
 
@@ -969,12 +969,12 @@ pub mod tests {
             CodecExclusionProof::KeyValue(
                 sample_op_proof(),
                 Update {
-                    key: Sha256::hash(b"key"),
-                    value: Sha256::hash(b"value"),
-                    next_key: Sha256::hash(b"next-key"),
+                    key: Sha256::hash(&[b"key"]),
+                    value: Sha256::hash(&[b"value"]),
+                    next_key: Sha256::hash(&[b"next-key"]),
                 },
             ),
-            CodecExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(b"metadata"))),
+            CodecExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(&[b"metadata"]))),
             CodecExclusionProof::Commit(sample_op_proof(), None),
         ];
 

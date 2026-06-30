@@ -23,7 +23,8 @@ pub fn genesis<H: Hasher>() -> H::Digest {
     // parent, this only seeds the consensus floor.
     let mut hasher = H::default();
     hasher.update(GENESIS);
-    hasher.finalize()
+    let (_, digest) = hasher.finalize();
+    digest
 }
 
 /// Configuration for the application.

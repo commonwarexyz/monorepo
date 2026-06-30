@@ -916,26 +916,11 @@ pub(super) fn combine_roots<H: Hasher>(
     partial: Option<(u64, &H::Digest)>,
 ) -> H::Digest {
     match (pending, partial) {
-        (None, None) => hasher.hash([ops_root.as_ref(), grafted_root.as_ref()]),
-        (Some(pe), None) => hasher.hash([ops_root.as_ref(), grafted_root.as_ref(), pe.as_ref()]),
-        (None, Some((nb, p))) => {
-            let nb_bytes = nb.to_be_bytes();
-            hasher.hash([
-                ops_root.as_ref(),
-                grafted_root.as_ref(),
-                nb_bytes.as_slice(),
-                p.as_ref(),
-            ])
-        }
+        (None, None) => hasher.hash(&[ops_root, grafted_root]),
+        (Some(pe), None) => hasher.hash(&[ops_root, grafted_root, pe]),
+        (None, Some((nb, p))) => hasher.hash(&[ops_root, grafted_root, &nb.to_be_bytes(), p]),
         (Some(pe), Some((nb, p))) => {
-            let nb_bytes = nb.to_be_bytes();
-            hasher.hash([
-                ops_root.as_ref(),
-                grafted_root.as_ref(),
-                pe.as_ref(),
-                nb_bytes.as_slice(),
-                p.as_ref(),
-            ])
+            hasher.hash(&[ops_root, grafted_root, pe, &nb.to_be_bytes(), p])
         }
     }
 }
@@ -1078,10 +1063,7 @@ pub(super) async fn compute_grafted_leaves<
             if chunk == zero_chunk {
                 (chunk_idx, chunk_ops_digest)
             } else {
-                (
-                    chunk_idx,
-                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
-                )
+                (chunk_idx, h.hash(&[&chunk, &chunk_ops_digest]))
             }
         },
     ))
@@ -1274,8 +1256,8 @@ mod tests {
     #[test]
     fn combine_roots_deterministic() {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let ops = Sha256::hash(b"ops");
-        let grafted = Sha256::hash(b"grafted");
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
         let r1 = combine_roots(&hasher, &ops, &grafted, None, None);
         let r2 = combine_roots(&hasher, &ops, &grafted, None, None);
         assert_eq!(r1, r2);
@@ -1284,9 +1266,9 @@ mod tests {
     #[test]
     fn combine_roots_with_partial_differs() {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let ops = Sha256::hash(b"ops");
-        let grafted = Sha256::hash(b"grafted");
-        let partial_digest = Sha256::hash(b"partial");
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let partial_digest = Sha256::hash(&[b"partial"]);
 
         let without = combine_roots(&hasher, &ops, &grafted, None, None);
         let with = combine_roots(&hasher, &ops, &grafted, None, Some((5, &partial_digest)));
@@ -1296,9 +1278,9 @@ mod tests {
     #[test]
     fn combine_roots_with_pending_differs() {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let ops = Sha256::hash(b"ops");
-        let grafted = Sha256::hash(b"grafted");
-        let pending_digest = Sha256::hash(b"pending");
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let pending_digest = Sha256::hash(&[b"pending"]);
 
         let without = combine_roots(&hasher, &ops, &grafted, None, None);
         let with = combine_roots(&hasher, &ops, &grafted, Some(&pending_digest), None);
@@ -1308,10 +1290,10 @@ mod tests {
     #[test]
     fn combine_roots_pending_and_partial_independent() {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let ops = Sha256::hash(b"ops");
-        let grafted = Sha256::hash(b"grafted");
-        let pending_digest = Sha256::hash(b"pending");
-        let partial_digest = Sha256::hash(b"partial");
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let pending_digest = Sha256::hash(&[b"pending"]);
+        let partial_digest = Sha256::hash(&[b"partial"]);
 
         let only_pending = combine_roots(&hasher, &ops, &grafted, Some(&pending_digest), None);
         let only_partial = combine_roots(&hasher, &ops, &grafted, None, Some((5, &partial_digest)));
@@ -1330,9 +1312,9 @@ mod tests {
     #[test]
     fn combine_roots_different_ops_root() {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let ops_a = Sha256::hash(b"ops_a");
-        let ops_b = Sha256::hash(b"ops_b");
-        let grafted = Sha256::hash(b"grafted");
+        let ops_a = Sha256::hash(&[b"ops_a"]);
+        let ops_b = Sha256::hash(&[b"ops_b"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
 
         let r1 = combine_roots(&hasher, &ops_a, &grafted, None, None);
         let r2 = combine_roots(&hasher, &ops_b, &grafted, None, None);
@@ -1345,33 +1327,28 @@ mod tests {
     #[test]
     fn combine_roots_format_golden() {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let ops = Sha256::hash(b"ops");
-        let grafted = Sha256::hash(b"grafted");
-        let pending = Sha256::hash(b"pending");
-        let partial = Sha256::hash(b"partial");
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let pending = Sha256::hash(&[b"pending"]);
+        let partial = Sha256::hash(&[b"partial"]);
         let next_bit: u64 = 0x1122_3344_5566_7788;
 
         // Neither pending nor partial.
         assert_eq!(
             combine_roots(&hasher, &ops, &grafted, None, None),
-            hasher.hash([ops.as_ref(), grafted.as_ref()])
+            hasher.hash(&[&ops, &grafted])
         );
 
         // Pending only.
         assert_eq!(
             combine_roots(&hasher, &ops, &grafted, Some(&pending), None),
-            hasher.hash([ops.as_ref(), grafted.as_ref(), pending.as_ref()])
+            hasher.hash(&[&ops, &grafted, &pending])
         );
 
         // Partial only.
         assert_eq!(
             combine_roots(&hasher, &ops, &grafted, None, Some((next_bit, &partial))),
-            hasher.hash([
-                ops.as_ref(),
-                grafted.as_ref(),
-                next_bit.to_be_bytes().as_slice(),
-                partial.as_ref(),
-            ])
+            hasher.hash(&[&ops, &grafted, &next_bit.to_be_bytes(), &partial])
         );
 
         // Both: pending precedes partial.
@@ -1383,13 +1360,7 @@ mod tests {
                 Some(&pending),
                 Some((next_bit, &partial))
             ),
-            hasher.hash([
-                ops.as_ref(),
-                grafted.as_ref(),
-                pending.as_ref(),
-                next_bit.to_be_bytes().as_slice(),
-                partial.as_ref(),
-            ])
+            hasher.hash(&[&ops, &grafted, &pending, &next_bit.to_be_bytes(), &partial])
         );
     }
 
@@ -1421,8 +1392,8 @@ mod tests {
     {
         let mut batch = db.new_batch();
         for idx in start..start + count {
-            let key = Sha256::hash(&idx.to_be_bytes());
-            let value = Sha256::hash(&(idx + count).to_be_bytes());
+            let key = Sha256::hash(&[&idx.to_be_bytes()]);
+            let value = Sha256::hash(&[&(idx + count).to_be_bytes()]);
             batch = batch.write(key, Some(value));
         }
         let merkleized = batch.merkleize(db, None).await.unwrap();
@@ -1456,14 +1427,14 @@ mod tests {
             assert!(witness.partial_chunk.is_none());
             assert!(witness.verify(&hasher, &ops_root, &canonical_root));
 
-            let wrong_ops_root = Sha256::hash(b"wrong ops root");
+            let wrong_ops_root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!witness.verify(&hasher, &wrong_ops_root, &canonical_root));
 
-            let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
+            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
             assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
-            tampered.grafted_root = Sha256::hash(b"wrong grafted root");
+            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
             assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
         });
     }
@@ -1488,14 +1459,14 @@ mod tests {
             assert!(witness.partial_chunk.is_some());
             assert!(witness.verify(&hasher, &ops_root, &canonical_root));
 
-            let wrong_ops_root = Sha256::hash(b"wrong ops root");
+            let wrong_ops_root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!witness.verify(&hasher, &wrong_ops_root, &canonical_root));
 
-            let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
+            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
             assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness.clone();
-            tampered.grafted_root = Sha256::hash(b"wrong grafted root");
+            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
             assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
 
             let mut tampered = witness.clone();
@@ -1503,7 +1474,7 @@ mod tests {
             assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
 
             let mut tampered = witness;
-            tampered.partial_chunk.as_mut().unwrap().1 = Sha256::hash(b"wrong partial chunk");
+            tampered.partial_chunk.as_mut().unwrap().1 = Sha256::hash(&[b"wrong partial chunk"]);
             assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
         });
     }
@@ -1536,11 +1507,11 @@ mod tests {
 
             assert!(witness.verify(&hasher, &ops_root, &canonical_root));
 
-            let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
+            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
             assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
-            tampered.grafted_root = Sha256::hash(b"wrong grafted root");
+            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
             assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
         });
     }

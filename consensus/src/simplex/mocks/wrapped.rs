@@ -72,7 +72,7 @@ impl<S> Scheme<S> {
         let mut hasher = Sha256::default();
         hasher.update(&signer.encode());
         hasher.update(&encoded);
-        let digest = hasher.finalize();
+        let (_, digest) = hasher.finalize();
 
         // Start from a deterministic but non-trivial bit so tests do not always
         // mutate the same low-order bit first.

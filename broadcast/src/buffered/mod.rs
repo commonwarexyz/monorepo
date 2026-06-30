@@ -813,7 +813,7 @@ mod tests {
                         hasher.update(&value.content);
                     }
                 }
-                hasher.finalize()
+                hasher.finalize().1
             })
         };
 

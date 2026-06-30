@@ -181,11 +181,12 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
 }
 
 fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
-    let mut h = H::new();
+    let mut h = H::default();
     for x in row {
         h.update(&x.to_le_bytes());
     }
-    h.finalize()
+    let (_, digest) = h.finalize();
+    digest
 }
 
 mod topology;
@@ -457,10 +458,9 @@ impl<D: Digest> CheckingData<D> {
             .collect();
 
         // Verify the multi-proof
-        let mut hasher = H::new();
         if weak_shard
             .inclusion_proof
-            .verify_multi_inclusion(&mut hasher, &proof_elements, &self.root)
+            .verify_multi_inclusion::<H>(&proof_elements, &self.root)
             .is_err()
         {
             return Err(Error::InvalidWeakShard);

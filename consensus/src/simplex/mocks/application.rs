@@ -116,7 +116,7 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 pub fn genesis<H: Hasher>(epoch: Epoch) -> H::Digest {
     let mut hasher = H::default();
     hasher.update(&(Bytes::from(GENESIS_BYTES), epoch).encode());
-    hasher.finalize()
+    hasher.finalize().1
 }
 
 type Latency = (f64, f64);
@@ -300,7 +300,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         let rand = self.context.gen::<u64>();
         let payload = (context.round, context.parent.1, rand).encode();
         self.hasher.update(&payload);
-        let digest = self.hasher.finalize();
+        let (hasher, digest) = core::mem::take(&mut self.hasher).finalize();
+        self.hasher = hasher;
 
         // Mark verified
         self.verified.insert(digest);
