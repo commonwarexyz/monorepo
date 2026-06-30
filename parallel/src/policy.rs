@@ -13,9 +13,8 @@
 //! resample bounds how long a stale decision persists, and both paths produce identical results,
 //! so a misjudged call only costs throughput, never correctness.
 
-use parking_lot::Mutex;
+use dashmap::DashMap;
 use std::{
-    collections::HashMap,
     panic::Location,
     sync::Arc,
     time::{Duration, Instant},
@@ -34,7 +33,7 @@ const SERIAL_WIN_NUMERATOR: u64 = 90;
 const SERIAL_WIN_DENOMINATOR: u64 = 100;
 const SERIAL_SAMPLE_LIMIT_NS: u64 = 10_000_000;
 
-type Entries = HashMap<Key, Entry>;
+type Entries = DashMap<Key, Entry>;
 
 /// The path the policy chose for a call: the strategy runs the matching serial or parallel body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,7 +45,7 @@ pub(super) enum Execution {
 /// Adaptive serial-vs-parallel decisions, shared cheaply across [`super::Rayon`] clones.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Policy {
-    entries: Arc<Mutex<Entries>>,
+    entries: Arc<Entries>,
 }
 
 impl Policy {
@@ -67,12 +66,11 @@ impl Policy {
         }
 
         let key = Key::new(caller, len, work, parallelism);
-        let (execution, measure) = self.entries.lock().entry(key).or_default().choose();
+        let (execution, measure) = self.entries.entry(key).or_default().choose();
         let start = measure.then(Instant::now);
         let result = run(execution);
         if let Some(start) = start {
             self.entries
-                .lock()
                 .entry(key)
                 .or_default()
                 .record(execution, start.elapsed());
@@ -82,7 +80,7 @@ impl Policy {
 
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
-        self.entries.lock().len()
+        self.entries.len()
     }
 }
 

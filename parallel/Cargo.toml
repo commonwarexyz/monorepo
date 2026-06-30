@@ -15,16 +15,16 @@ workspace = true
 [dependencies]
 cfg-if.workspace = true
 commonware-macros.workspace = true
+dashmap = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
-parking_lot = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
+dashmap.workspace = true
 futures.workspace = true
-parking_lot.workspace = true
 proptest.workspace = true
 rayon.workspace = true
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std", "dep:futures", "dep:parking_lot", "dep:rayon" ]
+std = [ "commonware-macros/std", "dep:dashmap", "dep:futures", "dep:rayon" ]
