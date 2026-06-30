@@ -456,9 +456,6 @@ commonware_macros::stability_scope!(BETA {
         }
 
         /// Maps each element with per-partition state and a per-item work multiplier.
-        ///
-        /// The multiplier is used only by adaptive strategies to distinguish workloads where the
-        /// item count hides the real amount of work.
         #[track_caller]
         fn map_init_collect_vec_with_multiplier<I, INIT, T, F, R>(
             &self,
