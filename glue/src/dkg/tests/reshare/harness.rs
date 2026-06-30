@@ -757,6 +757,7 @@ impl EngineDefinition for ReshareEngine {
                 write_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         };
 
         let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(

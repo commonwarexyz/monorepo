@@ -12,10 +12,12 @@
 //!
 //! The actor has a deliberately weak subjectivity boundary. Before it has read a boundary block it
 //! does not know the epoch participant set, so it cannot run the `f + 1` peer-sample protocol used
-//! by a stronger scheme such as [`stateful::probe`](crate::stateful::probe). Instead it accepts the
-//! first finalization it can verify with the all-epoch verifier, then asks peers for the boundary
-//! block that finalization points at. While the resulting [`Artifact`] is guaranteed to be a _valid_
-//! finalized block, it is not guaranteed that it is _recent_.
+//! by a stronger scheme such as [`stateful::probe`](crate::stateful::probe). Instead it accepts a
+//! finalization it can verify with the all-epoch verifier, then asks peers for the boundary block
+//! that finalization implies. A verified finalization remains provisional until the corresponding
+//! boundary block is returned; while waiting, a strictly newer verified finalization may replace the
+//! pending candidate. While the resulting [`Artifact`] is guaranteed to be a _valid_ finalized
+//! block, it is not guaranteed that it is _recent_.
 //!
 //! Operators treat the configured peers and constant verifier as the weakly subjective checkpoint
 //! for startup.
@@ -26,8 +28,8 @@
 //!
 //! ## Discovery
 //!
-//! Once a subscriber appears, [`Actor`] listens on the simplex certificate channel and accepts
-//! the first finalization it can verify with the all-epoch verifier:
+//! Once a subscriber appears, [`Actor`] listens on the simplex certificate channel and accepts a
+//! finalization it can verify with the all-epoch verifier:
 //!
 //! ```text
 //!   peer --Finalization--> Actor --verify (all-epoch)--> accepted
@@ -42,6 +44,17 @@
 //!   Actor -------+-- Request(epoch) --> peer 2 <-- Response(block + finalization)
 //!                |
 //!                +-- Request(epoch) --> peer 3
+//! ```
+//!
+//! If the boundary request remains unanswered and the actor verifies a newer finalization, that
+//! finalization supersedes the pending candidate. The actor then requests the boundary implied by
+//! the newer finalization: the final block of the previous epoch, which carries the newer epoch's
+//! [`EpochInfo`]. Older or equal finalizations are ignored while a request is pending, and late
+//! responses for superseded candidates are ignored without blocking the peer.
+//!
+//! ```text
+//!   peer --Finalization(epoch = E + 1)--> Actor --verify (all-epoch)--> supersede
+//!   Actor --Request(E + 1)--> peers
 //! ```
 //!
 //! The block's [`EpochInfo`] is packaged into an [`Artifact`] and
@@ -116,8 +129,8 @@ mod tests {
     use commonware_consensus::{
         marshal::{self, resolver::p2p as marshal_resolver, Start},
         simplex::types::{Activity, Certificate, Finalization, Finalize, Proposal},
-        types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
-        Heightable as _, Reporter as _,
+        types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
+        Epochable as _, Heightable as _, Reporter as _,
     };
     use commonware_cryptography::{
         bls12381::{
@@ -126,7 +139,7 @@ mod tests {
         },
         certificate::Verifier as _,
         sha256::Sha256,
-        Digestible as _,
+        Digest as _, Digestible as _, Hasher as _,
     };
     use commonware_macros::select;
     use commonware_p2p::{
@@ -164,8 +177,10 @@ mod tests {
         participants: Vec<mocks::TestPublicKey>,
         schemes: Vec<mocks::TestScheme>,
         source_certificate_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
+        source_boundary_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
         client_boundary_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
         client_boundary_receiver: SimReceiver<mocks::TestPublicKey>,
+        oracle: Oracle<mocks::TestPublicKey, deterministic::Context>,
         joiner: super::Mailbox<mocks::TestScheme, mocks::TestMarshalVariant>,
         boundary: mocks::TestBlock,
         boundary_finalization: Finalization<mocks::TestScheme, mocks::TestDigest>,
@@ -180,6 +195,18 @@ mod tests {
         }
 
         async fn start_with(context: &mut deterministic::Context, source_serves: bool) -> Self {
+            let boundaries = if source_serves {
+                vec![Epoch::new(1)]
+            } else {
+                Vec::new()
+            };
+            Self::start_with_boundaries(context, boundaries).await
+        }
+
+        async fn start_with_boundaries(
+            context: &mut deterministic::Context,
+            source_boundaries: Vec<Epoch>,
+        ) -> Self {
             let fixture = mocks::scheme_fixture_n(context, 4);
             let participants = fixture.participants.clone();
             let peers = Set::from_iter_dedup(participants.iter().cloned());
@@ -207,23 +234,26 @@ mod tests {
             }
 
             let (boundary, boundary_sharing) =
-                boundary_block(participants[0].clone(), &participants);
+                boundary_block(Epoch::new(1), participants[0].clone(), &participants);
             let genesis = genesis_info(&participants);
-            let boundary_finalization = finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(1)),
-                    View::zero(),
-                    boundary.digest(),
-                ),
-                &fixture.schemes,
-            );
+            let first_boundary_finalization =
+                boundary_finalization(Epoch::new(1), boundary.digest(), &fixture.schemes);
+            let source_boundaries = source_boundaries
+                .into_iter()
+                .map(|epoch| {
+                    let (block, _) = boundary_block(epoch, participants[0].clone(), &participants);
+                    let finalization =
+                        boundary_finalization(epoch, block.digest(), &fixture.schemes);
+                    (block, finalization)
+                })
+                .collect::<Vec<_>>();
 
             let (source_marshal, marshal_handle) = start_marshal(
                 context.child("source_marshal"),
                 &oracle,
                 &fixture,
                 0,
-                source_serves.then(|| (boundary.clone(), boundary_finalization.clone())),
+                source_boundaries,
             )
             .await;
 
@@ -237,6 +267,7 @@ mod tests {
                 .register(BOUNDARY_CHANNEL, TEST_QUOTA)
                 .await
                 .expect("failed to register source boundaries");
+            let source_boundary_sender = source_boundaries.0.clone();
             let (source_actor, source_mailbox) = Actor::new(Config {
                 context: context.child("source_anchor"),
                 manager: oracle.manager(),
@@ -304,11 +335,13 @@ mod tests {
                 participants,
                 schemes: fixture.schemes,
                 source_certificate_sender,
+                source_boundary_sender,
                 client_boundary_sender: client_boundaries.0,
                 client_boundary_receiver: client_boundaries.1,
+                oracle,
                 joiner,
                 boundary,
-                boundary_finalization,
+                boundary_finalization: first_boundary_finalization,
                 boundary_sharing,
                 _handles: vec![
                     marshal_handle,
@@ -323,11 +356,19 @@ mod tests {
         fn send_target_finalization(
             &mut self,
         ) -> Finalization<mocks::TestScheme, mocks::TestDigest> {
+            self.send_target_finalization_for(Epoch::new(1), self.boundary.digest())
+        }
+
+        fn send_target_finalization_for(
+            &mut self,
+            epoch: Epoch,
+            digest: mocks::TestDigest,
+        ) -> Finalization<mocks::TestScheme, mocks::TestDigest> {
             let target = finalization(
                 Proposal::new(
-                    Round::new(Epoch::new(1), View::new(2)),
+                    Round::new(epoch, View::new(2)),
                     View::new(1),
-                    self.boundary.digest(),
+                    digest,
                 ),
                 &self.schemes,
             );
@@ -358,7 +399,7 @@ mod tests {
         oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
         fixture: &mocks::SchemeFixture,
         index: usize,
-        boundary: Option<(
+        boundaries: Vec<(
             mocks::TestBlock,
             Finalization<mocks::TestScheme, mocks::TestDigest>,
         )>,
@@ -435,7 +476,7 @@ mod tests {
         .await;
         let handle = marshal_actor.start_unbuffered(mocks::MarshalApplication::default(), resolver);
 
-        if let Some((block, finalization)) = boundary {
+        for (block, finalization) in boundaries {
             assert!(marshal.certified(block.context().round, block).await);
             assert_eq!(
                 marshal.report(Activity::Finalization(finalization)),
@@ -474,35 +515,70 @@ mod tests {
     }
 
     fn boundary_block(
+        epoch: Epoch,
         leader: mocks::TestPublicKey,
         participants: &[mocks::TestPublicKey],
     ) -> (mocks::TestBlock, Sharing<mocks::TestBlsVariant>) {
-        let genesis = mocks::genesis_block(leader.clone());
+        let height = FixedEpocher::new(BLOCKS_PER_EPOCH)
+            .last(epoch.previous().expect("boundary epoch must be non-zero"))
+            .expect("test epoch must be supported");
+        let parent = if height == Height::zero() {
+            mocks::TestDigest::EMPTY
+        } else {
+            Sha256::hash(
+                &height
+                    .previous()
+                    .expect("non-genesis height")
+                    .get()
+                    .to_be_bytes(),
+            )
+        };
         let context = mocks::TestContext {
-            round: Round::new(Epoch::zero(), View::new(1)),
+            round: Round::new(
+                epoch.previous().expect("boundary epoch must be non-zero"),
+                View::new(1),
+            ),
             leader,
-            parent: (View::zero(), genesis.digest()),
+            parent: (View::zero(), parent),
         };
         let participants = Set::from_iter_dedup(participants.iter().cloned());
         let (output, _) = deal::<mocks::TestBlsVariant, _, N3f1>(
-            test_rng_seeded(1),
+            test_rng_seeded(epoch.get()),
             Mode::NonZeroCounter,
             participants.clone(),
         )
         .expect("failed to create test DKG output");
         let sharing = output.public().clone();
-        let block = mocks::TestBlock::new::<Sha256>(context, genesis.digest(), Height::new(1), 1)
+        let block = mocks::TestBlock::new::<Sha256>(context, parent, height, epoch.get())
             .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestSigner>(
             NZU32!(16),
             Payload::EpochInfo(EpochInfo {
                 outcome: EpochOutcome::Success,
-                epoch: Epoch::new(1),
+                epoch,
                 output,
                 players: participants.clone(),
                 next_players: participants,
             }),
         );
         (block, sharing)
+    }
+
+    fn boundary_finalization(
+        epoch: Epoch,
+        digest: mocks::TestDigest,
+        schemes: &[mocks::TestScheme],
+    ) -> Finalization<mocks::TestScheme, mocks::TestDigest> {
+        finalization(
+            Proposal::new(
+                Round::new(
+                    epoch.previous().expect("boundary epoch must be non-zero"),
+                    View::new(1),
+                ),
+                View::zero(),
+                digest,
+            ),
+            schemes,
+        )
     }
 
     fn genesis_info(
@@ -542,10 +618,11 @@ mod tests {
         expected_sharing: &Sharing<mocks::TestBlsVariant>,
         participants: &[mocks::TestPublicKey],
     ) {
+        let expected_epoch = expected_finalization.epoch().next();
         let participants = Set::from_iter_dedup(participants.iter().cloned());
-        assert_eq!(artifact.epoch, Epoch::new(1));
+        assert_eq!(artifact.epoch, expected_epoch);
         assert_eq!(artifact.finalization.as_ref(), Some(expected_finalization));
-        assert_eq!(artifact.info.epoch, Epoch::new(1));
+        assert_eq!(artifact.info.epoch, expected_epoch);
         assert_eq!(artifact.info.output.public(), expected_sharing);
         assert_eq!(artifact.info.output.players(), &participants);
         assert_eq!(artifact.info.players, participants);
@@ -589,6 +666,82 @@ mod tests {
 
             // After the retry timeout the joiner re-broadcasts the same request.
             assert_eq!(harness.next_client_request().await, Epoch::new(1));
+            assert!(matches!(
+                subscription.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+        });
+    }
+
+    #[test]
+    fn newer_finalization_supersedes_unanswered_boundary() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // The source can serve the newer boundary but not the first one.
+            let mut harness =
+                Harness::start_with_boundaries(&mut context, vec![Epoch::new(2)]).await;
+            let mut subscription = harness.joiner.subscribe();
+
+            harness.send_target_finalization();
+            assert_eq!(harness.next_client_request().await, Epoch::new(1));
+            assert!(matches!(
+                subscription.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+
+            let (newer_boundary, newer_sharing) =
+                boundary_block(Epoch::new(2), harness.participants[0].clone(), &harness.participants);
+            let newer_finalization =
+                harness.send_target_finalization_for(Epoch::new(2), newer_boundary.digest());
+
+            assert_eq!(harness.next_client_request().await, Epoch::new(2));
+            context.sleep(Duration::from_millis(100)).await;
+
+            let artifact = subscription.try_recv().expect("artifact resolved");
+            assert_artifact(
+                artifact,
+                &boundary_finalization(Epoch::new(2), newer_boundary.digest(), &harness.schemes),
+                &newer_sharing,
+                &harness.participants,
+            );
+            assert_eq!(newer_finalization.epoch(), Epoch::new(2));
+        });
+    }
+
+    #[test]
+    fn late_response_for_superseded_boundary_does_not_block_peer() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start_with_boundaries(&mut context, Vec::new()).await;
+            let mut subscription = harness.joiner.subscribe();
+
+            harness.send_target_finalization();
+            assert_eq!(harness.next_client_request().await, Epoch::new(1));
+
+            let (newer_boundary, _) =
+                boundary_block(Epoch::new(2), harness.participants[0].clone(), &harness.participants);
+            harness.send_target_finalization_for(Epoch::new(2), newer_boundary.digest());
+            assert_eq!(harness.next_client_request().await, Epoch::new(2));
+
+            harness.source_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::Response(
+                    wire::Response {
+                        finalization: harness.boundary_finalization.clone(),
+                        block: harness.boundary.clone(),
+                    },
+                )
+                .encode()
+                .to_vec(),
+                false,
+            );
+            context.sleep(Duration::from_millis(100)).await;
+
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(
+                !blocked.contains(&(harness.participants[1].clone(), harness.participants[0].clone())),
+                "late response for superseded boundary should not block source peer"
+            );
             assert!(matches!(
                 subscription.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)

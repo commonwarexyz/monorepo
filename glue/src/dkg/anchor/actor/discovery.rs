@@ -165,7 +165,7 @@ where
         mut message: impl Buf,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
     ) -> bool {
-        if self.artifact.is_some() || self.pending.is_some() || self.subscribers.is_empty() {
+        if self.artifact.is_some() || self.subscribers.is_empty() {
             return false;
         }
 
@@ -182,6 +182,13 @@ where
         let Certificate::Finalization(finalization) = certificate else {
             return false;
         };
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| finalization.epoch() <= pending.epoch)
+        {
+            return false;
+        }
         if !finalization.verify(
             self.context.as_present_mut(),
             &self.verifier,
@@ -253,6 +260,17 @@ where
                 return;
             }
         };
+
+        let response_epoch = response.finalization.epoch().next();
+        if response_epoch < pending.epoch {
+            debug!(
+                response_epoch = %response_epoch,
+                pending_epoch = %pending.epoch,
+                "ignoring stale bootstrap boundary response"
+            );
+            self.pending = Some(pending);
+            return;
+        }
 
         match self.artifact_from_response(&pending, response) {
             Some(artifact) => self.resolve(artifact),
