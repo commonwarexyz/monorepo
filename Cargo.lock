@@ -1811,6 +1811,7 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-formatting",
+ "commonware-glue",
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
