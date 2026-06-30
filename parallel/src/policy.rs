@@ -21,9 +21,9 @@ use std::{
 };
 
 // Refresh the preferred path periodically so its EWMA does not go stale.
-const PREFERRED_SAMPLE_INTERVAL: u32 = 8;
+const PREFERRED_SAMPLE_INTERVAL: u32 = 10;
 // Probe the non-preferred path on a longer interval in case conditions change.
-const RESAMPLE_INTERVAL: u32 = 64;
+const RESAMPLE_INTERVAL: u32 = 100;
 // Track a short EWMA so recent measurements outweigh old startup noise.
 const EWMA_PREVIOUS_WEIGHT: u64 = 4;
 const EWMA_NEXT_WEIGHT: u64 = 1;
