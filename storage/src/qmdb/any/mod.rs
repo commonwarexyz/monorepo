@@ -2627,7 +2627,7 @@ mod bitmap_tests {
         qmdb::any::unordered::variable::test::{create_test_config, AnyTest},
     };
     use commonware_cryptography::{Hasher, Sha256};
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_runtime::{
         deterministic::{self, Context},
         Runner as _, Supervisor as _,
@@ -2649,6 +2649,7 @@ mod bitmap_tests {
     }
 
     /// Commit, drop, reopen, and assert the rebuilt bitmap matches the in-memory bitmap.
+    #[boxed]
     async fn assert_oracle_round_trip(mut db: AnyTest, context: Context, label: &str) -> AnyTest {
         let pre_active = bitmap_active_locs(&db);
         let pre_len = db.bitmap.len();
@@ -2712,7 +2713,7 @@ mod bitmap_tests {
             // Most recent commit is current -> bit=1.
             assert!(db.bitmap.get_bit(*commit_locs[2]));
 
-            let db = Box::pin(assert_oracle_round_trip(db, context, "commit_floor")).await;
+            let db = assert_oracle_round_trip(db, context, "commit_floor").await;
             db.destroy().await.unwrap();
         });
     }
@@ -2765,7 +2766,7 @@ mod bitmap_tests {
             assert_eq!(db.get(&k1).await.unwrap(), Some(vec![10]));
             assert!(db.get(&k2).await.unwrap().is_none());
 
-            let db = Box::pin(assert_oracle_round_trip(db, context, "rewind")).await;
+            let db = assert_oracle_round_trip(db, context, "rewind").await;
             db.destroy().await.unwrap();
         });
     }
@@ -2842,7 +2843,7 @@ mod bitmap_tests {
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![3]));
 
-            let db = Box::pin(assert_oracle_round_trip(db, context, "tail")).await;
+            let db = assert_oracle_round_trip(db, context, "tail").await;
             db.destroy().await.unwrap();
         });
     }
