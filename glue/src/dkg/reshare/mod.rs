@@ -112,6 +112,24 @@
 //! carrying a valid share forward when a ceremony fails and the previous
 //! threshold output remains active.
 //!
+//! # Offline Players
+//!
+//! A validator that is selected as a `player` must be online and reachable
+//! during the early dealing window if it expects its new secret share to remain
+//! private.
+//!
+//! Feldman-Desmedt resharing preserves liveness by allowing dealers to publish
+//! reveal evidence for players that do not return valid acknowledgements. If a
+//! validator is offline while it is a `player`, the ceremony can still succeed,
+//! but the validator's secret share for the new output will be revealed in the
+//! public dealer logs. The resulting output is protocol-valid; reveal-bearing
+//! outputs are not rejected by this reshare actor.
+//!
+//! Operationally, an offline player should treat the affected secret share as
+//! public. It must not assume that coming back online later restores the
+//! privacy of that share. Applications that require every active signing share
+//! to remain unrevealed must enforce that policy outside this protocol.
+//!
 //! # State Sync
 //!
 //! Reshare is compatible with application state sync, but timing matters. A node
@@ -123,7 +141,7 @@
 //! If a node state syncs during the epoch in which it is already a `player`, it
 //! has missed non-replayable private dealings. The actor enters follower mode for
 //! that partial epoch and will not participate in the ceremony. If the ceremony
-//! needs that node's share, the share can be revealed as part of the public
+//! needs that node's share, the share will be revealed as part of the public
 //! outcome.
 //!
 //! This is why [`ParticipantsProvider`](crate::dkg::ParticipantsProvider) can be
