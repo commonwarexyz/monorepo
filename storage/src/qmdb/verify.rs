@@ -5,6 +5,9 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::{CodecHasher, Digest, DigestOf};
 
+/// Digests extracted from a verified proof, paired with their Merkle positions.
+pub type ExtractedDigests<F, H> = Vec<(Position<F>, DigestOf<H>)>;
+
 /// Verify that a [Proof] is valid for a range of operations and a target root.
 pub fn verify_proof<H, F, Op>(
     proof: &Proof<F, DigestOf<H>>,
@@ -47,7 +50,7 @@ pub fn verify_proof_and_extract_digests<H, F, Op>(
     start_loc: Location<F>,
     operations: &[Op],
     target_root: &DigestOf<H>,
-) -> Result<Vec<(Position<F>, DigestOf<H>)>, Error<F>>
+) -> Result<ExtractedDigests<F, H>, Error<F>>
 where
     F: Family,
     Op: Encode,

@@ -730,7 +730,7 @@ mod tests {
         // (This is the exact attack from issue #2837)
         let malleated_proof = Proof {
             leaf_count: 254,
-            siblings: original_proof.siblings.clone(),
+            siblings: original_proof.siblings,
         };
 
         // Malleated proof should NOT verify because the root now incorporates

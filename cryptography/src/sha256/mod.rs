@@ -130,8 +130,7 @@ impl CodecHasher for Sha256 {
             len = end;
         }
 
-        let digest = finalize_fixed(&mut self.scratch, len);
-        digest
+        finalize_fixed(&mut self.scratch, len)
     }
 
     #[inline]
@@ -156,8 +155,7 @@ impl CodecHasher for Sha256 {
         let mut tail: &mut [u8] = &mut self.scratch[prefix.len()..len];
         value.write(&mut tail);
         assert_eq!(tail.len(), 0, "encode_size() did not match write()");
-        let digest = finalize_fixed(&mut self.scratch, len);
-        digest
+        finalize_fixed(&mut self.scratch, len)
     }
 
     #[inline]
@@ -270,7 +268,7 @@ fn digest_from_state(state: [u32; 8]) -> Digest {
 }
 
 #[inline]
-fn digest_from_output(output: [u8; DIGEST_LENGTH]) -> Digest {
+const fn digest_from_output(output: [u8; DIGEST_LENGTH]) -> Digest {
     Digest(output)
 }
 

@@ -81,18 +81,18 @@
 //! ```
 
 use crate::merkle::{
-    hasher::{Hasher, Standard},
-    mem::Mem,
-    path,
-    proof::Proof,
-    Bagging, Error, Family, Location, Position, Readable,
+    hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
 };
+#[cfg(feature = "std")]
+use crate::merkle::{hasher::Standard, Bagging};
 use ahash::RandomState;
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use commonware_cryptography::{CodecHasher, Digest};
+#[cfg(feature = "std")]
+use commonware_cryptography::CodecHasher;
+use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
 use core::ops::Range;
 

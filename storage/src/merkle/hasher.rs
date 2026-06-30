@@ -2,6 +2,7 @@
 
 use crate::merkle::{Bagging, Error, Family, Location, Position};
 use alloc::vec::Vec;
+#[cfg(any(feature = "std", test))]
 use commonware_codec::Encode;
 use commonware_cryptography::{CodecHasher, Digest};
 use core::marker::PhantomData;
@@ -180,16 +181,19 @@ impl<H: CodecHasher> Standard<H> {
     }
 
     /// Create reusable hashing state for a local batch of Merkle operations.
+    #[cfg(any(feature = "std", test))]
     pub(crate) fn state(&self) -> StandardState<H> {
         StandardState { hasher: H::new() }
     }
 }
 
 /// Reusable hashing state for a local run of Merkle operations.
+#[cfg(any(feature = "std", test))]
 pub(crate) struct StandardState<H: CodecHasher> {
     hasher: H,
 }
 
+#[cfg(any(feature = "std", test))]
 impl<H: CodecHasher> StandardState<H> {
     /// Hash a fixed-position Merkle node.
     pub(crate) fn node_digest<F: Family>(
