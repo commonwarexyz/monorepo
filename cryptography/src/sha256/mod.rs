@@ -107,6 +107,7 @@ impl CodecHasher for Sha256 {
         let mut parts = parts.into_iter();
         while let Some(part) = parts.next() {
             let Some(end) = len.checked_add(part.len()) else {
+                self.hasher.reset();
                 self.hasher.update(&self.scratch[..len]);
                 self.hasher.update(part);
                 for part in parts {
@@ -115,6 +116,7 @@ impl CodecHasher for Sha256 {
                 return digest_from_output(self.hasher.finalize_reset().into());
             };
             if end > MAX_FIXED_PREIMAGE {
+                self.hasher.reset();
                 self.hasher.update(&self.scratch[..len]);
                 self.hasher.update(part);
                 for part in parts {
@@ -137,11 +139,13 @@ impl CodecHasher for Sha256 {
     #[inline]
     fn hash_prefixed<E: Encode>(&mut self, prefix: &[u8], value: &E) -> Self::Digest {
         let Some(len) = prefix.len().checked_add(value.encode_size()) else {
+            self.hasher.reset();
             self.hasher.update(prefix);
             self.hasher.update(value.encode().as_ref());
             return digest_from_output(self.hasher.finalize_reset().into());
         };
         if len > MAX_FIXED_PREIMAGE {
+            self.hasher.reset();
             self.hasher.update(prefix);
             self.hasher.update(value.encode().as_ref());
             return digest_from_output(self.hasher.finalize_reset().into());

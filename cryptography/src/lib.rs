@@ -293,11 +293,12 @@ commonware_macros::stability_scope!(BETA {
             Self::default()
         }
 
-        /// Start a new empty hash.
+        /// Start a new hash.
         ///
         /// Append data with [Pending::update] and produce the digest with [Pending::finalize].
-        /// The returned [Pending] state holds a mutable reference to the hasher until it is
-        /// finalized or dropped.
+        /// The returned [Pending] holds a mutable reference to the hasher until it is finalized or
+        /// dropped. The hasher is expected to be in its initial state; this holds between
+        /// operations because [Pending::finalize] and dropping a [Pending] both reset it.
         #[inline]
         fn begin(&mut self) -> Pending<'_, Self> {
             Pending {
@@ -307,6 +308,9 @@ commonware_macros::stability_scope!(BETA {
         }
 
         /// Append message to the current hash state.
+        ///
+        /// Low-level hook driven by [Pending]. A direct caller must [Pending::finalize] or
+        /// [reset](Self::reset) afterward to restore the hasher to its initial state.
         #[doc(hidden)]
         fn update_inner(&mut self, message: &[u8]);
 
@@ -329,8 +333,8 @@ commonware_macros::stability_scope!(BETA {
     pub trait CodecHasher: Hasher {
         /// Hash a sequence of byte slices as one contiguous message.
         ///
-        /// The current hasher state is discarded before hashing, and the hasher is reset before
-        /// returning.
+        /// Assumes the hasher is in its initial state; this holds between operations because
+        /// [Pending::finalize] and dropping a [Pending] both reset it.
         #[inline]
         fn hash_parts<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
             self.reset();
