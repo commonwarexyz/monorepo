@@ -57,15 +57,12 @@ type StagedUpdate<F, U> = (
 /// Pending updates whose old committed location was already resolved by a staged read.
 pub(crate) struct StagedUpdates<F: Family, U: update::Update> {
     entries: Vec<StagedUpdate<F, U>>,
-    /// Whether `entries` is sorted by committed location.
-    sorted: bool,
 }
 
 impl<F: Family, U: update::Update> StagedUpdates<F, U> {
     fn new() -> Self {
         Self {
             entries: Vec::new(),
-            sorted: true,
         }
     }
 }
@@ -1067,7 +1064,6 @@ where
                 .mutations
                 .insert(self.keys[slot].clone(), Some(updates[update_idx].1.clone()));
         }
-        staged_updates.sorted = true;
         (Self::apply_upserts(self.batch, upserts), staged_updates)
     }
 }
@@ -1403,13 +1399,8 @@ where
         let (mut mutations, m) = self.into_parts();
         let mut cached: Vec<(K, Location<F>, Option<V::Value>)> =
             Vec::with_capacity(staged_updates.entries.len());
-        let sorted = staged_updates.sorted;
         for (key, loc, (), value) in staged_updates.entries {
             cached.push((key, loc, Some(value)));
-        }
-
-        if !cached.is_empty() && !sorted {
-            db.strategy().sort_by(&mut cached, |a, b| a.1.cmp(&b.1));
         }
 
         // Resolve existing keys.
