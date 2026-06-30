@@ -250,7 +250,7 @@ where
                 continue;
             } => {
                 let config = self.codec_config.clone();
-                let handle = self.strategy.spawn(move || {
+                let handle = self.strategy.spawn(move |_| {
                     let result = V::decode_cfg(bytes.as_ref(), &config);
                     (peer, result)
                 });
@@ -420,15 +420,16 @@ mod tests {
 
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
         where
-            F: FnOnce() -> T + Send + 'static,
+            F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
         {
             let pending = self.pending;
+            let s = self.clone();
             async move {
                 if pending {
                     futures::future::pending::<()>().await;
                 }
-                f()
+                f(s)
             }
         }
 
