@@ -137,7 +137,7 @@ commonware_macros::stability_scope!(BETA {
         /// If the job panics, the panic is propagated to the caller; it never aborts the process.
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
         where
-            F: FnOnce() -> T + Send + 'static,
+            F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static;
 
         /// Runs either a serial or parallel body.
@@ -593,10 +593,11 @@ commonware_macros::stability_scope!(BETA {
 
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
         where
-            F: FnOnce() -> T + Send + 'static,
+            F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
         {
-            self.strategy.spawn(f)
+            let s = self.clone();
+            self.strategy.spawn(|_| f(s))
         }
 
         #[track_caller]
@@ -769,10 +770,10 @@ commonware_macros::stability_scope!(BETA {
 
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
         where
-            F: FnOnce() -> T + Send + 'static,
+            F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
         {
-            let result = f();
+            let result = f(self.clone());
             async move { result }
         }
 
@@ -941,18 +942,19 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
         where
-            F: FnOnce() -> T + Send + 'static,
+            F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
         {
             if self.thread_pool.current_num_threads() <= 1 {
-                return Either::Left(future::ready(f()));
+                return Either::Left(future::ready(f(self.clone())));
             }
 
             let (tx, rx) = oneshot::channel();
+            let s = self.clone();
             self.thread_pool.spawn(move || {
                 // Catch the panic so a panicking job propagates to the awaiting task rather than
                 // aborting the process (rayon aborts on an uncaught panic in a spawned job).
-                let result = panic::catch_unwind(AssertUnwindSafe(f));
+                let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
                 let _ = tx.send(result);
             });
             Either::Right(async move {
@@ -1365,7 +1367,7 @@ mod test {
 
     #[test]
     fn sequential_spawn_runs_job() {
-        let result = futures::executor::block_on(Sequential.spawn(|| 7));
+        let result = futures::executor::block_on(Sequential.spawn(|_| 7));
 
         assert_eq!(result, 7);
     }
@@ -1374,7 +1376,7 @@ mod test {
     fn rayon_spawn_runs_job_on_pool() {
         let strategy = parallel_strategy();
 
-        let result = futures::executor::block_on(strategy.spawn(|| {
+        let result = futures::executor::block_on(strategy.spawn(|_| {
             assert!(rayon::current_thread_index().is_some());
             7
         }));
@@ -1392,7 +1394,7 @@ mod test {
             .unwrap();
         let strategy = Rayon::with_pool(Arc::new(pool));
 
-        let result = strategy.spawn(|| 7).now_or_never();
+        let result = strategy.spawn(|_| 7).now_or_never();
 
         assert_eq!(result, Some(7));
         assert_eq!(policy_len(&strategy), 0);
@@ -1404,13 +1406,13 @@ mod test {
         // A panic on a pool worker must surface at the await point, not abort the process.
         let strategy = parallel_strategy();
 
-        let _: () = futures::executor::block_on(strategy.spawn(|| panic!("boom")));
+        let _: () = futures::executor::block_on(strategy.spawn(|_| panic!("boom")));
     }
 
     #[test]
     #[should_panic(expected = "boom")]
     fn sequential_spawn_propagates_job_panic() {
-        let _: () = futures::executor::block_on(Sequential.spawn(|| panic!("boom")));
+        let _: () = futures::executor::block_on(Sequential.spawn(|_| panic!("boom")));
     }
 
     proptest! {
