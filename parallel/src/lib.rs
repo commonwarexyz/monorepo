@@ -144,10 +144,6 @@ commonware_macros::stability_scope!(BETA {
             T: Send + 'static;
 
         /// Runs either a serial or parallel body.
-        ///
-        /// Adaptive strategies use `len` to decide which body to run. The parallel body is
-        /// responsible for using this strategy, [`manual`](Self::manual), or another parallel
-        /// primitive to perform parallel work.
         #[track_caller]
         fn run<R, SEQ, PAR>(
             &self,
@@ -465,8 +461,7 @@ commonware_macros::stability_scope!(BETA {
         /// Maps each element with per-partition state and a per-item work multiplier.
         ///
         /// The multiplier is used only by adaptive strategies to distinguish workloads where the
-        /// item count hides the real amount of work. Implementations that do not adapt their
-        /// execution path may ignore it.
+        /// item count hides the real amount of work.
         #[track_caller]
         fn map_init_collect_vec_with_multiplier<I, INIT, T, F, R>(
             &self,
