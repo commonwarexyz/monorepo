@@ -2712,7 +2712,7 @@ mod bitmap_tests {
             // Most recent commit is current -> bit=1.
             assert!(db.bitmap.get_bit(*commit_locs[2]));
 
-            let db = assert_oracle_round_trip(db, context, "commit_floor").await;
+            let db = Box::pin(assert_oracle_round_trip(db, context, "commit_floor")).await;
             db.destroy().await.unwrap();
         });
     }
@@ -2765,7 +2765,7 @@ mod bitmap_tests {
             assert_eq!(db.get(&k1).await.unwrap(), Some(vec![10]));
             assert!(db.get(&k2).await.unwrap().is_none());
 
-            let db = assert_oracle_round_trip(db, context, "rewind").await;
+            let db = Box::pin(assert_oracle_round_trip(db, context, "rewind")).await;
             db.destroy().await.unwrap();
         });
     }
@@ -2842,7 +2842,7 @@ mod bitmap_tests {
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![3]));
 
-            let db = assert_oracle_round_trip(db, context, "tail").await;
+            let db = Box::pin(assert_oracle_round_trip(db, context, "tail")).await;
             db.destroy().await.unwrap();
         });
     }

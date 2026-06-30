@@ -104,7 +104,7 @@ pub struct Writer<B: Blob> {
     /// will contain its CRC record.
     partial_page_state: Option<Checksum>,
 
-    /// Durability state for plain writes, resizes, and range-sync writes.
+    /// Durability state for writes, resizes, and range-sync writes.
     durability: Durability,
 
     /// Unique id assigned to this blob by the page cache.
@@ -150,11 +150,6 @@ impl<B: Blob> Writer<B> {
         } else {
             self.write_at(offset, bufs).await
         }
-    }
-
-    /// Sync the underlying blob if there are unsynced mutations.
-    async fn sync_inner(&mut self) -> Result<(), Error> {
-        self.durability.sync(&self.blob).await
     }
 
     /// Wrap `blob` in a [Writer]. `blob` must already hold `original_blob_size` physical bytes;
@@ -345,6 +340,7 @@ impl<B: Blob> Writer<B> {
             self.partial_page_state.is_none(),
             "an empty tip implies no partial page state"
         );
+        // Direct blob writes must not overtake an earlier started sync barrier.
         self.durability.wait_for_pending().await?;
 
         // Cache the pages before `replace` publishes the new size, so reads of the bulk range are
@@ -396,7 +392,7 @@ impl<B: Blob> Writer<B> {
     /// If `sync` is true and the flush emits a single write, that write is made durable
     /// immediately: with [`Blob::write_at_sync`] when there are no earlier unsynced mutations, or
     /// by writing it and syncing the blob when there are. Flushes split around a protected CRC use
-    /// plain writes so the caller can make them durable with one sync.
+    /// unsynced writes so the caller can make them durable with one sync.
     ///
     /// Returns `true` if the flush made its writes durable, so no additional sync is needed.
     async fn flush_internal(
@@ -417,6 +413,7 @@ impl<B: Blob> Writer<B> {
             return Ok(false);
         }
 
+        // A flush mutates the blob, so first resolve any outstanding start_sync barrier.
         self.durability.wait_for_pending().await?;
 
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
@@ -928,9 +925,9 @@ impl<B: Blob> Writer<B> {
             return Ok(());
         }
 
-        // Otherwise, the flush either had no bytes to write or used plain writes. Sync only if a
+        // Otherwise, the flush either had no bytes to write or used unsynced writes. Sync only if a
         // durability barrier is still pending.
-        self.sync_inner().await
+        self.durability.sync(&self.blob).await
     }
 
     /// Flushes buffered data and begins making all pending mutations durable, returning a
@@ -2162,12 +2159,15 @@ mod tests {
         });
     }
 
+    type StartedSyncSender = Arc<Mutex<Option<oneshot::Sender<()>>>>;
+    type ReleaseSyncReceiver = Arc<Mutex<Option<oneshot::Receiver<Result<(), Error>>>>>;
+
     /// Blob wrapper that lets tests hold one started sync open until explicitly released.
     #[derive(Clone)]
     struct DelayedStartSyncBlob<B: Blob> {
         inner: B,
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<Result<(), Error>>>>>,
+        started: StartedSyncSender,
+        release: ReleaseSyncReceiver,
     }
 
     impl<B: Blob> DelayedStartSyncBlob<B> {

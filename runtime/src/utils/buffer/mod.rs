@@ -10,10 +10,13 @@ mod write;
 pub use read::Read;
 pub use write::Write;
 
-/// Tracks whether plain blob mutations still need a full durability barrier.
+/// Tracks whether blob state is durably persisted.
 enum Durability {
+    // No unsynced mutations.
     Clean,
+    // Unsynced mutations need a sync.
     Dirty,
+    // A started sync is in flight.
     Pending(Completion),
 }
 
@@ -23,28 +26,27 @@ struct Completion {
 }
 
 impl Completion {
+    /// Share a started sync.
     fn start(handle: crate::Handle<()>) -> Self {
         Self {
-            inner: async move { handle.await }.boxed().shared(),
+            inner: handle.boxed().shared(),
         }
     }
 
+    /// Return another waiter.
     fn handle(&self) -> crate::Handle<()> {
         let inner = self.inner.clone();
-        crate::Handle::from_future(async move { inner.await })
+        crate::Handle::from_future(inner)
     }
 
+    /// Wait internally.
     async fn wait(&self) -> Result<(), crate::Error> {
         self.inner.clone().await
     }
 }
 
 impl Durability {
-    /// Create a new sync state.
-    ///
-    /// Use `needs_sync = true` when wrapping an existing blob because prior plain mutations may
-    /// still need a full [`crate::Blob::sync`] barrier. [`Self::write_at_sync`] can use
-    /// [`crate::Blob::write_at_sync`] only when this is false.
+    /// `needs_sync` means existing blob contents may not be durable.
     const fn new(needs_sync: bool) -> Self {
         if needs_sync {
             Self::Dirty
@@ -65,6 +67,7 @@ impl Durability {
         let Self::Pending(pending) = self else {
             return Ok(());
         };
+        // Keep `self` pending until the await resolves.
         let pending = pending.clone();
         match pending.wait().await {
             Ok(()) => {
@@ -129,6 +132,7 @@ impl Durability {
         match self {
             Self::Clean => crate::Handle::ready(Ok(())),
             Self::Dirty => {
+                // Share one completion with all waiters.
                 let pending = Completion::start(blob.start_sync().await);
                 let handle = pending.handle();
                 *self = Self::Pending(pending);
@@ -173,7 +177,7 @@ mod tests {
 
     /// Test blob with separate visible and durable state.
     ///
-    /// Plain writes and resizes only update `data`. `write_at_sync` updates `data`
+    /// Unsynced writes and resizes only update `data`. `write_at_sync` updates `data`
     /// and then copies only that submitted range into `durable`. `sync` copies all
     /// of `data` to `durable`. This lets tests assert that `Write::sync` uses range
     /// sync only when no earlier unsynced mutation needs a full durability barrier.
