@@ -10,16 +10,6 @@ mod write;
 pub use read::Read;
 pub use write::Write;
 
-/// Tracks whether blob state is durably persisted.
-enum Durability {
-    // No unsynced mutations.
-    Clean,
-    // Unsynced mutations need a sync.
-    Dirty,
-    // A started sync is in flight.
-    Pending(Completion),
-}
-
 /// A shared sync result.
 #[derive(Clone)]
 struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
@@ -40,6 +30,16 @@ impl From<crate::Handle<()>> for Completion {
     fn from(handle: crate::Handle<()>) -> Self {
         Self(handle.boxed().shared())
     }
+}
+
+/// Tracks whether blob state is durably persisted.
+enum Durability {
+    // No unsynced mutations.
+    Clean,
+    // Unsynced mutations need a sync.
+    Dirty,
+    // A started sync is in flight.
+    Pending(Completion),
 }
 
 impl Durability {
