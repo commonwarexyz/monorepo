@@ -192,13 +192,19 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     /// node MUST return an identical [`Set`], with the same membership AND the
     /// same ordering, and repeated calls MUST return the same `Set`.
     ///
-    /// This set is embedded verbatim as the `next_players` of the epoch's final
-    /// block, which the proposer and every verifier independently rebuild and
-    /// compare for equality. Because [`Set`] is order sensitive (both its
-    /// equality and its encoding depend on element order), any divergence in
-    /// membership or ordering between proposer and verifier rejects a valid
-    /// final block and stalls the epoch boundary. Canonicalize (e.g. sort) the
-    /// returned `Set` so it is identical regardless of how the underlying
-    /// membership is stored or queried.
+    /// In continuous reshare, this hook is consulted while building or
+    /// verifying an epoch's final block. That final block carries the
+    /// [`types::EpochInfo`] for the next epoch, and this set is embedded
+    /// verbatim as that epoch info's `next_players`.
+    ///
+    /// Therefore the result for `epoch` must be locked in before honest nodes
+    /// propose or verify the final block that announces `epoch` as
+    /// `next_players`. The proposer and every verifier independently rebuild
+    /// and compare the value for equality. Because [`Set`] is order sensitive
+    /// (both its equality and its encoding depend on element order), any
+    /// divergence in membership or ordering between proposer and verifier
+    /// rejects a valid final block and stalls the epoch boundary. Canonicalize
+    /// (e.g. sort) the returned `Set` so it is identical regardless of how the
+    /// underlying membership is stored or queried.
     fn participants(&mut self, epoch: Epoch) -> impl Future<Output = Set<Self::PublicKey>> + Send;
 }
