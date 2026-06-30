@@ -131,13 +131,10 @@ commonware_macros::stability_scope!(BETA {
 
         /// Submit one CPU-bound job to this strategy.
         ///
-        /// The returned future resolves when the submitted job completes. Depending on the
-        /// strategy, the job may run eagerly and inline on the calling thread when this method is
-        /// called (e.g. [`Sequential`] or a single-worker [`Rayon`] pool) or be deferred to a
-        /// worker thread and run while the returned future is awaited.
+        /// The returned future resolves when the submitted job completes, but blocking on external
+        /// synchronization or I/O inside the job can occupy execution capacity until it returns.
         ///
-        /// If the job panics, the panic is propagated to the caller (at the call site for the
-        /// inline case, or at the future's await point otherwise); it never aborts the process.
+        /// If the job panics, the panic is propagated to the caller; it never aborts the process.
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
         where
             F: FnOnce() -> T + Send + 'static,
