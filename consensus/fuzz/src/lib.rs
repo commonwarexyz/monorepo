@@ -2035,41 +2035,6 @@ fn install_byzzfuzz_panic_hook() {
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn audit_input() -> FuzzInput {
-        FuzzInput {
-            raw_bytes: 0u64.to_be_bytes().to_vec(),
-            required_containers: MIN_REQUIRED_CONTAINERS,
-            degraded_network: false,
-            configuration: N4F0C4,
-            partition: Partition::Connected,
-            strategy: StrategyChoice::AnyScope,
-            messaging_faults: Vec::new(),
-            forwarding: ForwardingPolicy::Disabled,
-            certify: CertifyChoice::Always,
-            reporting: ReporterWiring::Solo,
-        }
-    }
-
-    #[test]
-    fn warn_trace_collection_does_not_perturb_standard_run() {
-        let input = audit_input();
-
-        let unwrapped = run_standard_once::<simplex::SimplexId>(input.clone(), false, true)
-            .expect("valid connected run should produce audit data");
-        let wrapped = run_with_warn_trace_collection(|| {
-            run_standard_once::<simplex::SimplexId>(input, false, true)
-        })
-        .expect("valid connected run should produce audit data");
-
-        assert_eq!(unwrapped.auditor_state, wrapped.auditor_state);
-        assert_eq!(unwrapped.reporter_states, wrapped.reporter_states);
-    }
-}
-
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput) {
     if matches!(M::MODE, Mode::Byzzfuzz) {
         install_byzzfuzz_panic_hook();
@@ -2130,5 +2095,40 @@ pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: Node
     if let Err(payload) = run_result {
         println!("Panicked with raw_bytes: {:?}", raw_bytes_for_panic);
         panic::resume_unwind(payload);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn audit_input() -> FuzzInput {
+        FuzzInput {
+            raw_bytes: 0u64.to_be_bytes().to_vec(),
+            required_containers: MIN_REQUIRED_CONTAINERS,
+            degraded_network: false,
+            configuration: N4F0C4,
+            partition: Partition::Connected,
+            strategy: StrategyChoice::AnyScope,
+            messaging_faults: Vec::new(),
+            forwarding: ForwardingPolicy::Disabled,
+            certify: CertifyChoice::Always,
+            reporting: ReporterWiring::Solo,
+        }
+    }
+
+    #[test]
+    fn warn_trace_collection_does_not_perturb_standard_run() {
+        let input = audit_input();
+
+        let unwrapped = run_standard_once::<simplex::SimplexId>(input.clone(), false, true)
+            .expect("valid connected run should produce audit data");
+        let wrapped = run_with_warn_trace_collection(|| {
+            run_standard_once::<simplex::SimplexId>(input, false, true)
+        })
+        .expect("valid connected run should produce audit data");
+
+        assert_eq!(unwrapped.auditor_state, wrapped.auditor_state);
+        assert_eq!(unwrapped.reporter_states, wrapped.reporter_states);
     }
 }
