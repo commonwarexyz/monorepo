@@ -340,10 +340,11 @@ impl<B: Blob> Writer<B> {
         let mut physical_pages = IoBufs::default();
         self.append_full_pages(&bulk, None, &mut physical_pages);
 
-        debug_assert!(
+        assert!(
             self.partial_page_state.is_none(),
             "an empty tip implies no partial page state"
         );
+
         // Direct blob writes must not overtake an earlier started sync barrier.
         self.sync_state.wait_for_pending().await?;
 

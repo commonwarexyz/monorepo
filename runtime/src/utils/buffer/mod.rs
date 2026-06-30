@@ -57,7 +57,6 @@ impl SyncState {
         let Self::Pending(pending) = self else {
             return Ok(());
         };
-        let pending = pending.clone();
         match pending.wait().await {
             Ok(()) => {
                 *self = Self::Clean;
