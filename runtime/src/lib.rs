@@ -842,6 +842,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_macros::select;
+    use commonware_parallel::Strategy as _;
     use commonware_utils::{
         channel::{mpsc, oneshot},
         futures::Pool as FuturesPool,
@@ -3920,6 +3921,47 @@ mod tests {
             pool.install(|| {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
+        });
+    }
+
+    #[test]
+    fn test_deterministic_nested_parallel_strategy_uses_spawn_worker() {
+        // The deterministic runtime is single-threaded.
+        const NUM_THREADS: usize = 1;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context
+                .child("pool")
+                .create_strategy(NZUsize!(NUM_THREADS))
+                .unwrap()
+                .manual();
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
+        });
+    }
+
+    #[test]
+    fn test_tokio_nested_parallel_strategy_uses_spawn_worker() {
+        const WORKERS: usize = 2;
+
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context
+                .child("pool")
+                .create_strategy(NZUsize!(WORKERS))
+                .unwrap()
+                .manual();
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
         });
     }
 
