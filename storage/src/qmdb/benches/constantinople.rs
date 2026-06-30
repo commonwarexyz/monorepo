@@ -145,6 +145,7 @@ struct Args {
     iters: usize,
     num_keys: u64,
     num_updates: u64,
+    num_reads: u64,
 }
 
 fn key(i: u64) -> Digest {
@@ -221,10 +222,11 @@ macro_rules! run_pipeline {
                 chain.push(b.merkleize(&db, None).await.unwrap());
             }
 
-            let muts = gen_muts(&mut rng, args.num_updates, args.num_keys);
-            let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
-            let updates: Vec<_> = muts
+            let reads = gen_muts(&mut rng, args.num_reads, args.num_keys);
+            let keys: Vec<&Digest> = reads.iter().map(|(k, _)| k).collect();
+            let updates: Vec<_> = reads
                 .iter()
+                .take(args.num_updates as usize)
                 .enumerate()
                 .map(|(idx, (_, v))| (idx, *v))
                 .collect();
@@ -279,9 +281,10 @@ fn main() {
         iters: raw.get(3).and_then(|s| s.parse().ok()).unwrap_or(15),
         num_keys: raw.get(4).and_then(|s| s.parse().ok()).unwrap_or(1_000_000),
         num_updates: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
+        num_reads: raw.get(6).and_then(|s| s.parse().ok()).unwrap_or(32_768),
     };
     let threads: NonZeroUsize = raw
-        .get(6)
+        .get(7)
         .and_then(|s| s.parse().ok())
         .unwrap_or(NZUsize!(8));
     assert!(
@@ -296,13 +299,16 @@ fn main() {
         "db: any::unordered::fixed::mmb|any::ordered::fixed::mmb|any::unordered::variable::mmb|current::unordered::fixed::mmb|current::ordered::fixed::mmb"
     );
     assert!(
-        args.iters > 0 && args.num_keys > 0 && args.num_updates > 0,
-        "iters, keys, and updates must be non-zero"
+        args.iters > 0
+            && args.num_keys > 0
+            && args.num_updates > 0
+            && args.num_reads >= args.num_updates,
+        "iters, keys, and updates must be non-zero, and reads must be >= updates"
     );
 
     eprintln!(
-        "constantinople db={db_kind} depth={} iters={} keys={} updates={} threads={threads}",
-        args.depth, args.iters, args.num_keys, args.num_updates
+        "constantinople db={db_kind} depth={} iters={} keys={} updates={} reads={} threads={threads}",
+        args.depth, args.iters, args.num_keys, args.num_updates, args.num_reads
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
