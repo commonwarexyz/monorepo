@@ -82,13 +82,8 @@ impl<E: Context> Checkpoint<E> {
         self.get(CLEAR_TARGET_KEY)
     }
 
-    /// Durably record the boundary and watermark, writing only entries that changed.
-    pub(super) async fn persist(
-        &mut self,
-        items_per_blob: u64,
-        boundary: u64,
-        watermark: u64,
-    ) -> Result<(), Error> {
+    /// Stage the boundary and watermark, writing only entries that changed.
+    fn stage_persist(&mut self, items_per_blob: u64, boundary: u64, watermark: u64) {
         // A blob-aligned boundary is derived from the oldest blob, so the entry is only kept
         // while the boundary is mid-blob.
         if boundary.is_multiple_of(items_per_blob) {
@@ -101,6 +96,16 @@ impl<E: Context> Checkpoint<E> {
         if self.watermark() != Some(watermark) {
             self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
         }
+    }
+
+    /// Durably record the boundary and watermark, writing only entries that changed.
+    pub(super) async fn persist(
+        &mut self,
+        items_per_blob: u64,
+        boundary: u64,
+        watermark: u64,
+    ) -> Result<(), Error> {
+        self.stage_persist(items_per_blob, boundary, watermark);
         // Always sync, even if this call staged nothing: `lower_watermark` stages without syncing,
         // so skipping the sync when our own entries are unchanged could drop that pending change.
         self.sync().await

@@ -1,11 +1,21 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
-use super::{Contiguous, Many};
+use super::{fixed, variable, Contiguous, Many};
 use crate::journal::{contiguous::Mutable, Error};
 use commonware_macros::boxed;
-use commonware_utils::NZUsize;
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, reschedule, Handle, Runner as _, Spawner as _,
+    Supervisor as _,
+};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{future::BoxFuture, StreamExt};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 pub(super) mod partition_sync_fault {
     use commonware_runtime::{
@@ -176,6 +186,242 @@ pub(super) mod partition_sync_fault {
                 return Handle::ready(self.sync().await);
             }
             self.inner.start_sync().await
+        }
+    }
+}
+
+/// A [Context] wrapper whose blob `start_sync` defers completion until [`Control::release`], so a
+/// test can observe (and act on) the journal while a real backend sync is genuinely in flight.
+pub(super) mod delayed_start_sync {
+    use commonware_runtime::{
+        deterministic, telemetry::metrics, Blob, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics,
+        Name, Storage, Supervisor,
+    };
+    use commonware_utils::sync::Notify;
+    use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
+    use std::{
+        future::Future,
+        io::Error as IoError,
+        ops::RangeInclusive,
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        },
+        time::{Duration, SystemTime},
+    };
+
+    /// Shared control over every blob's deferred `start_sync` produced by one [Context].
+    pub(in crate::journal::contiguous) struct Control {
+        released: AtomicBool,
+        release: Notify,
+        fail: AtomicBool,
+        starts: AtomicUsize,
+        start_waits: AtomicUsize,
+        start_completions: AtomicUsize,
+    }
+
+    impl Control {
+        pub(in crate::journal::contiguous) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                released: AtomicBool::new(false),
+                release: Notify::new(),
+                fail: AtomicBool::new(false),
+                starts: AtomicUsize::new(0),
+                start_waits: AtomicUsize::new(0),
+                start_completions: AtomicUsize::new(0),
+            })
+        }
+
+        /// Arm every in-flight sync to resolve to an error instead of syncing.
+        pub(in crate::journal::contiguous) fn arm_fail(&self) {
+            self.fail.store(true, Ordering::SeqCst);
+        }
+
+        /// Let every in-flight (and future) `start_sync` proceed to completion.
+        pub(in crate::journal::contiguous) fn release(&self) {
+            self.released.store(true, Ordering::SeqCst);
+            self.release.notify_waiters();
+        }
+
+        /// Number of `start_sync` calls issued.
+        pub(in crate::journal::contiguous) fn starts(&self) -> usize {
+            self.starts.load(Ordering::SeqCst)
+        }
+
+        /// Number of in-flight syncs that began waiting for release.
+        pub(in crate::journal::contiguous) fn start_waits(&self) -> usize {
+            self.start_waits.load(Ordering::SeqCst)
+        }
+
+        /// Number of in-flight syncs that completed durably.
+        pub(in crate::journal::contiguous) fn start_completions(&self) -> usize {
+            self.start_completions.load(Ordering::SeqCst)
+        }
+
+        async fn wait_released(&self) {
+            while !self.released.load(Ordering::SeqCst) {
+                self.release.notified().await;
+            }
+        }
+    }
+
+    pub(in crate::journal::contiguous) struct Context {
+        inner: deterministic::Context,
+        control: Arc<Control>,
+    }
+
+    impl Context {
+        pub(in crate::journal::contiguous) fn new(
+            inner: deterministic::Context,
+            control: Arc<Control>,
+        ) -> Self {
+            Self { inner, control }
+        }
+    }
+
+    #[derive(Clone)]
+    pub(in crate::journal::contiguous) struct DelayedStartSyncBlob<B: Blob> {
+        inner: B,
+        control: Arc<Control>,
+    }
+
+    impl Supervisor for Context {
+        fn name(&self) -> Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            Self {
+                inner: self.inner.child(label),
+                control: self.control.clone(),
+            }
+        }
+
+        fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            self.inner = self.inner.with_attribute(key, value);
+            self
+        }
+    }
+
+    impl Metrics for Context {
+        fn register<N: Into<String>, H: Into<String>, M: metrics::Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> metrics::Registered<M> {
+            self.inner.register(name, help, metric)
+        }
+
+        fn encode(&self) -> String {
+            self.inner.encode()
+        }
+    }
+
+    impl Clock for Context {
+        fn current(&self) -> SystemTime {
+            self.inner.current()
+        }
+
+        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+            self.inner.sleep(duration)
+        }
+
+        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+            self.inner.sleep_until(deadline)
+        }
+    }
+
+    impl GovernorClock for Context {
+        type Instant = SystemTime;
+
+        fn now(&self) -> Self::Instant {
+            self.current()
+        }
+    }
+
+    impl ReasonablyRealtime for Context {}
+
+    impl Storage for Context {
+        type Blob = DelayedStartSyncBlob<<deterministic::Context as Storage>::Blob>;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: RangeInclusive<u16>,
+        ) -> Result<(Self::Blob, u64, u16), Error> {
+            let (inner, len, version) =
+                self.inner.open_versioned(partition, name, versions).await?;
+            Ok((
+                DelayedStartSyncBlob {
+                    inner,
+                    control: self.control.clone(),
+                },
+                len,
+                version,
+            ))
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+            self.inner.remove(partition, name).await
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+            self.inner.scan(partition).await
+        }
+    }
+
+    impl<B: Blob> Blob for DelayedStartSyncBlob<B> {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.control.starts.fetch_add(1, Ordering::SeqCst);
+            let control = self.control.clone();
+            let inner = self.inner.clone();
+            Handle::from_future(async move {
+                control.start_waits.fetch_add(1, Ordering::SeqCst);
+                control.wait_released().await;
+                if control.fail.load(Ordering::SeqCst) {
+                    return Err(Error::Io(
+                        IoError::other("injected start_sync failure").into(),
+                    ));
+                }
+                inner.start_sync().await.await?;
+                control.start_completions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
         }
     }
 }
@@ -1434,4 +1680,347 @@ where
     assert_eq!(journal.read(0).await.unwrap(), 42);
 
     journal.destroy().await.unwrap();
+}
+
+trait CommitHandle: Mutable<Item = u64> {
+    fn commit_handle(&mut self) -> impl Future<Output = Handle<()>> + Send;
+}
+
+impl<E: crate::Context> CommitHandle for fixed::Journal<E, u64> {
+    fn commit_handle(&mut self) -> impl Future<Output = Handle<()>> + Send {
+        Self::start_commit(self)
+    }
+}
+
+impl<E: crate::Context> CommitHandle for variable::Journal<E, u64> {
+    fn commit_handle(&mut self) -> impl Future<Output = Handle<()>> + Send {
+        Self::start_commit(self)
+    }
+}
+
+#[boxed]
+async fn test_commit_handle_durability<F, Fut, J>(factory: F)
+where
+    F: Fn(&'static str) -> Fut,
+    Fut: Future<Output = Result<J, Error>>,
+    J: CommitHandle,
+{
+    let mut journal = factory("a").await.unwrap();
+    for i in 0..7u64 {
+        journal.append(&(i * 10)).await.unwrap();
+    }
+    let handle = journal.commit_handle().await;
+    handle.await.unwrap();
+    let size = journal.bounds().end;
+    drop(journal);
+
+    let journal = factory("b").await.unwrap();
+    assert_eq!(journal.bounds().end, size);
+    for i in 0..7u64 {
+        assert_eq!(journal.read(i).await.unwrap(), i * 10);
+    }
+    journal.destroy().await.unwrap();
+}
+
+#[test]
+fn test_fixed_commit_handle_durability() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let cfg = fixed::Config {
+            partition: "fixed-commit-handle".into(),
+            items_per_blob: NZU64!(3),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_commit_handle_durability(|label| {
+            let cfg = cfg.clone();
+            fixed::Journal::<_, u64>::init(context.child(label), cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_variable_commit_handle_durability() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let cfg = variable::Config {
+            partition: "variable-commit-handle".into(),
+            items_per_section: NZU64!(3),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_commit_handle_durability(|label| {
+            let cfg = cfg.clone();
+            variable::Journal::<_, u64>::init(context.child(label), cfg)
+        })
+        .await;
+    });
+}
+
+/// A commit handle must not block journal use while backend sync is pending.
+#[boxed]
+async fn test_commit_handle_overlaps_work<F, Fut, J>(
+    context: deterministic::Context,
+    control: Arc<delayed_start_sync::Control>,
+    make: F,
+) where
+    F: Fn(delayed_start_sync::Context) -> Fut,
+    Fut: Future<Output = Result<J, Error>>,
+    J: CommitHandle,
+{
+    let mut journal = make(delayed_start_sync::Context::new(
+        context.child("a"),
+        control.clone(),
+    ))
+    .await
+    .unwrap();
+    for i in 0..4u64 {
+        journal.append(&i).await.unwrap();
+    }
+
+    let handle = journal.commit_handle().await;
+    assert!(control.starts() >= 1);
+    assert_eq!(control.start_completions(), 0);
+
+    // Observe the sync while the journal keeps working.
+    let waiter = context
+        .child("await_sync")
+        .spawn(|_| async move { handle.await.unwrap() });
+    while control.start_waits() == 0 {
+        reschedule().await;
+    }
+
+    // Append/read complete before sync.
+    journal.append(&999).await.unwrap();
+    assert_eq!(journal.read(0).await.unwrap(), 0);
+    assert_eq!(
+        control.start_completions(),
+        0,
+        "the journal made progress while the sync was still in flight"
+    );
+
+    control.release();
+    waiter.await.unwrap();
+    assert!(control.start_completions() >= 1);
+
+    // Mid-sync append is durable after the next commit.
+    let handle = journal.commit_handle().await;
+    handle.await.unwrap();
+    drop(journal);
+
+    let journal = make(delayed_start_sync::Context::new(
+        context.child("b"),
+        control.clone(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(journal.bounds().end, 5);
+    for i in 0..4u64 {
+        assert_eq!(journal.read(i).await.unwrap(), i);
+    }
+    assert_eq!(journal.read(4).await.unwrap(), 999);
+    journal.destroy().await.unwrap();
+}
+
+#[boxed]
+async fn test_commit_handle_overlaps_predecessor_and_tail<F, Fut, J>(
+    context: deterministic::Context,
+    control: Arc<delayed_start_sync::Control>,
+    make: F,
+) where
+    F: FnOnce(delayed_start_sync::Context) -> Fut,
+    Fut: Future<Output = Result<J, Error>>,
+    J: CommitHandle + 'static,
+{
+    let mut journal = make(delayed_start_sync::Context::new(
+        context.child("a"),
+        control.clone(),
+    ))
+    .await
+    .unwrap();
+    for i in 0..4u64 {
+        journal.append(&i).await.unwrap();
+    }
+    let starts_before = control.starts();
+    assert!(starts_before > 0);
+    let waits_before = control.start_waits();
+
+    let handle = journal.commit_handle().await;
+    assert!(
+        control.starts() > starts_before,
+        "tail sync was not started while predecessor was in flight"
+    );
+
+    let waiter = context
+        .child("commit")
+        .spawn(|_| async move { handle.await.unwrap() });
+    while control.start_waits() == waits_before {
+        reschedule().await;
+    }
+
+    assert_eq!(
+        control.start_completions(),
+        0,
+        "commit completed before predecessor was released"
+    );
+
+    control.release();
+    waiter.await.unwrap();
+    journal.destroy().await.unwrap();
+}
+
+/// A commit whose in-flight sync fails surfaces the error through both the returned handle and the
+/// next durability operation.
+#[boxed]
+async fn test_commit_handle_failure_propagates<F, Fut, J>(
+    context: deterministic::Context,
+    control: Arc<delayed_start_sync::Control>,
+    make: F,
+) where
+    F: FnOnce(delayed_start_sync::Context) -> Fut,
+    Fut: Future<Output = Result<J, Error>>,
+    J: CommitHandle,
+{
+    let mut journal = make(delayed_start_sync::Context::new(
+        context.child("a"),
+        control.clone(),
+    ))
+    .await
+    .unwrap();
+    for i in 0..4u64 {
+        journal.append(&i).await.unwrap();
+    }
+
+    // Arm the in-flight sync to fail, and release it so it resolves to an error.
+    control.arm_fail();
+    control.release();
+
+    let handle = journal.commit_handle().await;
+    assert!(
+        handle.await.is_err(),
+        "the commit handle surfaces the failure"
+    );
+    assert!(
+        matches!(Mutable::commit(&mut journal).await, Err(Error::Runtime(_))),
+        "the next durability op surfaces the failed in-flight sync"
+    );
+
+    // A mutable method returned an error, so the journal is unusable per the failures-are-fatal
+    // contract; just drop it.
+    drop(journal);
+}
+
+fn fixed_overlap_cfg(context: &deterministic::Context, partition: &str) -> fixed::Config {
+    fixed::Config {
+        partition: partition.into(),
+        items_per_blob: NZU64!(10),
+        page_cache: CacheRef::from_pooler(context, NZU16!(44), NZUsize!(8)),
+        write_buffer: NZUsize!(2048),
+    }
+}
+
+fn variable_overlap_cfg(context: &deterministic::Context, partition: &str) -> variable::Config<()> {
+    variable::Config {
+        partition: partition.into(),
+        items_per_section: NZU64!(10),
+        compression: None,
+        codec_config: (),
+        page_cache: CacheRef::from_pooler(context, NZU16!(44), NZUsize!(8)),
+        write_buffer: NZUsize!(2048),
+    }
+}
+
+#[test]
+fn test_fixed_commit_handle_overlaps_predecessor_and_tail() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let control = delayed_start_sync::Control::new();
+        let cfg = fixed::Config {
+            partition: "fixed-commit-handle-predecessor".into(),
+            items_per_blob: NZU64!(3),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_commit_handle_overlaps_predecessor_and_tail(context, control, move |ctx| {
+            fixed::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_variable_commit_handle_overlaps_predecessor_and_tail() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let control = delayed_start_sync::Control::new();
+        let cfg = variable::Config {
+            partition: "variable-commit-handle-predecessor".into(),
+            items_per_section: NZU64!(3),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+        };
+        test_commit_handle_overlaps_predecessor_and_tail(context, control, move |ctx| {
+            variable::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_fixed_commit_handle_overlaps_work() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let control = delayed_start_sync::Control::new();
+        let cfg = fixed_overlap_cfg(&context, "fixed-commit-handle-overlap");
+        test_commit_handle_overlaps_work(context, control, move |ctx| {
+            let cfg = cfg.clone();
+            fixed::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_variable_commit_handle_overlaps_work() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let control = delayed_start_sync::Control::new();
+        let cfg = variable_overlap_cfg(&context, "variable-commit-handle-overlap");
+        test_commit_handle_overlaps_work(context, control, move |ctx| {
+            let cfg = cfg.clone();
+            variable::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_fixed_commit_handle_failure_propagates() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let control = delayed_start_sync::Control::new();
+        let cfg = fixed_overlap_cfg(&context, "fixed-commit-handle-fail");
+        test_commit_handle_failure_propagates(context, control, move |ctx| {
+            fixed::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
+}
+
+#[test]
+fn test_variable_commit_handle_failure_propagates() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let control = delayed_start_sync::Control::new();
+        let cfg = variable_overlap_cfg(&context, "variable-commit-handle-fail");
+        test_commit_handle_failure_propagates(context, control, move |ctx| {
+            variable::Journal::<_, u64>::init(ctx, cfg)
+        })
+        .await;
+    });
 }
