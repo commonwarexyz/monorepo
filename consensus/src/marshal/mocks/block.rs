@@ -37,8 +37,7 @@ impl<D: Digest, C: Codec> Block<D, C> {
         pending.update(&height.get().to_be_bytes());
         pending.update(&context.encode());
         pending.update(&timestamp.to_be_bytes());
-        let digest = pending.finalize();
-        digest
+        pending.finalize()
     }
 
     pub fn new<H: Hasher<Digest = D>>(
