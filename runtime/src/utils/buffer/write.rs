@@ -62,7 +62,7 @@ pub struct Write<B: Blob> {
     /// Buffered bytes at the logical tip of the blob.
     buffer: Buffer,
 
-    /// Durability state for writes and range-sync writes.
+    /// Durability state for plain writes and range-sync writes.
     sync_state: SyncState,
 }
 

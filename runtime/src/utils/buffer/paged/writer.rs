@@ -104,7 +104,7 @@ pub struct Writer<B: Blob> {
     /// will contain its CRC record.
     partial_page_state: Option<Checksum>,
 
-    /// Durability state for writes, resizes, and range-sync writes.
+    /// Durability state for plain writes, resizes, and range-sync writes.
     sync_state: SyncState,
 
     /// Unique id assigned to this blob by the page cache.
@@ -2272,6 +2272,7 @@ mod tests {
 
             // A fresh writer is dirty, so start_sync does one full fsync; nothing is buffered to write.
             let handle = writer.start_sync().await;
+            // Let the started sync finish.
             handle.await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 0);
@@ -2318,6 +2319,7 @@ mod tests {
             let handle = writer.start_sync().await;
             started_rx.await.expect("started sync was not issued");
 
+            // Try to sync while the started sync is still blocked.
             let mut sync = Box::pin(writer.sync());
             assert!(
                 sync.as_mut().now_or_never().is_none(),
@@ -2328,6 +2330,7 @@ mod tests {
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
+            // Release the started sync and retry.
             release_tx.send(Ok(())).unwrap();
             writer.sync().await.unwrap();
             handle.await.unwrap();
@@ -2352,6 +2355,7 @@ mod tests {
             started_rx.await.expect("started sync was not issued");
             writer.append(b"hello world").await.unwrap();
 
+            // Sync must wait before flushing the buffered write.
             let mut sync = Box::pin(writer.sync());
             assert!(
                 sync.as_mut().now_or_never().is_none(),
@@ -2363,6 +2367,7 @@ mod tests {
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
+            // Release the started sync, then flush the buffered write.
             release_tx.send(Ok(())).unwrap();
             writer.sync().await.unwrap();
             handle.await.unwrap();
@@ -2392,12 +2397,14 @@ mod tests {
                 writer.append(&data).await.unwrap();
                 writer
             });
+            // The append has reached the pending sync wait.
             blocked_rx.await.expect("append never waited on start_sync");
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 0);
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
+            // Release the started sync so the append can flush.
             release_tx.send(Ok(())).unwrap();
             let mut writer = append.await.unwrap();
             handle.await.unwrap();
@@ -2426,12 +2433,14 @@ mod tests {
             let seal = context
                 .child("seal")
                 .spawn(move |_| async move { writer.seal().await });
+            // The seal has reached the pending sync wait.
             blocked_rx.await.expect("seal never waited on start_sync");
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 0);
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
+            // Release the started sync so seal can flush.
             release_tx.send(Ok(())).unwrap();
             let sealed = seal.await.unwrap().unwrap();
             prior.await.unwrap();
