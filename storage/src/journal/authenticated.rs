@@ -53,8 +53,8 @@ type MerkleizedParent<F, H, Item, S> = Arc<MerkleizedBatch<F, DigestOf<H>, Item,
 pub struct UnmerkleizedBatch<F: Family, H: CodecHasher, Item: Send + Sync, S: Strategy> {
     // The inner batch of Merkle leaf digests.
     inner: batch::UnmerkleizedBatch<F, H::Digest, S>,
-    // The hasher to use for hashing the items.
-    hasher: StandardHasher<H>,
+    // The peak-bagging policy stamped into the resulting `MerkleizedBatch`.
+    bagging: Bagging,
     // Reusable state for hashing single items added through `add`.
     state: StandardState<H>,
     // The items to append from this batch.
@@ -104,7 +104,7 @@ impl<F: Family, H: CodecHasher, Item: Encode + Send + Sync, S: Strategy>
     pub fn merkleize(self, base: &Mem<F, H::Digest>) -> MerkleizedBatchArc<F, H, Item, S> {
         let Self {
             inner,
-            hasher,
+            bagging,
             state: _,
             items,
             parent,
@@ -115,7 +115,7 @@ impl<F: Family, H: CodecHasher, Item: Encode + Send + Sync, S: Strategy>
         let ancestor_items = Self::collect_ancestor_items(&parent);
         Arc::new(MerkleizedBatch {
             inner: merkle,
-            bagging: hasher.root_bagging(),
+            bagging,
             items,
             parent: parent.as_ref().map(Arc::downgrade),
             ancestor_items,
@@ -136,7 +136,7 @@ impl<F: Family, H: CodecHasher, Item: Encode + Send + Sync, S: Strategy>
         let first = self.inner.leaves();
         let digests = self.inner.strategy().map_init_collect_vec(
             items.iter().enumerate(),
-            || self.hasher.state(),
+            || StandardState::<H>::new(),
             |state, (i, item)| {
                 let pos = Position::try_from(first + i as u64).expect("valid leaf location");
                 state.leaf_encoded(pos, item)
@@ -218,12 +218,10 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     where
         Item: Encode,
     {
-        let hasher = StandardHasher::new(self.bagging);
-        let state = hasher.state();
         UnmerkleizedBatch {
             inner: self.inner.new_batch(),
-            hasher,
-            state,
+            bagging: self.bagging,
+            state: StandardState::new(),
             items: Vec::new(),
             parent: Some(Arc::clone(self)),
         }
@@ -313,12 +311,10 @@ where
         C::Item: Encode,
     {
         let root = self.merkle.to_batch();
-        let hasher = StandardHasher::new(self.hasher.root_bagging());
-        let state = hasher.state();
         UnmerkleizedBatch {
             inner: root.new_batch(),
-            hasher,
-            state,
+            bagging: self.hasher.root_bagging(),
+            state: StandardState::new(),
             items: Vec::new(),
             parent: None,
         }
@@ -972,12 +968,12 @@ mod tests {
             .unwrap();
 
             let batch = journal.new_batch();
-            assert_eq!(batch.hasher.root_bagging(), BackwardFold);
+            assert_eq!(batch.bagging, BackwardFold);
 
             let merkleized = journal.merkle.with_mem(|mem| batch.merkleize(mem));
             let child: UnmerkleizedBatch<mmr::Family, Sha256, TestOp<mmr::Family>, Sequential> =
                 merkleized.new_batch();
-            assert_eq!(child.hasher.root_bagging(), BackwardFold);
+            assert_eq!(child.bagging, BackwardFold);
         });
     }
 
