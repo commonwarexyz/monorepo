@@ -214,8 +214,6 @@ impl<B: Blob> Write<B> {
             self.write_blob(offset, buf).await?;
         }
 
-        self.sync_state.wait_for_pending().await?;
-
         // Resize the underlying blob.
         self.blob.resize(len).await?;
         self.sync_state.mark_dirty();
