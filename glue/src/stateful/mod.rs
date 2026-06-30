@@ -185,7 +185,7 @@ where
     fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Self::Block> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: &mut Self::InputProvider,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
@@ -224,7 +224,7 @@ where
     fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Stream<Item = Self::Block> + Send,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 

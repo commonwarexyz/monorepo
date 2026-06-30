@@ -412,41 +412,43 @@ where
         };
 
         let (epoch, outcome, output, players, next_players, share) = match outcome {
-            Some((output, share)) if let Some(current) = current => {
-                let next_epoch = epoch.next();
-                let next_players = self
-                    .participants_provider
-                    .participants(next_epoch.next())
-                    .await;
-                if record_metrics {
-                    self.metrics.record_success(&output, &public_key);
+            Some((output, share)) => match current {
+                Some(current) => {
+                    let next_epoch = epoch.next();
+                    let next_players = self
+                        .participants_provider
+                        .participants(next_epoch.next())
+                        .await;
+                    if record_metrics {
+                        self.metrics.record_success(&output, &public_key);
+                    }
+                    (
+                        next_epoch,
+                        EpochOutcome::Success,
+                        output,
+                        current.next_players,
+                        next_players,
+                        share,
+                    )
                 }
-                (
-                    next_epoch,
-                    EpochOutcome::Success,
-                    output,
-                    current.next_players,
-                    next_players,
-                    share,
-                )
-            }
-            Some((output, share)) => {
-                // DKG success emits the genesis threshold artifact directly.
-                // There is no next committee to prefetch because this
-                // one-shot chain terminates after epoch zero.
-                let share = share.expect("DKG participant must receive a share");
-                if record_metrics {
-                    self.metrics.record_success(&output, &public_key);
+                None => {
+                    // DKG success emits the genesis threshold artifact directly.
+                    // There is no next committee to prefetch because this
+                    // one-shot chain terminates after epoch zero.
+                    let share = share.expect("DKG participant must receive a share");
+                    if record_metrics {
+                        self.metrics.record_success(&output, &public_key);
+                    }
+                    (
+                        epoch,
+                        EpochOutcome::Success,
+                        output,
+                        players,
+                        Default::default(),
+                        Some(share),
+                    )
                 }
-                (
-                    epoch,
-                    EpochOutcome::Success,
-                    output,
-                    players,
-                    Default::default(),
-                    Some(share),
-                )
-            }
+            },
             None => {
                 let current = current?;
                 if record_metrics {
