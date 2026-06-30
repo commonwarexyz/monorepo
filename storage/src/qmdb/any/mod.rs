@@ -2610,7 +2610,7 @@ mod bitmap_tests {
         qmdb::any::unordered::variable::test::{create_test_config, AnyTest},
     };
     use commonware_cryptography::{Hasher as _, Sha256};
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_runtime::{
         deterministic::{self, Context},
         Runner as _, Supervisor as _,
@@ -2632,6 +2632,7 @@ mod bitmap_tests {
     }
 
     /// Commit, drop, reopen, and assert the rebuilt bitmap matches the in-memory bitmap.
+    #[boxed]
     async fn assert_oracle_round_trip(mut db: AnyTest, context: Context, label: &str) -> AnyTest {
         let pre_active = bitmap_active_locs(&db);
         let pre_len = db.bitmap.len();

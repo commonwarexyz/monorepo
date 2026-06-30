@@ -331,13 +331,14 @@ fn encode<H: CodecHasher, S: Strategy>(
     let (padded, shard_len) = prepare_data(data, k);
 
     // Compute recovery shards, striping large shard widths across the strategy
-    let recovery_buf = match striped::ranges(shard_len, strategy.parallelism_hint()) {
+    let manual = strategy.manual();
+    let recovery_buf = match striped::ranges(shard_len, manual.parallelism_hint()) {
         Some(ranges) => {
             let original_shards = padded.chunks(shard_len).collect::<Vec<_>>();
             let mut buf = vec![0u8; m * shard_len];
             let groups = striped::stripe_columns(&mut buf, shard_len, &ranges);
             let stripes: Vec<_> = ranges.into_iter().zip(groups).collect();
-            strategy.try_map_collect_vec(stripes, |(range, out)| {
+            manual.try_map_collect_vec(stripes, |(range, out)| {
                 striped::encode_recovery_into(k, m, range, &original_shards, out)
             })?;
             buf
@@ -375,7 +376,14 @@ fn encode<H: CodecHasher, S: Strategy>(
         .map(|i| originals.slice(i * shard_len..(i + 1) * shard_len))
         .chain((0..m).map(|i| recoveries.slice(i * shard_len..(i + 1) * shard_len)))
         .collect();
-    let shard_hashes = strategy.map_collect_vec(&shard_slices, |shard| H::hash(shard.as_ref()));
+    let shard_hashes = strategy.map_init_collect_vec_with_multiplier(
+        &shard_slices,
+        shard_len,
+        H::new,
+        |hasher, shard| {
+            hasher.update(shard).finalize()
+        },
+    );
     for hash in &shard_hashes {
         builder.add(hash);
     }
@@ -751,7 +759,14 @@ fn verify_root<H: CodecHasher, S: Strategy>(
         })
         .collect::<Vec<_>>();
 
-    for (i, digest) in strategy.map_collect_vec(missing_shards, |(i, shard)| (i, H::hash(shard))) {
+    for (i, digest) in strategy.map_init_collect_vec_with_multiplier(
+        missing_shards,
+        shard_len,
+        H::new,
+        |hasher, (i, shard)| {
+            (i, hasher.update(shard).finalize())
+        },
+    ) {
         shard_digests[i] = Some(digest);
     }
 
@@ -936,7 +951,8 @@ fn decode<'a, H: CodecHasher, S: Strategy>(
 
     // Process checked chunks
     let shard_len = first.shard.len();
-    let stripes = striped::ranges(shard_len, strategy.parallelism_hint());
+    let manual = strategy.manual();
+    let stripes = striped::ranges(shard_len, manual.parallelism_hint());
     let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
@@ -991,6 +1007,34 @@ fn decode<'a, H: CodecHasher, S: Strategy>(
     }
 
     // Decode the data, striping the work across the strategy when shards are large enough
+    if let Some(ranges) = stripes {
+        let ctx = DecodeCtx {
+            n,
+            k,
+            m,
+            shard_len,
+            root,
+            strategy: &manual,
+        };
+        // Recovery reads the missing originals and recoveries straight out of one decode;
+        // with all originals present there is nothing to decode, so re-encode instead.
+        if recovery_needed {
+            return striped::decode_reveal::<H, _>(
+                &ctx,
+                ranges,
+                shard_digests,
+                provided_originals,
+                provided_recoveries,
+            );
+        }
+        return striped::decode::<H, _>(
+            &ctx,
+            ranges,
+            shard_digests,
+            provided_originals,
+            provided_recoveries,
+        );
+    }
     let ctx = DecodeCtx {
         n,
         k,
@@ -999,26 +1043,6 @@ fn decode<'a, H: CodecHasher, S: Strategy>(
         root,
         strategy,
     };
-    if let Some(ranges) = stripes {
-        // Recovery reads the missing originals and recoveries straight out of one decode;
-        // with all originals present there is nothing to decode, so re-encode instead.
-        if recovery_needed {
-            return striped::decode_reveal::<H, S>(
-                &ctx,
-                ranges,
-                shard_digests,
-                provided_originals,
-                provided_recoveries,
-            );
-        }
-        return striped::decode::<H, S>(
-            &ctx,
-            ranges,
-            shard_digests,
-            provided_originals,
-            provided_recoveries,
-        );
-    }
     sequential::decode::<H, S>(&ctx, shard_digests, provided_originals, provided_recoveries)
 }
 
@@ -1552,7 +1576,8 @@ mod tests {
         // exercise the sequential path.
         let shard_len = canonical_shard_len(data.len(), min as usize);
         assert!(
-            striped::ranges(shard_len, strategy.parallelism_hint()).map_or(0, |r| r.len()) >= 2,
+            striped::ranges(shard_len, strategy.manual().parallelism_hint()).map_or(0, |r| r.len())
+                >= 2,
             "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
@@ -1712,7 +1737,8 @@ mod tests {
         let shard_len = canonical_shard_len(data.len(), min as usize);
         let rayon = Rayon::new(NZUsize!(4)).unwrap();
         assert!(
-            striped::ranges(shard_len, rayon.parallelism_hint()).map_or(0, |r| r.len()) >= 2,
+            striped::ranges(shard_len, rayon.manual().parallelism_hint()).map_or(0, |r| r.len())
+                >= 2,
             "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
@@ -2132,7 +2158,8 @@ mod tests {
         let min = 4u16;
         let shard_len = canonical_shard_len(data.len(), min as usize);
         assert!(
-            striped::ranges(shard_len, strategy.parallelism_hint()).map_or(0, |r| r.len()) >= 2,
+            striped::ranges(shard_len, strategy.manual().parallelism_hint()).map_or(0, |r| r.len())
+                >= 2,
             "test must exercise the striped path (shard_len={shard_len})"
         );
 

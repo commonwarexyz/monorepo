@@ -796,13 +796,14 @@ where
                         ),
                     }
                 };
-                let chunk_len = candidates.len().div_ceil(strategy.parallelism_hint());
+                let manual = strategy.manual();
+                let chunk_len = candidates.len().div_ceil(manual.parallelism_hint());
                 let chunks: Vec<CandidateChunk<'_, F, U>> = candidates
                     .chunks(chunk_len)
                     .zip(resolved.chunks(chunk_len))
                     .collect();
                 let outcomes: Vec<Vec<FloorOutcome<F>>> =
-                    strategy.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
+                    manual.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
                         chunk_locs
                             .iter()
                             .zip(chunk_ops)
