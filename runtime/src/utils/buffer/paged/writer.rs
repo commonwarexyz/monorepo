@@ -2460,6 +2460,182 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    // Verifies snapshot cannot flush buffered bytes before pending start_sync finishes.
+    fn test_snapshot_waits_for_outstanding_start_sync_before_flushing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, started_rx, blocked_rx, release_tx) =
+                DelayedStartSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            // Start a sync, then buffer newer bytes not covered by it.
+            let prior = writer.start_sync().await;
+            started_rx.await.expect("started sync was not issued");
+            writer.append(b"hello world").await.unwrap();
+
+            let snapshot = context.child("snapshot").spawn(move |_| async move {
+                let snapshot = writer.snapshot().await.unwrap();
+                let read = snapshot
+                    .read_at(0, b"hello world".len())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                assert_eq!(read.as_ref(), b"hello world");
+                writer
+            });
+
+            // Snapshot must wait before flushing buffered bytes.
+            blocked_rx
+                .await
+                .expect("snapshot never waited on start_sync");
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Releasing the sync lets snapshot flush and read the buffered bytes.
+            release_tx.send(Ok(())).unwrap();
+            let _writer = snapshot.await.unwrap();
+            prior.await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies replay cannot flush buffered bytes before pending start_sync finishes.
+    fn test_replay_waits_for_outstanding_start_sync_before_flushing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, started_rx, blocked_rx, release_tx) =
+                DelayedStartSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            // Start a sync, then buffer newer bytes not covered by it.
+            let prior = writer.start_sync().await;
+            started_rx.await.expect("started sync was not issued");
+            writer.append(b"hello world").await.unwrap();
+
+            let replay = context.child("replay").spawn(move |_| async move {
+                {
+                    let mut replay = writer.replay(NZUsize!(BUFFER_SIZE)).await.unwrap();
+                    assert!(replay.ensure(1).await.unwrap());
+                    assert_eq!(replay.chunk()[0], b'h');
+                }
+                writer
+            });
+
+            // Replay must wait before flushing buffered bytes.
+            blocked_rx.await.expect("replay never waited on start_sync");
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Releasing the sync lets replay flush and read the buffered bytes.
+            release_tx.send(Ok(())).unwrap();
+            let _writer = replay.await.unwrap();
+            prior.await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies resize growth cannot write zeros before pending start_sync finishes.
+    fn test_resize_grow_waits_for_outstanding_start_sync_before_writing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, started_rx, blocked_rx, release_tx) =
+                DelayedStartSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            // Start a sync before growing into the direct-write path.
+            let prior = writer.start_sync().await;
+            started_rx.await.expect("started sync was not issued");
+
+            let target_size = (BUFFER_SIZE + PAGE_SIZE.get() as usize) as u64;
+            let resize = context.child("resize_grow").spawn(move |_| async move {
+                writer.resize(target_size).await.unwrap();
+                writer
+            });
+
+            // Growth must wait before writing zero-filled pages.
+            blocked_rx
+                .await
+                .expect("resize grow never waited on start_sync");
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Releasing the sync lets the resize complete.
+            release_tx.send(Ok(())).unwrap();
+            let mut writer = resize.await.unwrap();
+            prior.await.unwrap();
+            assert_eq!(writer.size(), target_size);
+            writer.sync().await.unwrap();
+            let (_, writes, full_syncs, _) = inner.snapshot();
+            assert!(writes > 0);
+            assert!(full_syncs > 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies shrink cannot resize the blob before pending start_sync finishes.
+    fn test_resize_shrink_waits_for_outstanding_start_sync_before_resizing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, started_rx, blocked_rx, release_tx) =
+                DelayedStartSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            // Build durable pages, then start a sync for a newer partial page.
+            let data = vec![3; PAGE_SIZE.get() as usize * 2];
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+            writer.append(b"x").await.unwrap();
+            let prior = writer.start_sync().await;
+            started_rx.await.expect("started sync was not issued");
+            let physical_size = inner.size();
+
+            let resize = context.child("resize_shrink").spawn(move |_| async move {
+                writer.resize(PAGE_SIZE.get() as u64).await.unwrap();
+                writer
+            });
+
+            // Shrink must wait before truncating the physical blob.
+            blocked_rx
+                .await
+                .expect("resize shrink never waited on start_sync");
+            assert_eq!(
+                inner.size(),
+                physical_size,
+                "resize must not shrink the blob before the pending sync finishes"
+            );
+
+            // Releasing the sync lets the shrink truncate the blob.
+            release_tx.send(Ok(())).unwrap();
+            let writer = resize.await.unwrap();
+            prior.await.unwrap();
+            assert_eq!(writer.size(), PAGE_SIZE.get() as u64);
+            assert!(inner.size() < physical_size);
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_sync_failed_range_sync_does_not_mark_clean() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
