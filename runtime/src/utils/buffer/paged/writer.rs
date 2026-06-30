@@ -193,7 +193,11 @@ impl<B: Blob> Writer<B> {
             blob,
             current_page,
             partial_page_state,
-            durability: Durability::new(needs_sync),
+            durability: if needs_sync {
+                Durability::Dirty
+            } else {
+                Durability::Clean
+            },
             id: cache_ref.next_id(),
             cache_ref,
             buffer,

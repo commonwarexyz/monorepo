@@ -20,41 +20,30 @@ enum Durability {
     Pending(Completion),
 }
 
+/// A shared sync result.
 #[derive(Clone)]
-struct Completion {
-    inner: Shared<BoxFuture<'static, Result<(), crate::Error>>>,
-}
+struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
 
 impl Completion {
-    /// Share a started sync.
-    fn start(handle: crate::Handle<()>) -> Self {
-        Self {
-            inner: handle.boxed().shared(),
-        }
-    }
-
-    /// Return another waiter.
+    /// Return a handle for the sync result.
     fn handle(&self) -> crate::Handle<()> {
-        let inner = self.inner.clone();
-        crate::Handle::from_future(inner)
+        crate::Handle::from_future(self.0.clone())
     }
 
-    /// Wait internally.
+    /// Wait for the sync result.
     async fn wait(&self) -> Result<(), crate::Error> {
-        self.inner.clone().await
+        self.0.clone().await
+    }
+}
+
+impl From<crate::Handle<()>> for Completion {
+    fn from(handle: crate::Handle<()>) -> Self {
+        Self(handle.boxed().shared())
     }
 }
 
 impl Durability {
-    /// `needs_sync` means existing blob contents may not be durable.
-    const fn new(needs_sync: bool) -> Self {
-        if needs_sync {
-            Self::Dirty
-        } else {
-            Self::Clean
-        }
-    }
-
+    /// Mark a new unsynced mutation.
     fn mark_dirty(&mut self) {
         assert!(
             !matches!(self, Self::Pending(_)),
@@ -63,11 +52,11 @@ impl Durability {
         *self = Self::Dirty;
     }
 
+    /// Wait for an in-flight sync before reusing or mutating the blob.
     async fn wait_for_pending(&mut self) -> Result<(), crate::Error> {
         let Self::Pending(pending) = self else {
             return Ok(());
         };
-        // Keep `self` pending until the await resolves.
         let pending = pending.clone();
         match pending.wait().await {
             Ok(()) => {
@@ -75,12 +64,14 @@ impl Durability {
                 Ok(())
             }
             Err(err) => {
+                // The sync failed, so the pending mutations still need durability.
                 *self = Self::Dirty;
                 Err(err)
             }
         }
     }
 
+    /// Write data that will require a later sync.
     async fn write_at(
         &mut self,
         blob: &impl crate::Blob,
@@ -93,6 +84,7 @@ impl Durability {
         Ok(())
     }
 
+    /// Write data and make it durable before returning.
     async fn write_at_sync(
         &mut self,
         blob: &impl crate::Blob,
@@ -102,13 +94,14 @@ impl Durability {
         self.wait_for_pending().await?;
         match self {
             Self::Dirty => {
+                // Earlier mutations need a full durability barrier too.
                 blob.write_at(offset, bufs).await?;
                 blob.sync().await?;
                 *self = Self::Clean;
                 Ok(())
             }
             Self::Clean => {
-                // If `write_at_sync` fails, a later sync must not treat the drained buffer as durable.
+                // If this fails, a later sync must still cover the attempted write.
                 *self = Self::Dirty;
                 blob.write_at_sync(offset, bufs).await?;
                 *self = Self::Clean;
@@ -118,6 +111,7 @@ impl Durability {
         }
     }
 
+    /// Make all pending mutations durable before returning.
     async fn sync(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
         if matches!(self, Self::Clean) {
@@ -128,12 +122,13 @@ impl Durability {
         Ok(())
     }
 
+    /// Start making pending mutations durable and return a handle for completion.
     async fn start_sync(&mut self, blob: &impl crate::Blob) -> crate::Handle<()> {
         match self {
             Self::Clean => crate::Handle::ready(Ok(())),
             Self::Dirty => {
-                // Share one completion with all waiters.
-                let pending = Completion::start(blob.start_sync().await);
+                // Store a shared completion so repeated calls observe the same sync.
+                let pending = Completion::from(blob.start_sync().await);
                 let handle = pending.handle();
                 *self = Self::Pending(pending);
                 handle

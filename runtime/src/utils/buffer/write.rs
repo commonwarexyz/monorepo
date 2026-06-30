@@ -73,7 +73,8 @@ impl<B: Blob> Write<B> {
         Self {
             blob,
             buffer: Buffer::new(size, capacity.get(), pool),
-            durability: Durability::new(true), // ensure pending writes on the wrapped blob are synced
+            // Existing blob contents may not be durable yet.
+            durability: Durability::Dirty,
         }
     }
 
