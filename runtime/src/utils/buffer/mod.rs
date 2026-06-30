@@ -64,6 +64,15 @@ impl SyncState {
         self.needs_sync = false;
         Ok(())
     }
+
+    async fn start_sync(&mut self, blob: &impl crate::Blob) -> crate::Handle<()> {
+        if !self.needs_sync {
+            return crate::Handle::ready(Ok(()));
+        }
+        let handle = blob.start_sync().await;
+        self.needs_sync = false;
+        handle
+    }
 }
 
 #[cfg(test)]
