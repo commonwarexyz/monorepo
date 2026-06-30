@@ -13,6 +13,10 @@
 //! included in the elapsed time and can bias the parallel estimate upward, but the periodic resample
 //! bounds how long a stale decision persists, and both paths produce identical results, so a
 //! misjudged call only costs throughput, never correctness.
+//!
+//! State updates are serialized per policy entry, but calls do not hold the entry lock while work
+//! executes. Concurrent calls may therefore make decisions from an estimate that another in-flight
+//! call later updates, and measured samples are applied in completion order.
 
 use dashmap::DashMap;
 use std::{

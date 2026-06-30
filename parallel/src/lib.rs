@@ -1217,6 +1217,16 @@ mod test {
         let _: usize = strategy.run(len, || 1, || 2);
     }
 
+    fn map_partition_from_same_callsite(strategy: &Rayon, len: usize) {
+        let _: (Vec<_>, Vec<_>) = strategy.map_partition_collect_vec(0..len, |x| {
+            if x % 2 == 0 {
+                (x, Some(x))
+            } else {
+                (x, None)
+            }
+        });
+    }
+
     #[test]
     fn adaptive_policy_is_scoped_to_rayon() {
         let strategy = parallel_strategy();
@@ -1352,6 +1362,22 @@ mod test {
         // default method body: two calls from distinct callsites must yield two distinct entries.
         let _: i32 = strategy.fold(0..16, || 0, |acc, x| acc + x, |a, b| a + b);
         let _: i32 = strategy.fold(0..16, || 0, |acc, x| acc + x, |a, b| a + b);
+
+        assert_eq!(policy_len(&strategy), 2);
+    }
+
+    #[test]
+    fn adaptive_policy_keys_partition_map_by_external_callsite() {
+        let strategy = parallel_strategy();
+
+        map_partition_from_same_callsite(&strategy, 16);
+        let _: (Vec<_>, Vec<_>) = strategy.map_partition_collect_vec(0..16, |x| {
+            if x % 2 == 0 {
+                (x, Some(x))
+            } else {
+                (x, None)
+            }
+        });
 
         assert_eq!(policy_len(&strategy), 2);
     }
