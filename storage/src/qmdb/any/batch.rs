@@ -60,7 +60,7 @@ pub(crate) struct StagedUpdates<F: Family, U: update::Update> {
 }
 
 impl<F: Family, U: update::Update> StagedUpdates<F, U> {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             entries: Vec::new(),
         }
@@ -1082,10 +1082,7 @@ where
         upserts: &[(K, V::Value)],
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<
-        Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>,
-        crate::qmdb::Error<F>,
-    >
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -1093,7 +1090,7 @@ where
     {
         let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts);
         batch
-            .merkleize_with_staged_floor_scan(
+            .merkleize_with_floor_scan(
                 db,
                 metadata,
                 staged_updates,
@@ -1117,10 +1114,7 @@ where
         upserts: &[(K, V::Value)],
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<
-        Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>,
-        crate::qmdb::Error<F>,
-    >
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -1128,7 +1122,7 @@ where
     {
         let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts);
         batch
-            .merkleize_with_staged_floor_scan(
+            .merkleize_with_floor_scan(
                 db,
                 metadata,
                 staged_updates,
@@ -1352,39 +1346,23 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(db, metadata, |floor, tip, limit, out| {
-            fill_candidates(&db.bitmap, floor, tip, limit, out)
-        })
+        self.merkleize_with_floor_scan(
+            db,
+            metadata,
+            StagedUpdates::new(),
+            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+        )
         .await
     }
 
-    /// Like [`merkleize`](Self::merkleize), but accepts the floor-raise candidate source.
+    /// Like [`merkleize`](Self::merkleize), but accepts staged updates and the floor-raise
+    /// candidate source.
     ///
     /// The callback may skip locations only when it knows they are inactive. The floor-raise
     /// loop revalidates each returned candidate against the batch diff, ancestor diffs, and
     /// snapshot because the bitmap reflects committed state only -- uncommitted ancestor ops
     /// aren't tracked, and bits can be set for locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
-        self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
-        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        self.merkleize_with_staged_floor_scan(
-            db,
-            metadata,
-            StagedUpdates::new(),
-            fill_candidates,
-        )
-        .await
-    }
-
-    pub(crate) async fn merkleize_with_staged_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
@@ -1566,39 +1544,23 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(db, metadata, |floor, tip, limit, out| {
-            fill_candidates(&db.bitmap, floor, tip, limit, out)
-        })
+        self.merkleize_with_floor_scan(
+            db,
+            metadata,
+            StagedUpdates::new(),
+            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+        )
         .await
     }
 
-    /// Like [`merkleize`](Self::merkleize), but accepts the floor-raise candidate source.
+    /// Like [`merkleize`](Self::merkleize), but accepts staged updates and the floor-raise
+    /// candidate source.
     ///
     /// The callback may skip locations only when it knows they are inactive. The floor-raise
     /// loop revalidates each returned candidate against the batch diff, ancestor diffs, and
     /// snapshot because the bitmap reflects committed state only -- uncommitted ancestor ops
     /// aren't tracked, and bits can be set for locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
-        self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
-        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: OrderedIndex<Value = Location<F>>,
-    {
-        self.merkleize_with_staged_floor_scan(
-            db,
-            metadata,
-            StagedUpdates::new(),
-            fill_candidates,
-        )
-        .await
-    }
-
-    pub(crate) async fn merkleize_with_staged_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,

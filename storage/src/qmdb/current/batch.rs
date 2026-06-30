@@ -389,10 +389,7 @@ where
         upserts: &[(K, V::Value)],
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<
-        Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>,
-        Error<F>,
-    >
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -405,7 +402,7 @@ where
         } = self;
         let (inner, staged_updates) = inner.into_merkleize_parts(updates, upserts);
         let inner = inner
-            .merkleize_with_staged_floor_scan(
+            .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
                 staged_updates,
@@ -431,10 +428,7 @@ where
         upserts: &[(K, V::Value)],
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<
-        Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>,
-        Error<F>,
-    >
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -447,7 +441,7 @@ where
         } = self;
         let (inner, staged_updates) = inner.into_merkleize_parts(updates, upserts);
         let inner = inner
-            .merkleize_with_staged_floor_scan(
+            .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
                 staged_updates,
@@ -554,9 +548,12 @@ where
         } = self;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
-            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(
+                &db.any,
+                metadata,
+                any::batch::StagedUpdates::new(),
+                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
+            )
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
@@ -658,9 +655,12 @@ where
         } = self;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
-            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(
+                &db.any,
+                metadata,
+                any::batch::StagedUpdates::new(),
+                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
+            )
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
