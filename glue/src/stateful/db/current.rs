@@ -206,28 +206,67 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> CurrentStaged<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, K, V, const N: usize, S>
+    CurrentStaged<F, E, C, I, H, unordered::Update<K, V>, N, S>
 where
     F: Graftable,
     E: Storage + Clock + Metrics,
-    U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
+    K: Key,
+    V: ValueEncoding + 'static,
+    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
-    Operation<F, U>: Codec,
+    Operation<F, unordered::Update<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys.
-    pub fn set(
+    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    pub async fn set(
         self,
-        updates: &[(usize, U::Value)],
-        upserts: &[(U::Key, U::Value)],
-    ) -> CurrentUnmerkleized<F, E, C, I, H, U, N, S> {
-        CurrentUnmerkleized {
-            batch: self.staged.set(updates, upserts),
-            db: self.db,
-            metadata: self.metadata,
-        }
+        updates: &[(usize, V::Value)],
+        upserts: &[(K, V::Value)],
+    ) -> Result<CurrentMerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>, Error<F>> {
+        let Self {
+            staged,
+            db,
+            metadata,
+        } = self;
+        let inner = {
+            let guard = db.read().await;
+            staged.set(updates, upserts, &*guard, metadata).await?
+        };
+        Ok(CurrentMerkleized { inner, db })
+    }
+}
+
+impl<F, E, C, I, H, K, V, const N: usize, S>
+    CurrentStaged<F, E, C, I, H, ordered::Update<K, V>, N, S>
+where
+    F: Graftable,
+    E: Storage + Clock + Metrics,
+    K: Key,
+    V: ValueEncoding + 'static,
+    C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
+    I: OrderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, ordered::Update<K, V>>: Codec,
+{
+    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    pub async fn set(
+        self,
+        updates: &[(usize, V::Value)],
+        upserts: &[(K, V::Value)],
+    ) -> Result<CurrentMerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>, Error<F>> {
+        let Self {
+            staged,
+            db,
+            metadata,
+        } = self;
+        let inner = {
+            let guard = db.read().await;
+            staged.set(updates, upserts, &*guard, metadata).await?
+        };
+        Ok(CurrentMerkleized { inner, db })
     }
 }
 

@@ -1,9 +1,9 @@
 //! Constantinople-shape harness: load+write+merkleize at 32k updates / 1M keys.
 //!
-//! Times the full per-block state pipeline (get_many load, batch writes, merkleize, root) on the
+//! Times the full per-block state pipeline (get_many load, staged set+merkleize, root) on the
 //! tokio runtime with EightCap, matching the production validator shape. Runs against the
 //! unordered or ordered fixed `any`/`current` DBs over `mmb`. Prints per-iteration latency with
-//! a load/write/merkleize phase split and the speculative root (a cross-binary parity check:
+//! a load/set+merkleize phase split and the speculative root (a cross-binary parity check:
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
@@ -240,7 +240,7 @@ macro_rules! run_pipeline {
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 
-            // Timed: load all touched keys, write the selected keys, merkleize, read root. The
+            // Timed: load all touched keys, set the selected keys, merkleize, read root. The
             // load returns a staged batch that consumes `(read_index, value)` pairs after the
             // caller has computed them.
             let start = Instant::now();
@@ -248,19 +248,16 @@ macro_rules! run_pipeline {
             let (values, staged) = b.get_many_staged(&keys, &db).await.unwrap();
             black_box(&values);
             let t_load = start.elapsed();
-            let b = staged.set(&updates, &[]);
-            let t_write = start.elapsed();
-            let merkleized = b.merkleize(&db, None).await.unwrap();
+            let merkleized = staged.set(&updates, &[], &db, None).await.unwrap();
             let root = merkleized.root();
             let elapsed = start.elapsed();
 
             times_ms.push(elapsed.as_secs_f64() * 1000.0);
             println!(
-                "iter={iter} ms={:.2} load={:.2} write={:.2} merk={:.2} root={root}",
+                "iter={iter} ms={:.2} load={:.2} set_merk={:.2} root={root}",
                 times_ms[iter],
                 t_load.as_secs_f64() * 1000.0,
-                (t_write - t_load).as_secs_f64() * 1000.0,
-                (elapsed - t_write).as_secs_f64() * 1000.0
+                (elapsed - t_load).as_secs_f64() * 1000.0
             );
         }
 

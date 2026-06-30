@@ -374,24 +374,87 @@ where
     }
 }
 
-impl<F, H, U, const N: usize, S: Strategy> Staged<F, H, U, N, S>
+impl<F, K, V, H, const N: usize, S: Strategy> Staged<F, H, update::Unordered<K, V>, N, S>
 where
     F: Graftable,
-    U: update::Update + Send + Sync,
+    K: Key,
+    V: ValueEncoding,
     H: Hasher,
-    Operation<F, U>: Codec,
+    Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys.
-    pub fn set(
+    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    pub async fn set<E, C, I>(
         self,
-        updates: &[(usize, U::Value)],
-        upserts: &[(U::Key, U::Value)],
-    ) -> UnmerkleizedBatch<F, H, U, N, S> {
-        UnmerkleizedBatch {
-            inner: self.inner.set(updates, upserts),
-            grafted_parent: self.grafted_parent,
-            bitmap_parent: self.bitmap_parent,
-        }
+        updates: &[(usize, V::Value)],
+        upserts: &[(K, V::Value)],
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+    ) -> Result<
+        Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>,
+        Error<F>,
+    >
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        let (inner, staged_updates) = inner.into_batch_and_staged_updates(updates, upserts);
+        let inner = inner
+            .merkleize_with_staged_floor_scan(
+                &db.any,
+                metadata,
+                staged_updates,
+                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
+            )
+            .await?;
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+    }
+}
+
+impl<F, K, V, H, const N: usize, S: Strategy> Staged<F, H, update::Ordered<K, V>, N, S>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    pub async fn set<E, C, I>(
+        self,
+        updates: &[(usize, V::Value)],
+        upserts: &[(K, V::Value)],
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+    ) -> Result<
+        Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>,
+        Error<F>,
+    >
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        let (inner, staged_updates) = inner.into_batch_and_staged_updates(updates, upserts);
+        let inner = inner
+            .merkleize_with_staged_floor_scan(
+                &db.any,
+                metadata,
+                staged_updates,
+                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
+            )
+            .await?;
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
