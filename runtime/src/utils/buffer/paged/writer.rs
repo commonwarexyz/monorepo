@@ -2176,6 +2176,7 @@ mod tests {
     }
 
     impl<B: Blob> DelayedStartSyncBlob<B> {
+        #[allow(clippy::type_complexity)]
         fn new(
             inner: B,
         ) -> (
