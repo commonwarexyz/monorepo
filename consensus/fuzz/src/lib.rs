@@ -1874,7 +1874,7 @@ pub trait FuzzMode {
 /// TwinsMutator, TwinsCampaign) can run with or without the [`state_cov`] signal.
 pub trait Coverage {
     /// When `true`, the run projects its honest reporters through
-    /// [`state_cov::observe`] so libFuzzer also tracks protocol-state novelty.
+    /// [`state_cov::observe_with_metrics`] so libFuzzer also tracks protocol-state novelty.
     const STATE: bool;
 }
 
