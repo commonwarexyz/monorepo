@@ -11,12 +11,53 @@ use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Metrics, Storage,
+    Buf, BufMut, BufferPooler, Error as RError, Handle, Metrics, Storage,
 };
 use commonware_utils::Array;
-use futures::{pin_mut, StreamExt};
-use std::collections::{btree_map, BTreeMap, BTreeSet};
+use futures::{
+    future::{join_all, BoxFuture, Shared},
+    pin_mut, FutureExt as _, StreamExt,
+};
+use std::{
+    collections::{btree_map, BTreeMap, BTreeSet},
+    mem,
+};
 use tracing::debug;
+
+type SharedSync = Shared<BoxFuture<'static, Result<(), SharedSyncError>>>;
+
+#[derive(Clone)]
+struct SharedSyncError(String);
+
+impl From<RError> for SharedSyncError {
+    fn from(err: RError) -> Self {
+        Self(err.to_string())
+    }
+}
+
+impl From<SharedSyncError> for RError {
+    fn from(err: SharedSyncError) -> Self {
+        Self::Io(std::io::Error::other(err.0))
+    }
+}
+
+fn share_sync(handle: Handle<()>) -> SharedSync {
+    async move { handle.await.map_err(SharedSyncError::from) }
+        .boxed()
+        .shared()
+}
+
+fn observe_syncs(syncs: Vec<SharedSync>) -> Handle<()> {
+    if syncs.is_empty() {
+        return Handle::ready(Ok(()));
+    }
+    Handle::from_future(async move {
+        for result in join_all(syncs).await {
+            result.map_err(RError::from)?;
+        }
+        Ok(())
+    })
+}
 
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
@@ -108,7 +149,11 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     /// Combined index + value storage with crash recovery.
     oversized: Oversized<E, Record<K>, V>,
 
+    /// Sections with writes not yet covered by an issued sync.
     pending: BTreeSet<u64>,
+
+    /// Syncs already issued by `start_sync` that a later shutdown `sync` must observe.
+    syncing: BTreeMap<u64, SharedSync>,
 
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -219,6 +264,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             items_per_section: cfg.items_per_section.get(),
             oversized,
             pending: BTreeSet::new(),
+            syncing: BTreeMap::new(),
             oldest_allowed: None,
             indices,
             extra_indices,
@@ -368,6 +414,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         }
         debug!(min, "pruning archive");
 
+        self.wait_syncing().await?;
+
         // Prune oversized journal (handles both index and values)
         self.oversized.prune(min).await?;
 
@@ -401,6 +449,57 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
     }
+
+    /// Drain the set of sections with unsynced writes, recording them in the sync metric.
+    fn take_pending(&mut self) -> BTreeSet<u64> {
+        let pending = mem::take(&mut self.pending);
+        self.syncs.inc_by(pending.len() as u64);
+        pending
+    }
+
+    async fn wait_syncing(&mut self) -> Result<(), Error> {
+        let syncing = mem::take(&mut self.syncing);
+        for result in join_all(syncing.into_values()).await {
+            result
+                .map_err(RError::from)
+                .map_err(crate::journal::Error::from)?;
+        }
+        Ok(())
+    }
+
+    /// Store an item and start syncing pending writes.
+    pub async fn put_start_sync(
+        &mut self,
+        index: u64,
+        key: K,
+        data: V,
+    ) -> Result<Handle<()>, Error> {
+        self.put_internal(index, key, data, true).await?;
+        self.start_sync().await
+    }
+
+    /// Store an item with multi-index semantics and start syncing pending writes.
+    pub async fn put_multi_start_sync(
+        &mut self,
+        index: u64,
+        key: K,
+        data: V,
+    ) -> Result<Handle<()>, Error> {
+        self.put_internal(index, key, data, false).await?;
+        self.start_sync().await
+    }
+
+    /// Start syncing all pending writes.
+    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+        let pending = self.take_pending();
+        let mut syncs = Vec::with_capacity(pending.len());
+        for section in pending {
+            let sync = share_sync(self.oversized.start_sync(section).await?);
+            self.syncing.insert(section, sync.clone());
+            syncs.push(sync);
+        }
+        Ok(observe_syncs(syncs))
+    }
 }
 
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
@@ -429,13 +528,11 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        // Update metrics
-        self.syncs.inc_by(self.pending.len() as u64);
-
-        // Sync oversized journal (handles both index and values)
-        self.oversized.sync(&self.pending).await?;
-
-        self.pending.clear();
+        self.wait_syncing().await?;
+        let pending = self.take_pending();
+        for section in pending {
+            self.oversized.sync(section).await?;
+        }
         Ok(())
     }
 

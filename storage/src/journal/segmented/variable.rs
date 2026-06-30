@@ -90,7 +90,7 @@ use crate::journal::{
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay, Writer},
-    Blob, Buf, IoBuf, Metrics, Storage,
+    Blob, Buf, Handle, IoBuf, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
@@ -578,6 +578,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// If a selected section does not exist, no error will be returned.
     pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
         self.manager.sync(sections).await
+    }
+
+    /// Start syncing the given `section` to storage.
+    pub async fn start_sync(&mut self, section: u64) -> Result<Handle<()>, Error> {
+        self.manager.start_sync(section).await
     }
 
     /// Syncs all open sections.

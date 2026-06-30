@@ -223,11 +223,24 @@ mod tests {
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::has_metric_value, Metrics as _, Runner, Supervisor as _,
+        deterministic,
+        telemetry::metrics::{has_metric_value, Metric, Registered},
+        Blob, BufferPool, BufferPooler, Error as RError, Handle, IoBufs, IoBufsMut, Metrics as _,
+        Name, Runner, Spawner as _, Storage, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+    use commonware_utils::{
+        channel::oneshot, sequence::FixedBytes, sync::Mutex, NZUsize, NZU16, NZU64,
+    };
     use rand::Rng;
-    use std::{collections::BTreeMap, num::NonZeroU16};
+    use std::{
+        collections::BTreeMap,
+        mem,
+        num::NonZeroU16,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -242,6 +255,326 @@ mod tests {
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    type SyncSender = oneshot::Sender<Result<(), RError>>;
+    type PendingSyncs = Arc<Mutex<Vec<SyncSender>>>;
+
+    #[derive(Clone)]
+    struct DelayedSyncContext<E> {
+        inner: E,
+        pending: PendingSyncs,
+    }
+
+    impl<E: commonware_runtime::Supervisor> commonware_runtime::Supervisor for DelayedSyncContext<E> {
+        fn name(&self) -> Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            Self {
+                inner: self.inner.child(label),
+                pending: self.pending.clone(),
+            }
+        }
+
+        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            Self {
+                inner: self.inner.with_attribute(key, value),
+                pending: self.pending,
+            }
+        }
+    }
+
+    impl<E: commonware_runtime::Metrics> commonware_runtime::Metrics for DelayedSyncContext<E> {
+        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> Registered<M> {
+            self.inner.register(name, help, metric)
+        }
+
+        fn encode(&self) -> String {
+            self.inner.encode()
+        }
+    }
+
+    impl<E: BufferPooler> BufferPooler for DelayedSyncContext<E> {
+        fn network_buffer_pool(&self) -> &BufferPool {
+            self.inner.network_buffer_pool()
+        }
+
+        fn storage_buffer_pool(&self) -> &BufferPool {
+            self.inner.storage_buffer_pool()
+        }
+    }
+
+    impl<E: Storage> Storage for DelayedSyncContext<E> {
+        type Blob = DelayedSyncBlob<E::Blob>;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: std::ops::RangeInclusive<u16>,
+        ) -> Result<(Self::Blob, u64, u16), RError> {
+            let (inner, len, version) =
+                self.inner.open_versioned(partition, name, versions).await?;
+            Ok((
+                DelayedSyncBlob {
+                    inner,
+                    pending: self.pending.clone(),
+                },
+                len,
+                version,
+            ))
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RError> {
+            self.inner.remove(partition, name).await
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RError> {
+            self.inner.scan(partition).await
+        }
+    }
+
+    #[derive(Clone)]
+    struct DelayedSyncBlob<B> {
+        inner: B,
+        pending: PendingSyncs,
+    }
+
+    impl<B: Blob> Blob for DelayedSyncBlob<B> {
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, RError> {
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, RError> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), RError> {
+            self.inner.write_at(offset, bufs).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), RError> {
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), RError> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), RError> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            let (sender, receiver) = oneshot::channel();
+            self.pending.lock().push(sender);
+            Handle::from_receiver(receiver)
+        }
+    }
+
+    fn release_pending_syncs(pending: &PendingSyncs) {
+        for sender in mem::take(&mut *pending.lock()) {
+            let _ = sender.send(Ok(()));
+        }
+    }
+
+    #[test_traced]
+    fn test_put_start_sync_returns_before_handle_completes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let handle = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert!(
+                !pending.lock().is_empty(),
+                "put_start_sync should return while the sync handle is still pending"
+            );
+
+            archive
+                .put(2, test_key("bbb"), 20)
+                .await
+                .expect("archive should remain usable before sync completion");
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+
+            release_pending_syncs(&pending);
+            handle.await.expect("sync handle should complete");
+        });
+    }
+
+    #[test_traced]
+    fn test_overlapping_put_start_sync_waits_for_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            let pending_after_first = pending.lock().len();
+            assert!(pending_after_first > 0);
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("second").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                let second = archive
+                    .put_start_sync(2, test_key("bbb"), 20)
+                    .await
+                    .expect("Failed to start second sync");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                (archive, second)
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(completed.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                pending.lock().len(),
+                pending_after_first,
+                "second put_start_sync must not start new syncs before the first completes"
+            );
+
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let (archive, second) = waiter.await.expect("second put task failed");
+            assert!(!pending.lock().is_empty());
+            release_pending_syncs(&pending);
+            second.await.expect("second sync handle should complete");
+
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
+        });
+    }
+
+    #[test_traced]
+    fn test_sync_after_put_start_sync_waits_for_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("sync").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                archive.sync().await.expect("sync should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                archive
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "shutdown sync must wait for the in-flight put_start_sync handle"
+            );
+
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let archive = waiter.await.expect("sync task failed");
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+        });
+    }
 
     #[test_traced]
     fn test_archive_compression_then_none() {

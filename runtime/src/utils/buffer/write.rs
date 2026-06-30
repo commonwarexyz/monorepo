@@ -1,6 +1,6 @@
 use crate::{
     buffer::{tip::Buffer, SyncState},
-    Blob, Buf, BufferPool, BufferPooler, Error, IoBufs,
+    Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs,
 };
 use std::num::NonZeroUsize;
 
@@ -214,8 +214,7 @@ impl<B: Blob> Write<B> {
         }
 
         // Resize the underlying blob.
-        self.blob.resize(len).await?;
-        self.sync_state.mark_unsynced();
+        self.sync_state.resize(&self.blob, len).await?;
 
         Ok(())
     }
@@ -227,6 +226,19 @@ impl<B: Blob> Write<B> {
         }
 
         self.sync_blob().await
+    }
+
+    /// Flush buffered bytes and start durably syncing mutations tracked by this writer.
+    ///
+    /// Once a sync is started, the pending mutations are considered issued, so a later
+    /// [`Self::sync`] without intervening writes returns immediately and does not wait for this
+    /// handle.
+    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+        if let Some((buf, offset)) = self.buffer.take() {
+            self.write_blob(offset, buf).await?;
+        }
+
+        Ok(self.sync_state.start_sync(&self.blob).await)
     }
 
     /// Write bytes to the underlying blob and mark them as needing sync.

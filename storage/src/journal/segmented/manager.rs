@@ -11,7 +11,7 @@ use commonware_runtime::{
         Write,
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Blob, BufferPool, Error as RError, Metrics, Storage,
+    Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
 };
 use futures::future::try_join_all;
 use std::{
@@ -30,6 +30,9 @@ pub trait SectionBuffer: Send + Sync {
     /// Ensure all pending data is durably persisted.
     fn sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
+    /// Start syncing all pending data.
+    fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, RError>> + Send;
+
     /// Resize the logical size of the buffer.
     fn resize(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 }
@@ -41,6 +44,10 @@ impl<B: Blob> SectionBuffer for Writer<B> {
 
     async fn sync(&mut self) -> Result<(), RError> {
         Self::sync(self).await
+    }
+
+    async fn start_sync(&mut self) -> Result<Handle<()>, RError> {
+        Self::start_sync(self).await
     }
 
     async fn resize(&mut self, len: u64) -> Result<(), RError> {
@@ -55,6 +62,10 @@ impl<B: Blob> SectionBuffer for Write<B> {
 
     async fn sync(&mut self) -> Result<(), RError> {
         Self::sync(self).await
+    }
+
+    async fn start_sync(&mut self) -> Result<Handle<()>, RError> {
+        Self::start_sync(self).await
     }
 
     async fn resize(&mut self, len: u64) -> Result<(), RError> {
@@ -236,6 +247,16 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         try_join_all(futures).await.map_err(Error::Runtime)?;
         self.synced.inc_by(count);
         Ok(())
+    }
+
+    /// Start syncing the given `section` to storage.
+    pub async fn start_sync(&mut self, section: u64) -> Result<Handle<()>, Error> {
+        self.prune_guard(section)?;
+        if let Some(blob) = self.blobs.get_mut(&section) {
+            self.synced.inc();
+            return blob.start_sync().await.map_err(Error::Runtime);
+        }
+        Ok(Handle::ready(Ok(())))
     }
 
     /// Sync all sections to storage.

@@ -653,6 +653,11 @@ mod tests {
         });
     }
 
+    /// Crash-recovery shape: after an unclean shutdown, Simplex may recover a
+    /// notarized commitment while marshal has no local verification task and no
+    /// durable block. If enough shards or a peer response can provide the block,
+    /// certification should fetch it by notarized round and persist it instead
+    /// of treating the missing local copy as a hard failure.
     #[test_traced("WARN")]
     fn test_coding_certify_missing_candidate_fetches_by_round() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -2156,7 +2161,7 @@ mod tests {
     #[test_traced("WARN")]
     fn test_certify_without_prior_verify_crash_recovery() {
         // After a crash, consensus may call certify() without a prior verify().
-        // The certify path (marshaled.rs:842-936) should:
+        // The certify path should:
         //   1. Find no in-progress verification task
         //   2. Subscribe to the block from the shard engine
         //   3. Use the block's embedded context for deferred_verify
@@ -2448,7 +2453,10 @@ mod tests {
 
             // Validator 1 proposes coded_block_b (same inner block, different coding).
             // This stores it in v1's shard engine and actor cache.
-            assert!(v1_mailbox.verified(round1, coded_block_b.clone()).await);
+            assert!(
+                v1_mailbox.verified(round1, coded_block_b.clone()).await,
+                "durable: verified"
+            );
             context.sleep(Duration::from_millis(100)).await;
 
             // Create finalization referencing commitment_a (the "correct" commitment).
@@ -2598,12 +2606,9 @@ mod tests {
     }
 
     /// Regression: a validator must not vote finalize on a block that is not
-    /// durably persisted. `certify` resolves true ⟹ block is on disk for
+    /// durably persisted. If `certify` resolves true, the block is on disk for
     /// this validator. We assert this by aborting the marshal actor the
-    /// instant `certify` returns true; without the persist-before-certify
-    /// fix, the actor may have only had the `Verified` message enqueued (not
-    /// processed), and the block is lost on restart even though the validator
-    /// would have proceeded to broadcast a finalize vote.
+    /// instant `certify` returns true, then restarting from the same partition.
     #[test_traced("WARN")]
     fn test_marshaled_certify_persists_block_before_resolving() {
         for seed in 0u64..16 {
@@ -2729,16 +2734,15 @@ mod tests {
             let post_restart = marshal2.get_block(&child_digest).await;
             assert!(
                 post_restart.is_some(),
-                "certify resolved true ⟹ block must be durably persisted"
+                "certify resolved true, so block must be durably persisted"
             );
         });
     }
 
-    /// Regression: a proposer must be able to recover its own block after a
-    /// crash that occurs immediately after `Marshaled::propose()` returns a
-    /// commitment. `propose` is responsible for persisting the block via
-    /// `marshal.verified`, so the block must survive restart even if
-    /// `Relay::broadcast` never runs or marshal aborts in between.
+    /// Regression: a leader must be able to recover its own block across an unclean restart.
+    /// `propose` registers a durability task, so the leader establishes durability by
+    /// certifying its own proposal. After certify, the block must survive restart even if
+    /// `Relay::broadcast` never runs. This is the >= f+1 guarantee for the leader's own block.
     #[test_traced("WARN")]
     fn test_marshaled_proposed_block_persists_across_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -2821,8 +2825,18 @@ mod tests {
                 .expect("propose should produce a commitment");
             assert_eq!(commitment, expected_commitment);
 
-            // Abort marshal immediately after propose returns; the propose
-            // path must already have persisted the block.
+            // The leader certifies its own proposal, which awaits the deferred propose
+            // sync handle and establishes durability before the finalize vote.
+            assert!(
+                marshaled
+                    .certify(propose_round, commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "certify must succeed for the leader's own proposal"
+            );
+
+            // Abort marshal after certify; the leader's own block must be durable.
             marshal_actor_handle.abort();
             drop(marshaled);
             drop(marshal);
@@ -2906,7 +2920,7 @@ mod tests {
             let coded_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
                 CodedBlock::new(block_a.clone(), coding_config, &Sequential);
             let commitment_a = coded_a.commitment();
-            assert!(marshal.verified(round, coded_a).await);
+            assert!(marshal.verified(round, coded_a).await, "durable: verified");
 
             // After restart, a fresh application would build a different
             // block for the same round.
@@ -2997,7 +3011,10 @@ mod tests {
             let stale_block = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
             let stale_coded: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
                 CodedBlock::new(stale_block, coding_config, &Sequential);
-            assert!(marshal.verified(round, stale_coded).await);
+            assert!(
+                marshal.verified(round, stale_coded).await,
+                "durable: verified"
+            );
 
             // Simulate a replay where parent selection now points to a
             // different parent commitment than the cached block was built for.

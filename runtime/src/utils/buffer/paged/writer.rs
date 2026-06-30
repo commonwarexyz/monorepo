@@ -45,11 +45,18 @@ use crate::{
         tip::Buffer,
         SyncState,
     },
-    Blob, Error, IoBuf, IoBufMut, IoBufs,
+    Blob, Error, Handle, IoBuf, IoBufMut, IoBufs,
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
-use std::num::{NonZeroU16, NonZeroUsize};
+use futures::{
+    future::{BoxFuture, Shared},
+    FutureExt as _,
+};
+use std::{
+    future::Future,
+    num::{NonZeroU16, NonZeroUsize},
+};
 use tracing::warn;
 
 /// Adjusts a requested write-buffer `capacity` upward to the value the buffer actually uses,
@@ -92,6 +99,47 @@ const fn too_big_for_buffer(
     overflows_capacity && has_full_page_after_fill
 }
 
+/// The completion of an in-flight partial-page sync.
+type SharedSync = Shared<BoxFuture<'static, ()>>;
+
+/// Tracks the in-flight partial-page footer sync that a rewrite of the current partial page must
+/// observe before overwriting the page's preserved checksum slot.
+#[derive(Default)]
+struct Barrier(Option<SharedSync>);
+
+impl Barrier {
+    fn into_shared(fut: impl Future<Output = Result<(), Error>> + Send + 'static) -> SharedSync {
+        async move { fut.await.expect("partial-page sync failed") }
+            .boxed()
+            .shared()
+    }
+
+    fn record(&mut self, handle: Handle<()>) -> SharedSync {
+        let barrier = Self::into_shared(handle);
+        self.0 = Some(barrier.clone());
+        barrier
+    }
+
+    fn record_lazy<B: Blob>(&mut self, blob: B) {
+        self.0 = Some(Self::into_shared(async move { blob.sync().await }));
+    }
+
+    fn pending(&self) -> Option<SharedSync> {
+        self.0.clone()
+    }
+
+    fn discharge(&mut self) {
+        self.0 = None;
+    }
+
+    fn observe(pending: SharedSync) -> Handle<()> {
+        Handle::from_future(async move {
+            pending.await;
+            Ok(())
+        })
+    }
+}
+
 /// Unique writer to a cache-wrapped [Blob].
 pub struct Writer<B: Blob> {
     /// The underlying blob being wrapped.
@@ -103,6 +151,9 @@ pub struct Writer<B: Blob> {
     /// The state of the partial page in the blob. If it was written due to a sync call, then this
     /// will contain its CRC record.
     partial_page_state: Option<Checksum>,
+
+    /// The barrier owed before the current partial page may be rewritten again.
+    barrier: Barrier,
 
     /// Durability state for plain writes, resizes, and range-sync writes.
     sync_state: SyncState,
@@ -198,6 +249,7 @@ impl<B: Blob> Writer<B> {
             blob,
             current_page,
             partial_page_state,
+            barrier: Barrier::default(),
             sync_state: SyncState::new(needs_sync),
             id: cache_ref.next_id(),
             cache_ref,
@@ -403,6 +455,18 @@ impl<B: Blob> Writer<B> {
         write_partial_page: bool,
         sync: bool,
     ) -> Result<bool, Error> {
+        let logical_page_size = self.cache_ref.page_size() as usize;
+        if self.rewrites_current_page(write_partial_page, logical_page_size)
+            && self.barrier.pending().is_some()
+        {
+            self.drain_barrier().await?;
+            debug_assert!(
+                self.rewrites_current_page(write_partial_page, logical_page_size),
+                "serialized mutation invariant: flush must still rewrite the partial page after \
+                 draining its barrier"
+            );
+        }
+
         // Prepare the *physical* pages corresponding to the data in the buffer.
         // Pass the old partial page state so the CRC record is constructed correctly.
         let (mut physical_pages, partial_page_state) = self.to_physical_pages(
@@ -418,7 +482,6 @@ impl<B: Blob> Writer<B> {
 
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
         // partial page in tip for continued buffering.
-        let logical_page_size = self.cache_ref.page_size() as usize;
         let pages_to_cache = self.buffer.len() / logical_page_size;
         let bytes_to_drain = pages_to_cache * logical_page_size;
 
@@ -560,6 +623,34 @@ impl<B: Blob> Writer<B> {
                 Ok(sync)
             }
         }
+    }
+
+    fn rewrites_current_page(&self, write_partial_page: bool, logical_page_size: usize) -> bool {
+        if self.buffer.is_empty() {
+            return false;
+        }
+        if self.buffer.len() >= logical_page_size {
+            return true;
+        }
+        if !write_partial_page {
+            return false;
+        }
+
+        let visible_len = self
+            .partial_page_state
+            .as_ref()
+            .map(|crc| crc.get_crc().0 as usize);
+        visible_len != Some(self.buffer.len())
+    }
+
+    async fn drain_barrier(&mut self) -> Result<(), Error> {
+        let Some(pending) = self.barrier.pending() else {
+            return Ok(());
+        };
+        pending.await;
+        self.barrier.discharge();
+        self.sync_state.mark_synced();
+        Ok(())
     }
 
     /// Returns the size of the blob.
@@ -861,8 +952,14 @@ impl<B: Blob> Writer<B> {
         let logical_page_size_nz =
             NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
 
-        // Flush any buffered data (without fsync) so the reader sees all written data.
+        // Flush any buffered data (without fsync) so the reader sees all written data. If the
+        // flush plainly rewrites the current partial page, a later rewrite must first make that
+        // footer durable.
+        let rewrote_partial_page = self.rewrites_current_page(true, logical_page_size as usize);
         self.flush_internal(true, false).await?;
+        if rewrote_partial_page && self.partial_page_state.is_some() {
+            self.barrier.record_lazy(self.blob.clone());
+        }
 
         // Convert buffer size (bytes) to page count
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
@@ -927,7 +1024,30 @@ impl<B: Blob> Writer<B> {
 
         // Otherwise, the flush either had no bytes to write or used plain writes. Sync only if a
         // durability barrier is still pending.
-        self.sync_inner().await
+        let synced = self.sync_state.needs_sync();
+        self.sync_inner().await?;
+        if synced {
+            self.barrier.discharge();
+        }
+        Ok(())
+    }
+
+    /// Flush buffered data and start making all pending mutations durable.
+    ///
+    /// The returned [`Handle`] is the durability signal: the caller must await it to observe
+    /// completion. Once a sync is started, the pending mutations are considered issued, so a later
+    /// [`Self::sync`] without intervening writes returns immediately and does not wait for this
+    /// handle.
+    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+        self.flush_internal(true, false).await?;
+
+        if self.sync_state.needs_sync() && self.partial_page_state.is_some() {
+            let handle = self.sync_state.start_sync(&self.blob).await;
+            let pending = self.barrier.record(handle);
+            Ok(Barrier::observe(pending))
+        } else {
+            Ok(self.sync_state.start_sync(&self.blob).await)
+        }
     }
 
     /// Resize the blob to the provided logical `size`.
@@ -967,6 +1087,7 @@ impl<B: Blob> Writer<B> {
 
         // Flush any buffered data first to ensure we have a consistent state on disk.
         self.sync().await?;
+        self.drain_barrier().await?;
 
         // Calculate the physical size needed for the new size.
         let full_pages = target_size / logical_page_size;
@@ -994,8 +1115,9 @@ impl<B: Blob> Writer<B> {
         // A logical shrink can leave the physical page count unchanged. Only real physical
         // resizes need to create a pending sync.
         if new_physical_size != current_physical_size {
-            self.blob.resize(new_physical_size).await?;
-            self.sync_state.mark_unsynced();
+            self.sync_state
+                .resize(&self.blob, new_physical_size)
+                .await?;
         }
 
         // Evict cached pages at or beyond the new full-page boundary. The page at
@@ -1116,6 +1238,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16, NZU32};
     use std::{
+        collections::VecDeque,
         num::NonZeroU16,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -2500,6 +2623,240 @@ mod tests {
         async fn start_sync(&self) -> Handle<()> {
             self.inner.start_sync().await
         }
+    }
+
+    #[derive(Default)]
+    struct ControlledSyncState {
+        data: Vec<u8>,
+        durable: Vec<u8>,
+        writes: usize,
+        pending_syncs: VecDeque<oneshot::Sender<()>>,
+    }
+
+    /// Blob whose `start_sync` handles complete only when the test releases them.
+    #[derive(Clone)]
+    struct ControlledSyncBlob {
+        state: Arc<Mutex<ControlledSyncState>>,
+    }
+
+    impl ControlledSyncBlob {
+        fn new() -> Self {
+            Self {
+                state: Arc::new(Mutex::new(ControlledSyncState::default())),
+            }
+        }
+
+        fn writes(&self) -> usize {
+            self.state.lock().writes
+        }
+
+        fn pending_syncs(&self) -> usize {
+            self.state.lock().pending_syncs.len()
+        }
+
+        fn release_next_sync(&self) {
+            let sender = self
+                .state
+                .lock()
+                .pending_syncs
+                .pop_front()
+                .expect("pending sync missing");
+            let _ = sender.send(());
+        }
+
+        fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), Error> {
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(buf.len()).ok_or(Error::OffsetOverflow)?;
+            if end > data.len() {
+                data.resize(end, 0);
+            }
+            data[start..end].copy_from_slice(buf);
+            Ok(())
+        }
+    }
+
+    impl Blob for ControlledSyncBlob {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::default()).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
+            let state = self.state.lock();
+            if end > state.data.len() {
+                return Err(Error::BlobInsufficientLength);
+            }
+
+            let mut out = bufs.into();
+            out.put_slice(&state.data[start..end]);
+            Ok(out)
+        }
+
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            let buf = bufs.into().coalesce();
+            let mut state = self.state.lock();
+            state.writes += 1;
+            Self::write(&mut state.data, offset, buf.as_ref())
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            let buf = bufs.into().coalesce();
+            let mut state = self.state.lock();
+            state.writes += 1;
+            Self::write(&mut state.data, offset, buf.as_ref())?;
+            state.durable = state.data.clone();
+            Ok(())
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            let len = usize::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+            self.state.lock().data.resize(len, 0);
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            let mut state = self.state.lock();
+            state.durable = state.data.clone();
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            let (sender, receiver) = oneshot::channel();
+            let snapshot = {
+                let mut state = self.state.lock();
+                state.pending_syncs.push_back(sender);
+                state.data.clone()
+            };
+            let state = self.state.clone();
+            Handle::from_future(async move {
+                receiver.await.map_err(|_| Error::Closed)?;
+                state.lock().durable = snapshot;
+                Ok(())
+            })
+        }
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_start_sync_durability() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"writer_start_sync_durability")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..200u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.start_sync().await.unwrap().await.unwrap();
+            let size = writer.size();
+            drop(writer);
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"writer_start_sync_durability")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), size);
+            let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_sync_after_start_sync_without_new_writes_does_not_wait() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = ControlledSyncBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            writer.append(b"abc").await.unwrap();
+            let handle = writer.start_sync().await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+
+            writer.sync().await.unwrap();
+            assert_eq!(
+                blob.pending_syncs(),
+                1,
+                "sync without new writes must not wait for the in-flight start_sync handle"
+            );
+
+            blob.release_next_sync();
+            handle.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_overlapped_start_sync_waits_before_rewriting_partial_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = ControlledSyncBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            writer.append(b"abc").await.unwrap();
+            writer.sync().await.unwrap();
+
+            writer.append(b"de").await.unwrap();
+            let first = writer.start_sync().await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+            let writes_after_first = blob.writes();
+
+            writer.append(b"fg").await.unwrap();
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let starter = context.child("second_start").spawn(|_| async move {
+                let second = writer.start_sync().await.unwrap();
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                (writer, second)
+            });
+
+            crate::utils::reschedule().await;
+            assert_eq!(
+                blob.writes(),
+                writes_after_first,
+                "second start_sync must not rewrite before the first partial sync completes"
+            );
+            assert_eq!(completed.load(Ordering::Relaxed), 0);
+
+            blob.release_next_sync();
+            first.await.unwrap();
+            while completed.load(Ordering::Relaxed) == 0 {
+                crate::utils::reschedule().await;
+            }
+
+            assert!(
+                blob.writes() > writes_after_first,
+                "queued start_sync should rewrite the page after the first sync completes"
+            );
+            let (_writer, second) = starter.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+
+            blob.release_next_sync();
+            second.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 0);
+        });
     }
 
     /// Blob wrapper that delays one selected read after capturing its current bytes.

@@ -901,8 +901,9 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: `marshal.proposed(...)=true` means the block survives an
-/// immediate crash and repeated recoveries.
+/// Contract: awaiting the sync handle delivered by `marshal.proposed(...)` (the
+/// returned receiver, then the handle) means the block survives an immediate
+/// crash and repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
@@ -987,7 +988,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                                 .await
                                 .unwrap_or_else(|| {
                                     panic!(
-                                        "marshal.proposed() returning true must imply \
+                                        "awaiting marshal.proposed() must imply \
                                      get_verified(round) recovers the block after restart \
                                      (seed={seed}, cycle={cycle})"
                                     )
@@ -1124,9 +1125,9 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
 /// immediate crash and repeated recoveries.
 ///
 /// Complements [`verified_success_implies_recoverable_after_restart`] by
-/// exercising the `Message::Certified -> put_block -> put_sync` handshake.
-/// A regression that acked before syncing the notarized cache would surface
-/// here as a missing block after restart.
+/// exercising the `Message::Certified -> put_block -> sync handle` handshake.
+/// A regression that acked before the sync handle completed would surface here
+/// as a missing block after restart.
 pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
@@ -1800,7 +1801,13 @@ impl TestHarness for StandardHarness {
     }
 
     async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
+        handle
+            .mailbox
+            .proposed(round, block.clone())
+            .await
+            .expect("durable: enqueue")
+            .await
+            .expect("durable: synced");
     }
 
     async fn verify(
@@ -1809,7 +1816,10 @@ impl TestHarness for StandardHarness {
         block: &B,
         _all_handles: &mut [ValidatorHandle<Self>],
     ) {
-        assert!(handle.mailbox.verified(round, block.clone()).await);
+        assert!(
+            handle.mailbox.verified(round, block.clone()).await,
+            "durable: verified"
+        );
     }
 
     async fn certify(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) -> bool {
@@ -1961,7 +1971,10 @@ impl TestHarness for StandardHarness {
     }
 
     async fn verify_for_prune(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        assert!(handle.mailbox.verified(round, block.clone()).await);
+        assert!(
+            handle.mailbox.verified(round, block.clone()).await,
+            "durable: verified"
+        );
     }
 }
 
@@ -2649,7 +2662,13 @@ impl TestHarness for CodingHarness {
         round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
     ) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
+        handle
+            .mailbox
+            .proposed(round, block.clone())
+            .await
+            .expect("durable: enqueue")
+            .await
+            .expect("durable: synced");
     }
 
     async fn verify(
@@ -2658,7 +2677,10 @@ impl TestHarness for CodingHarness {
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
         _all_handles: &mut [ValidatorHandle<Self>],
     ) {
-        assert!(handle.mailbox.verified(round, block.clone()).await);
+        assert!(
+            handle.mailbox.verified(round, block.clone()).await,
+            "durable: verified"
+        );
     }
 
     async fn certify(
@@ -2831,7 +2853,10 @@ impl TestHarness for CodingHarness {
         round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
     ) {
-        assert!(handle.mailbox.verified(round, block.clone()).await);
+        assert!(
+            handle.mailbox.verified(round, block.clone()).await,
+            "durable: verified"
+        );
     }
 }
 

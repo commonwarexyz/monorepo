@@ -25,7 +25,7 @@ use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
-    Blob, Buf, Metrics, Storage,
+    Blob, Buf, Handle, Metrics, Storage,
 };
 use commonware_utils::NZUsize;
 use futures::{
@@ -365,6 +365,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Sync the given `sections` to storage.
     pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
         self.manager.sync(sections).await
+    }
+
+    /// Start syncing the given `section` to storage.
+    pub async fn start_sync(&mut self, section: u64) -> Result<Handle<()>, Error> {
+        self.manager.start_sync(section).await
     }
 
     /// Sync all sections to storage.

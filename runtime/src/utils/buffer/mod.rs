@@ -5,26 +5,82 @@ mod read;
 mod tip;
 mod write;
 
+use futures::{
+    future::{BoxFuture, Shared},
+    FutureExt as _,
+};
 pub use read::Read;
+use std::future::Future;
 pub use write::Write;
 
-/// Tracks whether plain blob mutations still need a full durability barrier.
-struct SyncState {
-    needs_sync: bool,
+type SharedSync = Shared<BoxFuture<'static, Result<(), SyncError>>>;
+
+#[derive(Clone)]
+struct SyncError(String);
+
+impl From<crate::Error> for SyncError {
+    fn from(err: crate::Error) -> Self {
+        Self(err.to_string())
+    }
+}
+
+impl From<SyncError> for crate::Error {
+    fn from(err: SyncError) -> Self {
+        Self::Io(std::io::Error::other(err.0))
+    }
+}
+
+fn share_sync(fut: impl Future<Output = Result<(), crate::Error>> + Send + 'static) -> SharedSync {
+    async move { fut.await.map_err(SyncError::from) }
+        .boxed()
+        .shared()
+}
+
+fn observe_sync(sync: SharedSync) -> crate::Handle<()> {
+    crate::Handle::from_future(async move { sync.await.map_err(crate::Error::from) })
+}
+
+/// Tracks pending and issued full durability barriers for plain blob mutations.
+enum SyncState {
+    /// No issued mutation requires a sync.
+    Clean,
+
+    /// At least one issued plain write or resize requires a full blob sync.
+    Dirty,
+
+    /// A full blob sync has been issued and gates later disk mutations.
+    InFlight(SharedSync),
 }
 
 impl SyncState {
     /// Create a new sync state.
     ///
     /// Use `needs_sync = true` when wrapping an existing blob because prior plain mutations may
-    /// still need a full [`crate::Blob::sync`] barrier. [`Self::write_at_sync`] can use
-    /// [`crate::Blob::write_at_sync`] only when this is false.
+    /// still need a full [`crate::Blob::sync`] barrier. [`Self::write_at_sync`] uses
+    /// [`crate::Blob::write_at_sync`] only after prior barriers are clear.
     const fn new(needs_sync: bool) -> Self {
-        Self { needs_sync }
+        if needs_sync {
+            Self::Dirty
+        } else {
+            Self::Clean
+        }
     }
 
-    const fn mark_unsynced(&mut self) {
-        self.needs_sync = true;
+    fn mark_synced(&mut self) {
+        *self = Self::Clean;
+    }
+
+    const fn needs_sync(&self) -> bool {
+        matches!(self, Self::Dirty)
+    }
+
+    async fn drain_in_flight(&mut self) -> Result<(), crate::Error> {
+        let Self::InFlight(sync) = self else {
+            return Ok(());
+        };
+        sync.clone().await?;
+        *self = Self::Clean;
+        Ok(())
     }
 
     async fn write_at(
@@ -33,8 +89,9 @@ impl SyncState {
         offset: u64,
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
+        self.drain_in_flight().await?;
         blob.write_at(offset, bufs).await?;
-        self.needs_sync = true;
+        *self = Self::Dirty;
         Ok(())
     }
 
@@ -44,25 +101,46 @@ impl SyncState {
         offset: u64,
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
-        if self.needs_sync {
-            self.write_at(blob, offset, bufs).await?;
-            self.sync(blob).await
+        self.drain_in_flight().await?;
+        if self.needs_sync() {
+            blob.write_at(offset, bufs).await?;
+            blob.sync().await?;
+            *self = Self::Clean;
+            Ok(())
         } else {
             // If `write_at_sync` fails, a later sync must not treat the drained buffer as durable.
-            self.needs_sync = true;
+            *self = Self::Dirty;
             blob.write_at_sync(offset, bufs).await?;
-            self.needs_sync = false;
+            *self = Self::Clean;
             Ok(())
         }
     }
 
-    async fn sync(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
-        if !self.needs_sync {
-            return Ok(());
-        }
-        blob.sync().await?;
-        self.needs_sync = false;
+    async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
+        self.drain_in_flight().await?;
+        blob.resize(len).await?;
+        *self = Self::Dirty;
         Ok(())
+    }
+
+    async fn sync(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
+        if self.needs_sync() {
+            blob.sync().await?;
+            *self = Self::Clean;
+        }
+        Ok(())
+    }
+
+    async fn start_sync(&mut self, blob: &impl crate::Blob) -> crate::Handle<()> {
+        match self {
+            Self::Clean => crate::Handle::ready(Ok(())),
+            Self::Dirty => {
+                let sync = share_sync(blob.start_sync().await);
+                *self = Self::InFlight(sync.clone());
+                observe_sync(sync)
+            }
+            Self::InFlight(sync) => observe_sync(sync.clone()),
+        }
     }
 }
 
@@ -71,11 +149,17 @@ mod tests {
     use super::*;
     use crate::{
         deterministic, Blob as _, BufMut, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner,
-        Storage,
+        Spawner as _, Storage, Supervisor as _,
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{sync::Mutex, NZUsize};
-    use std::sync::Arc;
+    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
+    use std::{
+        collections::VecDeque,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
 
     #[derive(Default)]
     struct RangeSyncState {
@@ -201,6 +285,113 @@ mod tests {
 
         async fn start_sync(&self) -> Handle<()> {
             Handle::ready(self.sync().await)
+        }
+    }
+
+    #[derive(Default)]
+    struct ControlledSyncState {
+        data: Vec<u8>,
+        writes: usize,
+        pending_syncs: VecDeque<oneshot::Sender<()>>,
+    }
+
+    /// Blob whose `start_sync` handles complete only when the test releases them.
+    #[derive(Clone)]
+    struct ControlledSyncBlob {
+        state: Arc<Mutex<ControlledSyncState>>,
+    }
+
+    impl ControlledSyncBlob {
+        fn new() -> Self {
+            Self {
+                state: Arc::new(Mutex::new(ControlledSyncState::default())),
+            }
+        }
+
+        fn writes(&self) -> usize {
+            self.state.lock().writes
+        }
+
+        fn pending_syncs(&self) -> usize {
+            self.state.lock().pending_syncs.len()
+        }
+
+        fn release_next_sync(&self) {
+            let sender = self
+                .state
+                .lock()
+                .pending_syncs
+                .pop_front()
+                .expect("pending sync missing");
+            let _ = sender.send(());
+        }
+
+        fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), Error> {
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(buf.len()).ok_or(Error::OffsetOverflow)?;
+            if end > data.len() {
+                data.resize(end, 0);
+            }
+            data[start..end].copy_from_slice(buf);
+            Ok(())
+        }
+    }
+
+    impl crate::Blob for ControlledSyncBlob {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::default()).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            buf: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
+            let state = self.state.lock();
+            if end > state.data.len() {
+                return Err(Error::BlobInsufficientLength);
+            }
+
+            let mut out = buf.into();
+            out.put_slice(&state.data[start..end]);
+            Ok(out)
+        }
+
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            let buf = bufs.into().coalesce();
+            let mut state = self.state.lock();
+            state.writes += 1;
+            Self::write(&mut state.data, offset, buf.as_ref())
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.write_at(offset, bufs).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            let len = usize::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+            self.state.lock().data.resize(len, 0);
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            let (sender, receiver) = oneshot::channel();
+            self.state.lock().pending_syncs.push_back(sender);
+            Handle::from_future(async move {
+                receiver.await.map_err(|_| Error::Closed)?;
+                Ok(())
+            })
         }
     }
 
@@ -1483,6 +1674,52 @@ mod tests {
             assert_eq!(writes, 3);
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_sync_after_buffered_write_waits_for_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = ControlledSyncBlob::new();
+            let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+
+            writer.write_at(0, b"abc").await.unwrap();
+            let first = writer.start_sync().await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+
+            writer.write_at(3, b"d").await.unwrap();
+            let writes_before_sync = blob.writes();
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.child("sync").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                writer.sync().await.unwrap();
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                writer
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                crate::utils::reschedule().await;
+            }
+            crate::utils::reschedule().await;
+            assert_eq!(completed.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                blob.writes(),
+                writes_before_sync,
+                "later disk writes must wait for the outstanding start_sync"
+            );
+
+            blob.release_next_sync();
+            first.await.unwrap();
+            while completed.load(Ordering::Relaxed) != 1 {
+                crate::utils::reschedule().await;
+            }
+            let _writer = waiter.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 0);
         });
     }
 

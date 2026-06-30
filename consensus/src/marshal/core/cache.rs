@@ -6,7 +6,9 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::boxed;
-use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    buffer::paged::CacheRef, BufferPooler, Clock, Handle, Metrics, Spawner, Storage,
+};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier, MultiArchive as _},
     metadata::{self, Metadata},
@@ -290,21 +292,25 @@ where
         archive
     }
 
-    /// Add a verified block to the prunable archive.
+    /// Add a verify-stage candidate block to the prunable archive and start syncing it.
+    ///
+    /// The archive name is historical: callers may start this durability work
+    /// after structural validation and before the application verdict is known.
+    /// Consensus must not treat presence in this cache as application validity.
     pub(crate) async fn put_verified(
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
         block: V::StoredBlock,
-    ) {
+    ) -> Handle<()> {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
-            return;
+            return Handle::ready(Ok(()));
         };
         let result = cache
             .verified_blocks
-            .put_sync(round.view().get(), digest, block)
+            .put_start_sync(round.view().get(), digest, block)
             .await;
-        Self::handle_result(result, round, "verified");
+        Self::handle_start_result(result, round, "verified")
     }
 
     /// Add a certified block to the height-indexed archive.
@@ -338,38 +344,39 @@ where
         }
     }
 
-    /// Add a notarized block to the prunable archive.
-    pub(crate) async fn put_block(
+    /// Add a notarized block to the prunable archive and start syncing it.
+    pub(crate) async fn put_notarized(
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
         block: V::StoredBlock,
-    ) {
+    ) -> Handle<()> {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
-            return;
+            return Handle::ready(Ok(()));
         };
+
         let result = cache
             .notarized_blocks
-            .put_sync(round.view().get(), digest, block)
+            .put_start_sync(round.view().get(), digest, block)
             .await;
-        Self::handle_result(result, round, "notarized");
+        Self::handle_start_result(result, round, "notarized")
     }
 
-    /// Add a notarization to the prunable archive.
+    /// Add a notarization to the prunable archive and start syncing it.
     pub(crate) async fn put_notarization(
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
         notarization: Notarization<S, V::Commitment>,
-    ) {
+    ) -> Handle<()> {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
-            return;
+            return Handle::ready(Ok(()));
         };
         let result = cache
             .notarizations
-            .put_sync(round.view().get(), digest, notarization)
+            .put_start_sync(round.view().get(), digest, notarization)
             .await;
-        Self::handle_result(result, round, "notarization");
+        Self::handle_start_result(result, round, "notarization")
     }
 
     /// Add a finalization to the prunable archive.
@@ -397,6 +404,27 @@ where
             }
             Err(archive::Error::AlreadyPrunedTo(_)) => {
                 debug!(?round, name, "already pruned");
+            }
+            Err(e) => {
+                panic!("failed to insert {name}: {e}");
+            }
+        }
+    }
+
+    /// Helper to debug cache sync start results.
+    fn handle_start_result(
+        result: Result<Handle<()>, archive::Error>,
+        round: Round,
+        name: &str,
+    ) -> Handle<()> {
+        match result {
+            Ok(handle) => {
+                debug!(?round, name, "cache sync started");
+                handle
+            }
+            Err(archive::Error::AlreadyPrunedTo(_)) => {
+                debug!(?round, name, "already pruned");
+                Handle::ready(Ok(()))
             }
             Err(e) => {
                 panic!("failed to insert {name}: {e}");
