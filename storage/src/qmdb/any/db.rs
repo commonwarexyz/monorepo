@@ -28,10 +28,6 @@ use commonware_utils::bitmap;
 use core::num::NonZeroU64;
 use std::{collections::HashMap, sync::Arc};
 
-/// Estimate of the number of keys per shard at which parallelizing [`Db::get_many_map`]'s
-/// index probe is faster than probing serially.
-const MIN_PROBES_PER_SHARD: usize = 8;
-
 /// Metrics for Any QMDBs.
 pub(crate) struct Metrics<E: Context> {
     /// State gauges.
@@ -255,15 +251,17 @@ where
         // for large batches the probe is sharded across the strategy pool; each candidate carries
         // its global key index, so partition order does not matter.
         let strategy = self.strategy();
-        let manual = strategy.manual();
-        let parallelism = manual.parallelism_hint();
-        let mut candidates: Vec<(usize, u64)> =
-            if parallelism == 1 || keys.len() < MIN_PROBES_PER_SHARD.saturating_mul(parallelism) {
+        let mut candidates: Vec<(usize, u64)> = strategy.run(
+            keys.len(),
+            || {
                 let mut candidates = Vec::with_capacity(keys.len());
                 self.snapshot
                     .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
                 candidates
-            } else {
+            },
+            || {
+                let manual = strategy.manual();
+                let parallelism = manual.parallelism_hint();
                 let chunk = keys.len().div_ceil(parallelism);
                 let snapshot = &self.snapshot;
                 manual
@@ -281,7 +279,8 @@ where
                     .into_iter()
                     .flatten()
                     .collect()
-            };
+            },
+        );
 
         let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
         if candidates.is_empty() {

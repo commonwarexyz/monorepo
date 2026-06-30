@@ -1,10 +1,11 @@
 //! Adaptive execution policy for collection operations.
 //!
-//! Entries are keyed by callsite, input-size bucket, and thread count so a decision learned for
-//! one workload does not leak into another. The policy compares recent serial and parallel timing
-//! samples and prefers parallel unless serial is clearly faster. It re-times the preferred path
-//! every [`PREFERRED_SAMPLE_INTERVAL`] calls to keep its estimate current, and probes the
-//! non-preferred path every [`RESAMPLE_INTERVAL`] calls in case the faster path has changed.
+//! Entries are keyed by callsite, input-size bucket, work-size bucket, and thread count so a
+//! decision learned for one workload does not leak into another. The policy compares recent serial
+//! and parallel timing samples and prefers parallel unless serial is clearly faster. It re-times
+//! the preferred path every [`PREFERRED_SAMPLE_INTERVAL`] calls to keep its estimate current, and
+//! probes the non-preferred path every [`RESAMPLE_INTERVAL`] calls in case the faster path has
+//! changed.
 //!
 //! Timing is coarse by design: each measured call records a single wall-clock sample, and the
 //! parallel sample also captures any time the job waits for a pool worker. On a shared pool under
@@ -55,6 +56,7 @@ impl Policy {
         &self,
         caller: &'static Location<'static>,
         len: usize,
+        work: usize,
         parallelism: usize,
         run: impl FnOnce(Execution) -> R,
     ) -> R {
@@ -64,7 +66,7 @@ impl Policy {
             return run(Execution::Serial);
         }
 
-        let key = Key::new(caller, len, parallelism);
+        let key = Key::new(caller, len, work, parallelism);
         let (execution, measure) = self.entries.lock().entry(key).or_default().choose();
         let start = measure.then(Instant::now);
         let result = run(execution);
@@ -90,17 +92,24 @@ struct Key {
     file: &'static str,
     line: u32,
     column: u32,
-    bucket: u8,
+    len_bucket: u8,
+    work_bucket: u8,
     parallelism: usize,
 }
 
 impl Key {
-    const fn new(caller: &'static Location<'static>, len: usize, parallelism: usize) -> Self {
+    const fn new(
+        caller: &'static Location<'static>,
+        len: usize,
+        work: usize,
+        parallelism: usize,
+    ) -> Self {
         Self {
             file: caller.file(),
             line: caller.line(),
             column: caller.column(),
-            bucket: len_bucket(len),
+            len_bucket: len_bucket(len),
+            work_bucket: len_bucket(work),
             parallelism,
         }
     }
