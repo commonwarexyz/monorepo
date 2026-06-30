@@ -18,6 +18,7 @@
 //! - iters: timed iterations (default 15)
 //! - keys: total seeded keys (default 1,000,000)
 //! - updates: keys written per batch (default 32,768)
+//! - reads: keys loaded per batch (default 32,768)
 //! - threads: strategy pool threads (default 8)
 
 use commonware_cryptography::{Hasher, Sha256};
@@ -224,11 +225,14 @@ macro_rules! run_pipeline {
 
             let reads = gen_muts(&mut rng, args.num_reads, args.num_keys);
             let keys: Vec<&Digest> = reads.iter().map(|(k, _)| k).collect();
-            let updates: Vec<_> = reads
+            let mut slots: Vec<_> = (0..reads.len()).collect();
+            for i in 0..args.num_updates as usize {
+                let j = i + (rng.next_u64() as usize % (slots.len() - i));
+                slots.swap(i, j);
+            }
+            let updates: Vec<_> = slots[..args.num_updates as usize]
                 .iter()
-                .take(args.num_updates as usize)
-                .enumerate()
-                .map(|(idx, (_, v))| (idx, *v))
+                .map(|&idx| (idx, reads[idx].1))
                 .collect();
             let new_batch = || {
                 chain
