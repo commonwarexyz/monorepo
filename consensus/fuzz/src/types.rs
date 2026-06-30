@@ -56,10 +56,15 @@ pub struct ReporterReplicaStateData {
     pub nullification_signature_counts: BTreeMap<u64, Option<usize>>,
     pub finalizations: BTreeMap<u64, ProposalData>,
     pub finalization_signature_counts: BTreeMap<u64, Option<usize>>,
+    pub notarize_vote_counts: BTreeMap<u64, usize>,
+    pub nullify_vote_counts: BTreeMap<u64, usize>,
+    pub finalize_vote_counts: BTreeMap<u64, usize>,
     /// Views that have any certificate (notarization, nullification, or finalization).
     pub certified: BTreeSet<u64>,
     /// Views with a proposal certificate usable for parent selection.
     pub successful_certifications: BTreeSet<u64>,
+    /// Views where the known leader sent a nullify vote.
+    pub leader_nullify_views: BTreeSet<u64>,
     /// Max view with a finalization certificate.
     pub last_finalized: u64,
     /// Max view this replica has notarized (notarize vote or notarization certificate).

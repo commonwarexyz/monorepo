@@ -55,7 +55,7 @@ use commonware_p2p::{
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Runner, Spawner, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner, Supervisor as _,
 };
 use commonware_utils::{
     channel::mpsc::{self, Receiver},
@@ -1136,7 +1136,8 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput, state_coverage: bool) {
             if state_coverage {
                 let reporter_states =
                     state_cov::encode_reporter_states(&reporter_only, config.n as usize);
-                state_cov::observe(&reporter_states);
+                let metrics = context.encode();
+                state_cov::observe_with_metrics(&reporter_states, &metrics);
             }
             let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);
@@ -1728,7 +1729,8 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
             if state_coverage {
                 let reporter_states =
                     state_cov::encode_reporter_states(honest_reporters, config.n as usize);
-                state_cov::observe(&reporter_states);
+                let metrics = context.encode();
+                state_cov::observe_with_metrics(&reporter_states, &metrics);
             }
             let states = invariants::extract(
                 reporters.into_iter().skip(honest_start).collect(),
