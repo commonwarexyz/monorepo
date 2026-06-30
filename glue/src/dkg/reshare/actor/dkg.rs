@@ -128,7 +128,6 @@ where
                 epoch: Epoch::zero(),
                 phase: bounds.phase(),
                 participants: snapshot,
-                round: 0,
                 previous: None,
                 share: None,
                 seed,

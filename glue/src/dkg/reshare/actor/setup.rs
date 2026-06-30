@@ -48,7 +48,6 @@ where
     pub(super) epoch: Epoch,
     pub(super) phase: EpochPhase,
     pub(super) participants: Participants<P>,
-    pub(super) round: u64,
     pub(super) previous: Option<Output<V, P>>,
     pub(super) share: Option<Share>,
     pub(super) seed: Summary,
@@ -115,8 +114,9 @@ where
         }
 
         let participants = info.participants();
+        let round = epoch.get();
         participants
-            .validate(self.max_participants, Some(&info.output), info.round)
+            .validate(self.max_participants, Some(&info.output), round)
             .expect("boundary epoch participants must be valid");
 
         let share = self.recovered_share(store, &info).await;
@@ -134,7 +134,6 @@ where
                 epoch,
                 phase: bounds.phase(),
                 participants,
-                round: info.round,
                 previous: Some(info.output.clone()),
                 share,
                 seed,
@@ -203,12 +202,12 @@ where
             epoch,
             phase,
             participants,
-            round,
             previous,
             share,
             seed,
         } = preparation;
 
+        let round = epoch.get();
         let _ = self
             .manager
             .track(epoch.get(), participants.tracked_peers());

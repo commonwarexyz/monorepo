@@ -680,15 +680,10 @@ mod tests {
         output
     }
 
-    fn epoch_info(
-        epoch: Epoch,
-        round: u64,
-        output: Output<MinPk, PublicKey>,
-    ) -> EpochInfo<MinPk, PublicKey> {
+    fn epoch_info(epoch: Epoch, output: Output<MinPk, PublicKey>) -> EpochInfo<MinPk, PublicKey> {
         EpochInfo {
             outcome: EpochOutcome::Success,
             epoch,
-            round,
             output,
             players: Set::default(),
             next_players: Set::default(),
@@ -715,19 +710,18 @@ mod tests {
     }
 
     #[test]
-    fn commit_epoch_seeds_configured_epoch_and_round() {
+    fn commit_epoch_seeds_configured_epoch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let secret_store = MemorySecretStore::default();
             let mut store =
                 init_store(context.child("store"), "configured-start", secret_store).await;
             store
-                .commit_epoch(epoch_info(Epoch::new(7), 3, output(1)), summary(1), None)
+                .commit_epoch(epoch_info(Epoch::new(7), output(1)), summary(1), None)
                 .await;
 
             let info = store.current().expect("current epoch");
             assert_eq!(info.epoch, Epoch::new(7));
-            assert_eq!(info.round, 3);
         });
     }
 
@@ -750,7 +744,7 @@ mod tests {
             )
             .expect("valid info");
             store
-                .commit_epoch(epoch_info(Epoch::zero(), 0, output(1)), summary(1), None)
+                .commit_epoch(epoch_info(Epoch::zero(), output(1)), summary(1), None)
                 .await;
 
             let dealer_pk = signers[0].public_key();
@@ -834,7 +828,7 @@ mod tests {
             )
             .expect("valid info");
             store
-                .commit_epoch(epoch_info(Epoch::zero(), 0, output(1)), summary(1), None)
+                .commit_epoch(epoch_info(Epoch::zero(), output(1)), summary(1), None)
                 .await;
 
             let dealer_pk = signers[0].public_key();
@@ -901,7 +895,7 @@ mod tests {
                 init_store(context.child("store"), "secret-boundary", secret_store).await;
             store
                 .commit_epoch(
-                    epoch_info(Epoch::zero(), 0, output(1)),
+                    epoch_info(Epoch::zero(), output(1)),
                     summary(1),
                     Some(share),
                 )
@@ -943,11 +937,11 @@ mod tests {
                 .clone();
 
             store
-                .commit_epoch(epoch_info(Epoch::zero(), 0, output(1)), summary(1), None)
+                .commit_epoch(epoch_info(Epoch::zero(), output(1)), summary(1), None)
                 .await;
             store
                 .commit_epoch(
-                    epoch_info(Epoch::new(1), 1, next_output),
+                    epoch_info(Epoch::new(1), next_output),
                     summary(2),
                     Some(share),
                 )

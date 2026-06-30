@@ -475,7 +475,6 @@ mod tests {
         EpochInfo {
             outcome: EpochOutcome::Success,
             epoch,
-            round: 0,
             output,
             players: participants.clone(),
             next_players: participants,

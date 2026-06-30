@@ -408,7 +408,7 @@ where
             }
         };
 
-        let (epoch, outcome, round, output, players, next_players, share) = match outcome {
+        let (epoch, outcome, output, players, next_players, share) = match outcome {
             Some((output, share)) if let Some(current) = current => {
                 let next_epoch = epoch.next();
                 let next_players = self
@@ -421,7 +421,6 @@ where
                 (
                     next_epoch,
                     EpochOutcome::Success,
-                    current.round + 1,
                     output,
                     current.next_players,
                     next_players,
@@ -439,7 +438,6 @@ where
                 (
                     epoch,
                     EpochOutcome::Success,
-                    0,
                     output,
                     players,
                     Default::default(),
@@ -459,7 +457,6 @@ where
                 (
                     epoch.next(),
                     EpochOutcome::Failure,
-                    current.round,
                     current.output.clone(),
                     current.next_players,
                     self.participants_provider
@@ -474,7 +471,6 @@ where
             info: EpochInfo {
                 outcome,
                 epoch,
-                round,
                 output,
                 players,
                 next_players,
@@ -529,7 +525,7 @@ where
             .await;
         info!(
             epoch = ?info.epoch,
-            round = info.round,
+            round = info.epoch.get(),
             success = matches!(info.outcome, EpochOutcome::Success),
             dealers = ?info.output.dealers(),
             players = ?info.players,

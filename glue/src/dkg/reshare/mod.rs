@@ -30,14 +30,12 @@
 //!   epoch.
 //! - `next_players` are announced one epoch early so future players can connect
 //!   and state sync before they must receive private dealings.
-//! - `round` advances only after a successful ceremony.
 //! - `outcome` records whether the ceremony that produced this boundary
 //!   artifact succeeded or failed.
 //!
-//! On success, the artifact contains the newly generated output and the round is
-//! incremented. On failure, the artifact carries the previous output forward,
-//! keeps the round unchanged, advances `players` to the previously announced
-//! `next_players`, and refreshes `next_players` from the
+//! On success, the artifact contains the newly generated output. On failure,
+//! the artifact carries the previous output forward, advances `players` to the
+//! previously announced `next_players`, and refreshes `next_players` from the
 //! [`ParticipantsProvider`](crate::dkg::ParticipantsProvider).
 //!
 //! # Protocol Flow

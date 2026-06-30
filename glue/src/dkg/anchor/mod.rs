@@ -497,7 +497,6 @@ mod tests {
             Payload::EpochInfo(EpochInfo {
                 outcome: EpochOutcome::Success,
                 epoch: Epoch::new(1),
-                round: 0,
                 output,
                 players: participants.clone(),
                 next_players: participants,
@@ -519,7 +518,6 @@ mod tests {
         EpochInfo {
             outcome: EpochOutcome::Success,
             epoch: Epoch::zero(),
-            round: 0,
             output,
             players: participants.clone(),
             next_players: participants,

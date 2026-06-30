@@ -218,8 +218,8 @@ where
 
 /// Canonical public epoch artifact.
 ///
-/// This is the public truth needed to start an epoch: the round, the latest
-/// public output, and the participant sets not already carried by that output.
+/// This is the public truth needed to start an epoch: the latest public output
+/// and the participant sets not already carried by that output.
 /// The genesis block carries the [`EpochInfo`] for epoch 0; the final block of
 /// each epoch carries the [`EpochInfo`] for the following epoch. The reshare
 /// actor never invents this; it reads it back from finalized block ancestry.
@@ -229,8 +229,6 @@ pub struct EpochInfo<V: Variant, P: PublicKey> {
     pub outcome: EpochOutcome,
     /// Epoch this artifact describes.
     pub epoch: Epoch,
-    /// Reshare ceremony round for the epoch. Incremented on each [`EpochOutcome::Success`].
-    pub round: u64,
     /// Latest public DKG output.
     pub output: Output<V, P>,
     /// Peers that receive shares in this epoch.
@@ -254,7 +252,6 @@ impl<V: Variant, P: PublicKey> Write for EpochInfo<V, P> {
     fn write(&self, buf: &mut impl BufMut) {
         self.outcome.write(buf);
         self.epoch.write(buf);
-        self.round.write(buf);
         self.output.write(buf);
         self.players.write(buf);
         self.next_players.write(buf);
@@ -265,7 +262,6 @@ impl<V: Variant, P: PublicKey> EncodeSize for EpochInfo<V, P> {
     fn encode_size(&self) -> usize {
         self.outcome.encode_size()
             + self.epoch.encode_size()
-            + self.round.encode_size()
             + self.output.encode_size()
             + self.players.encode_size()
             + self.next_players.encode_size()
@@ -280,7 +276,6 @@ impl<V: Variant, P: PublicKey> Read for EpochInfo<V, P> {
         Ok(Self {
             outcome: EpochOutcome::read(buf)?,
             epoch: Epoch::read(buf)?,
-            round: ReadExt::read(buf)?,
             output: Output::<V, P>::read_cfg(buf, &(*max, MAX_SUPPORTED_MODE))?,
             players: Set::read_cfg(buf, &(RangeCfg::new(0..=max.get() as usize), ()))?,
             next_players: Set::read_cfg(buf, &(RangeCfg::new(0..=max.get() as usize), ()))?,
@@ -298,7 +293,6 @@ where
         Ok(Self {
             outcome: u.arbitrary()?,
             epoch: u.arbitrary()?,
-            round: u.arbitrary()?,
             output: u.arbitrary()?,
             players: u.arbitrary()?,
             next_players: u.arbitrary()?,

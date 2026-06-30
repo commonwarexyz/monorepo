@@ -276,12 +276,6 @@ impl Property<ed25519::PublicKey, ValidatorState> for EpochInfoContinuity {
 
                 match info.outcome {
                     EpochOutcome::Success => {
-                        if info.round != previous.round + 1 {
-                            return Err(format!(
-                                "successful boundary at height {height} advanced round from {} to {}",
-                                previous.round, info.round
-                            ));
-                        }
                         if info.output.players() != &previous.players {
                             return Err(format!(
                                 "successful boundary at height {height} output players did not match previous players"
@@ -289,12 +283,6 @@ impl Property<ed25519::PublicKey, ValidatorState> for EpochInfoContinuity {
                         }
                     }
                     EpochOutcome::Failure => {
-                        if info.round != previous.round {
-                            return Err(format!(
-                                "failed boundary at height {height} changed round from {} to {}",
-                                previous.round, info.round
-                            ));
-                        }
                         if info.output != previous.output {
                             return Err(format!(
                                 "failed boundary at height {height} did not carry forward output"
@@ -448,12 +436,6 @@ impl Property<ed25519::PublicKey, ValidatorState> for FailedCeremonyCarryOver {
                 return Err(format!(
                     "boundary at height {height} carried {:?}, expected failure",
                     info.outcome
-                ));
-            }
-            if info.round != previous.round {
-                return Err(format!(
-                    "failed ceremony incremented round from {} to {}",
-                    previous.round, info.round
                 ));
             }
             if info.output != previous.output {

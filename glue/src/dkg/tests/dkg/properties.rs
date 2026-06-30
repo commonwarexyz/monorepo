@@ -79,9 +79,6 @@ impl Property<ed25519::PublicKey, NodeState> for DkgOutcome {
                 if info.epoch != Epoch::zero() {
                     return Err(format!("unexpected epoch: {:?}", info.epoch));
                 }
-                if info.round != 0 {
-                    return Err(format!("unexpected round: {}", info.round));
-                }
                 if info.output.players() != &self.participants {
                     return Err("output players did not match participants".into());
                 }

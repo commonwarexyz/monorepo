@@ -506,7 +506,6 @@ impl ReshareEngine {
         let info = EpochInfo {
             outcome: EpochOutcome::Success,
             epoch: Epoch::zero(),
-            round: 0,
             output,
             players,
             next_players: schedule.players(Epoch::new(1)),

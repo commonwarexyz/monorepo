@@ -12,7 +12,7 @@ hash = "9e5d122980ec0436a7d77de1342381879d52fa796eaedfd8eba08117420ab691"
 
 ["commonware_glue::dkg::types::conformance::CodecConformance<EpochInfo<MinSig,ed25519::PublicKey>>"]
 n_cases = 8192
-hash = "68e22077598497e15ca097e9e9809d175f2c6de90ea8b59336a4da46c90a0992"
+hash = "7b3e025094ada3f7e729d2b36e3e55f60f19e2a6267111ae0c2266579cfa2578"
 
 ["commonware_glue::dkg::types::conformance::CodecConformance<EpochOutcome>"]
 n_cases = 65536
@@ -28,7 +28,7 @@ hash = "240c5ef5d2a29ad2f22678bbe5f8360ae0ab628b68e792573a16dcd0d0f09c4d"
 
 ["commonware_glue::dkg::types::conformance::CodecConformance<Payload<MinSig,ed25519::PrivateKey>>"]
 n_cases = 8192
-hash = "192f2a16a379559a0e873680dc328b08ea406508aade2c8d7cbba663e1f6d0d9"
+hash = "89d51bef0703a3cc6ac96ae71daa453113fd55e70febcd765d0791cc7d8c612c"
 
 ["commonware_glue::stateful::db::p2p::compact::handler::tests::conformance::CodecConformance<Request<mmr::Family,sha256::Digest>>"]
 n_cases = 65536
