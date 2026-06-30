@@ -58,7 +58,7 @@ use commonware_runtime::Spawner;
 use commonware_utils::{cache::Clock, channel::mpsc, NZUsize};
 use core::num::NonZeroUsize;
 use futures::{future::join_all, pin_mut, StreamExt as _};
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc};
 use thiserror::Error;
 
 pub mod any;
@@ -451,9 +451,9 @@ pub enum InitParallelism {
 
 /// Builds a database's snapshot index from the operations log.
 ///
-/// Generic over the `Index` type to allow for custom (e.g. parallel) implementations. Default
-/// implementation is the serial replay.
-pub trait SnapshotBuild<F: Family>: Index<Value = Location<F>> + Sized {
+/// Generic over the `Index` type so each index controls how it builds: serial index types replay the
+/// log sequentially, while the ordered partitioned index builds its partitions in parallel.
+pub trait SnapshotBuild<F: Family>: Index<Value = Location<F>> + Sized + 'static {
     /// Replay `log` from `inactivity_floor_loc`, populating `self` and invoking `callback` for each
     /// operation (its activity status and the location it inactivates, if any). Returns the number of
     /// active keys. `parallelism` selects how index types that build in parallel split the work
@@ -461,24 +461,24 @@ pub trait SnapshotBuild<F: Family>: Index<Value = Location<F>> + Sized {
     /// core for the replay/routing task); extra workers have diminishing returns once that task becomes
     /// the bottleneck. `cache_size` bounds each build's `(location -> key)` cache (`None` disables it).
     #[allow(clippy::too_many_arguments)]
-    fn build_snapshot<E, C, S, Fn>(
-        &mut self,
+    fn build_snapshot<'a, E, C, S, Fn>(
+        &'a mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        strategy: &S,
+        log: &'a Arc<C>,
+        strategy: &'a S,
         parallelism: InitParallelism,
         cache_size: Option<NonZeroUsize>,
         callback: Fn,
-    ) -> impl core::future::Future<Output = Result<usize, Error<F>>> + Send
+    ) -> Pin<Box<dyn core::future::Future<Output = Result<usize, Error<F>>> + Send + 'a>>
     where
         E: Context + Spawner + 'static,
         C: Contiguous<Item: Operation<F> + Send> + Send + Sync + 'static,
         S: Strategy,
-        Fn: FnMut(bool, Option<Location<F>>) + Send,
+        Fn: FnMut(bool, Option<Location<F>>) + Send + 'a,
     {
-        // This index type builds serially, so `parallelism` has no effect; warn rather than silently
-        // ignore a non-default setting (only the ordered partitioned index parallelizes).
+        // This index type builds serially, so `parallelism` has no effect; warn rather than
+        // silently ignore a non-default setting (only the ordered partitioned index parallelizes).
         if parallelism != InitParallelism::Serial {
             tracing::warn!(
                 ?parallelism,
@@ -486,9 +486,9 @@ pub trait SnapshotBuild<F: Family>: Index<Value = Location<F>> + Sized {
             );
         }
         let _ = (context, strategy);
-        async move {
+        Box::pin(async move {
             build_snapshot_from_log(inactivity_floor_loc, &**log, self, cache_size, callback).await
-        }
+        })
     }
 }
 
@@ -502,28 +502,24 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::ordered::Index<T, Location<F>, P>
 {
-    #[allow(
-        clippy::manual_async_fn,
-        clippy::too_many_arguments,
-        clippy::type_complexity
-    )]
-    fn build_snapshot<E, C, S, Fn>(
-        &mut self,
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn build_snapshot<'a, E, C, S, Fn>(
+        &'a mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        strategy: &S,
+        log: &'a Arc<C>,
+        strategy: &'a S,
         parallelism: InitParallelism,
         cache_size: Option<NonZeroUsize>,
         mut callback: Fn,
-    ) -> impl core::future::Future<Output = Result<usize, Error<F>>> + Send
+    ) -> Pin<Box<dyn core::future::Future<Output = Result<usize, Error<F>>> + Send + 'a>>
     where
         E: Context + Spawner + 'static,
         C: Contiguous<Item: Operation<F> + Send> + Send + Sync + 'static,
         S: Strategy,
-        Fn: FnMut(bool, Option<Location<F>>) + Send,
+        Fn: FnMut(bool, Option<Location<F>>) + Send + 'a,
     {
-        async move {
+        Box::pin(async move {
             let count = self.partition_count();
             let workers = match parallelism {
                 InitParallelism::Serial => 0,
@@ -657,7 +653,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             }
 
             Ok(total_items as usize)
-        }
+        })
     }
 }
 
