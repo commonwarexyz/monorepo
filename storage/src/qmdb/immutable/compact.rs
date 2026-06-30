@@ -518,7 +518,7 @@ where
     /// Durably persist the current db state to disk. This is faster than [`Self::sync`] but
     /// reopen may need to replay the witness journal's tail to recover.
     #[tracing::instrument(name = "qmdb.immutable.compact.db.commit", level = "info", skip_all)]
-    pub async fn commit(&self) -> Result<(), Error<F>> {
+    pub async fn commit(&mut self) -> Result<(), Error<F>> {
         self.witness
             .commit::<H, S>(&self.merkle, self.inactivity_floor_loc, || {
                 Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
@@ -529,7 +529,7 @@ where
     /// Durably persist the current db state to disk, also persisting journal metadata to
     /// minimize recovery work on reopen.
     #[tracing::instrument(name = "qmdb.immutable.compact.db.sync", level = "info", skip_all)]
-    pub async fn sync(&self) -> Result<(), Error<F>> {
+    pub async fn sync(&mut self) -> Result<(), Error<F>> {
         self.witness
             .sync::<H, S>(&self.merkle, self.inactivity_floor_loc, || {
                 Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
@@ -1058,14 +1058,14 @@ mod tests {
             drop(db);
 
             // Corrupt the persisted proof so it no longer verifies against the stored root.
-            let journal = open_witness_journal(context.child("tamper"), partition).await;
+            let mut journal = open_witness_journal(context.child("tamper"), partition).await;
             let (op_bytes, mut proof, pinned_nodes) = witness::tests::tip(&journal).await;
             if let Some(digest) = proof.digests.first_mut() {
                 *digest = Sha256::fill(0xff);
             } else {
                 proof.leaves = Location::new(*proof.leaves + 1);
             }
-            witness::tests::overwrite_tip(&journal, op_bytes, proof, pinned_nodes).await;
+            witness::tests::overwrite_tip(&mut journal, op_bytes, proof, pinned_nodes).await;
             drop(journal);
 
             let merkle = crate::merkle::compact::Merkle::new(Sequential);
@@ -1104,8 +1104,8 @@ mod tests {
             drop(db);
 
             // Corrupt the rewind target's entry (the journal holds bootstrap, target, tip).
-            let journal = open_witness_journal(context.child("corrupt"), partition).await;
-            witness::tests::corrupt_entry(&journal, 1, |entry| {
+            let mut journal = open_witness_journal(context.child("corrupt"), partition).await;
+            witness::tests::corrupt_entry(&mut journal, 1, |entry| {
                 entry.pinned_nodes[0] = Sha256::fill(0xff);
             })
             .await;
@@ -1161,8 +1161,8 @@ mod tests {
 
             // Simulate a crash between an import's journal clear and its entry append: the
             // journal is empty but its size is nonzero.
-            let journal = open_witness_journal(context.child("clear"), partition).await;
-            let size = journal.size().await;
+            let mut journal = open_witness_journal(context.child("clear"), partition).await;
+            let size = journal.size();
             journal.clear_to_size(size.max(1)).await.unwrap();
             drop(journal);
 
@@ -1195,7 +1195,7 @@ mod tests {
             let oversized_floor = Location::new(10);
 
             // Overwrite the persisted commit op with a floor beyond its own commit location.
-            let journal = open_witness_journal(context.child("tamper"), partition).await;
+            let mut journal = open_witness_journal(context.child("tamper"), partition).await;
             let (_, proof, pinned_nodes) = witness::tests::tip(&journal).await;
             let bad_op = Operation::<mmr::Family, Digest, FixedEncoding<Digest>>::Commit(
                 Some(Sha256::fill(0xaa)),
@@ -1203,7 +1203,7 @@ mod tests {
             )
             .encode()
             .to_vec();
-            witness::tests::overwrite_tip(&journal, bad_op, proof, pinned_nodes).await;
+            witness::tests::overwrite_tip(&mut journal, bad_op, proof, pinned_nodes).await;
             drop(journal);
 
             let merkle = crate::merkle::compact::Merkle::new(Sequential);
@@ -1237,10 +1237,10 @@ mod tests {
 
             // Corrupt one pinned frontier node: the root recomputed from the rebuilt Merkle no
             // longer matches the proof stored in the same entry.
-            let journal = open_witness_journal(context.child("tamper"), partition).await;
+            let mut journal = open_witness_journal(context.child("tamper"), partition).await;
             let (op_bytes, proof, mut pinned_nodes) = witness::tests::tip(&journal).await;
             pinned_nodes[0] = Sha256::fill(0xff);
-            witness::tests::overwrite_tip(&journal, op_bytes, proof, pinned_nodes).await;
+            witness::tests::overwrite_tip(&mut journal, op_bytes, proof, pinned_nodes).await;
             drop(journal);
 
             let merkle = crate::merkle::compact::Merkle::new(Sequential);
@@ -1276,10 +1276,10 @@ mod tests {
 
             // Simulate the crash window: append an entry ahead of the tip without syncing it,
             // then drop the journal. The unsynced tail must not survive reopen.
-            let journal = open_witness_journal(context.child("crash"), partition).await;
+            let mut journal = open_witness_journal(context.child("crash"), partition).await;
             let (op_bytes, mut proof, pinned_nodes) = witness::tests::tip(&journal).await;
             proof.leaves = Location::new(*proof.leaves + 2);
-            witness::tests::append_unsynced(&journal, op_bytes, proof, pinned_nodes).await;
+            witness::tests::append_unsynced(&mut journal, op_bytes, proof, pinned_nodes).await;
             drop(journal);
 
             // Reopen must drop the unsynced entry and recover state A.
@@ -1579,7 +1579,7 @@ mod tests {
                 (db.root(), db.size())
             };
 
-            let db = open_db::<mmr::Family>(context.child("second"), partition).await;
+            let mut db = open_db::<mmr::Family>(context.child("second"), partition).await;
             assert_eq!(db.root(), root_before_drop);
             assert_eq!(db.size(), size_before_drop);
 

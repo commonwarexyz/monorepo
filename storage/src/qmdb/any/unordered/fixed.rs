@@ -148,7 +148,8 @@ pub(crate) mod test {
         deterministic::{self, Context},
         Metrics as _, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{test_rng_seeded, NZU64};
+    use commonware_utils::{test_rng_seeded, NZUsize, NZU64};
+    use core::num::NonZeroUsize;
     use rand::RngCore;
     use std::collections::HashMap;
 
@@ -258,6 +259,40 @@ pub(crate) mod test {
 
     fn val(i: u64) -> Digest {
         Sha256::hash(&(i + 10000).to_be_bytes())
+    }
+
+    /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
+    /// with the cache disabled (`init_cache_size = None`) or enabled must produce the identical root.
+    #[test_traced("WARN")]
+    fn test_unordered_fixed_init_cache_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            // Populate a database with churny operations (repeated updates and deletes drive the
+            // collision resolution that the cache accelerates), then commit and drop it.
+            let cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
+            let mut db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
+            apply_ops(&mut db, create_test_ops(10_000)).await;
+            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            // Reopen with the cache disabled and with a large cache; both rebuild the snapshot by
+            // replaying the same immutable log, so both roots must equal the pre-drop root.
+            for cache_size in [None, Some(NZUsize!(1 << 20))] {
+                let mut cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
+                cfg.init_cache_size = cache_size;
+                let ctx = context
+                    .child("reopen")
+                    .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));
+                let db = AnyTest::init(ctx, cfg).await.unwrap();
+                assert_eq!(
+                    db.root(),
+                    root,
+                    "root mismatch at cache_size={cache_size:?}"
+                );
+                drop(db);
+            }
+        });
     }
 
     #[test_traced("INFO")]
@@ -864,7 +899,7 @@ pub(crate) mod test {
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
             let root_hash = db.root();
-            let original_op_count = db.bounds().await.end;
+            let original_op_count = db.bounds().end;
 
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
@@ -909,7 +944,7 @@ pub(crate) mod test {
             // Try to get historical proof with op_count > number of operations and confirm it
             // returns RangeOutOfBounds error.
             assert!(matches!(
-                db.historical_proof(db.bounds().await.end + 1, Location::new(6), NZU64!(10))
+                db.historical_proof(db.bounds().end + 1, Location::new(6), NZU64!(10))
                     .await,
                 Err(Error::Merkle(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
@@ -929,11 +964,11 @@ pub(crate) mod test {
             let mut commit_boundary_sizes: Vec<Location> = Vec::new();
             for _ in 0..5 {
                 apply_ops(&mut db, create_test_ops(10)).await;
-                commit_boundary_sizes.push(db.bounds().await.end);
+                commit_boundary_sizes.push(db.bounds().end);
             }
 
             let root = db.root();
-            let full_size = db.bounds().await.end;
+            let full_size = db.bounds().end;
             assert_eq!(full_size, *commit_boundary_sizes.last().unwrap());
 
             // Verify a single-op proof at the full commit size.
@@ -998,7 +1033,7 @@ pub(crate) mod test {
                 apply_ops(&mut db, ops[offset..offset + chunk].to_vec()).await;
                 offset += chunk;
 
-                let end_loc = db.bounds().await.end;
+                let end_loc = db.bounds().end;
                 let root = db.root();
                 let (proof, proof_ops) = db.proof(start_loc, max_ops).await.unwrap();
                 checkpoints.push((end_loc, root, proof, proof_ops));

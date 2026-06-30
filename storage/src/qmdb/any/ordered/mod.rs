@@ -1,6 +1,6 @@
 use crate::{
     index::Ordered as Index,
-    journal::contiguous::{Contiguous, Reader},
+    journal::contiguous::Contiguous,
     merkle::{Family, Location},
     qmdb::{
         any::{db::Db, ValueEncoding},
@@ -39,7 +39,7 @@ where
     Operation<F, K, V>: Codec,
 {
     async fn get_update_op(
-        reader: &impl Reader<Item = Operation<F, K, V>>,
+        reader: &impl Contiguous<Item = Operation<F, K, V>>,
         loc: Location<F>,
     ) -> Result<Update<K, V>, crate::qmdb::Error<F>> {
         match reader.read(*loc).await? {
@@ -71,10 +71,9 @@ where
         locs: impl IntoIterator<Item = Location<F>>,
         key: &K,
     ) -> Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>> {
-        let reader = self.log.reader().await;
         for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
-            let data = Self::get_update_op(&reader, loc).await?;
+            let data = Self::get_update_op(&self.log, loc).await?;
             if Self::span_contains(&data.key, &data.next_key, key) {
                 return Ok(Some((loc, data)));
             }
@@ -127,9 +126,8 @@ where
     ) -> Result<Option<(Update<K, V>, Location<F>)>, crate::qmdb::Error<F>> {
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
-        let reader = self.log.reader().await;
         for loc in locs {
-            let op = reader.read(*loc).await?;
+            let op = self.log.read(*loc).await?;
             assert!(
                 op.is_update(),
                 "location does not reference update operation. loc={loc}"
@@ -202,10 +200,9 @@ where
         &self,
         locs: impl IntoIterator<Item = &Location<F>>,
     ) -> Result<Vec<Update<K, V>>, crate::qmdb::Error<F>> {
-        let reader = self.log.reader().await;
         let futures = locs
             .into_iter()
-            .map(|loc| Self::get_update_op(&reader, *loc));
+            .map(|loc| Self::get_update_op(&self.log, *loc));
         let mut updates = try_join_all(futures).await?;
         updates.sort_by(|a, b| b.key.cmp(&a.key));
 
@@ -541,10 +538,10 @@ mod test {
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
-        let op_count = db.bounds().await.end;
+        let op_count = db.bounds().end;
         let root = db.root();
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
-        assert_eq!(db.bounds().await.end, op_count);
+        assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);
 
         // Re-activate the keys by updating them.
@@ -599,12 +596,12 @@ mod test {
         db.commit().await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
-        let op_count = db.bounds().await.end;
+        let op_count = db.bounds().end;
         let root = db.root();
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
 
         assert_eq!(db.root(), root);
-        assert_eq!(db.bounds().await.end, op_count);
+        assert_eq!(db.bounds().end, op_count);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.

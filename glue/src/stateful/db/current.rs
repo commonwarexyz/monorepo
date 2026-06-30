@@ -387,7 +387,7 @@ where
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+        let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
@@ -481,7 +481,7 @@ where
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+        let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
@@ -652,7 +652,7 @@ where
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+        let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
@@ -751,7 +751,7 @@ where
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+        let bounds = self.bounds();
         CurrentSyncTarget::new(
             self.ops_root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
@@ -1068,6 +1068,7 @@ mod tests {
             },
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -1095,6 +1096,7 @@ mod tests {
             },
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 

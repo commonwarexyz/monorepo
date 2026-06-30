@@ -365,6 +365,7 @@ impl EngineDefinition for SingleDbEngine {
                 write_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         };
 
         // Destructure the 7 channels.
@@ -534,7 +535,7 @@ impl EngineDefinition for SingleDbEngine {
             Box::pin(async move {
                 let databases = mailbox.subscribe_databases().await;
                 let guard = databases.read().await;
-                let bounds = guard.bounds().await;
+                let bounds = guard.bounds();
                 *bounds.start
             })
         });

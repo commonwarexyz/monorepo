@@ -17,8 +17,8 @@ use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{
-            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Logs, Output,
-            Player as CryptoPlayer, PlayerAck, SignedDealerLog,
+            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Error as DkgError,
+            Info, Logs, Output, Player as CryptoPlayer, PlayerAck, SignedDealerLog, Verdict,
         },
         primitives::{group::Share, variant::Variant},
     },
@@ -217,7 +217,7 @@ where
         .await
         .expect("should be able to init dkg_states metadata");
 
-        let msgs = SVJournal::init(
+        let mut msgs = SVJournal::init(
             context.child("msgs"),
             SVConfig {
                 partition: format!("{partition_prefix}_msgs"),
@@ -542,32 +542,37 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
 
     /// Handle an incoming ack from a player.
     ///
-    /// If the ack is valid and new, persists it to storage.
-    /// Returns true if the ack was successfully processed.
+    /// Persists a valid, new ack to storage. Returns [`Verdict::Fault`] when the
+    /// player sent an ack that is provably invalid, so the caller can block
+    /// them. Returns [`Verdict::Skip`] for a benign no-op (already handled, not
+    /// a player of this round, or after dealer finalization).
     pub async fn handle<E>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
         player: C::PublicKey,
         ack: PlayerAck<C::PublicKey>,
-    ) -> bool
+    ) -> Verdict<()>
     where
         E: BufferPooler + Clock + RuntimeStorage + Metrics,
     {
         if !self.unsent.contains_key(&player) {
-            return false;
+            return Verdict::Skip;
         }
-        if let Some(ref mut dealer) = self.dealer {
-            if dealer
-                .receive_player_ack(player.clone(), ack.clone())
-                .is_ok()
-            {
+        let Some(dealer) = self.dealer.as_mut() else {
+            return Verdict::Skip;
+        };
+        match dealer.receive_player_ack(player.clone(), ack.clone()) {
+            Ok(()) => {
                 self.unsent.remove(&player);
                 storage.append_ack(epoch, player, ack).await;
-                return true;
+                Verdict::Valid(())
             }
+            // The player signed an ack that does not verify: a provable fault.
+            Err(DkgError::InvalidAck) => Verdict::Fault,
+            // Benign: the player is not part of this round.
+            Err(_) => Verdict::Skip,
         }
-        false
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
@@ -618,7 +623,10 @@ pub struct Player<V: Variant, C: Signer> {
 impl<V: Variant, C: Signer> Player<V, C> {
     /// Handle an incoming dealer message.
     ///
-    /// If this is a new valid dealer message, persists it to storage before returning.
+    /// Persists a new valid dealing and returns [`Verdict::Valid`] with the ack
+    /// to send back. Returns [`Verdict::Fault`] when the dealing is provably
+    /// invalid so the caller can block the dealer, and [`Verdict::Skip`] for a
+    /// benign no-op (duplicate).
     pub async fn handle<E, M>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
@@ -626,28 +634,30 @@ impl<V: Variant, C: Signer> Player<V, C> {
         dealer: C::PublicKey,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) -> Option<PlayerAck<C::PublicKey>>
+    ) -> Verdict<PlayerAck<C::PublicKey>>
     where
         E: BufferPooler + Clock + RuntimeStorage + Metrics,
         M: Faults,
     {
-        // If we've already generated an ack, return the cached version
+        // If we've already generated an ack, return the cached version.
         if let Some(ack) = self.acks.get(&dealer) {
-            return Some(ack.clone());
+            return Verdict::Valid(ack.clone());
         }
 
-        // Otherwise generate a new ack
-        if let Some(ack) =
-            self.player
-                .dealer_message::<M>(dealer.clone(), pub_msg.clone(), priv_msg.clone())
+        // Otherwise process the dealing.
+        match self
+            .player
+            .dealer_message::<M>(dealer.clone(), pub_msg.clone(), priv_msg.clone())
         {
-            storage
-                .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
-                .await;
-            self.acks.insert(dealer, ack.clone());
-            return Some(ack);
+            Verdict::Valid(ack) => {
+                storage
+                    .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
+                    .await;
+                self.acks.insert(dealer, ack.clone());
+                Verdict::Valid(ack)
+            }
+            verdict => verdict,
         }
-        None
     }
 
     /// Finalize the player's participation in the DKG round.
@@ -707,7 +717,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_dealer_handle_returns_false_when_player_not_in_unsent() {
+    fn test_dealer_handle_skips_when_player_not_in_unsent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let signers = create_test_signers(4);
@@ -742,14 +752,14 @@ mod tests {
                 .await;
 
             assert!(
-                !result,
-                "handle should return false when player not in unsent"
+                matches!(result, Verdict::Skip),
+                "handle should skip when player not in unsent"
             );
         });
     }
 
     #[test_traced]
-    fn test_dealer_handle_returns_false_when_crypto_dealer_is_none() {
+    fn test_dealer_handle_skips_when_crypto_dealer_is_none() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let signers = create_test_signers(4);
@@ -784,14 +794,14 @@ mod tests {
                 .await;
 
             assert!(
-                !result,
-                "handle should return false when crypto dealer is None"
+                matches!(result, Verdict::Skip),
+                "handle should skip when crypto dealer is None"
             );
         });
     }
 
     #[test_traced]
-    fn test_dealer_handle_returns_true_for_valid_ack() {
+    fn test_dealer_handle_accepts_valid_ack() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let signers = create_test_signers(4);
@@ -828,20 +838,27 @@ mod tests {
 
             let mut crypto_player =
                 CryptoPlayer::new(round_info, player_signer).expect("valid player");
-            let ack = crypto_player
-                .dealer_message::<N3f1>(dealer_signer.public_key(), pub_msg, player_priv_msg)
-                .expect("valid ack");
+            let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
+                dealer_signer.public_key(),
+                pub_msg,
+                player_priv_msg,
+            ) else {
+                panic!("valid ack");
+            };
 
             let result = dealer
                 .handle(&mut storage, Epoch::zero(), player_pk, ack)
                 .await;
 
-            assert!(result, "handle should return true for valid ack");
+            assert!(
+                matches!(result, Verdict::Valid(())),
+                "handle should accept a valid ack"
+            );
         });
     }
 
     #[test_traced]
-    fn test_dealer_handle_returns_false_for_duplicate_ack() {
+    fn test_dealer_handle_skips_duplicate_ack() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let signers = create_test_signers(4);
@@ -878,21 +895,67 @@ mod tests {
 
             let mut crypto_player =
                 CryptoPlayer::new(round_info, player_signer).expect("valid player");
-            let ack = crypto_player
-                .dealer_message::<N3f1>(dealer_signer.public_key(), pub_msg, player_priv_msg)
-                .expect("valid ack");
+            let Verdict::Valid(ack) = crypto_player.dealer_message::<N3f1>(
+                dealer_signer.public_key(),
+                pub_msg,
+                player_priv_msg,
+            ) else {
+                panic!("valid ack");
+            };
 
             // First ack should succeed
             let result = dealer
                 .handle(&mut storage, Epoch::zero(), player_pk.clone(), ack.clone())
                 .await;
-            assert!(result, "first ack should succeed");
+            assert!(
+                matches!(result, Verdict::Valid(())),
+                "first ack should succeed"
+            );
 
-            // Second ack from same player should fail (player removed from unsent)
+            // Second ack from same player should skip (player removed from unsent)
             let result = dealer
                 .handle(&mut storage, Epoch::zero(), player_pk, ack)
                 .await;
-            assert!(!result, "duplicate ack should return false");
+            assert!(matches!(result, Verdict::Skip), "duplicate ack should skip");
+        });
+    }
+
+    #[test_traced]
+    fn test_dealer_handle_returns_fault_for_invalid_ack() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers = create_test_signers(4);
+            let round_info = create_round_info(&signers);
+
+            let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
+                context.child("storage"),
+                "test",
+                NonZeroU32::new(10).unwrap(),
+                crate::dkg::MAX_SUPPORTED_MODE,
+            )
+            .await;
+
+            let dealer_signer = signers[0].clone();
+            let mut rng = test_rng();
+            let (crypto_dealer, pub_msg, priv_msgs) =
+                CryptoDealer::<MinPk, _>::start::<N3f1>(&mut rng, round_info, dealer_signer, None)
+                    .expect("valid dealer");
+            let unsent: BTreeMap<_, _> = priv_msgs.into_iter().collect();
+            let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg, unsent);
+
+            // A player of this round signs an ack that does not verify for it.
+            let player_pk = signers[1].public_key();
+            let bad_ack: PlayerAck<ed25519::PublicKey> =
+                PlayerAck::read(&mut signers[1].sign(b"ns", b"not an ack").encode().as_ref())
+                    .expect("decodes");
+
+            let result = dealer
+                .handle(&mut storage, Epoch::zero(), player_pk, bad_ack)
+                .await;
+            assert!(
+                matches!(result, Verdict::Fault),
+                "an ack with an invalid signature should be a fault"
+            );
         });
     }
 }

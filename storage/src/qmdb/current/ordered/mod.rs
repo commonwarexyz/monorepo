@@ -151,7 +151,7 @@ pub mod tests {
     use super::{db, ExclusionProof};
     use crate::{
         index::ordered::Index,
-        journal::contiguous::Mutable,
+        journal::contiguous::{Contiguous as _, Mutable},
         merkle::{Graftable, Location, Proof},
         mmb,
         qmdb::{
@@ -273,7 +273,7 @@ pub mod tests {
         assert_ne!(root3, root2);
 
         // Confirm all activity bits except the last are false.
-        let bounds = db.bounds().await;
+        let bounds = db.bounds();
         for i in 0..*bounds.end - 1 {
             assert!(!db.get_bit(i));
         }
@@ -495,7 +495,7 @@ pub mod tests {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.bounds().await.end;
+            let end_loc = db.bounds().end;
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
@@ -558,7 +558,7 @@ pub mod tests {
                 }
                 // Found an active operation! Create a proof for its active current key/value if
                 // it's a key-updating operation.
-                let op = db.any.log.read(Location::<F>::new(i)).await.unwrap();
+                let op = db.any.log.read(*Location::<F>::new(i)).await.unwrap();
                 let (key, value) = match op {
                     Operation::Update(key_data) => (key_data.key, key_data.value),
                     Operation::CommitFloor(_, _) => continue,
@@ -822,7 +822,7 @@ pub mod tests {
             // This root should be different than the empty root from earlier since the DB now has a
             // non-zero number of operations.
             assert!(db.is_empty());
-            assert_ne!(db.bounds().await.end, 0);
+            assert_ne!(db.bounds().end, 0);
             assert_ne!(root, empty_root);
 
             let proof = db.exclusion_proof(&key_exists_1).await.unwrap();

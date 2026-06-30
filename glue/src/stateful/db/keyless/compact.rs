@@ -746,7 +746,7 @@ mod tests {
             source.sync().await.unwrap();
             let first_target = sync::compact::Target {
                 root: source.root(),
-                leaf_count: source.bounds().await.end,
+                leaf_count: source.bounds().end,
             };
 
             let floor = source.inactivity_floor_loc();
@@ -759,7 +759,7 @@ mod tests {
             source.sync().await.unwrap();
             let second_target = sync::compact::Target {
                 root: source.root(),
-                leaf_count: source.bounds().await.end,
+                leaf_count: source.bounds().end,
             };
 
             let (update_tx, update_rx) = mpsc::channel(1);

@@ -29,7 +29,7 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Mutable, Reader as _},
+        contiguous::{fixed, variable, Contiguous, Mutable},
     },
     merkle::{
         full::{self, Merkle},
@@ -70,9 +70,8 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{CodecHasher, DigestOf};
 use commonware_parallel::Strategy;
-use commonware_utils::{
-    bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, sync::AsyncMutex, Array,
-};
+use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
+use core::num::NonZeroUsize;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -102,6 +101,7 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
+    cache_size: Option<NonZeroUsize>,
     metadata_partition: String,
     strategy: S,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>
@@ -151,7 +151,7 @@ where
     // during replay.
     let any_metrics = AnyMetrics::new(context.child("any"));
     let any: AnyDb<F, E, J, I, H, U, N, S> =
-        AnyDb::init_from_log(index, log, Some(bitmap), any_metrics).await?;
+        AnyDb::init_from_log(index, log, Some(bitmap), cache_size, any_metrics).await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
@@ -226,10 +226,10 @@ where
             .await?;
 
     let metrics = db::Metrics::new(context);
-    let current_db = db::Db {
+    let mut current_db = db::Db {
         any,
         grafted_tree,
-        metadata: AsyncMutex::new(metadata),
+        metadata,
         strategy,
         root,
         metrics,
@@ -280,6 +280,7 @@ macro_rules! impl_current_sync_database {
                 let metadata_partition = config.grafted_metadata_partition.clone();
                 let strategy = config.merkle_config.strategy.clone();
                 let translator = config.translator.clone();
+                let cache_size = config.init_cache_size;
                 build_db::<F, _, $update<K, V>, _, H, _, T, N, _>(
                     context,
                     merkle_config,
@@ -288,6 +289,7 @@ macro_rules! impl_current_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
+                    cache_size,
                     metadata_partition,
                     strategy,
                 )
@@ -304,8 +306,7 @@ macro_rules! impl_current_sync_database {
                     return Ok(None);
                 }
 
-                let reader = journal.reader().await;
-                let bounds = reader.bounds();
+                let bounds = journal.bounds();
                 if Location::new(bounds.start) > target.range.start()
                     || Location::new(bounds.end) != target.range.end()
                 {
@@ -313,12 +314,11 @@ macro_rules! impl_current_sync_database {
                 }
 
                 let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(
-                    &reader,
+                    journal,
                     target.range.end(),
                     |op| op.has_floor(),
                 )
                 .await?;
-                drop(reader);
 
                 let hasher = qmdb::hasher::<H>();
                 let merkle = Merkle::<F, _, _, S>::init(

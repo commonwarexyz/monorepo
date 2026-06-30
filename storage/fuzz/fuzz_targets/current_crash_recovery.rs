@@ -20,7 +20,7 @@ use commonware_storage::{
     qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -117,6 +117,7 @@ fn make_config(
         },
         grafted_metadata_partition: format!("crash-grafted-merkle-metadata-{suffix}"),
         translator: TwoCap,
+        init_cache_size: Some(NZUsize!(3)),
     }
 }
 
@@ -324,7 +325,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
 
             // Verify range proofs over the recovered DB.
             let floor = *db.sync_boundary();
-            let size = *db.bounds().await.end;
+            let size = *db.bounds().end;
             for i in floor..size {
                 let loc = Location::<F>::new(i);
                 let (proof, ops, chunks) = db

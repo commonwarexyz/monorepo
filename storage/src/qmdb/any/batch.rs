@@ -4,7 +4,7 @@ use crate::{
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location},
     qmdb::{
@@ -568,7 +568,7 @@ where
     /// Batch and ancestor regions resolve in memory. All committed locations are served by
     /// one batched read, which serves page-cache hits under a single lock acquisition per
     /// section instead of paying a cache lock acquisition per location.
-    async fn read_ops<R: Reader<Item = Operation<F, U>>>(
+    async fn read_ops<R: Contiguous<Item = Operation<F, U>>>(
         &self,
         locations: &[Location<F>],
         batch_ops: &[Operation<F, U>],
@@ -709,7 +709,7 @@ where
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
     /// merkleize, diff merge, and `MerkleizedBatch` construction.
     #[allow(clippy::too_many_arguments)]
-    async fn finish<E, C, I, R, const N: usize>(
+    async fn finish<E, C, I, const N: usize>(
         self,
         mut ops: Vec<Operation<F, U>>,
         mut diff: DiffVec<U::Key, F, U::Value>,
@@ -717,14 +717,12 @@ where
         user_steps: u64,
         metadata: Option<U::Value>,
         mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-        reader: R,
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
-        R: Reader<Item = Operation<F, U>>,
     {
         // Floor raise.
         // Steps = user_steps + 1 (+1 for previous commit becoming inactive).
@@ -754,7 +752,7 @@ where
 
                 // Batch-read candidates: page-cache hits are served by one batched read,
                 // disk misses are fetched concurrently.
-                let resolved = self.read_ops(&candidates, &ops, &reader).await?;
+                let resolved = self.read_ops(&candidates, &ops, &db.log).await?;
 
                 // Classify every candidate against the pre-raise state (see [`FloorOutcome`]).
                 // Revalidation is required even for candidates whose committed bitmap bit is
@@ -863,10 +861,6 @@ where
             floor = Location::new(self.base_size + ops.len() as u64);
             debug!(tip = ?floor, "db is empty, raising floor to tip");
         }
-
-        // Release the reader guard before CPU-only work (merkleization) so
-        // concurrent writers are not blocked.
-        drop(reader);
 
         // CommitFloor operation.
         let commit_loc = Location::<F>::new(self.base_size + ops.len() as u64);
@@ -1144,8 +1138,7 @@ where
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false);
-        let reader = db.log.reader().await;
-        let results = m.read_ops(&locations, &[], &reader).await?;
+        let results = m.read_ops(&locations, &[], &db.log).await?;
 
         // Generate user mutation operations.
         let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
@@ -1268,7 +1261,6 @@ where
             user_steps,
             metadata,
             fill_candidates,
-            reader,
             db,
         )
         .await
@@ -1362,7 +1354,6 @@ where
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);
-        let reader = db.log.reader().await;
 
         // Classify mutations into deleted, created, updated. `next_candidates` and
         // `prev_candidates` are built as unsorted `Vec`s here and sorted+deduped once below,
@@ -1373,7 +1364,7 @@ where
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
         for (op, &old_loc) in m
-            .read_ops(&locations, &[], &reader)
+            .read_ops(&locations, &[], &db.log)
             .await?
             .into_iter()
             .zip(&locations)
@@ -1456,7 +1447,7 @@ where
         prev_locations.sort();
         prev_locations.dedup();
 
-        let prev_results = m.read_ops(&prev_locations, &[], &reader).await?;
+        let prev_results = m.read_ops(&prev_locations, &[], &db.log).await?;
 
         for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
             let data = match op {
@@ -1531,7 +1522,7 @@ where
         let ancestor_locs: Vec<Location<F>> =
             ancestor_active.iter().map(|&(_, _, loc)| loc).collect();
         for (op, (key, value, loc)) in m
-            .read_ops(&ancestor_locs, &[], &reader)
+            .read_ops(&ancestor_locs, &[], &db.log)
             .await?
             .into_iter()
             .zip(ancestor_active)
@@ -1706,7 +1697,6 @@ where
             user_steps,
             metadata,
             fill_candidates,
-            reader,
             db,
         )
         .await
@@ -1991,7 +1981,7 @@ where
         // Return range of operations that were written to the log.
         let end_loc = Location::new(*self.last_commit_loc + 1);
         let range = start_loc..end_loc;
-        self.update_metrics().await;
+        self.update_metrics();
         self.metrics
             .operations
             .operations_applied
@@ -2836,16 +2826,14 @@ mod tests {
 
             // read_ops should resolve all three sources correctly while preserving order and
             // duplicates across the disk-backed subset.
-            let reader = db.log.reader().await;
             let ops = merkleizer
                 .read_ops(
                     &[current_loc, committed_loc, parent_loc, committed_loc],
                     &batch_ops,
-                    &reader,
+                    &db.log,
                 )
                 .await
                 .unwrap();
-            drop(reader);
 
             assert_eq!(
                 ops,

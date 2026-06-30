@@ -180,6 +180,7 @@ pub(crate) mod test {
                 page_cache,
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -385,7 +386,7 @@ pub(crate) mod test {
             let inactivity_floor = db.inactivity_floor_loc();
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(inactivity_floor).await.unwrap();
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             let snapshot_items = db.snapshot.items();
 
             db.sync().await.unwrap();
@@ -394,7 +395,7 @@ pub(crate) mod test {
             // Confirm state is preserved after reopen.
             let db = open_db(context.child("open").with_attribute("index", 5)).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.bounds().await, bounds);
+            assert_eq!(db.bounds(), bounds);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor);
             assert_eq!(db.snapshot.items(), snapshot_items);
 
@@ -464,7 +465,7 @@ pub(crate) mod test {
             // Apply the first -- should succeed.
             db.apply_batch(batch_a).await.unwrap();
             let expected_root = db.root();
-            let expected_bounds = db.bounds().await;
+            let expected_bounds = db.bounds();
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
             assert_eq!(db.get(&key2).await.unwrap(), None);
 
@@ -475,7 +476,7 @@ pub(crate) mod test {
                 "expected StaleBatch error, got {result:?}"
             );
             assert_eq!(db.root(), expected_root);
-            assert_eq!(db.bounds().await, expected_bounds);
+            assert_eq!(db.bounds(), expected_bounds);
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
             assert_eq!(db.get(&key2).await.unwrap(), None);
 

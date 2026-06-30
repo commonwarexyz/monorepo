@@ -5,7 +5,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
     merkle::{
@@ -40,7 +40,6 @@ use commonware_runtime::telemetry::metrics::{
 use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
-    sync::AsyncMutex,
 };
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
@@ -152,7 +151,7 @@ pub struct Db<
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
     /// - The grafted tree pinned nodes at key [NODE_PREFIX]
-    pub(super) metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
+    pub(super) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Strategy used to parallelize batch operations across the ops tree, the grafted tree,
     /// and grafted leaf computation.
@@ -197,8 +196,8 @@ where
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    pub async fn bounds(&self) -> std::ops::Range<Location<F>> {
-        self.any.bounds().await
+    pub fn bounds(&self) -> std::ops::Range<Location<F>> {
+        self.any.bounds()
     }
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
@@ -534,7 +533,7 @@ where
         self.sync_metadata().await?;
 
         self.any.prune_log(prune_loc).await?;
-        self.any.update_metrics().await;
+        self.any.update_metrics();
         self.update_metrics();
         Ok(())
     }
@@ -593,9 +592,8 @@ where
         // to a commit with floor below `pruned_bits` would require bitmap chunks we've already
         // discarded.
         {
-            let reader = self.any.log.reader().await;
             let rewind_last_loc = Location::<F>::new(rewind_size - 1);
-            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            let rewind_last_op = self.any.log.read(*rewind_last_loc).await?;
             let Some(rewind_floor) = rewind_last_op.has_floor() else {
                 return Err(Error::<F>::UnexpectedData(rewind_last_loc));
             };
@@ -660,16 +658,16 @@ where
     }
 
     /// Sync the metadata to disk.
-    pub(crate) async fn sync_metadata(&self) -> Result<(), Error<F>> {
-        let mut metadata = self.metadata.lock().await;
-        metadata.clear();
+    pub(crate) async fn sync_metadata(&mut self) -> Result<(), Error<F>> {
+        self.metadata.clear();
 
         // Snapshot the pruning boundary under the read lock; the guard drops before any await.
         let pruned_chunks_u64 = self.any.bitmap.pruned_chunks() as u64;
 
         // Write the number of pruned chunks.
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        metadata.put(key, pruned_chunks_u64.to_be_bytes().to_vec());
+        self.metadata
+            .put(key, pruned_chunks_u64.to_be_bytes().to_vec());
 
         // Write the pinned nodes of the grafted tree.
         let pruned_chunks = Location::<F>::new(pruned_chunks_u64);
@@ -679,10 +677,10 @@ where
                 .get_node(grafted_pos)
                 .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
             let key = U64::new(NODE_PREFIX, i as u64);
-            metadata.put(key, digest.to_vec());
+            self.metadata.put(key, digest.to_vec());
         }
 
-        metadata.sync().await?;
+        self.metadata.sync().await?;
 
         Ok(())
     }
@@ -757,13 +755,13 @@ where
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
     #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
-    pub async fn commit(&self) -> Result<(), Error<F>> {
+    pub async fn commit(&mut self) -> Result<(), Error<F>> {
         self.any.commit().await
     }
 
     /// Sync all database state to disk.
     #[tracing::instrument(name = "qmdb.current.db.sync", level = "info", skip_all)]
-    pub async fn sync(&self) -> Result<(), Error<F>> {
+    pub async fn sync(&mut self) -> Result<(), Error<F>> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.any.sync().await?;
@@ -778,7 +776,7 @@ where
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.metadata.into_inner().destroy().await?;
+        self.metadata.destroy().await?;
         self.any.destroy().await
     }
 }

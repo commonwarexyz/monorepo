@@ -584,6 +584,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -732,7 +733,7 @@ mod tests {
             source.sync().await.unwrap();
             let stale_target = sync::compact::Target {
                 root: source.root(),
-                leaf_count: source.bounds().await.end,
+                leaf_count: source.bounds().end,
             };
 
             let floor = source.inactivity_floor_loc();
@@ -744,7 +745,7 @@ mod tests {
             source.sync().await.unwrap();
             let latest_target = sync::compact::Target {
                 root: source.root(),
-                leaf_count: source.bounds().await.end,
+                leaf_count: source.bounds().end,
             };
 
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);

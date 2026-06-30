@@ -144,6 +144,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             },
             grafted_metadata_partition: format!("fuzz-current-{suffix}-grafted-merkle-metadata"),
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(3)),
         };
 
         let mut db: Db<F> = Db::init(context.child("storage"), cfg)
@@ -172,7 +173,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 &mut pending_expected,
             )
             .await;
-            committed_op_count = db.bounds().await.end;
+            committed_op_count = db.bounds().end;
         }
 
         for op in &operations {
@@ -222,7 +223,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 }
 
                 CurrentOperation::OpCount => {
-                    let actual = db.bounds().await.end;
+                    let actual = db.bounds().end;
                     assert_eq!(
                         actual, committed_op_count,
                         "Op count mismatch: expected {committed_op_count}, got {actual}"
@@ -231,32 +232,32 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
 
                 CurrentOperation::Commit => {
                     commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
+                    committed_op_count = db.bounds().end;
                 }
 
                 CurrentOperation::Prune => {
                     commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
+                    committed_op_count = db.bounds().end;
                     db.prune(db.sync_boundary()).await.expect("Prune should not fail");
                 }
 
                 CurrentOperation::Root => {
                     commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
+                    committed_op_count = db.bounds().end;
                     let _root = db.root();
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
-                    let current_op_count = db.bounds().await.end;
+                    let current_op_count = db.bounds().end;
                     if current_op_count == 0 {
                         continue;
                     }
 
                     commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
+                    committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
-                    let current_op_count = db.bounds().await.end;
+                    let current_op_count = db.bounds().end;
                     let start_loc = Location::<F>::new(start_loc % *current_op_count);
                     let oldest_loc = db.sync_boundary();
                     if start_loc >= oldest_loc {
@@ -286,14 +287,14 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     max_ops,
                     chunk_xor,
                 } => {
-                    let current_op_count = db.bounds().await.end;
+                    let current_op_count = db.bounds().end;
                     if current_op_count == 0 {
                         continue;
                     }
                     commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
+                    committed_op_count = db.bounds().end;
 
-                    let current_op_count = db.bounds().await.end;
+                    let current_op_count = db.bounds().end;
                     let start_loc = Location::<F>::new(start_loc % current_op_count.as_u64());
                     let root = db.root();
 
@@ -367,7 +368,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     let k = Key::new(*key);
 
                     commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                    committed_op_count = db.bounds().await.end;
+                    committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
                     match db.key_value_proof(k.clone()).await {

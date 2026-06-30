@@ -1,6 +1,6 @@
 use crate::{
     bls12381::primitives::group::{Scalar, ScalarReadCfg},
-    zk::circuit::{BoolVar, Context, Var},
+    zk::circuit::{BoolVar, Context, Selector, Var},
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -591,7 +591,6 @@ impl G {
 
     /// Out-of-circuit squared affine x-coordinate of `[x] * self` for an [`F`]
     /// exponent — the native counterpart of
-    /// [`scalar_mul_x_squared_bits`](Self::scalar_mul_x_squared_bits). Like
     /// [`scalar_mul_x_squared_base`](Self::scalar_mul_x_squared_base), the
     /// square is representative-independent.
     pub fn scalar_mul_x_squared_f(&self, x: &F) -> Scalar {
@@ -829,6 +828,11 @@ impl<'ctx> GVar<'ctx> {
         (self.x.clone() * &other.y).assert_eq(&(other.x.clone() * &self.y));
     }
 
+    /// Return the squared affine x-coordinate of this circuit point.
+    pub fn x_squared(&self) -> Var<'ctx, Scalar> {
+        self.x.clone() * &self.x
+    }
+
     /// Multiply by a scalar given as its little-endian bits, via double-and-add.
     ///
     /// `cur` holds `[2^i] * self` and `acc` accumulates the conditionally-added
@@ -868,7 +872,7 @@ fn scalar_limbs(x: &Scalar) -> [u64; 4] {
 /// alias `x + p`; because the Banderwagon group order does not divide `p`, that
 /// alias scales a point to a *different* result. The canonicity check pins the
 /// decomposition to the unique integer in `[0, p)`.
-fn scalar_bits_le<'ctx>(
+pub fn scalar_bits_le<'ctx>(
     ctx: Context<'ctx, Scalar>,
     x: &Var<'ctx, Scalar>,
 ) -> Vec<BoolVar<'ctx, Scalar>> {
@@ -941,6 +945,45 @@ impl G {
         GVar::constant(self).mul_bits(&bits)
     }
 
+    /// In-circuit fixed-base scalar multiplication for several public bases
+    /// sharing one scalar bit decomposition.
+    ///
+    /// `WINDOW` controls how many bits are selected at a time. Selector
+    /// monomials are built once per window and reused across every base.
+    pub fn scalar_mul_many_in_circuit<'ctx, const WINDOW: usize>(
+        bases: &[Self],
+        bits: &[BoolVar<'ctx, Scalar>],
+    ) -> Vec<GVar<'ctx>> {
+        const {
+            assert!(WINDOW >= 1 && WINDOW <= 8, "window size must be in 1..=8");
+        }
+
+        let mut accs = vec![GVar::identity(); bases.len()];
+        let mut shifted = bases.to_vec();
+        for window in bits.chunks(WINDOW) {
+            let selector = Selector::new(window);
+            for (acc, base) in accs.iter_mut().zip(&shifted) {
+                let (xs, ys): (Vec<_>, Vec<_>) = (0..(1usize << window.len()))
+                    .scan(Self::zero(), |p, _| {
+                        let (x, y) = p.canonicalize().affine();
+                        *p += base;
+                        Some((x, y))
+                    })
+                    .unzip();
+                *acc += &GVar {
+                    x: selector.select_constant(&xs),
+                    y: selector.select_constant(&ys),
+                }
+            }
+            for base in &mut shifted {
+                for _ in 0..window.len() {
+                    base.double();
+                }
+            }
+        }
+        accs
+    }
+
     /// In-circuit squared affine x-coordinate of `[scalar] * self`.
     ///
     /// We expose the *squared* abscissa rather than the bare one because the
@@ -968,18 +1011,6 @@ impl G {
     /// same slice across operations, so a single exponent is bound everywhere.
     pub fn scalar_mul_bits<'ctx>(&self, bits: &[BoolVar<'ctx, Scalar>]) -> GVar<'ctx> {
         GVar::constant(self).mul_bits(bits)
-    }
-
-    /// In-circuit squared affine x-coordinate of `[scalar] * self` for a
-    /// bit-given scalar; combines [`scalar_mul_bits`](Self::scalar_mul_bits) with
-    /// the representative-independent squaring of
-    /// [`scalar_mul_x_squared`](Self::scalar_mul_x_squared).
-    pub fn scalar_mul_x_squared_bits<'ctx>(
-        &self,
-        bits: &[BoolVar<'ctx, Scalar>],
-    ) -> Var<'ctx, Scalar> {
-        let x = self.scalar_mul_bits(bits).x;
-        x.clone() * &x
     }
 }
 

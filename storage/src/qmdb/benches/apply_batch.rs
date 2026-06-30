@@ -2,7 +2,7 @@
 
 use crate::common::{
     any_fix_cfg_with, imm_fix_cfg_with, make_fixed_value, seed_db, AnyOFixP256Db, AnyUFixDb,
-    Digest, ImmFixDb, CHUNK_SIZE,
+    Digest, ImmFixDb, CHUNK_SIZE, PAGE_CACHE_SIZE,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
@@ -50,9 +50,12 @@ fn write_updates<D: BatchableDb<K = Digest, V = Digest>>(
 }
 
 async fn open_db(ctx: &Context) -> Db {
-    Db::init(ctx.child("storage"), any_fix_cfg_with(ctx, ITEMS_PER_BLOB))
-        .await
-        .unwrap()
+    Db::init(
+        ctx.child("storage"),
+        any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
+    )
+    .await
+    .unwrap()
 }
 
 #[boxed]
@@ -73,9 +76,12 @@ async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
 }
 
 async fn open_ord_db(ctx: &Context) -> ODb {
-    ODb::init(ctx.child("storage"), any_fix_cfg_with(ctx, ITEMS_PER_BLOB))
-        .await
-        .unwrap()
+    ODb::init(
+        ctx.child("storage"),
+        any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
+    )
+    .await
+    .unwrap()
 }
 
 #[boxed]

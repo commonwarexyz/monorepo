@@ -162,6 +162,7 @@ fn test_config(
             page_cache,
         },
         translator: TwoCap,
+        init_cache_size: Some(NZUsize!(3)),
     }
 }
 
@@ -207,7 +208,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
-                    historical_roots.insert(db.bounds().await.end, db.root());
+                    historical_roots.insert(db.bounds().end, db.root());
                 }
 
                 Operation::Prune => {
@@ -235,9 +236,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
-                    historical_roots.insert(db.bounds().await.end, db.root());
+                    historical_roots.insert(db.bounds().end, db.root());
                     let start_loc = Location::<F>::new(*start_loc % (*F::MAX_LEAVES + 1));
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     let oldest_retained_loc = db.sync_boundary();
                     if start_loc >= oldest_retained_loc && start_loc < op_count {
                         if let Ok((proof, log)) = db.proof(start_loc, *max_ops).await {
@@ -262,7 +263,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
-                    historical_roots.insert(db.bounds().await.end, db.root());
+                    historical_roots.insert(db.bounds().end, db.root());
                     let op_count = {
                         let idx = (*size as usize) % historical_roots.len();
                         *historical_roots
@@ -295,7 +296,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
-                    historical_roots.insert(db.bounds().await.end, db.root());
+                    historical_roots.insert(db.bounds().end, db.root());
                     db.sync().await.expect("Sync should not fail");
                 }
 
@@ -304,7 +305,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().await.end;
+                    let _ = db.bounds().end;
                 }
 
                 Operation::Root => {
@@ -318,7 +319,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
-                    historical_roots.insert(db.bounds().await.end, db.root());
+                    historical_roots.insert(db.bounds().end, db.root());
                     let _ = db.root();
                 }
 

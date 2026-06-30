@@ -506,6 +506,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -550,7 +551,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-after-attach").await;
-            let op_count = db.read().await.bounds().await.end;
+            let op_count = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
             let (response_tx, response_rx) = oneshot::channel();
@@ -570,7 +571,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
-            let op_count = db.read().await.bounds().await.end;
+            let op_count = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
             let request = handler::Request {

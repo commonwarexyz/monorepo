@@ -440,6 +440,7 @@ impl EngineDefinition for MultiDbEngine {
                 write_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         };
         // One witness entry per section so the periodic prune actually drops entries
         // (pruning is section-aligned).
@@ -664,7 +665,7 @@ impl EngineDefinition for MultiDbEngine {
             let mailbox = prune_observer.clone();
             Box::pin(async move {
                 let (a, _b) = mailbox.subscribe_databases().await;
-                let oldest_a = *a.read().await.bounds().await.start;
+                let oldest_a = *a.read().await.bounds().start;
                 oldest_a
             })
         });

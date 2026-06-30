@@ -31,7 +31,7 @@ impl Conformance for ContiguousFixed {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: WRITE_BUFFER,
             };
-            let journal = fixed::Journal::<_, u64>::init(context.child("journal"), config)
+            let mut journal = fixed::Journal::<_, u64>::init(context.child("journal"), config)
                 .await
                 .unwrap();
 
@@ -64,9 +64,10 @@ impl Conformance for ContiguousVariable {
                 compression: None,
                 codec_config: (RangeCfg::new(0..256), ()),
             };
-            let journal = variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
-                .await
-                .unwrap();
+            let mut journal =
+                variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
+                    .await
+                    .unwrap();
 
             let mut data_to_write =
                 vec![Vec::new(); context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
@@ -115,9 +116,7 @@ impl Conformance for SegmentedFixed {
             }
 
             // Sync all sections
-            for section in 0..3 {
-                journal.sync(section).await.unwrap();
-            }
+            journal.sync([0, 1, 2]).await.unwrap();
             drop(journal);
 
             context.storage_audit().to_vec()
@@ -157,9 +156,7 @@ impl Conformance for SegmentedGlob {
             }
 
             // Sync all sections
-            for section in 0..3 {
-                journal.sync(section).await.unwrap();
-            }
+            journal.sync([0, 1, 2]).await.unwrap();
             drop(journal);
 
             context.storage_audit().to_vec()
@@ -201,9 +198,7 @@ impl Conformance for SegmentedVariable {
             }
 
             // Sync all sections
-            for section in 0..3 {
-                journal.sync(section).await.unwrap();
-            }
+            journal.sync([0, 1, 2]).await.unwrap();
             drop(journal);
 
             context.storage_audit().to_vec()
@@ -301,9 +296,7 @@ impl Conformance for SegmentedOversized {
             }
 
             // Sync all sections
-            for section in 0..3 {
-                journal.sync(section).await.unwrap();
-            }
+            journal.sync([0, 1, 2]).await.unwrap();
             drop(journal);
 
             context.storage_audit().to_vec()
