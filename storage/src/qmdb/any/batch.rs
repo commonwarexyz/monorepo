@@ -1020,17 +1020,17 @@ where
         batch
     }
 
-    /// Record upserts for unread keys and updates for staged reads.
+    /// Record updates for staged reads and upserts for unread keys.
     ///
-    /// Upserts are `(key, value)` writes for keys outside the staged read set.
     /// Each update is `(read_index, value)`, where `read_index` is the position of the key in
     /// the original `get_many_staged` input. Duplicate keys retain last-write-wins semantics
-    /// according to the update order. Upserts are applied last; if a caller passes an
-    /// overlapping key, the upsert follows normal [`Self::write`] semantics and wins.
+    /// according to the update order. Upserts are `(key, value)` writes for keys outside the
+    /// staged read set. Upserts are applied last; if a caller passes an overlapping key, the
+    /// upsert follows normal `write` semantics and wins.
     pub fn set(
         mut self,
-        upserts: &[(U::Key, U::Value)],
         updates: &[(usize, U::Value)],
+        upserts: &[(U::Key, U::Value)],
     ) -> UnmerkleizedBatch<F, H, U, S> {
         if updates.is_empty() {
             return Self::apply_upserts(self.batch, upserts);
@@ -1551,12 +1551,12 @@ where
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
-    /// Consumes the payloads cached by this batch's reads: keys loaded via `get`/`get_many`
-    /// before being updated skip the index probe and journal re-read their resolution would
-    /// otherwise require (the cached old value and next key feed op generation directly).
-    /// Deletes never consume the cache. Deleting a key requires rewriting its predecessor,
-    /// which may be a colliding key in the deleted key's snapshot bucket, so that bucket
-    /// must be scanned regardless and the cached location saves nothing.
+    /// Consumes updates recorded by [`Staged::set`], allowing loaded keys to skip the index probe
+    /// and journal re-read their resolution would otherwise require (the cached old value and next
+    /// key feed op generation directly). Deletes never consume staged updates. Deleting a key
+    /// requires rewriting its predecessor, which may be a colliding key in the deleted key's
+    /// snapshot bucket, so that bucket must be scanned regardless and the cached location saves
+    /// nothing.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.ordered.batch.merkleize",
@@ -3139,7 +3139,7 @@ mod tests {
             let cached_token = db.new_batch();
             let (cached_token_values, staged) =
                 cached_token.get_many_staged(&keys, &db).await.unwrap();
-            let cached_token = staged.set(&upserts, &indexed_updates);
+            let cached_token = staged.set(&indexed_updates, &upserts);
 
             assert_eq!(explicit_values, loaded_values);
             assert_eq!(explicit_values, cached_token_values);
@@ -3161,7 +3161,7 @@ mod tests {
             );
             let (updated_reads, staged) = cached_token.get_many_staged(&keys, &db).await.unwrap();
             assert_eq!(updated_reads, updated_values);
-            let cached_token = staged.set(&upserts, &indexed_second_updates);
+            let cached_token = staged.set(&indexed_second_updates, &upserts);
             assert_eq!(
                 cached_token.get_many(&keys, &db).await.unwrap(),
                 second_updated_values
@@ -3308,7 +3308,7 @@ mod tests {
             let cached_token = db.new_batch();
             let (cached_token_values, staged) =
                 cached_token.get_many_staged(&keys, &db).await.unwrap();
-            let cached_token = staged.set(&upserts, &indexed_updates);
+            let cached_token = staged.set(&indexed_updates, &upserts);
 
             assert_eq!(explicit_values, loaded_values);
             assert_eq!(explicit_values, cached_token_values);
@@ -3330,7 +3330,7 @@ mod tests {
             );
             let (updated_reads, staged) = cached_token.get_many_staged(&keys, &db).await.unwrap();
             assert_eq!(updated_reads, updated_values);
-            let cached_token = staged.set(&upserts, &indexed_second_updates);
+            let cached_token = staged.set(&indexed_second_updates, &upserts);
             assert_eq!(
                 cached_token.get_many(&keys, &db).await.unwrap(),
                 second_updated_values
@@ -3425,7 +3425,7 @@ mod tests {
 
                     db.apply_batch(grandparent).await.unwrap();
                     db.commit().await.unwrap();
-                    staged.set(&[], &indexed_updates)
+                    staged.set(&indexed_updates, &[])
                 } else {
                     let mut child = parent.new_batch::<Sha256>();
                     db.apply_batch(grandparent).await.unwrap();
@@ -3529,7 +3529,7 @@ mod tests {
 
                     db.apply_batch(grandparent).await.unwrap();
                     db.commit().await.unwrap();
-                    staged.set(&[], &indexed_updates)
+                    staged.set(&indexed_updates, &[])
                 } else {
                     let mut child = parent.new_batch::<Sha256>();
                     db.apply_batch(grandparent).await.unwrap();

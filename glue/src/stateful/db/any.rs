@@ -216,14 +216,14 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Record upserts for unread keys and updates for staged reads.
+    /// Record updates for staged reads and upserts for unread keys.
     pub fn set(
         self,
-        upserts: &[(U::Key, U::Value)],
         updates: &[(usize, U::Value)],
+        upserts: &[(U::Key, U::Value)],
     ) -> AnyUnmerkleized<F, E, C, I, H, U, S> {
         AnyUnmerkleized {
-            batch: self.staged.set(upserts, updates),
+            batch: self.staged.set(updates, upserts),
             db: self.db,
             metadata: self.metadata,
         }

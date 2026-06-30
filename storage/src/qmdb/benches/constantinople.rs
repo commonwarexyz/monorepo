@@ -242,7 +242,7 @@ macro_rules! run_pipeline {
             let (values, staged) = b.get_many_staged(&keys, &db).await.unwrap();
             black_box(&values);
             let t_load = start.elapsed();
-            let b = staged.set(&[], &updates);
+            let b = staged.set(&updates, &[]);
             let t_write = start.elapsed();
             let merkleized = b.merkleize(&db, None).await.unwrap();
             let root = merkleized.root();
