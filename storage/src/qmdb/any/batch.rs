@@ -990,14 +990,14 @@ where
         batch
     }
 
-    /// Build the batch and staged updates represented by this staged handle.
+    /// Build the inputs for staged merkleization represented by this staged handle.
     ///
     /// Each update is `(read_index, value)`, where `read_index` is the position of the key in
     /// the original `get_many_staged` input. Duplicate keys retain last-write-wins semantics
     /// according to the update order. Upserts are `(key, value)` writes for keys outside the
     /// staged read set. Upserts are applied last; if a caller passes an overlapping key, the
     /// upsert follows normal `write` semantics and wins.
-    pub(crate) fn into_batch_and_staged_updates(
+    pub(crate) fn into_merkleize_parts(
         mut self,
         updates: &[(usize, U::Value)],
         upserts: &[(U::Key, U::Value)],
@@ -1091,7 +1091,7 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let (batch, staged_updates) = self.into_batch_and_staged_updates(updates, upserts);
+        let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts);
         batch
             .merkleize_with_staged_floor_scan(
                 db,
@@ -1126,7 +1126,7 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let (batch, staged_updates) = self.into_batch_and_staged_updates(updates, upserts);
+        let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts);
         batch
             .merkleize_with_staged_floor_scan(
                 db,
