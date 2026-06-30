@@ -3172,10 +3172,7 @@ mod tests {
 
             db.apply_batch(cached_token).await.unwrap();
             assert_eq!(db.get(&k0).await.unwrap(), Some(second_updates[3].1));
-            assert_eq!(
-                db.get(&missing).await.unwrap(),
-                Some(second_updates[4].1)
-            );
+            assert_eq!(db.get(&missing).await.unwrap(), Some(second_updates[4].1));
             assert_eq!(db.get(&k1).await.unwrap(), Some(second_updates[2].1));
             assert_eq!(db.get(&k2).await.unwrap(), Some(second_updates[5].1));
             assert_eq!(db.get(&read_only).await.unwrap(), Some(read_only_value));
@@ -3341,10 +3338,7 @@ mod tests {
 
             db.apply_batch(cached_token).await.unwrap();
             assert_eq!(db.get(&k0).await.unwrap(), Some(second_updates[3].1));
-            assert_eq!(
-                db.get(&missing).await.unwrap(),
-                Some(second_updates[4].1)
-            );
+            assert_eq!(db.get(&missing).await.unwrap(), Some(second_updates[4].1));
             assert_eq!(db.get(&k1).await.unwrap(), Some(second_updates[2].1));
             assert_eq!(db.get(&k2).await.unwrap(), Some(second_updates[5].1));
             assert_eq!(db.get(&read_only).await.unwrap(), Some(read_only_value));
@@ -3449,7 +3443,10 @@ mod tests {
                 db.commit().await.unwrap();
 
                 for suffix in &suffixes {
-                    assert_eq!(db.get(&key(*suffix)).await.unwrap(), Some(val(suffix + 3_000)));
+                    assert_eq!(
+                        db.get(&key(*suffix)).await.unwrap(),
+                        Some(val(suffix + 3_000))
+                    );
                 }
                 roots.push(db.root());
                 db.destroy().await.unwrap();
@@ -3553,7 +3550,10 @@ mod tests {
                 db.commit().await.unwrap();
 
                 for suffix in &suffixes {
-                    assert_eq!(db.get(&key(*suffix)).await.unwrap(), Some(val(suffix + 3_000)));
+                    assert_eq!(
+                        db.get(&key(*suffix)).await.unwrap(),
+                        Some(val(suffix + 3_000))
+                    );
                 }
                 roots.push(db.root());
                 db.destroy().await.unwrap();
