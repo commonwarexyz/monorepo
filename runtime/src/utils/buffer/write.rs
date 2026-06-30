@@ -1,6 +1,6 @@
 use crate::{
     buffer::{tip::Buffer, SyncState},
-    Blob, Buf, BufferPool, BufferPooler, Error, IoBufs,
+    Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs,
 };
 use std::num::NonZeroUsize;
 
@@ -176,6 +176,10 @@ impl<B: Blob> Write<B> {
             // if merge is possible after.
             let chunk_end = current_offset + chunk_len as u64;
             if self.buffer.offset < chunk_end {
+                if !self.buffer.is_empty() {
+                    // Flushing the tip mutates the blob and must not overtake a started sync.
+                    self.sync_state.wait_for_pending().await?;
+                }
                 if let Some((old_buf, old_offset)) = self.buffer.take() {
                     self.write_blob(old_offset, old_buf).await?;
                     if self.buffer.merge(chunk, current_offset) {
@@ -207,6 +211,9 @@ impl<B: Blob> Write<B> {
     /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
     /// before resizing the underlying blob.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
+        // Resizing mutates the blob and must not overtake a started sync.
+        self.sync_state.wait_for_pending().await?;
+
         // Flush buffered data to the underlying blob.
         //
         // This can only happen if the new size is greater than the current size.
@@ -223,11 +230,40 @@ impl<B: Blob> Write<B> {
 
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        if let Some((buf, offset)) = self.buffer.take() {
+        if !self.buffer.is_empty() {
+            // Draining the tip writes new bytes and must wait for any started sync.
+            self.sync_state.wait_for_pending().await?;
+            let (buf, offset) = self
+                .buffer
+                .take()
+                .expect("take must succeed when sync observes buffered data");
             return self.write_blob_sync(offset, buf).await;
         }
 
         self.sync_blob().await
+    }
+
+    /// Flush buffered bytes and begin durably syncing mutations tracked by this writer.
+    ///
+    /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
+    /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
+    /// mutate the blob first wait for any outstanding start_sync handles.
+    pub async fn start_sync(&mut self) -> Handle<()> {
+        if !self.buffer.is_empty() {
+            // New buffered bytes must not be flushed into the prior started sync.
+            if let Err(err) = self.sync_state.wait_for_pending().await {
+                return Handle::ready(Err(err));
+            }
+            let (buf, offset) = self
+                .buffer
+                .take()
+                .expect("take must succeed when start_sync observes buffered data");
+            if let Err(err) = self.write_blob(offset, buf).await {
+                return Handle::ready(Err(err));
+            }
+        }
+
+        self.sync_state.start_sync(&self.blob).await
     }
 
     /// Write bytes to the underlying blob and mark them as needing sync.
