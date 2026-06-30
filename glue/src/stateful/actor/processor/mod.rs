@@ -37,7 +37,7 @@ use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
-use commonware_macros::select;
+use commonware_macros::{boxed, select};
 use commonware_runtime::{
     telemetry::{metrics::GaugeExt, traces::TracedExt as _},
     Clock, Metrics, Spawner,
@@ -568,6 +568,7 @@ where
     }
 
     /// Rebuild missing pending ancestry up to `target` lazily from a block provider.
+    #[boxed]
     pub(super) async fn rebuild_pending<P, Response>(
         &mut self,
         context: &E,
