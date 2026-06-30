@@ -2162,12 +2162,12 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
             // A fresh writer is dirty, so start_sync does one full fsync; nothing is buffered to write.
-            let handle = append.start_sync().await;
+            let handle = writer.start_sync().await;
             handle.await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 0);
@@ -2176,15 +2176,15 @@ mod tests {
 
             // Now clean, so the next write syncs just its range instead of the whole blob.
             let data = b"hello world";
-            append.append(data).await.unwrap();
-            append.sync().await.unwrap();
+            writer.append(data).await.unwrap();
+            writer.sync().await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 1);
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 1);
 
             // Nothing left to sync, so start_sync does nothing.
-            let handle = append.start_sync().await;
+            let handle = writer.start_sync().await;
             handle.await.unwrap();
             let (_, _, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(full_syncs, 1);
