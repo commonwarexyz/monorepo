@@ -747,7 +747,40 @@ where
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<C::Item>, JournalError> {
-        self.journal.read_many(positions).await
+        // Shard large batches across the strategy pool, serving page-cache hits synchronously
+        // (one cache-lock acquisition and one scratch buffer per shard) and falling back to a
+        // single batched read for the misses.
+        const PARALLEL_READ_THRESHOLD: usize = 4096;
+        let manual = self.strategy().manual();
+        let parallelism = manual.parallelism_hint();
+        if positions.len() < PARALLEL_READ_THRESHOLD || parallelism <= 1 {
+            return self.journal.read_many(positions).await;
+        }
+        let shard = positions.len().div_ceil(parallelism);
+        let journal = &self.journal;
+        let mut results: Vec<Option<C::Item>> = manual
+            .map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
+                journal.read_many_sync(shard)
+            })
+            .into_iter()
+            .flatten()
+            .collect();
+        let misses: Vec<u64> = positions
+            .iter()
+            .zip(&results)
+            .filter_map(|(&pos, r)| r.is_none().then_some(pos))
+            .collect();
+        if !misses.is_empty() {
+            let read = self.journal.read_many(&misses).await?;
+            let mut read = read.into_iter();
+            for r in results.iter_mut().filter(|r| r.is_none()) {
+                *r = Some(read.next().expect("one result per miss"));
+            }
+        }
+        Ok(results
+            .into_iter()
+            .map(|r| r.expect("all positions resolved"))
+            .collect())
     }
 
     fn try_read_sync(&self, position: u64) -> Option<C::Item> {

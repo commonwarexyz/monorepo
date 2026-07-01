@@ -193,6 +193,43 @@ impl<B: Blob> View<'_, B> {
 
         Ok(offsets.len() - blob_reads)
     }
+
+    /// Like [`Self::read_many_into`], but synchronous and cache-only.
+    ///
+    /// Items fully served from the in-memory tail and page cache are written to their slots in
+    /// `buf`. Returns the indices of items that require a blob read; those slots hold
+    /// unspecified bytes.
+    pub fn read_many_sync_cached(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<Vec<usize>, Error> {
+        super::validate_read_many_into(buf.len(), offsets, item_size, self.size)?;
+        if offsets.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut cache_ranges =
+            super::split_read_many(buf, offsets, item_size, self.tail_offset, self.tail);
+        if cache_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+
+        // Map missed ranges back to item indices: each remaining range starts at its item's
+        // offset, and both lists are sorted.
+        let mut misses = Vec::with_capacity(cache_ranges.len());
+        let mut idx = 0;
+        for (_, offset) in cache_ranges {
+            while offsets[idx] != offset {
+                idx += 1;
+            }
+            misses.push(idx);
+            idx += 1;
+        }
+        Ok(misses)
+    }
 }
 
 #[cfg(test)]

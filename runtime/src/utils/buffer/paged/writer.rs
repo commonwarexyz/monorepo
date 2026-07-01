@@ -625,6 +625,17 @@ impl<B: Blob> Writer<B> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
+    /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
+    /// items that require a blob read; their slots in `buf` hold unspecified bytes.
+    pub fn read_many_sync_cached(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<Vec<usize>, Error> {
+        self.view().read_many_sync_cached(buf, offsets, item_size)
+    }
+
     /// Reads bytes starting at `offset` into `buf`.
     pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         self.view().read_into(buf, offset).await
