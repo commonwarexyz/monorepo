@@ -13,7 +13,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
 };
-use futures::future::try_join_all;
+use futures::future::{join_all, try_join_all};
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -280,14 +280,47 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
-    /// Start syncing the given `section` to storage.
-    pub async fn start_sync(&mut self, section: u64) -> Result<Handle<()>, Error> {
-        self.prune_guard(section)?;
-        if let Some(blob) = self.blobs.get_mut(&section) {
-            self.synced.inc();
-            return Ok(blob.start_sync().await);
+    fn observe_handles(handles: Vec<Handle<()>>) -> Handle<()> {
+        if handles.is_empty() {
+            return Handle::ready(Ok(()));
         }
-        Ok(Handle::ready(Ok(())))
+        Handle::from_future(async move {
+            for result in join_all(handles).await {
+                result?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Start syncing the given `sections` to storage and return each section's handle.
+    pub(crate) async fn start_syncs(
+        &mut self,
+        sections: impl crate::Sections,
+    ) -> Result<Vec<(u64, Handle<()>)>, Error> {
+        let sections = sections.sections().collect::<BTreeSet<_>>();
+        for &section in &sections {
+            self.prune_guard(section)?;
+        }
+
+        let mut handles = Vec::new();
+        for (&section, blob) in &mut self.blobs {
+            if sections.contains(&section) {
+                handles.push((section, blob.start_sync().await));
+            }
+        }
+        self.synced.inc_by(handles.len() as u64);
+        Ok(handles)
+    }
+
+    /// Start syncing the given `sections` to storage.
+    pub async fn start_sync(&mut self, sections: impl crate::Sections) -> Result<Handle<()>, Error> {
+        let handles = self
+            .start_syncs(sections)
+            .await?
+            .into_iter()
+            .map(|(_, handle)| handle)
+            .collect();
+        Ok(Self::observe_handles(handles))
     }
 
     /// Sync all sections to storage.
@@ -603,6 +636,55 @@ mod tests {
             pending.remove(0)
         };
         let _ = sender.send(result);
+    }
+
+    #[test]
+    fn test_start_sync_multiple_sections_returns_combined_handle() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let wait_for_syncs = Arc::new(AtomicUsize::new(0));
+            let cfg = test_config(pending.clone(), wait_for_syncs);
+            let mut manager = Manager::init(context.child("manager"), cfg)
+                .await
+                .expect("failed to initialize manager");
+
+            manager
+                .get_or_create(1)
+                .await
+                .expect("failed to create first section");
+            manager
+                .get_or_create(2)
+                .await
+                .expect("failed to create second section");
+            let handle = manager
+                .start_sync([1, 2])
+                .await
+                .expect("failed to start sync");
+            assert_eq!(pending.lock().len(), 2);
+
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let waiter = context.child("combined").spawn(|_| async move {
+                handle.await.expect("sync handle should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            complete_next_pending_sync(&pending, Ok(()));
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "combined sync handle must wait for every selected section"
+            );
+
+            complete_next_pending_sync(&pending, Ok(()));
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            waiter.await.expect("sync waiter failed");
+            manager.destroy().await.expect("destroy failed");
+        });
     }
 
     #[test]

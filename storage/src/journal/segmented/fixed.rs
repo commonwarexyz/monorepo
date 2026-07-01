@@ -367,9 +367,17 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.sync(sections).await
     }
 
-    /// Start syncing the given `section` to storage.
-    pub async fn start_sync(&mut self, section: u64) -> Result<Handle<()>, Error> {
-        self.manager.start_sync(section).await
+    /// Start syncing the given `sections` to storage and return each section's handle.
+    pub(crate) async fn start_syncs(
+        &mut self,
+        sections: impl crate::Sections,
+    ) -> Result<Vec<(u64, Handle<()>)>, Error> {
+        self.manager.start_syncs(sections).await
+    }
+
+    /// Start syncing the given `sections` to storage.
+    pub async fn start_sync(&mut self, sections: impl crate::Sections) -> Result<Handle<()>, Error> {
+        self.manager.start_sync(sections).await
     }
 
     /// Sync all sections to storage.

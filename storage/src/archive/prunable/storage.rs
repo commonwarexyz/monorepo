@@ -549,8 +549,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     /// Start syncing all pending writes.
     pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
         let (pending, mut syncs) = self.sync_state.start(&self.syncs);
-        for section in pending {
-            let handle = self.oversized.start_sync(section).await?;
+        for (section, handle) in self.oversized.start_syncs(pending).await? {
             syncs.push(self.sync_state.record_syncing(section, handle));
         }
         Ok(observe_syncs(syncs))
