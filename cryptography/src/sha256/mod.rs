@@ -38,6 +38,8 @@ use rand_core::CryptoRngCore;
 use sha2::{Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 
+mod simd;
+
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
 pub type CoreSha256 = ISha256;
 
@@ -81,6 +83,13 @@ impl Hasher for Sha256 {
     fn reset(&mut self) -> &mut Self {
         self.hasher = ISha256::new();
         self
+    }
+
+    fn hash_pair(&self, left: &[u8], right: &[u8]) -> (Self::Digest, Self::Digest) {
+        if let Some(pair) = simd::hash_pair(left, right) {
+            return pair;
+        }
+        (Self::hash(left), Self::hash(right))
     }
 }
 
@@ -170,6 +179,7 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_invariants::minifuzz;
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -200,6 +210,53 @@ mod tests {
     #[test]
     fn test_sha256_len() {
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
+    }
+
+    #[test]
+    fn test_hash_pair_matches_scalar() {
+        let cases = [0usize, 1, 31, 32, 55, 56, 63, 64, 65, 72, 120, 256, 1024];
+        let hasher = Sha256::new();
+        for len in cases {
+            let left = vec![0x11; len];
+            let right = vec![0x22; len];
+            let (left_digest, right_digest) = hasher.hash_pair(&left, &right);
+            assert_eq!(left_digest, Sha256::hash(&left));
+            assert_eq!(right_digest, Sha256::hash(&right));
+        }
+    }
+
+    #[test]
+    fn test_hash_pair_matches_serial_sha2_minifuzz() {
+        let hasher = Sha256::new();
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(512)
+            .test(|u| {
+                let len = match u.int_in_range(0..=4)? {
+                    0 => 64,
+                    1 => 72,
+                    2 => 128,
+                    3 => 1024,
+                    _ => u.int_in_range(0..=1024)?,
+                };
+                let left = u.bytes(len)?.to_vec();
+                let right = u.bytes(len)?.to_vec();
+
+                let (left_digest, right_digest) = hasher.hash_pair(&left, &right);
+                assert_eq!(left_digest, Sha256::hash(&left));
+                assert_eq!(right_digest, Sha256::hash(&right));
+                Ok(())
+            });
+    }
+
+    #[test]
+    fn test_hash_pair_unequal_lengths_matches_scalar() {
+        let hasher = Sha256::new();
+        let left = vec![0x11; 32];
+        let right = vec![0x22; 33];
+        let (left_digest, right_digest) = hasher.hash_pair(&left, &right);
+        assert_eq!(left_digest, Sha256::hash(&left));
+        assert_eq!(right_digest, Sha256::hash(&right));
     }
 
     #[test]
