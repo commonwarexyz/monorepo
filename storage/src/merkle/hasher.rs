@@ -2,8 +2,11 @@
 
 use crate::merkle::{Bagging, Error, Family, Location, Position};
 use alloc::vec::Vec;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_codec::FixedSize;
+use commonware_cryptography::{sha256, Digest, Hasher as CHasher};
 use core::marker::PhantomData;
+
+const SHA256_NODE_LEN: usize = size_of::<u64>() + sha256::Digest::SIZE + sha256::Digest::SIZE;
 
 /// A trait for computing the various digests of a Merkle-family structure.
 ///
@@ -35,6 +38,22 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
             left.as_ref(),
             right.as_ref(),
         ])
+    }
+
+    /// Computes digests for two nodes at once.
+    fn node_digest_pair(
+        &self,
+        left_pos: Position<F>,
+        left_left: &Self::Digest,
+        left_right: &Self::Digest,
+        right_pos: Position<F>,
+        right_left: &Self::Digest,
+        right_right: &Self::Digest,
+    ) -> (Self::Digest, Self::Digest) {
+        (
+            self.node_digest(left_pos, left_left, left_right),
+            self.node_digest(right_pos, right_left, right_right),
+        )
     }
 
     /// Computes the digest for a leaf given its position and the element it represents.
@@ -192,6 +211,40 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     fn root_bagging(&self) -> Bagging {
         Self::root_bagging(self)
     }
+
+    fn node_digest_pair(
+        &self,
+        left_pos: Position<F>,
+        left_left: &Self::Digest,
+        left_right: &Self::Digest,
+        right_pos: Position<F>,
+        right_left: &Self::Digest,
+        right_right: &Self::Digest,
+    ) -> (Self::Digest, Self::Digest) {
+        if H::Digest::SIZE != sha256::Digest::SIZE {
+            return (
+                self.node_digest(left_pos, left_left, left_right),
+                self.node_digest(right_pos, right_left, right_right),
+            );
+        }
+
+        let mut left = [0; SHA256_NODE_LEN];
+        let mut right = [0; SHA256_NODE_LEN];
+        write_node(&mut left, left_pos, left_left, left_right);
+        write_node(&mut right, right_pos, right_left, right_right);
+        H::new().hash_pair(&left, &right)
+    }
+}
+
+fn write_node<F: Family, D: Digest>(
+    output: &mut [u8; SHA256_NODE_LEN],
+    pos: Position<F>,
+    left: &D,
+    right: &D,
+) {
+    output[..8].copy_from_slice(&(*pos).to_be_bytes());
+    output[8..8 + sha256::Digest::SIZE].copy_from_slice(left.as_ref());
+    output[8 + sha256::Digest::SIZE..].copy_from_slice(right.as_ref());
 }
 
 impl<F: Family, T: Hasher<F>> Hasher<F> for &T {

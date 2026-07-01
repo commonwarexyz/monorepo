@@ -274,6 +274,11 @@ commonware_macros::stability_scope!(BETA {
         fn hash(message: &[u8]) -> Self::Digest {
             Self::new().update(message).finalize()
         }
+
+        /// Hash two messages.
+        fn hash_pair(&self, left: &[u8], right: &[u8]) -> (Self::Digest, Self::Digest) {
+            (Self::hash(left), Self::hash(right))
+        }
     }
 });
 

@@ -95,6 +95,8 @@ use core::ops::Range;
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
 
+const HASH_PAIR_CHUNK: usize = 64;
+
 /// Push a dirty node position into its height bucket, growing the outer Vec as needed.
 fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
     let h = height as usize;
@@ -174,6 +176,39 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             self.appended[index] = digest;
         } else {
             self.overwrites.insert(pos, digest);
+        }
+    }
+
+    fn child_digests(&self, base: &Mem<F, D>, pos: Position<F>, height: u32) -> (D, D) {
+        let (left, right) = F::children(pos, height);
+        let left = self.get_node(base, left).expect("left child missing");
+        let right = self.get_node(base, right).expect("right child missing");
+        (left, right)
+    }
+
+    fn zip_nodes(
+        &self,
+        base: &Mem<F, D>,
+        hasher: &impl Hasher<F, Digest = D>,
+        positions: &[Position<F>],
+        height: u32,
+        output: &mut Vec<(Position<F>, D)>,
+    ) {
+        match positions {
+            [] => {}
+            [pos] => {
+                let (left, right) = self.child_digests(base, *pos, height);
+                output.push((*pos, hasher.node_digest(*pos, &left, &right)));
+            }
+            [left, right, remaining @ ..] => {
+                let (ll, lr) = self.child_digests(base, *left, height);
+                let (rl, rr) = self.child_digests(base, *right, height);
+                let (left_digest, right_digest) =
+                    hasher.node_digest_pair(*left, &ll, &lr, *right, &rl, &rr);
+                output.push((*left, left_digest));
+                output.push((*right, right_digest));
+                self.zip_nodes(base, hasher, remaining, height, output);
+            }
         }
     }
 
@@ -373,19 +408,19 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         positions: &[Position<F>],
         height: u32,
     ) {
-        let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
-            positions,
+        let computed: Vec<Vec<(Position<F>, D)>> = self.parent.strategy.map_init_collect_vec(
+            positions.chunks(HASH_PAIR_CHUNK),
             || hasher.clone(),
-            |hasher, &pos| {
-                let (left, right) = F::children(pos, height);
-                let left_d = self.get_node(base, left).expect("left child missing");
-                let right_d = self.get_node(base, right).expect("right child missing");
-                let digest = hasher.node_digest(pos, &left_d, &right_d);
-                (pos, digest)
+            |hasher, positions| {
+                let mut computed = Vec::with_capacity(positions.len());
+                self.zip_nodes(base, &*hasher, positions, height, &mut computed);
+                computed
             },
         );
-        for (pos, digest) in computed {
-            self.store_node(pos, digest);
+        for nodes in computed {
+            for (pos, digest) in nodes {
+                self.store_node(pos, digest);
+            }
         }
     }
 }
