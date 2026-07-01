@@ -370,10 +370,7 @@ impl<
             grafted_tree,
             grafting_height,
             ops_tree,
-            grafted_hasher: GraftedHasher::new(
-                merkle::hasher::Standard::new(merkle::Bagging::ForwardFold),
-                grafting_height,
-            ),
+            grafted_hasher: GraftedHasher::new(crate::qmdb::hasher::<H>(), grafting_height),
             _phantom: PhantomData,
         }
     }
