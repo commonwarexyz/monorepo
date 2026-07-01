@@ -1139,9 +1139,7 @@ where
                 .entries
                 .push((self.keys[slot].clone(), loc, payload, value));
         }
-        staged_updates
-            .entries
-            .sort_unstable_by_key(|entry| entry.1);
+        staged_updates.entries.sort_unstable_by_key(|entry| entry.1);
         for (slot, update_idx) in latest.into_iter().enumerate() {
             let Some(update_idx) = update_idx else {
                 continue;
