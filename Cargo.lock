@@ -1685,6 +1685,8 @@ version = "2026.5.0"
 dependencies = [
  "cfg-if",
  "commonware-macros",
+ "dashmap",
+ "futures",
  "proptest",
  "rayon",
 ]
