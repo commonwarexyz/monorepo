@@ -117,7 +117,6 @@ where
     Operation<F, U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
-    let hasher = qmdb::hasher::<H>();
     let merkle = Merkle::<F, _, _, S>::init_sync(
         context.child("merkle"),
         full::SyncConfig {
@@ -131,7 +130,7 @@ where
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         merkle,
         log,
-        hasher.clone(),
+        qmdb::hasher::<H>(),
         apply_batch_size as u64,
     )
     .await?;
