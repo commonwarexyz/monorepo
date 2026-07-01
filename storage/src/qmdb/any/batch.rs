@@ -868,7 +868,7 @@ where
                         continue;
                     }
                     let (read_candidate, op) = reads.next().expect("one read per candidate");
-                    debug_assert_eq!(candidate, read_candidate);
+                    assert_eq!(candidate, read_candidate);
                     let outcome = outcomes.next().expect("one outcome per read candidate");
                     match outcome {
                         FloorOutcome::Inactive => continue,
