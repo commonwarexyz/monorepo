@@ -6,17 +6,15 @@
 //! ```rust
 //! use commonware_cryptography::{Hasher, blake3::Blake3};
 //!
-//! // Create a new BLAKE3 hasher
-//! let mut hasher = Blake3::new();
+//! // Hash data in a single shot
+//! let digest = Blake3::hash(&[b"hello,", b"world!"]);
+//! println!("digest: {:?}", digest);
 //!
-//! // Update the hasher with some messages
+//! // Or stream data incrementally
+//! let mut hasher = Blake3::default();
 //! hasher.update(b"hello,");
 //! hasher.update(b"world!");
-//!
-//! // Finalize the hasher to get the digest
-//! let digest = hasher.finalize();
-//!
-//! // Print the digest
+//! let (_hasher, digest) = hasher.finalize();
 //! println!("digest: {:?}", digest);
 //! ```
 
@@ -51,13 +49,22 @@ pub struct Blake3 {
 
 impl Clone for Blake3 {
     fn clone(&self) -> Self {
-        // We manually implement `Clone` to avoid cloning the hasher state.
+        // Per the `Hasher` contract, `Clone` resets: we never duplicate in-progress
+        // hasher state.
         Self::default()
     }
 }
 
 impl Hasher for Blake3 {
     type Digest = Digest;
+
+    fn hash(parts: &[&[u8]]) -> Self::Digest {
+        let mut hasher = Self::default();
+        for part in parts {
+            hasher.update(part);
+        }
+        hasher.finalize().1
+    }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
         #[cfg(not(feature = "blake3-parallel"))]
@@ -79,16 +86,11 @@ impl Hasher for Blake3 {
         self
     }
 
-    fn finalize(&mut self) -> Self::Digest {
+    fn finalize(mut self) -> (Self, Self::Digest) {
         let finalized = self.hasher.finalize();
         self.hasher.reset();
         let array: [u8; DIGEST_LENGTH] = finalized.into();
-        Self::Digest::from(array)
-    }
-
-    fn reset(&mut self) -> &mut Self {
-        self.hasher = CoreBlake3::new();
-        self
+        (self, Self::Digest::from(array))
     }
 }
 
@@ -104,7 +106,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Digest {
         // Generate random bytes and compute their Blake3 hash
         let len = u.int_in_range(0..=256)?;
         let data = u.bytes(len)?;
-        Ok(Blake3::hash(data))
+        Ok(Blake3::hash(&[data]))
     }
 }
 
@@ -194,20 +196,25 @@ mod tests {
         let msg = b"hello world";
 
         // Generate initial hash
-        let mut hasher = Blake3::new();
+        let mut hasher = Blake3::default();
         hasher.update(msg);
-        let digest = hasher.finalize();
+        let (hasher, digest) = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
-        // Reuse hasher
+        // Reuse the reset hasher
+        let mut hasher = hasher;
         hasher.update(msg);
-        let digest = hasher.finalize();
+        let (_, digest) = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
-        // Test simple hasher
-        let hash = Blake3::hash(msg);
+        // Test one-shot hasher
+        let hash = Blake3::hash(&[msg]);
+        assert_eq!(hash.as_ref(), HELLO_DIGEST);
+
+        // Test multi-part one-shot hasher
+        let hash = Blake3::hash(&[b"hello", b" world"]);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
@@ -219,9 +226,9 @@ mod tests {
     #[test]
     fn test_codec() {
         let msg = b"hello world";
-        let mut hasher = Blake3::new();
+        let mut hasher = Blake3::default();
         hasher.update(msg);
-        let digest = hasher.finalize();
+        let (_, digest) = hasher.finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), DIGEST_LENGTH);
