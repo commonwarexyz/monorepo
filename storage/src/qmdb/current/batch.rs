@@ -455,7 +455,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, staged_updates) = inner.into_merkleize_parts(updates, upserts, true);
+        let (inner, staged_updates) = inner.into_parts(updates, upserts, true);
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
@@ -505,7 +505,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, staged_updates) = inner.into_merkleize_parts(updates, upserts, false);
+        let (inner, staged_updates) = inner.into_parts(updates, upserts, false);
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,

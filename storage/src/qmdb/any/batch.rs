@@ -1052,7 +1052,7 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    pub(crate) fn into_merkleize_parts(
+    pub(crate) fn into_parts(
         mut self,
         mut updates: Vec<(usize, Option<U::Value>)>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
@@ -1161,7 +1161,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
     {
         // Unordered deletes emit a `Delete` at the cached location, so they may be staged.
-        let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts, true);
+        let (batch, staged_updates) = self.into_parts(updates, upserts, true);
         batch
             .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
@@ -1203,7 +1203,7 @@ where
     {
         // Ordered deletes must rewrite the deleted key's predecessor, so they fall back to normal
         // mutations rather than reusing the cached location.
-        let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts, false);
+        let (batch, staged_updates) = self.into_parts(updates, upserts, false);
         batch
             .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
@@ -1462,9 +1462,9 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let (mut mutations, m) = self.into_parts();
         // `value` is `Some` for a staged update and `None` for a staged delete; `emit` maps each
         // to an `Update`/`Delete` at the cached location.
+        let (mut mutations, m) = self.into_parts();
         let mut cached: Vec<(K, Location<F>, Option<V::Value>)> =
             Vec::with_capacity(staged_updates.entries.len());
         for (key, loc, (), value) in staged_updates.entries {
@@ -1666,7 +1666,7 @@ where
 
         // Staged updates skip the index probe and journal re-read, and their old op's next key
         // feeds the candidate sets directly. The ordered path never stages deletes (see
-        // `into_merkleize_parts`), so every staged entry carries a value.
+        // `Staged::into_parts`), so every staged entry carries a value.
         let mut cached: Vec<(K, V::Value, Location<F>, K)> =
             Vec::with_capacity(staged_updates.entries.len());
         for (key, loc, old_next, value) in staged_updates.entries {
