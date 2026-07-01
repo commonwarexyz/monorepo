@@ -226,7 +226,7 @@ mod tests {
         deterministic,
         telemetry::metrics::{has_metric_value, Metric, Registered},
         Blob, BufferPool, BufferPooler, Error as RError, Handle, IoBufs, IoBufsMut, Metrics as _,
-        Name, Runner, Spawner as _, Storage, Supervisor as _,
+        Name, Runner, Spawner as _, Storage, Supervisor,
     };
     use commonware_utils::{
         channel::oneshot, sequence::FixedBytes, sync::Mutex, NZUsize, NZU16, NZU64,
@@ -283,7 +283,7 @@ mod tests {
         pending: PendingSyncs,
     }
 
-    impl<E: commonware_runtime::Supervisor> commonware_runtime::Supervisor for DelayedSyncContext<E> {
+    impl<E: Supervisor> Supervisor for DelayedSyncContext<E> {
         fn name(&self) -> Name {
             self.inner.name()
         }

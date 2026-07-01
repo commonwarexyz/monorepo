@@ -7,6 +7,7 @@ use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::{
+        Completion,
         paged::{CacheRef, Writer},
         Write,
     },
@@ -177,17 +178,14 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         F::Buffer: 'a,
     {
         let mut error = None;
-        for blob in blobs {
-            if let Err(err) = blob.wait_for_sync().await {
+        for result in join_all(blobs.into_iter().map(|blob| blob.wait_for_sync())).await {
+            if let Err(err) = result {
                 if error.is_none() {
                     error = Some(err);
                 }
             }
         }
-        match error {
-            Some(err) => Err(Error::Runtime(err)),
-            None => Ok(()),
-        }
+        error.map_or_else(|| Ok(()), |err| Err(Error::Runtime(err)))
     }
 
     /// Initialize a new `Manager`.
@@ -280,18 +278,6 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
-    fn observe_handles(handles: Vec<Handle<()>>) -> Handle<()> {
-        if handles.is_empty() {
-            return Handle::ready(Ok(()));
-        }
-        Handle::from_future(async move {
-            for result in join_all(handles).await {
-                result?;
-            }
-            Ok(())
-        })
-    }
-
     /// Start syncing the given `sections` to storage and return each section's handle.
     pub(crate) async fn start_syncs(
         &mut self,
@@ -317,13 +303,13 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         &mut self,
         sections: impl crate::Sections,
     ) -> Result<Handle<()>, Error> {
-        let handles = self
+        let handles: Vec<_> = self
             .start_syncs(sections)
             .await?
             .into_iter()
             .map(|(_, handle)| handle)
             .collect();
-        Ok(Self::observe_handles(handles))
+        Ok(Completion::join_handles(handles))
     }
 
     /// Sync all sections to storage.
@@ -538,13 +524,11 @@ mod tests {
     use super::*;
     use commonware_runtime::{deterministic, Runner as _, Spawner as _, Supervisor as _};
     use commonware_utils::{channel::oneshot, sync::Mutex};
-    use futures::future::{BoxFuture, FutureExt as _, Shared};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
 
-    type SharedSync = Shared<BoxFuture<'static, Result<(), RError>>>;
     type SyncSender = oneshot::Sender<Result<(), RError>>;
     type PendingSyncs = Arc<Mutex<Vec<SyncSender>>>;
 
@@ -557,7 +541,7 @@ mod tests {
     struct TestBuffer {
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
-        syncing: Option<SharedSync>,
+        syncing: Option<Completion>,
     }
 
     impl Drop for TestBuffer {
@@ -581,20 +565,19 @@ mod tests {
         async fn start_sync(&mut self) -> Handle<()> {
             let (sender, receiver) = oneshot::channel();
             self.pending.lock().push(sender);
-            let sync = async move {
+            let sync = Completion::from(Handle::from_future(async move {
                 receiver.await.map_err(|_| RError::Closed)??;
                 Ok(())
-            }
-            .boxed()
-            .shared();
-            self.syncing = Some(sync.clone());
-            Handle::from_future(sync)
+            }));
+            let handle = sync.handle();
+            self.syncing = Some(sync);
+            handle
         }
 
         async fn wait_for_sync(&mut self) -> Result<(), RError> {
             if let Some(syncing) = self.syncing.take() {
                 self.wait_for_syncs.fetch_add(1, Ordering::Relaxed);
-                syncing.await?;
+                syncing.wait().await?;
             }
             Ok(())
         }

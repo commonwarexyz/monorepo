@@ -46,11 +46,8 @@ use super::{
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{BufferPooler, Handle, Metrics, Storage};
-use futures::{
-    future::{join_all, try_join},
-    stream::Stream,
-};
+use commonware_runtime::{buffer::Completion, BufferPooler, Handle, Metrics, Storage};
+use futures::{future::try_join, stream::Stream};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     num::NonZeroUsize,
@@ -352,18 +349,6 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             .map(|_| ())
     }
 
-    fn observe_handles(handles: Vec<Handle<()>>) -> Handle<()> {
-        if handles.is_empty() {
-            return Handle::ready(Ok(()));
-        }
-        Handle::from_future(async move {
-            for result in join_all(handles).await {
-                result?;
-            }
-            Ok(())
-        })
-    }
-
     /// Start syncing both journals for the given `sections` and return each section's handle.
     pub(crate) async fn start_syncs(
         &mut self,
@@ -386,7 +371,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 
         Ok(handles
             .into_iter()
-            .map(|(section, handles)| (section, Self::observe_handles(handles)))
+            .map(|(section, handles)| (section, Completion::join_handles(handles)))
             .collect())
     }
 
@@ -395,13 +380,13 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         &mut self,
         sections: impl crate::Sections,
     ) -> Result<Handle<()>, Error> {
-        let handles = self
+        let handles: Vec<_> = self
             .start_syncs(sections)
             .await?
             .into_iter()
             .map(|(_, handle)| handle)
             .collect();
-        Ok(Self::observe_handles(handles))
+        Ok(Completion::join_handles(handles))
     }
 
     /// Sync all sections.

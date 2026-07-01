@@ -1,6 +1,6 @@
 //! Buffers for reading and writing to [crate::Blob]s.
 
-use futures::future::{BoxFuture, FutureExt as _, Shared};
+use futures::future::{join_all, BoxFuture, FutureExt as _, Shared};
 
 pub mod paged;
 mod read;
@@ -12,17 +12,45 @@ pub use write::Write;
 
 /// A shared sync result.
 #[derive(Clone)]
-struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
+pub struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
 
 impl Completion {
     /// Return a handle for the sync result.
-    fn handle(&self) -> crate::Handle<()> {
+    pub fn handle(&self) -> crate::Handle<()> {
         crate::Handle::from_future(self.0.clone())
     }
 
+    /// Return the sync result if it is ready.
+    pub fn try_wait(&self) -> Option<Result<(), crate::Error>> {
+        self.0.clone().now_or_never()
+    }
+
     /// Wait for the sync result.
-    async fn wait(&self) -> Result<(), crate::Error> {
+    pub async fn wait(&self) -> Result<(), crate::Error> {
         self.0.clone().await
+    }
+
+    async fn into_result(self) -> Result<(), crate::Error> {
+        self.0.await
+    }
+
+    /// Return a handle that observes every provided completion.
+    pub fn join(completions: impl IntoIterator<Item = Self>) -> crate::Handle<()> {
+        let completions = completions.into_iter().collect::<Vec<_>>();
+        if completions.is_empty() {
+            return crate::Handle::ready(Ok(()));
+        }
+        crate::Handle::from_future(async move {
+            for result in join_all(completions.into_iter().map(Self::into_result)).await {
+                result?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Return a handle that observes every provided handle.
+    pub fn join_handles(handles: impl IntoIterator<Item = crate::Handle<()>>) -> crate::Handle<()> {
+        Self::join(handles.into_iter().map(Self::from))
     }
 }
 
