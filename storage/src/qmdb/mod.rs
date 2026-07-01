@@ -55,7 +55,7 @@ use crate::{
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use commonware_utils::{cache::Clock, channel::mpsc, NZUsize};
+use commonware_utils::{bitmap::BitMap, cache::Clock, channel::mpsc, NZUsize};
 use core::num::NonZeroUsize;
 use futures::{future::join_all, pin_mut, StreamExt as _};
 use std::{pin::Pin, sync::Arc};
@@ -445,7 +445,8 @@ pub enum InitParallelism {
     /// Build with this many worker tasks, plus the task that replays and routes the log. `Workers(1)`
     /// still de-interleaves replay from the build onto a separate task.
     Workers(NonZeroUsize),
-    /// Build with `strategy.parallelism_hint()` worker tasks.
+    /// Build with `strategy.parallelism_hint() - 1` worker tasks, reserving one core for the
+    /// replay/routing task. Falls back to a serial build when the hint leaves no spare core.
     Auto,
 }
 
@@ -454,12 +455,14 @@ pub enum InitParallelism {
 /// Generic over the `Index` type so each index controls how it builds: serial index types replay the
 /// log sequentially, while the ordered partitioned index builds its partitions in parallel.
 pub trait SnapshotBuild<F: Family>: Index<Value = Location<F>> + Sized + 'static {
-    /// Replay `log` from `inactivity_floor_loc`, populating `self` and invoking `callback` for each
-    /// operation (its activity status and the location it inactivates, if any). Returns the number of
-    /// active keys. `parallelism` selects how index types that build in parallel split the work
-    /// ([`InitParallelism::Auto`] derives the worker count from `strategy.parallelism_hint()`, less one
-    /// core for the replay/routing task); extra workers have diminishing returns once that task becomes
-    /// the bottleneck. `cache_size` bounds each build's `(location -> key)` cache (`None` disables it).
+    /// Replay `log` from `inactivity_floor_loc`, populating `self` and invoking `callback` once per
+    /// replayed location, in location order. Each call carries an activity status to append and,
+    /// optionally, an earlier location whose status it clears; implementations may report per-op
+    /// transitions (a status that a later call clears) or pre-resolved final statuses (never clearing),
+    /// but the state after the last call is identical either way. Returns the number of active keys.
+    /// `parallelism` selects how index types that build in parallel split the work; extra workers have
+    /// diminishing returns once the replay/routing task becomes the bottleneck. `cache_size` bounds
+    /// each build's `(location -> key)` cache (`None` disables it).
     #[allow(clippy::too_many_arguments)]
     fn build_snapshot<'a, E, C, S, Fn>(
         &'a mut self,
@@ -477,9 +480,9 @@ pub trait SnapshotBuild<F: Family>: Index<Value = Location<F>> + Sized + 'static
         S: Strategy,
         Fn: FnMut(bool, Option<Location<F>>) + Send + 'a,
     {
-        // This index type builds serially, so `parallelism` has no effect; warn rather than
-        // silently ignore a non-default setting (only the ordered partitioned index parallelizes).
-        if parallelism != InitParallelism::Serial {
+        // This index type builds serially, so `parallelism` has no effect; warn on an explicit
+        // worker count rather than silently ignore it (`Auto` is best-effort and stays quiet).
+        if matches!(parallelism, InitParallelism::Workers(_)) {
             tracing::warn!(
                 ?parallelism,
                 "init_parallelism configured but this index builds serially; ignoring"
@@ -525,7 +528,11 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
                 InitParallelism::Serial => 0,
                 InitParallelism::Workers(n) => n.get().min(count),
                 // The replay/routing task occupies one core, so leave it one and spawn the rest.
-                InitParallelism::Auto => strategy.parallelism_hint().saturating_sub(1).min(count),
+                InitParallelism::Auto => strategy
+                    .manual()
+                    .parallelism_hint()
+                    .saturating_sub(1)
+                    .min(count),
             };
 
             // Serial, or Auto where the hint left no spare core: build on this task.
@@ -561,11 +568,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
                 // only that many slots, so per-worker memory is the range, not the full partition set.
                 let lo = w * range_size;
                 let range_len = range_size.min(count - lo);
-                let worker_index = self.new_range(
-                    context.child("snapshot_index").with_attribute("worker", w),
-                    lo,
-                    range_len,
-                );
+                let worker_index = self.new_range(lo, range_len);
                 let handle = context
                     .child("snapshot_worker")
                     .with_attribute("worker", w)
@@ -640,15 +643,14 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             // Reconstruct the activity bitmap in location order: a location is active iff it is the
             // current location of an active key, or it is the last commit. This matches the serial
             // build's per-op push-then-clear, which leaves exactly those bits set.
-            let len = (end - floor) as usize;
-            let mut active = vec![false; len];
+            let mut active: BitMap = BitMap::zeroes(end - floor);
             self.for_each_value(|loc| {
-                active[(**loc - floor) as usize] = true;
+                active.set(**loc - floor, true);
             });
             if last_commit >= floor {
-                active[(last_commit - floor) as usize] = true;
+                active.set(last_commit - floor, true);
             }
-            for is_active in active {
+            for is_active in active.iter() {
                 callback(is_active, None);
             }
 

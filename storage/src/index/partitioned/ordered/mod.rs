@@ -43,7 +43,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_runtime::{
-    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _, Registered, Registration},
     Metrics,
 };
 use std::{
@@ -229,10 +229,14 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     /// snapshot-build worker, matching this index's translator and spill threshold. It allocates just
     /// `count` partition slots but is still addressed by the global partition index (mapped to a local
     /// slot in `get_mut`/`get_mut_or_insert`), so per-worker memory is the range, not the full
-    /// `2^(8*P)` -- which is what makes a large `P` affordable. Only the build (Unordered) operations
-    /// are valid on it; [`Self::install_range`] folds it back into a full index.
+    /// `2^(8*P)` -- which is what makes a large `P` affordable. Its metric handles are detached (never
+    /// registered): they only accumulate the counts that [`Self::install_range`] folds back into a
+    /// full index. Only the build (Unordered) operations are valid on it.
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn new_range(&self, ctx: impl Metrics, offset: usize, count: usize) -> Self {
+    pub(crate) fn new_range(&self, offset: usize, count: usize) -> Self {
+        fn detached<M: Default>() -> Registered<M> {
+            Registered::with_registration(M::default(), Registration::from(()))
+        }
         let partitions = (0..count)
             .map(|_| Partition::default())
             .collect::<Vec<_>>()
@@ -243,9 +247,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
             partitions,
             spilled: HashMap::new(),
             threshold: self.threshold,
-            keys: ctx.gauge("keys", "Number of translated keys in the index"),
-            items: ctx.gauge("items", "Number of items in the index"),
-            pruned: ctx.counter("pruned", "Number of items pruned"),
+            keys: detached(),
+            items: detached(),
+            pruned: detached(),
             spills: None,
         }
     }
@@ -270,8 +274,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
                 spills.inc();
             }
         }
-        // Fold in the worker's delete-driven prune count (a build worker's own `pruned` series is
-        // transient), matching what the serial replay records on the full index.
+        // Fold in the worker's delete-driven prune count (a build worker's own `pruned` handle is
+        // detached), matching what the serial replay records on the full index.
         self.pruned.inc_by(worker.pruned.get());
         (worker.keys.get(), worker.items.get())
     }
@@ -906,7 +910,7 @@ mod tests {
 
             // A build worker covering the whole partition range. Workers do not register the metric,
             // so a spill on a worker is counted only when it is folded into the full index.
-            let mut worker = full.new_range(context.child("worker"), 0, full.partition_count());
+            let mut worker = full.new_range(0, full.partition_count());
             worker.get_mut_or_insert(&[0x10, 0x01], 1);
             worker.get_mut_or_insert(&[0x10, 0x02], 2); // second key in partition 0x10 -> spills
             assert_eq!(worker.spilled_count(), 1);
@@ -928,7 +932,7 @@ mod tests {
             // A worker covering the whole partition range. Give a key two values, then delete both
             // through a cursor (the same path the parallel build's deletes take) so the worker
             // records prunes that the full index never sees directly.
-            let mut worker = full.new_range(context.child("worker"), 0, full.partition_count());
+            let mut worker = full.new_range(0, full.partition_count());
             worker.insert(&[0x10, 0x01], 1);
             worker.insert(&[0x10, 0x01], 2);
             {
