@@ -1012,8 +1012,9 @@ impl<B: Blob> Writer<B> {
         // A logical shrink can leave the physical page count unchanged. Only real physical
         // resizes need to create a pending sync.
         if new_physical_size != current_physical_size {
-            self.blob.resize(new_physical_size).await?;
-            self.sync_state.mark_dirty();
+            self.sync_state
+                .resize(&self.blob, new_physical_size)
+                .await?;
         }
 
         // Evict cached pages at or beyond the new full-page boundary. The page at
@@ -1125,7 +1126,10 @@ impl<B: Blob> Writer<B> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
+        buffer::{
+            paged::CHECKSUM_SLOT_LEN_SIZE,
+            tests::{DelayedStartSyncBlob, SyncTrackingBlob},
+        },
         deterministic,
         telemetry::metrics::Registry,
         Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
@@ -2161,104 +2165,6 @@ mod tests {
             let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data);
         });
-    }
-
-    type StartedSyncSender = Arc<Mutex<Option<oneshot::Sender<()>>>>;
-    type BlockedSyncSender = Arc<Mutex<Option<oneshot::Sender<()>>>>;
-    type ReleaseSyncReceiver = Arc<Mutex<Option<oneshot::Receiver<Result<(), Error>>>>>;
-
-    /// Blob wrapper that lets tests hold one started sync open until explicitly released.
-    #[derive(Clone)]
-    struct DelayedStartSyncBlob<B: Blob> {
-        inner: B,
-        started: StartedSyncSender,
-        blocked: BlockedSyncSender,
-        release: ReleaseSyncReceiver,
-    }
-
-    impl<B: Blob> DelayedStartSyncBlob<B> {
-        #[allow(clippy::type_complexity)]
-        fn new(
-            inner: B,
-        ) -> (
-            Self,
-            oneshot::Receiver<()>,
-            oneshot::Receiver<()>,
-            oneshot::Sender<Result<(), Error>>,
-        ) {
-            let (started_tx, started_rx) = oneshot::channel();
-            let (blocked_tx, blocked_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
-            (
-                Self {
-                    inner,
-                    started: Arc::new(Mutex::new(Some(started_tx))),
-                    blocked: Arc::new(Mutex::new(Some(blocked_tx))),
-                    release: Arc::new(Mutex::new(Some(release_rx))),
-                },
-                started_rx,
-                blocked_rx,
-                release_tx,
-            )
-        }
-    }
-
-    impl<B: Blob> crate::Blob for DelayedStartSyncBlob<B> {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.inner.read_at(offset, len).await
-        }
-
-        async fn read_at_buf(
-            &self,
-            offset: u64,
-            len: usize,
-            buf: impl Into<IoBufsMut> + Send,
-        ) -> Result<IoBufsMut, Error> {
-            self.inner.read_at_buf(offset, len, buf).await
-        }
-
-        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            self.inner.write_at(offset, bufs).await
-        }
-
-        async fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            self.inner.write_at_sync(offset, bufs).await
-        }
-
-        async fn resize(&self, len: u64) -> Result<(), Error> {
-            self.inner.resize(len).await
-        }
-
-        async fn sync(&self) -> Result<(), Error> {
-            self.inner.sync().await
-        }
-
-        async fn start_sync(&self) -> Handle<()> {
-            let release = self.release.lock().take();
-            let blocked = self.blocked.lock().take();
-            if let Some(started) = self.started.lock().take() {
-                let _ = started.send(());
-            }
-
-            let inner = self.inner.clone();
-            Handle::from_future(async move {
-                if let Some(blocked) = blocked {
-                    let _ = blocked.send(());
-                }
-                let Some(release) = release else {
-                    return inner.sync().await;
-                };
-                match release.await {
-                    Ok(Ok(())) => inner.sync().await,
-                    Ok(Err(err)) => Err(err),
-                    Err(_) => Err(Error::Closed),
-                }
-            })
-        }
     }
 
     #[test_traced("DEBUG")]
