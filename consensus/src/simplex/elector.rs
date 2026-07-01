@@ -122,11 +122,9 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
             .collect();
 
         if let Some(seed) = &self.seed {
-            let mut hasher = H::default();
             permutation.sort_by_key(|&index| {
-                hasher.update(seed);
-                hasher.update(&index.get().encode());
-                hasher.finalize()
+                let index = index.get().encode();
+                H::hash([seed.as_slice(), index.as_ref()])
             });
         }
 

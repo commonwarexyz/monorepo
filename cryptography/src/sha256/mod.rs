@@ -66,9 +66,11 @@ fn digest_from_state(state: [u32; 8]) -> [u8; DIGEST_LENGTH] {
     out
 }
 
-/// Pad and compress `scratch[..len]` directly from the IV.
+/// Pad and compress `scratch[..len]` (where `len <= MAX_FIXED`) directly from
+/// the IV, assuming `scratch[len..]` is already zeroed (i.e. fresh scratch).
 ///
-/// `scratch[len..]` must already be zeroed.
+/// This avoids the streaming hasher's buffering and the redundant zero-fill of
+/// the padding region, which is the bulk of the one-shot speedup.
 #[inline]
 fn finalize_fixed_fresh(scratch: &mut [u8; 2 * BLOCK_LENGTH], len: usize) -> [u8; DIGEST_LENGTH] {
     let bit_len = ((len as u64) * 8).to_be_bytes();
@@ -76,11 +78,13 @@ fn finalize_fixed_fresh(scratch: &mut [u8; 2 * BLOCK_LENGTH], len: usize) -> [u8
 
     let mut state = IV;
     if len < BLOCK_LENGTH - 8 {
+        // Message + padding fit in a single block.
         scratch[BLOCK_LENGTH - 8..BLOCK_LENGTH].copy_from_slice(&bit_len);
         let (blocks, remainder) = scratch[..BLOCK_LENGTH].as_chunks::<BLOCK_LENGTH>();
         assert!(remainder.is_empty());
         compress256(&mut state, blocks);
     } else {
+        // Padding spills into a second block.
         scratch[2 * BLOCK_LENGTH - 8..].copy_from_slice(&bit_len);
         let (blocks, remainder) = scratch.as_chunks::<BLOCK_LENGTH>();
         assert!(remainder.is_empty());
@@ -156,20 +160,17 @@ impl Hasher for Sha256 {
         }
     }
 
-    #[inline]
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.hasher.update(message);
         self
     }
 
-    #[inline]
     fn finalize(&mut self) -> Self::Digest {
         let finalized = self.hasher.finalize_reset();
         let array: [u8; DIGEST_LENGTH] = finalized.into();
         Self::Digest::from(array)
     }
 
-    #[inline]
     fn reset(&mut self) -> &mut Self {
         self.hasher = ISha256::new();
         self
@@ -284,7 +285,7 @@ mod tests {
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
-        // Test simple hasher
+        // Test one-shot hasher
         let hash = Sha256::hash([msg]);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
 
@@ -293,18 +294,20 @@ mod tests {
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
+    /// Exercise the fixed-size fast path and the streaming fallback across the
+    /// `MAX_FIXED` boundary, checking each against the streaming implementation.
     #[test]
-    fn test_sha256_hash_boundaries() {
-        for total in [0usize, 1, 55, 56, 63, 64, 119, 120, 300] {
+    fn test_sha256_hash_parts_boundaries() {
+        for total in 0..=300usize {
             let data: Vec<u8> = (0..total).map(|i| i as u8).collect();
-            let first = total / 3;
-            let second = 2 * total / 3;
-            let parts = [&data[..first], &data[first..second], &data[second..]];
+            // Split into a few parts of varying sizes.
+            let mid = total / 3;
+            let parts: [&[u8]; 3] = [&data[..mid], &data[mid..2 * mid], &data[2 * mid..]];
 
             let oneshot = Sha256::hash(parts);
 
             let mut hasher = Sha256::default();
-            for part in parts {
+            for part in &parts {
                 hasher.update(part);
             }
             let streamed = hasher.finalize();

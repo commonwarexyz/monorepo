@@ -6,7 +6,7 @@
 //! replaying the fetched operations.
 
 use crate::{Hasher, Key, Value};
-use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
@@ -60,7 +60,7 @@ pub fn create_config(context: &impl BufferPooler) -> fixed::Config<Sequential> {
 /// the live db's [`super::ExampleDatabase::current_floor`] so floors stay monotonic.
 pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
-    let mut hasher = <Hasher as Default>::default();
+    let mut hasher = Hasher::default();
     let floor = Location::new(starting_loc);
 
     for i in 0..count {

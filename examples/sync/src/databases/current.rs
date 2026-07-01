@@ -16,7 +16,7 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_codec::FixedSize;
-use commonware_cryptography::{sha256, Hasher as CryptoHasher};
+use commonware_cryptography::{sha256, Hasher as _};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
@@ -83,7 +83,7 @@ where
     type Operation = Operation;
 
     fn create_test_operations(count: usize, seed: u64, _starting_loc: u64) -> Vec<Self::Operation> {
-        let mut hasher = <Hasher as Default>::default();
+        let mut hasher = Hasher::default();
         let mut operations = Vec::new();
         for i in 0..count {
             let key = {

@@ -81,18 +81,15 @@ impl Crc32 {
 impl Hasher for Crc32 {
     type Digest = Digest;
 
-    #[inline]
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.inner.update(message);
         self
     }
 
-    #[inline]
     fn finalize(&mut self) -> Self::Digest {
         Self::Digest::from(self.inner.finalize_reset() as u32)
     }
 
-    #[inline]
     fn reset(&mut self) -> &mut Self {
         self.inner = crc_fast::Digest::new(ALGORITHM);
         self

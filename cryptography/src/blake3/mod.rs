@@ -58,7 +58,6 @@ impl Clone for Blake3 {
 impl Hasher for Blake3 {
     type Digest = Digest;
 
-    #[inline]
     fn update(&mut self, message: &[u8]) -> &mut Self {
         #[cfg(not(feature = "blake3-parallel"))]
         self.hasher.update(message);
@@ -79,7 +78,6 @@ impl Hasher for Blake3 {
         self
     }
 
-    #[inline]
     fn finalize(&mut self) -> Self::Digest {
         let finalized = self.hasher.finalize();
         self.hasher.reset();
@@ -87,7 +85,6 @@ impl Hasher for Blake3 {
         Self::Digest::from(array)
     }
 
-    #[inline]
     fn reset(&mut self) -> &mut Self {
         self.hasher = CoreBlake3::new();
         self
@@ -208,7 +205,7 @@ mod tests {
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
-        // Test simple hasher
+        // Test one-shot hasher
         let hash = Blake3::hash([msg]);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
 
