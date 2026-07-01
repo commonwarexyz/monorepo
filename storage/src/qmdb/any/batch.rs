@@ -70,7 +70,7 @@ impl<F: Family, U: update::Update> StagedUpdates<F, U> {
     }
 }
 
-/// Committed locations resolved by [`UnmerkleizedBatch::stage`], keyed by the original input slot.
+/// Committed locations resolved by staged reads, keyed by staged read slot.
 struct StagedCache<F: Family, U: update::Update> {
     cached: Vec<(usize, Location<F>, U::Cached)>,
 }
@@ -1137,6 +1137,9 @@ where
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     ///
+    /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
+    /// method if more keys must be read into the staged index space.
+    ///
     /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
     /// [`expand`](Staged::expand) ranges.
@@ -1174,6 +1177,9 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
+    /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
@@ -3170,17 +3176,31 @@ mod tests {
             let explicit = explicit.merkleize(&db, None).await.unwrap();
 
             let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
-            let staged = staged
+            let staged_merkleized = staged
+                .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                .await
+                .unwrap();
+
+            let split = 3;
+            let (mut expanded_values, staged) =
+                db.new_batch().stage(&keys[..split], &db).await.unwrap();
+            let (range, suffix_values, staged) =
+                staged.expand(&keys[split..], &db).await.unwrap();
+            assert_eq!(range, split..keys.len());
+            expanded_values.extend(suffix_values);
+            let expanded = staged
                 .set(indexed_updates.clone(), upserts.clone(), &db, None)
                 .await
                 .unwrap();
 
             assert_eq!(explicit_values, loaded_values);
             assert_eq!(explicit_values, staged_values);
+            assert_eq!(explicit_values, expanded_values);
 
-            assert_eq!(explicit.root(), staged.root());
+            assert_eq!(explicit.root(), staged_merkleized.root());
+            assert_eq!(explicit.root(), expanded.root());
 
-            db.apply_batch(staged).await.unwrap();
+            db.apply_batch(expanded).await.unwrap();
             assert_eq!(db.get(&k0).await.unwrap(), upserts[2].1);
             assert_eq!(db.get(&missing).await.unwrap(), indexed_updates[4].1);
             assert_eq!(db.get(&k1).await.unwrap(), indexed_updates[2].1);
@@ -3287,17 +3307,31 @@ mod tests {
             let explicit = explicit.merkleize(&db, None).await.unwrap();
 
             let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
-            let staged = staged
+            let staged_merkleized = staged
+                .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                .await
+                .unwrap();
+
+            let split = 3;
+            let (mut expanded_values, staged) =
+                db.new_batch().stage(&keys[..split], &db).await.unwrap();
+            let (range, suffix_values, staged) =
+                staged.expand(&keys[split..], &db).await.unwrap();
+            assert_eq!(range, split..keys.len());
+            expanded_values.extend(suffix_values);
+            let expanded = staged
                 .set(indexed_updates.clone(), upserts.clone(), &db, None)
                 .await
                 .unwrap();
 
             assert_eq!(explicit_values, loaded_values);
             assert_eq!(explicit_values, staged_values);
+            assert_eq!(explicit_values, expanded_values);
 
-            assert_eq!(explicit.root(), staged.root());
+            assert_eq!(explicit.root(), staged_merkleized.root());
+            assert_eq!(explicit.root(), expanded.root());
 
-            db.apply_batch(staged).await.unwrap();
+            db.apply_batch(expanded).await.unwrap();
             assert_eq!(db.get(&k0).await.unwrap(), upserts[2].1);
             assert_eq!(db.get(&missing).await.unwrap(), indexed_updates[4].1);
             assert_eq!(db.get(&k1).await.unwrap(), indexed_updates[2].1);

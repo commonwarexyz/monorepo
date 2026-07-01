@@ -265,6 +265,9 @@ where
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     ///
+    /// Consumes the staged handle and write vectors. Call [`expand`](CurrentStaged::expand)
+    /// before this method if more keys must be read into the staged index space.
+    ///
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
     /// [`expand`](CurrentStaged::expand) ranges.
     pub async fn set(
@@ -299,6 +302,9 @@ where
     Operation<F, ordered::Update<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// Consumes the staged handle and write vectors. Call [`expand`](CurrentStaged::expand)
+    /// before this method if more keys must be read into the staged index space.
     ///
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
     /// [`expand`](CurrentStaged::expand) ranges.
@@ -1354,10 +1360,10 @@ mod tests {
         });
     }
 
-    /// The glue staged wrapper (`CurrentUnmerkleized::stage` -> `CurrentStaged::set`) must return
-    /// the same values and root as an explicit `get_many` + `write` + `merkleize`, including a
-    /// staged delete, an upsert, and metadata set before the read. This guards metadata flow and
-    /// db-handle pairing through the wrapper.
+    /// The glue staged wrapper (`CurrentUnmerkleized::stage` -> `CurrentStaged::expand` ->
+    /// `CurrentStaged::set`) must return the same values and root as an explicit `get_many` +
+    /// `write` + `merkleize`, including a staged delete, an upsert, and metadata set before the
+    /// read. This guards metadata flow and db-handle pairing through the wrapper.
     #[test]
     fn current_glue_staged_set_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
@@ -1411,7 +1417,11 @@ mod tests {
             let staged_batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
                 .with_metadata(metadata);
-            let (staged_values, staged) = staged_batch.stage(&keys).await.unwrap();
+            let split = 2;
+            let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
+            let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
+            assert_eq!(range, split..keys.len());
+            staged_values.extend(suffix_values);
             let staged_root = staged
                 .set(indexed_updates.clone(), upserts.clone())
                 .await

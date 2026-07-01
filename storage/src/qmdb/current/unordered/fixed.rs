@@ -253,10 +253,10 @@ pub mod test {
 
     /// The staged path (`stage` + `Staged::set`) must produce a root byte-identical to an explicit
     /// `get_many` + `write` + `merkleize` over the current layer, across updates, deletes, upserts,
-    /// duplicate read slots, missing keys, and prefix-then-suffix expansion, both rooted at the DB
-    /// (D=0) and through one pending ancestor (D=1). This guards the current-layer threading of
-    /// `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`, and
-    /// `compute_current_layer` for non-empty staged updates.
+    /// duplicate read slots, missing keys, and prefix-then-suffix expansion, rooted at the DB
+    /// (D=0) and through one or two pending ancestors (D=1/D=2). This guards the current-layer
+    /// threading of `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`,
+    /// and `compute_current_layer` for non-empty staged updates.
     #[test_traced("WARN")]
     pub fn test_current_unordered_fixed_staged_merkleize_parity() {
         fn key(i: u64) -> Digest {
@@ -277,31 +277,66 @@ pub mod test {
             db.apply_batch(seed).await.unwrap();
             db.commit().await.unwrap();
 
-            for depth in [0u8, 1u8] {
-                // At D=1 a pending ancestor updates keys 0..50 and deletes 100..110, so reads of
-                // key(0)/key(105) resolve through the ancestor diff (never cached) and exercise
-                // the staged fallback-to-mutation path.
-                let parent = if depth == 1 {
-                    let mut p = db.new_batch();
-                    for i in 0..50u64 {
-                        p = p.write(key(i), Some(val(i + 1_000)));
+            for depth in [0u8, 1u8, 2u8] {
+                // At D=1, one pending ancestor updates keys 0..50 and deletes 100..110. At D=2,
+                // the grandparent updates keys 0..10 and deletes 100..110 while the parent updates
+                // keys 20..30. The read set below then resolves through both ancestors, while
+                // key(60) still falls through to the committed DB and exercises staged cache reuse
+                // behind a stacked batch.
+                // Keep every uncommitted ancestor alive until the child is merkleized; speculative
+                // batch Merkle lookups walk weak parent links for in-memory ancestor nodes.
+                let mut stack = Vec::new();
+                match depth {
+                    0 => {}
+                    1 => {
+                        let mut p = db.new_batch();
+                        for i in 0..50u64 {
+                            p = p.write(key(i), Some(val(i + 1_000)));
+                        }
+                        for i in 100..110u64 {
+                            p = p.write(key(i), None);
+                        }
+                        stack.push(p.merkleize(&db, None).await.unwrap());
                     }
-                    for i in 100..110u64 {
-                        p = p.write(key(i), None);
+                    2 => {
+                        let mut grandparent = db.new_batch();
+                        for i in 0..10u64 {
+                            grandparent = grandparent.write(key(i), Some(val(i + 1_000)));
+                        }
+                        for i in 100..110u64 {
+                            grandparent = grandparent.write(key(i), None);
+                        }
+                        let grandparent = grandparent.merkleize(&db, None).await.unwrap();
+
+                        let mut p = grandparent.new_batch::<Sha256>();
+                        for i in 20..30u64 {
+                            p = p.write(key(i), Some(val(i + 2_000)));
+                        }
+                        let p = p.merkleize(&db, None).await.unwrap();
+                        stack.push(grandparent);
+                        stack.push(p);
                     }
-                    Some(p.merkleize(&db, None).await.unwrap())
-                } else {
-                    None
+                    _ => unreachable!("covered depths"),
                 };
                 let new_batch = || {
-                    parent
-                        .as_ref()
+                    stack
+                        .last()
                         .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
                 };
 
                 // Read set: key(5) duplicated at slots 0/3, read-only key(6), missing key(9000),
-                // ancestor-resolved key(0), key(20) deleted via index, ancestor-deleted key(105).
-                let read_keys = [key(5), key(6), key(9000), key(5), key(0), key(20), key(105)];
+                // key(60) that always remains committed, and keys 0/20/105 that resolve through
+                // ancestors when depth > 0.
+                let read_keys = [
+                    key(5),
+                    key(6),
+                    key(9000),
+                    key(5),
+                    key(0),
+                    key(20),
+                    key(60),
+                    key(105),
+                ];
                 let keys: Vec<&Digest> = read_keys.iter().collect();
                 // (read_slot, Some=upsert | None=delete).
                 let indexed_updates = vec![
@@ -311,6 +346,7 @@ pub mod test {
                     (4, Some(val(5_003))),
                     (5, None),
                     (6, Some(val(5_004))),
+                    (7, Some(val(5_005))),
                 ];
                 // Upserts for unread keys: create, update existing, override key(5), delete existing.
                 let upserts = vec![

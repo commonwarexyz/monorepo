@@ -263,6 +263,9 @@ where
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     ///
+    /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
+    /// this method if more keys must be read into the staged index space.
+    ///
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
     /// [`expand`](AnyStaged::expand) ranges.
     pub async fn set(
@@ -296,6 +299,9 @@ where
     Operation<F, ordered::Update<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
+    /// this method if more keys must be read into the staged index space.
     ///
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
     /// [`expand`](AnyStaged::expand) ranges.

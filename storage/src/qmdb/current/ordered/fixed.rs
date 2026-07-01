@@ -210,8 +210,9 @@ pub mod test {
     /// The staged path (`stage` + `Staged::set`) must produce a root byte-identical to an explicit
     /// `get_many` + `write` + `merkleize` over the current ordered layer, across updates, deletes
     /// (which fall back to normal mutations and rewrite predecessors via a snapshot-bucket scan),
-    /// upserts, duplicate read slots, and missing keys, both rooted at the DB (D=0) and through one
-    /// pending ancestor (D=1). `OneCap` forces collisions, stressing predecessor rewrites.
+    /// upserts, duplicate read slots, missing keys, and prefix-then-suffix expansion, rooted at the
+    /// DB (D=0) and through one or two pending ancestors (D=1/D=2). `OneCap` forces collisions,
+    /// stressing predecessor rewrites.
     #[test_traced("WARN")]
     pub fn test_current_ordered_fixed_staged_merkleize_parity() {
         fn key(i: u64) -> Digest {
@@ -232,26 +233,57 @@ pub mod test {
             db.apply_batch(seed).await.unwrap();
             db.commit().await.unwrap();
 
-            for depth in [0u8, 1u8] {
-                let parent = if depth == 1 {
-                    let mut p = db.new_batch();
-                    for i in 0..50u64 {
-                        p = p.write(key(i), Some(val(i + 1_000)));
+            for depth in [0u8, 1u8, 2u8] {
+                // Keep every uncommitted ancestor alive until the child is merkleized; speculative
+                // batch Merkle lookups walk weak parent links for in-memory ancestor nodes.
+                let mut stack = Vec::new();
+                match depth {
+                    0 => {}
+                    1 => {
+                        let mut p = db.new_batch();
+                        for i in 0..50u64 {
+                            p = p.write(key(i), Some(val(i + 1_000)));
+                        }
+                        for i in 100..110u64 {
+                            p = p.write(key(i), None);
+                        }
+                        stack.push(p.merkleize(&db, None).await.unwrap());
                     }
-                    for i in 100..110u64 {
-                        p = p.write(key(i), None);
+                    2 => {
+                        let mut grandparent = db.new_batch();
+                        for i in 0..10u64 {
+                            grandparent = grandparent.write(key(i), Some(val(i + 1_000)));
+                        }
+                        for i in 100..110u64 {
+                            grandparent = grandparent.write(key(i), None);
+                        }
+                        let grandparent = grandparent.merkleize(&db, None).await.unwrap();
+
+                        let mut p = grandparent.new_batch::<Sha256>();
+                        for i in 20..30u64 {
+                            p = p.write(key(i), Some(val(i + 2_000)));
+                        }
+                        let p = p.merkleize(&db, None).await.unwrap();
+                        stack.push(grandparent);
+                        stack.push(p);
                     }
-                    Some(p.merkleize(&db, None).await.unwrap())
-                } else {
-                    None
+                    _ => unreachable!("covered depths"),
                 };
                 let new_batch = || {
-                    parent
-                        .as_ref()
+                    stack
+                        .last()
                         .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
                 };
 
-                let read_keys = [key(5), key(6), key(9000), key(5), key(0), key(20), key(105)];
+                let read_keys = [
+                    key(5),
+                    key(6),
+                    key(9000),
+                    key(5),
+                    key(0),
+                    key(20),
+                    key(105),
+                ];
                 let keys: Vec<&Digest> = read_keys.iter().collect();
                 let indexed_updates = vec![
                     (0, Some(val(5_000))),
@@ -290,6 +322,69 @@ pub mod test {
                     "value mismatch at depth={depth}"
                 );
                 assert_eq!(explicit_root, staged_root, "root mismatch at depth={depth}");
+
+                let split = 3;
+                let (mut expanded_values, staged) =
+                    new_batch().stage(&keys[..split], &db).await.unwrap();
+                let (range, suffix_values, staged) =
+                    staged.expand(&keys[split..], &db).await.unwrap();
+                assert_eq!(range, split..keys.len());
+                expanded_values.extend(suffix_values);
+                let expanded_root = staged
+                    .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                    .await
+                    .unwrap()
+                    .root();
+
+                assert_eq!(
+                    explicit_values, expanded_values,
+                    "expanded value mismatch at depth={depth}"
+                );
+                assert_eq!(
+                    explicit_root, expanded_root,
+                    "expanded root mismatch at depth={depth}"
+                );
+
+                let planned = val(7_000);
+                let duplicate_update = val(7_001);
+                let (first_values, staged) = new_batch().stage(&keys[..1], &db).await.unwrap();
+                let (duplicate_range, duplicate_values, staged) =
+                    staged.expand(&keys[..1], &db).await.unwrap();
+                assert_eq!(duplicate_range, 1..2);
+                assert_eq!(
+                    first_values[0], duplicate_values[0],
+                    "duplicate expansion must assign a new slot without changing the base read"
+                );
+                assert_ne!(
+                    duplicate_values[0],
+                    Some(planned),
+                    "expand must not observe values computed for earlier staged slots"
+                );
+
+                let duplicate_root = staged
+                    .set(
+                        vec![
+                            (0, Some(planned)),
+                            (duplicate_range.start, Some(duplicate_update)),
+                        ],
+                        Vec::new(),
+                        &db,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                    .root();
+                let expected_duplicate_root = new_batch()
+                    .write(read_keys[0], Some(planned))
+                    .write(read_keys[0], Some(duplicate_update))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap()
+                    .root();
+                assert_eq!(
+                    expected_duplicate_root, duplicate_root,
+                    "duplicate expanded slots should use normal update-order semantics"
+                );
             }
         });
     }
