@@ -118,19 +118,19 @@ impl<B: Blob> Write<B> {
         }
 
         // Entirely in buffered tip.
-        if offset >= self.buffer.offset() {
-            let start = (offset - self.buffer.offset()) as usize;
+        if offset >= self.buffer.offset {
+            let start = (offset - self.buffer.offset) as usize;
             let end = start + len;
             return Ok(self.buffer.slice(start..end).into());
         }
 
         // Entirely in blob.
-        if end_offset <= self.buffer.offset() {
+        if end_offset <= self.buffer.offset {
             return self.read_blob(offset, len).await;
         }
 
         // Overlaps blob and buffered tip.
-        let blob_len = (self.buffer.offset() - offset) as usize;
+        let blob_len = (self.buffer.offset - offset) as usize;
         let tip_len = len - blob_len;
         let tip = self.buffer.slice(..tip_len);
 
@@ -179,7 +179,7 @@ impl<B: Blob> Write<B> {
             // Chunk cannot be merged, so flush the buffer if the range overlaps, and check
             // if merge is possible after.
             let chunk_end = current_offset + chunk_len as u64;
-            if self.buffer.offset() < chunk_end && !self.buffer.is_empty() {
+            if self.buffer.offset < chunk_end && !self.buffer.is_empty() {
                 self.flush_buffered(false).await?;
                 if self.buffer.merge(chunk, current_offset) {
                     bufs.advance(chunk_len);
@@ -200,7 +200,7 @@ impl<B: Blob> Write<B> {
 
             // Maintain the "buffer at tip" invariant by advancing offset to the end of this
             // write if it extended the underlying blob.
-            self.buffer.advance_to(current_offset);
+            self.buffer.offset = self.buffer.offset.max(current_offset);
         }
 
         Ok(())
@@ -251,7 +251,7 @@ impl<B: Blob> Write<B> {
             return Ok(());
         }
 
-        let offset = self.buffer.offset();
+        let offset = self.buffer.offset;
         let buffered = self.buffer.len();
         let buf = self.buffer.slice(..);
         if durable {

@@ -215,6 +215,49 @@ mod tests {
         });
     }
 
+    // An overwrite sync must also truncate trailing bytes a dropped rewrite may have left in
+    // the target blob; otherwise its checksum is not at the physical end and recovery discards
+    // the acknowledged sync.
+    #[test_traced]
+    fn test_sync_overwrite_truncates_stale_blob_bytes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Rewrite both blobs, then position the cursor so the next sync overwrites "left".
+            metadata.put(U64::new(1), b"aaaa".to_vec());
+            metadata.sync().await.unwrap();
+            metadata.sync().await.unwrap();
+            metadata.sync().await.unwrap();
+
+            // Simulate a dropped rewrite whose write still landed: leave bytes in "left"
+            // beyond the length the in-memory mirror knows about.
+            let (blob, size) = context.open("test", b"left").await.unwrap();
+            blob.write_at_sync(size, vec![0xAB; 512]).await.unwrap();
+            drop(blob);
+
+            // A same-length update keeps the next sync on the overwrite path.
+            metadata.put(U64::new(1), b"bbbb".to_vec());
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_overwrites_total 2"));
+
+            // The synced state must survive a restart despite the stale trailing bytes.
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)), Some(&b"bbbb".to_vec()));
+        });
+    }
+
     #[test_traced]
     fn test_put_returns_previous_value() {
         let executor = deterministic::Runner::default();

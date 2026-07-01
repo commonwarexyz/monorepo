@@ -28,7 +28,7 @@ pub(super) struct Buffer {
     ///
     /// This represents the logical position in the blob where `data[0]` would be written. The
     /// buffer is maintained at the "tip" to support efficient size calculation and appends.
-    offset: u64,
+    pub(super) offset: u64,
 
     /// The maximum size of the buffer.
     pub(super) capacity: usize,
@@ -60,11 +60,6 @@ impl Buffer {
     /// Returns the current logical size of the blob including any buffered data.
     pub(super) const fn size(&self) -> u64 {
         self.offset + self.len as u64
-    }
-
-    /// Returns the offset in the blob where the buffered data starts.
-    pub(super) const fn offset(&self) -> u64 {
-        self.offset
     }
 
     /// Returns the logical number of buffered bytes.
@@ -140,25 +135,6 @@ impl Buffer {
             self.len = 0;
             self.data = IoBuf::default();
             self.offset = len;
-        }
-    }
-
-    /// Discards buffered bytes and repositions the tip at `offset`, keeping backing allocation
-    /// for reuse.
-    pub(super) const fn reset_to(&mut self, offset: u64) {
-        self.len = 0;
-        self.offset = offset;
-    }
-
-    /// Advances an empty tip to `offset` if it lies beyond the current position.
-    ///
-    /// # Panics
-    ///
-    /// Panics if an actual advancement would skip over buffered bytes.
-    pub(super) fn advance_to(&mut self, offset: u64) {
-        if offset > self.offset {
-            assert!(self.is_empty(), "cannot advance past buffered bytes");
-            self.offset = offset;
         }
     }
 
@@ -244,6 +220,13 @@ impl Buffer {
         self.len = writable.len();
         self.data = writable.freeze();
         over_capacity
+    }
+
+    /// Clears buffered data while preserving offset.
+    ///
+    /// This resets logical length and keeps backing allocation for reuse.
+    pub(super) const fn clear(&mut self) {
+        self.len = 0;
     }
 }
 

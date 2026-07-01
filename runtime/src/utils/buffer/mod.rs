@@ -157,7 +157,6 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
-    use futures::pin_mut;
     use std::sync::Arc;
 
     #[derive(Default)]
@@ -318,6 +317,13 @@ mod tests {
                 let _ = release.await;
             }
         }
+    }
+
+    /// Drives `fut` until it parks at an armed [Gate], then drops it to simulate cancellation.
+    pub async fn cancel_at_gate<F: futures::Future>(fut: F, started: oneshot::Receiver<()>) {
+        futures::pin_mut!(fut);
+        assert!(fut.as_mut().now_or_never().is_none());
+        started.await.unwrap();
     }
 
     /// Blob wrapper that lets tests hold one write open until explicitly released.
@@ -1178,12 +1184,7 @@ mod tests {
 
             // The overlapping write must flush the old tip before it can continue.
             // Drop that future while the flush write is blocked.
-            {
-                let write = writer.write_at(5, b"0123456789");
-                pin_mut!(write);
-                assert!(write.as_mut().now_or_never().is_none());
-                started.await.unwrap();
-            }
+            cancel_at_gate(writer.write_at(5, b"0123456789"), started).await;
             drop(release);
 
             // The canceled flush must not have drained the tip or touched the blob.
@@ -1288,12 +1289,7 @@ mod tests {
 
             writer.write_at(0, b"hello").await.unwrap();
             // Growing past buffered data must flush that data first. Cancel during that flush.
-            {
-                let resize = writer.resize(10);
-                pin_mut!(resize);
-                assert!(resize.as_mut().now_or_never().is_none());
-                started.await.unwrap();
-            }
+            cancel_at_gate(writer.resize(10), started).await;
             drop(release);
 
             // The resize was canceled, so the writer should still look like it did before.
@@ -1345,12 +1341,7 @@ mod tests {
 
             writer.write_at(0, b"hello").await.unwrap();
             // An equal-size resize must flush buffered data first. Cancel during that flush.
-            {
-                let resize = writer.resize(5);
-                pin_mut!(resize);
-                assert!(resize.as_mut().now_or_never().is_none());
-                started.await.unwrap();
-            }
+            cancel_at_gate(writer.resize(5), started).await;
             drop(release);
 
             // The resize was canceled, so the writer should still look like it did before.
@@ -2005,16 +1996,13 @@ mod tests {
             let inner = SyncTrackingBlob::new();
             let (blob, started, release) = DelayedWriteBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+            // Clear the constructor's dirty state so the canceled sync takes the
+            // write-and-sync-in-one path.
             writer.sync().await.unwrap();
 
             writer.write_at(0, b"abc").await.unwrap();
             // Cancel while sync is trying to write the buffered tip to the blob.
-            {
-                let sync = writer.sync();
-                pin_mut!(sync);
-                assert!(sync.as_mut().now_or_never().is_none());
-                started.await.unwrap();
-            }
+            cancel_at_gate(writer.sync(), started).await;
             drop(release);
 
             // The tip should still be visible, and the blob should not have seen the write.
