@@ -32,7 +32,6 @@ const MAX_DESCRIBE_BATCH: usize = 1000;
 /// Pre-signed URLs for tools per architecture
 struct ToolUrls {
     docker: String,
-    libjemalloc: String,
     logrotate: String,
 }
 
@@ -277,14 +276,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     .await?;
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
-        let [docker_url, libjemalloc_url, logrotate_url]: [String; 3] = try_join_all([
+        let [docker_url, logrotate_url]: [String; 2] = try_join_all([
             cache_tool(
                 docker_bin_s3_key(DOCKER_VERSION, *arch),
                 docker_download_url(DOCKER_VERSION, *arch),
-            ),
-            cache_tool(
-                libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch),
-                libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch),
             ),
             cache_tool(
                 logrotate_bin_s3_key(LOGROTATE_VERSION, *arch),
@@ -298,7 +293,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             *arch,
             ToolUrls {
                 docker: docker_url,
-                libjemalloc: libjemalloc_url,
                 logrotate: logrotate_url,
             },
         );
@@ -851,7 +845,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Cache binary_service per architecture
     let mut binary_service_urls_by_arch: HashMap<Architecture, String> = HashMap::new();
     for arch in &architectures_needed {
-        let binary_service_content = binary_service(*arch);
+        let binary_service_content = binary_service();
         let temp_path = tag_directory.join(format!("binary-{}.service", arch.as_str()));
         std::fs::write(&temp_path, &binary_service_content)?;
         let binary_service_url = cache_and_presign(
@@ -1033,7 +1027,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     )?;
 
     // Build instance URLs map with architecture-specific tool URLs
-    let mut instance_urls_map: HashMap<String, (InstanceUrls, Architecture)> = HashMap::new();
+    let mut instance_urls_map: HashMap<String, InstanceUrls> = HashMap::new();
     for deployment in &deployments {
         let name = &deployment.instance.name;
         let arch = instance_architectures[name];
@@ -1043,25 +1037,21 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
         instance_urls_map.insert(
             name.clone(),
-            (
-                InstanceUrls {
-                    binary: instance_binary_urls[name].clone(),
-                    config: instance_config_urls[name].clone(),
-                    hosts: hosts_url.clone(),
-                    promtail_config: promtail_digest_to_url[promtail_digest].clone(),
-                    binary_service: binary_service_urls_by_arch[&arch].clone(),
-                    pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
-                    pyroscope_service: pyroscope_agent_service_url.clone(),
-                    pyroscope_timer: pyroscope_agent_timer_url.clone(),
-                    docker_tgz: tool_urls.docker.clone(),
-                    libjemalloc_deb: tool_urls.libjemalloc.clone(),
-                    logrotate_deb: tool_urls.logrotate.clone(),
-                    images: binary_images()
-                        .map(|image| (image, image_urls_by_arch[&arch][image].clone()))
-                        .collect(),
-                },
-                arch,
-            ),
+            InstanceUrls {
+                binary: instance_binary_urls[name].clone(),
+                config: instance_config_urls[name].clone(),
+                hosts: hosts_url.clone(),
+                promtail_config: promtail_digest_to_url[promtail_digest].clone(),
+                binary_service: binary_service_urls_by_arch[&arch].clone(),
+                pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
+                pyroscope_service: pyroscope_agent_service_url.clone(),
+                pyroscope_timer: pyroscope_agent_timer_url.clone(),
+                docker_tgz: tool_urls.docker.clone(),
+                logrotate_deb: tool_urls.logrotate.clone(),
+                images: binary_images()
+                    .map(|image| (image, image_urls_by_arch[&arch][image].clone()))
+                    .collect(),
+            },
         );
     }
     info!("uploaded config files to S3");
@@ -1098,12 +1088,12 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let ec2_client = ec2_clients[&instance.region].clone();
             let ip = deployment.ip.clone();
             let nvme = nvme_supported_by_instance_type[&instance.instance_type];
-            let (urls, arch) = instance_urls_map.remove(&instance.name).unwrap();
-            (instance, deployment_id, ec2_client, ip, urls, arch, nvme)
+            let urls = instance_urls_map.remove(&instance.name).unwrap();
+            (instance, deployment_id, ec2_client, ip, urls, nvme)
         })
         .collect();
     let binary_futures = binary_configs.into_iter().map(
-        |(instance, deployment_id, ec2_client, ip, urls, arch, nvme)| async move {
+        |(instance, deployment_id, ec2_client, ip, urls, nvme)| async move {
             let start = Instant::now();
 
             wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
@@ -1123,7 +1113,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             ssh_execute(
                 private_key,
                 &ip,
-                &install_binary_setup_cmd(instance.profiling, arch),
+                &install_binary_setup_cmd(instance.profiling),
             )
             .await?;
             let setup = format!("{:.1}s", setup_start.elapsed().as_secs_f64());

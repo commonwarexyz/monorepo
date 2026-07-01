@@ -135,8 +135,9 @@ impl Verifier {
         // Split all signatures into shards for parallel processing. Each shard is roughly
         // `n_signatures / cores` in size. Random seeds are generated for each shard, derived
         // from the provided RNG, to compute a random scalar for each signature in the shard.
+        let manual = strategy.manual();
         let groups: Vec<_> = self.signatures.into_iter().collect();
-        let shard_count = strategy.parallelism_hint().max(1).min(groups.len().max(1));
+        let shard_count = manual.parallelism_hint().min(groups.len().max(1));
         let shard_size = groups.len().div_ceil(shard_count).max(1);
         let mut shards = Vec::with_capacity(shard_count);
         for shard in groups.chunks(shard_size) {
@@ -144,7 +145,7 @@ impl Verifier {
             shards.push((shard, seed));
         }
 
-        strategy.fold(
+        manual.fold(
             shards,
             || Ok(()),
             |result, (shard, seed)| {

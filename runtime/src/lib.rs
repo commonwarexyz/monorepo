@@ -57,6 +57,7 @@ stability_scope!(BETA {
         io::Error as IoError,
         net::SocketAddr,
         num::NonZeroUsize,
+        sync::Arc,
         time::{Duration, SystemTime},
     };
     pub(crate) use telemetry::metrics::{child_label, prefixed_name, METRICS_PREFIX};
@@ -77,7 +78,7 @@ stability_scope!(BETA {
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
     /// Errors that can occur when interacting with the runtime.
-    #[derive(Error, Debug)]
+    #[derive(Error, Debug, Clone)]
     pub enum Error {
         #[error("exited")]
         Exited,
@@ -110,13 +111,13 @@ stability_scope!(BETA {
         #[error("partition corrupt: {0}")]
         PartitionCorrupt(String),
         #[error("blob open failed: {0}/{1} error: {2}")]
-        BlobOpenFailed(String, String, IoError),
+        BlobOpenFailed(String, String, Arc<IoError>),
         #[error("blob missing: {0}/{1}")]
         BlobMissing(String, String),
         #[error("blob resize failed: {0}/{1} error: {2}")]
-        BlobResizeFailed(String, String, IoError),
+        BlobResizeFailed(String, String, Arc<IoError>),
         #[error("blob sync failed: {0}/{1} error: {2}")]
-        BlobSyncFailed(String, String, IoError),
+        BlobSyncFailed(String, String, Arc<IoError>),
         #[error("blob insufficient length")]
         BlobInsufficientLength,
         #[error("blob corrupt: {0}/{1} reason: {2}")]
@@ -135,9 +136,15 @@ stability_scope!(BETA {
         #[error("offsets invalid")]
         OffsetsInvalid,
         #[error("io error: {0}")]
-        Io(#[from] IoError),
+        Io(Arc<IoError>),
         #[error("buffer pool: {0}")]
         Pool(#[from] PoolError),
+    }
+
+    impl From<IoError> for Error {
+        fn from(err: IoError) -> Self {
+            Self::Io(Arc::new(err))
+        }
     }
 
     /// Interface that any task scheduler must implement to start
@@ -846,6 +853,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_macros::select;
+    use commonware_parallel::Strategy as _;
     use commonware_utils::{
         channel::{mpsc, oneshot},
         futures::Pool as FuturesPool,
@@ -3924,6 +3932,42 @@ mod tests {
             pool.install(|| {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
+        });
+    }
+
+    #[test]
+    fn test_deterministic_nested_parallel_strategy_uses_spawn_worker() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context
+                .child("pool")
+                .create_strategy(NZUsize!(1))
+                .unwrap()
+                .manual();
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
+        });
+    }
+
+    #[test]
+    fn test_tokio_nested_parallel_strategy_uses_spawn_worker() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context
+                .child("pool")
+                .create_strategy(NZUsize!(1))
+                .unwrap()
+                .manual();
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
         });
     }
 
