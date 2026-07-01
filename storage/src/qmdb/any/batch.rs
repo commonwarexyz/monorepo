@@ -1143,57 +1143,48 @@ where
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
     pub(crate) fn into_parts(
-        self,
+        mut self,
         mut updates: Vec<(usize, Option<U::Value>)>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
         stage_deletes: bool,
     ) -> (UnmerkleizedBatch<F, H, U, S>, StagedUpdates<F, U>) {
-        let Staged {
-            mut batch,
-            keys,
-            cache,
-        } = self;
         let mut staged_updates = StagedUpdates::new();
         if updates.is_empty() {
-            return (Self::apply_upserts(batch, upserts), staged_updates);
+            return (Self::apply_upserts(self.batch, upserts), staged_updates);
         }
+
+        let upsert_keys = if upserts.is_empty() {
+            None
+        } else {
+            Some(
+                upserts
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .collect::<AHashSet<_>>(),
+            )
+        };
 
         // Each update value is consumed at most once: last-write-wins means at most one update
         // index survives per read slot, so values are moved out with `Option::take` rather than
         // cloned.
-        let mut latest = vec![None; keys.len()];
-        {
-            let upsert_keys = if upserts.is_empty() {
-                None
-            } else {
-                Some(
-                    upserts
-                        .iter()
-                        .map(|(key, _)| key)
-                        .collect::<AHashSet<_>>(),
-                )
-            };
-
-            let mut seen = AHashMap::with_capacity(updates.len());
-            for (update_idx, (slot, _)) in updates.iter().enumerate() {
-                assert!(
-                    *slot < keys.len(),
-                    "update index out of staged read range"
-                );
-                let key = &keys[*slot];
-                if let Some(prev) = seen.insert(key, update_idx) {
-                    latest[updates[prev].0] = None;
-                }
-                latest[*slot] = Some(update_idx);
+        let mut latest = vec![None; self.keys.len()];
+        let mut seen = AHashMap::with_capacity(updates.len());
+        for (update_idx, (slot, _)) in updates.iter().enumerate() {
+            assert!(
+                *slot < self.keys.len(),
+                "update index out of staged read range"
+            );
+            if let Some(prev) = seen.insert(&self.keys[*slot], update_idx) {
+                latest[updates[prev].0] = None;
             }
+            latest[*slot] = Some(update_idx);
+        }
 
-            // Upserts are applied last, so matching staged updates can be ignored.
-            if let Some(upsert_keys) = &upsert_keys {
-                for (slot, update_idx) in latest.iter_mut().enumerate() {
-                    let key = &keys[slot];
-                    if update_idx.is_some() && upsert_keys.contains(key) {
-                        *update_idx = None;
-                    }
+        // Upserts are applied last, so matching staged updates can be ignored.
+        if let Some(upsert_keys) = &upsert_keys {
+            for (slot, update_idx) in latest.iter_mut().enumerate() {
+                if update_idx.is_some() && upsert_keys.contains(&self.keys[slot]) {
+                    *update_idx = None;
                 }
             }
         }
@@ -1202,8 +1193,10 @@ where
         // location/payload. Ordered deletes, keys resolved from ancestors, and keys missing from
         // committed state fall back to normal mutations: leaving `latest[slot]` set routes them to
         // the fallback loop below.
-        let mut staged_slots = Vec::with_capacity(updates.len().min(cache.cached.len()));
-        for (slot, loc, payload) in cache.cached {
+        staged_updates
+            .entries
+            .reserve(updates.len().min(self.cache.cached.len()));
+        for (slot, loc, payload) in self.cache.cached {
             let Some(update_idx) = latest[slot] else {
                 continue;
             };
@@ -1211,32 +1204,22 @@ where
                 continue;
             }
             latest[slot] = None;
-            staged_slots.push((slot, loc, payload, update_idx));
+            let key = self.keys[slot].clone();
+            // This staged update is the surviving write for `key`; do not also emit an older
+            // batch mutation for the same key.
+            self.batch.mutations.remove(&key);
+            let value = updates[update_idx].1.take();
+            staged_updates.entries.push((key, loc, payload, value));
         }
-        staged_slots.sort_unstable_by_key(|entry| entry.0);
-
-        staged_updates.entries.reserve(staged_slots.len());
-        let mut staged_slots = staged_slots.into_iter().peekable();
-        for (slot, key) in keys.into_iter().enumerate() {
-            if let Some((_, loc, payload, update_idx)) =
-                staged_slots.next_if(|(staged_slot, _, _, _)| *staged_slot == slot)
-            {
-                // This staged update is the surviving write for `key`; do not also emit an older
-                // batch mutation for the same key.
-                batch.mutations.remove(&key);
-                let value = updates[update_idx].1.take();
-                staged_updates.entries.push((key, loc, payload, value));
-                continue;
-            }
-
-            let Some(update_idx) = latest[slot] else {
+        staged_updates.entries.sort_unstable_by_key(|entry| entry.1);
+        for (slot, update_idx) in latest.into_iter().enumerate() {
+            let Some(update_idx) = update_idx else {
                 continue;
             };
             let value = updates[update_idx].1.take();
-            batch.mutations.insert(key, value);
+            self.batch.mutations.insert(self.keys[slot].clone(), value);
         }
-        staged_updates.entries.sort_unstable_by_key(|entry| entry.1);
-        (Self::apply_upserts(batch, upserts), staged_updates)
+        (Self::apply_upserts(self.batch, upserts), staged_updates)
     }
 }
 
