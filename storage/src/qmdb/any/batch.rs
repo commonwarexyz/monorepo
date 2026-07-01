@@ -2540,6 +2540,7 @@ mod tests {
             ordered::fixed::Db as OrderedFixedDb,
             test::{colliding_digest, fixed_db_config},
             unordered::fixed::Db as UnorderedFixedDb,
+            value::FixedEncoding,
             BITMAP_CHUNK_BYTES,
         },
         translator::OneCap,
@@ -3367,6 +3368,137 @@ mod tests {
             assert_eq!(db.get(&unread_missing).await.unwrap(), upserts[1].1);
             assert_eq!(db.get(&del_read).await.unwrap(), None);
             assert_eq!(db.get(&del_unread).await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn unordered_staged_into_parts_collapses_duplicates_before_sorting() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            type TestUpdate = update::Unordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
+
+            let config = fixed_db_config::<OneCap>("unordered-staged-into-parts", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let k0 = colliding_digest(0x90, 0);
+            let k1 = colliding_digest(0x90, 1);
+            let k2 = colliding_digest(0x90, 2);
+            let k3 = colliding_digest(0x90, 3);
+            let old0 = colliding_digest(0x91, 0);
+            let old1 = colliding_digest(0x91, 1);
+            let new0 = colliding_digest(0x91, 2);
+            let staged_k2 = colliding_digest(0x91, 3);
+            let fallback = colliding_digest(0x91, 4);
+            let upsert = colliding_digest(0x91, 5);
+
+            let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
+                batch: db.new_batch(),
+                keys: vec![k0, k1, k0, k2, k1, k3],
+                cache: StagedCache {
+                    cached: vec![
+                        (0, loc(30), ()),
+                        (1, loc(10), ()),
+                        (2, loc(30), ()),
+                        (3, loc(40), ()),
+                        (4, loc(10), ()),
+                    ],
+                },
+            };
+
+            let (batch, staged_updates) = staged.into_parts(
+                vec![
+                    (0, Some(old0)),
+                    (1, Some(old1)),
+                    (2, Some(new0)),
+                    (3, Some(staged_k2)),
+                    (4, None),
+                    (5, Some(fallback)),
+                ],
+                vec![(k2, Some(upsert))],
+                true,
+            );
+
+            assert_eq!(
+                staged_updates.entries,
+                vec![(k1, loc(10), (), None), (k0, loc(30), (), Some(new0))]
+            );
+            assert_eq!(batch.mutations.len(), 2);
+            assert_eq!(batch.mutations.get(&k2), Some(&Some(upsert)));
+            assert_eq!(batch.mutations.get(&k3), Some(&Some(fallback)));
+            assert!(!batch.mutations.contains_key(&k0));
+            assert!(!batch.mutations.contains_key(&k1));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn ordered_staged_into_parts_keeps_deletes_as_mutations() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            type TestUpdate = update::Ordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
+
+            let config = fixed_db_config::<OneCap>("ordered-staged-into-parts", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let delete_key = colliding_digest(0x92, 0);
+            let update_a = colliding_digest(0x92, 1);
+            let update_b = colliding_digest(0x92, 2);
+            let next_delete = colliding_digest(0x93, 0);
+            let next_a = colliding_digest(0x93, 1);
+            let next_b = colliding_digest(0x93, 2);
+            let value_a = colliding_digest(0x94, 0);
+            let value_b = colliding_digest(0x94, 1);
+
+            let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
+                batch: db.new_batch(),
+                keys: vec![delete_key, update_a, update_b],
+                cache: StagedCache {
+                    cached: vec![
+                        (0, loc(11), next_delete),
+                        (1, loc(30), next_a),
+                        (2, loc(7), next_b),
+                    ],
+                },
+            };
+
+            let (batch, staged_updates) = staged.into_parts(
+                vec![(0, None), (1, Some(value_a)), (2, Some(value_b))],
+                Vec::new(),
+                false,
+            );
+
+            assert_eq!(
+                staged_updates.entries,
+                vec![
+                    (update_b, loc(7), next_b, Some(value_b)),
+                    (update_a, loc(30), next_a, Some(value_a)),
+                ]
+            );
+            assert_eq!(batch.mutations.len(), 1);
+            assert_eq!(batch.mutations.get(&delete_key), Some(&None));
+            assert!(!batch.mutations.contains_key(&update_a));
+            assert!(!batch.mutations.contains_key(&update_b));
 
             db.destroy().await.unwrap();
         });
