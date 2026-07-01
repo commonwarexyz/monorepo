@@ -24,7 +24,9 @@ impl<T: Read<Cfg = ()>> ReadExt for T {}
 
 /// Trait for types that are unit-like, i.e. have only one possible value.
 ///
-/// This is typically used to implement the `DefaultExt` trait for types that are unit-like.
+/// Used to mark configuration types that have a single sensible value and can be supplied via
+/// `Default` to extension traits like [DecodeExt], [ReadRangeExt], and [DecodeRangeExt] for
+/// ergonomic APIs when the configuration is uniquely determined.
 pub trait IsUnit: Default {}
 
 // Generate `IsUnit` implementations for types with only one possible value.
