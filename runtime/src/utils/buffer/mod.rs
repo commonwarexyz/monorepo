@@ -43,15 +43,6 @@ enum SyncState {
 }
 
 impl SyncState {
-    /// Mark a new unsynced mutation.
-    fn mark_dirty(&mut self) {
-        assert!(
-            !matches!(self, Self::Pending(_)),
-            "pending sync must be joined before marking dirty"
-        );
-        *self = Self::Dirty;
-    }
-
     /// Wait for an in-flight sync before reusing or mutating the blob.
     async fn wait_for_pending(&mut self) -> Result<(), crate::Error> {
         let Self::Pending(pending) = self else {
@@ -108,6 +99,14 @@ impl SyncState {
             }
             Self::Pending(_) => unreachable!("pending sync waited above"),
         }
+    }
+
+    /// Resize the blob and require a later sync.
+    async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
+        self.wait_for_pending().await?;
+        blob.resize(len).await?;
+        *self = Self::Dirty;
+        Ok(())
     }
 
     /// Make all pending mutations durable before returning.
@@ -1645,6 +1644,50 @@ mod tests {
             assert_eq!(writes, 1);
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 1);
+        });
+    }
+
+    // Verifies overlapping writes wait before flushing buffered bytes while start_sync is pending.
+    #[test_traced]
+    fn test_write_at_overlap_flush_waits_for_outstanding_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            inner.write_at(0, b"xxx").await.unwrap();
+
+            let (blob, started_rx, blocked_rx, release_tx) =
+                DelayedStartSyncBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, inner.size(), NZUsize!(8));
+
+            let handle = writer.start_sync().await;
+            started_rx.await.expect("started sync was not issued");
+
+            // This write stays buffered at the tip while the earlier sync is pending.
+            writer.write_at(3, b"abc").await.unwrap();
+
+            // An overlapping write would flush the tip, so it must stop at the pending sync first.
+            let mut write = Box::pin(writer.write_at(2, b"ZZ"));
+            assert!(
+                write.as_mut().now_or_never().is_none(),
+                "overlapping write must wait for the outstanding start_sync before flushing"
+            );
+            blocked_rx.await.expect("write never waited on start_sync");
+            drop(write);
+
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Dropping the parked write leaves the buffered tip available for the retry.
+            release_tx.send(Ok(())).unwrap();
+            writer.write_at(2, b"ZZ").await.unwrap();
+            handle.await.unwrap();
+
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 3);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
         });
     }
 
