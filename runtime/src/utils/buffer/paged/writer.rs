@@ -1979,6 +1979,100 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_append_owned_cancel_preserves_state() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"append_owned_cancel")
+                .await
+                .unwrap();
+            let (blob, started, release) = DelayedWriteBlob::new(inner);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+            {
+                let append = writer.append_owned(IoBuf::from(data.clone()));
+                pin_mut!(append);
+                assert!(append.as_mut().now_or_never().is_none());
+                started.await.unwrap();
+            }
+            drop(release);
+
+            assert_eq!(writer.current_page, 0);
+            assert!(writer.partial_page_state.is_none());
+            assert_eq!(writer.size(), 0);
+
+            let mut probe = vec![0u8; PAGE_SIZE.get() as usize];
+            assert_eq!(writer.cache_ref.read_cached(writer.id, &mut probe, 0), 0);
+
+            writer
+                .append_owned(IoBuf::from(data.clone()))
+                .await
+                .unwrap();
+            assert_eq!(writer.size(), data.len() as u64);
+            let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"append_owned_cancel")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), data.len() as u64);
+            let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_sync_cancel_preserves_paged_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"sync_cancel")
+                .await
+                .unwrap();
+            let (blob, started, release) = DelayedWriteBlob::new(inner);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..50).map(|i| i as u8).collect();
+            writer.append(&data).await.unwrap();
+
+            {
+                let sync = writer.sync();
+                pin_mut!(sync);
+                assert!(sync.as_mut().now_or_never().is_none());
+                started.await.unwrap();
+            }
+            drop(release);
+
+            assert_eq!(writer.current_page, 0);
+            assert!(writer.partial_page_state.is_none());
+            assert_eq!(writer.size(), data.len() as u64);
+            assert_eq!(writer.buffer.as_ref(), data.as_slice());
+            let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+
+            writer.sync().await.unwrap();
+            assert_eq!(writer.current_page, 0);
+            assert!(writer.partial_page_state.is_some());
+            let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_append_owned_exact_page_multiple_and_small() {
         // An owned append of an exact page multiple leaves an empty tip that later buffered and
         // small owned appends continue from; small owned appends use the buffered path.
