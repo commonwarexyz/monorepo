@@ -477,7 +477,6 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> Result<(), Error> {
         let mut hasher = H::default();
-
         // Validate position
         if position >= self.leaf_count {
             return Err(Error::InvalidPosition(position));
@@ -552,7 +551,6 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> Result<(), Error> {
         let mut hasher = H::default();
-
         // Handle empty case
         if elements.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {

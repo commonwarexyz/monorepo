@@ -6,7 +6,7 @@
 //! ```rust
 //! use commonware_cryptography::{Hasher, Sha256};
 //!
-//! // Hash data in a single shot
+//! // Hash data in a single shot (fastest path)
 //! let digest = Sha256::hash([b"hello,", b"world!"]);
 //! println!("digest: {:?}", digest);
 //!
@@ -160,17 +160,20 @@ impl Hasher for Sha256 {
         }
     }
 
+    #[inline]
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.hasher.update(message);
         self
     }
 
+    #[inline]
     fn finalize(&mut self) -> Self::Digest {
         let finalized = self.hasher.finalize_reset();
         let array: [u8; DIGEST_LENGTH] = finalized.into();
         Self::Digest::from(array)
     }
 
+    #[inline]
     fn reset(&mut self) -> &mut Self {
         self.hasher = ISha256::new();
         self

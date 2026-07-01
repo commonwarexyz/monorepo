@@ -123,8 +123,7 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
 
         if let Some(seed) = &self.seed {
             permutation.sort_by_key(|&index| {
-                let index = index.get().encode();
-                H::hash([seed.as_slice(), index.as_ref()])
+                H::hash([seed, &index.get().encode()])
             });
         }
 

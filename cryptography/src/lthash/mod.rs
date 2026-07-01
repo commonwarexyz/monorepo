@@ -163,7 +163,7 @@ impl LtHash {
         let mut bytes = [0u8; LTHASH_SIZE];
 
         // Use Blake3 in XOF mode to expand the data to LTHASH_SIZE bytes
-        let mut hasher = CoreBlake3::default();
+        let mut hasher = CoreBlake3::new();
         hasher.update(data);
         let mut output_reader = hasher.finalize_xof();
         output_reader.fill(&mut bytes);

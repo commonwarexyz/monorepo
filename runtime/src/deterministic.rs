@@ -164,7 +164,7 @@ impl Auditor {
     {
         let mut digest = self.digest.lock();
 
-        let mut hasher = Sha256::default();
+        let mut hasher = Sha256::new();
         hasher.update(digest.as_ref());
         hasher.update(label);
         payload(&mut hasher);
