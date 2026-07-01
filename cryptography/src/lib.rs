@@ -681,9 +681,8 @@ mod tests {
         assert!(H::Digest::decode(digest_again.as_ref()).is_ok());
         assert_eq!(digest, digest_again);
 
-        // Reuse hasher with reset
+        // Reuse hasher after abandoning an in-progress hash (dropping the Pending resets it)
         drop(hasher.begin().update(b"hello mars"));
-        hasher.reset();
         let digest_reset = hasher.begin().update(b"hello world").finalize();
         assert!(H::Digest::decode(digest_reset.as_ref()).is_ok());
         assert_eq!(digest, digest_reset);
@@ -695,16 +694,16 @@ mod tests {
     }
 
     fn test_hasher_multiple_updates<H: Hasher>() {
-        // Generate initial hash (fluent multi-part chain)
-        let mut hasher = H::new();
-        let digest = hasher.begin().update(b"hello").update(b" world").finalize();
-        assert!(H::Digest::decode(digest.as_ref()).is_ok());
-
-        // Generate hash in oneshot
-        let mut hasher = H::new();
-        let digest_oneshot = hasher.begin().update(b"hello world").finalize();
-        assert!(H::Digest::decode(digest_oneshot.as_ref()).is_ok());
-        assert_eq!(digest, digest_oneshot);
+        // A chunked update chain must equal a single contiguous update.
+        let mut chunked = H::new();
+        let chunked = chunked
+            .begin()
+            .update(b"hello")
+            .update(b" world")
+            .finalize();
+        let mut whole = H::new();
+        let whole = whole.begin().update(b"hello world").finalize();
+        assert_eq!(chunked, whole);
     }
 
     fn test_hasher_empty_input<H: Hasher>() {
