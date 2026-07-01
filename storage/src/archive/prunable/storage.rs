@@ -27,9 +27,9 @@ use tracing::debug;
 ///
 /// A started section sync covers writes accepted before that sync began. Later writes to the same
 /// section are not covered by that handle, so they are recorded in `pending` for a future sync.
-/// Lower buffers own the physical barrier: if a later write must mutate the blob, it waits there
-/// before issuing I/O. Operations that remove data, shut down storage, or need a full durability
-/// barrier call `wait_all` before proceeding.
+/// Lower buffers own the physical barrier: if a later write or sync must mutate the blob, it waits
+/// there before issuing I/O. Operations that remove data, shut down storage, or need a full
+/// durability barrier call `wait_all` before proceeding.
 struct SyncState {
     /// Sections with writes not yet covered by an issued sync.
     pending: BTreeSet<u64>,
@@ -53,14 +53,6 @@ impl SyncState {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, Error>>,
     {
-        // Do not wait here: writes can be buffered while an earlier sync is still pending. This only
-        // surfaces a completed same-section sync failure before accepting another write.
-        if let Some(syncing) = self.syncing.get(&section).cloned() {
-            if let Some(result) = syncing.try_wait() {
-                self.syncing.remove(&section);
-                result.map_err(crate::journal::Error::from)?;
-            }
-        }
         let result = write().await?;
         self.pending.insert(section);
         Ok(result)
@@ -97,8 +89,9 @@ impl SyncState {
 
     /// Prepare a `start_sync` call.
     ///
-    /// Returns sections that need new syncs and existing in-flight syncs that
-    /// the returned handle must also observe.
+    /// Returns sections that need new syncs and existing in-flight syncs that the returned handle
+    /// must also observe. Lower buffers wait as needed when starting syncs for sections with newer
+    /// pending writes.
     fn start(&mut self, syncs: &Counter) -> (BTreeSet<u64>, Vec<Completion>) {
         let pending = self.take_pending(syncs);
         let mut handles = Vec::with_capacity(self.syncing.len() + pending.len());

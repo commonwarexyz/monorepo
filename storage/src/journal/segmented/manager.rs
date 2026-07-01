@@ -32,10 +32,12 @@ pub trait SectionBuffer: Send + Sync {
 
     /// Start making data currently accepted by this buffer durable.
     ///
-    /// The returned handle covers data accepted before this call returns. It does not cover later
-    /// writes. Implementations may accept later writes before the handle completes, but any later
-    /// operation that mutates the underlying blob must first wait for the outstanding handle. A
-    /// repeated call may return another handle for the same in-flight sync instead of waiting.
+    /// The returned handle covers every write accepted before this call returns. It does not cover
+    /// later writes. Implementations may accept later writes before an earlier handle completes, but
+    /// any later operation that mutates the underlying blob must first wait for the outstanding
+    /// handle. If those later writes need to be flushed by another `start_sync`, this call must wait
+    /// before starting the next sync. Reusing an in-flight handle is only valid when no newer
+    /// accepted writes need a new sync.
     fn start_sync(&mut self) -> impl Future<Output = Handle<()>> + Send;
 
     /// Wait for any started sync without starting a new sync.

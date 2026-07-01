@@ -20,11 +20,6 @@ impl Completion {
         crate::Handle::from_future(self.0.clone())
     }
 
-    /// Return the sync result if it is ready.
-    pub fn try_wait(&self) -> Option<Result<(), crate::Error>> {
-        self.0.clone().now_or_never()
-    }
-
     /// Wait for the sync result.
     pub async fn wait(&self) -> Result<(), crate::Error> {
         self.0.clone().await

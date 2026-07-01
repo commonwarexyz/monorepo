@@ -857,7 +857,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_failed_start_sync_is_returned_by_same_section_mutation() {
+    fn test_failed_start_sync_is_returned_by_next_start_sync_handle() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = Arc::new(Mutex::new(Vec::new()));
@@ -878,14 +878,19 @@ mod tests {
             assert_eq!(pending.lock().len(), 2);
             fail_pending_syncs(&pending);
 
-            let err = match archive.put_start_sync(2, test_key("bbb"), 20).await {
-                Ok(_) => panic!("same-section mutation should observe failed in-flight sync"),
-                Err(err) => err,
-            };
-            assert!(matches!(
-                err,
-                Error::Journal(JournalError::Runtime(RError::Io(_)))
-            ));
+            archive
+                .put(2, test_key("bbb"), 20)
+                .await
+                .expect("write should be accepted before observing the failed sync");
+
+            let second = archive
+                .start_sync()
+                .await
+                .expect("start_sync should return a handle for the failed sync");
+            let err = second
+                .await
+                .expect_err("next start_sync handle should observe failed in-flight sync");
+            assert!(matches!(err, RError::Io(_)));
 
             let err = first.await.expect_err("first sync handle should fail");
             assert!(matches!(err, RError::Io(_)));
