@@ -139,7 +139,7 @@ impl Digestible for Block {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        Sha256::hash(&self.encode())
+        Sha256::hash(&[&self.encode()])
     }
 }
 
@@ -215,7 +215,7 @@ impl App {
 
         // DB-A: increment counter and write a height marker, mirroring the single-db app's
         // per-block operation count so its state sync spans the same crash windows.
-        let counter = Sha256::hash(b"counter");
+        let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batch_a
             .get(&counter)
             .await
@@ -223,13 +223,13 @@ impl App {
             .map_or(0, |v| digest_to_u64(&v));
         batch_a = batch_a.write(counter, Some(u64_to_digest(current + 1)));
         batch_a = batch_a.write(
-            Sha256::hash(&height.get().to_be_bytes()),
+            Sha256::hash(&[&height.get().to_be_bytes()]),
             Some(u64_to_digest(height.get())),
         );
 
         // DB-B: write height marker
         let batch_b = batch_b.set(
-            Sha256::hash(&height.get().to_be_bytes()),
+            Sha256::hash(&[&height.get().to_be_bytes()]),
             u64_to_digest(height.get()),
         );
 

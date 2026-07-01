@@ -1455,7 +1455,7 @@ pub(crate) mod tests {
             let expected_ops = std::cmp::min(max_ops, *db.bounds().end - start_loc);
             assert_eq!(ops.len() as u64, expected_ops);
 
-            let wrong_root = Sha256::hash(&[0xFF; 32]);
+            let wrong_root = Sha256::hash(&[&[0xFF; 32]]);
             assert!(!verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(start_loc),

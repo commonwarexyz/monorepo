@@ -209,11 +209,8 @@ impl<F: Graftable, H: HasherTrait<F>> GraftedHasher<F, H> {
 }
 
 impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
+    type Hasher = H::Hasher;
     type Digest = H::Digest;
-
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
-        self.inner.hash(parts)
-    }
 
     fn root_bagging(&self) -> merkle::Bagging {
         self.inner.root_bagging()
@@ -284,11 +281,8 @@ impl<'a, F: Graftable, H: Hasher> Verifier<'a, F, H> {
 }
 
 impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
+    type Hasher = H;
     type Digest = H::Digest;
-
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        self.hasher.hash(parts)
-    }
 
     fn root_bagging(&self) -> merkle::Bagging {
         <merkle::hasher::Standard<H> as HasherTrait<F>>::root_bagging(&self.hasher)
@@ -335,7 +329,7 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
                 if chunk.iter().all(|&b| b == 0) {
                     ops_subtree_root
                 } else {
-                    self.hash([chunk, ops_subtree_root.as_ref()])
+                    self.hash(&[chunk, ops_subtree_root.as_ref()])
                 }
             }
         }
@@ -637,7 +631,7 @@ mod tests {
                         .get_node(ops_pos)
                         .expect("ops tree missing node at mapped position");
                     batch = batch.add_leaf_digest(
-                        leaf_hasher.hash([chunk.as_ref(), ops_subtree_root.as_ref()]),
+                        leaf_hasher.hash(&[chunk.as_ref(), ops_subtree_root.as_ref()]),
                     );
                 }
                 batch.merkleize(&grafted_mmr, &grafted_hasher)
@@ -809,11 +803,11 @@ mod tests {
             let sub0 = ops_mmr.get_node(pos0).unwrap();
             let batch = grafted
                 .new_batch()
-                .add_leaf_digest(leaf_hasher.hash([c1.as_ref(), sub0.as_ref()]));
+                .add_leaf_digest(leaf_hasher.hash(&[c1.as_ref(), sub0.as_ref()]));
 
             let sub1 = ops_mmr.get_node(pos1).unwrap();
             batch
-                .add_leaf_digest(leaf_hasher.hash([c2.as_ref(), sub1.as_ref()]))
+                .add_leaf_digest(leaf_hasher.hash(&[c2.as_ref(), sub1.as_ref()]))
                 .merkleize(&grafted, &grafted_hasher)
         };
         grafted.apply_batch(&batch).unwrap();

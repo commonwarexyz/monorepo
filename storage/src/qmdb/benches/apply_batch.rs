@@ -43,7 +43,7 @@ fn write_updates<D: BatchableDb<K = Digest, V = Digest>>(
 ) -> D::Batch {
     for _ in 0..updates {
         let idx = rng.next_u64() % NUM_KEYS;
-        let key = Sha256::hash(&idx.to_be_bytes());
+        let key = Sha256::hash(&[&idx.to_be_bytes()]);
         batch = batch.write(key, Some(make_fixed_value(rng)));
     }
     batch
@@ -200,7 +200,7 @@ async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration 
 async fn seed_imm_db(db: &mut ImmDb, keys: u64, counter: &mut u64, rng: &mut StdRng) {
     let mut batch = db.new_batch();
     for _ in 0..keys {
-        let key = Sha256::hash(&counter.to_be_bytes());
+        let key = Sha256::hash(&[&counter.to_be_bytes()]);
         *counter += 1;
         batch = batch.set(key, make_fixed_value(rng));
     }
@@ -225,7 +225,7 @@ async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
 
     let mut batch = db.new_batch();
     for _ in 0..updates {
-        let key = Sha256::hash(&counter.to_be_bytes());
+        let key = Sha256::hash(&[&counter.to_be_bytes()]);
         counter += 1;
         batch = batch.set(key, make_fixed_value(&mut rng));
     }
@@ -250,7 +250,7 @@ async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) 
 
     let mut parent = db.new_batch();
     for _ in 0..updates {
-        let key = Sha256::hash(&counter.to_be_bytes());
+        let key = Sha256::hash(&[&counter.to_be_bytes()]);
         counter += 1;
         parent = parent.set(key, make_fixed_value(&mut rng));
     }
@@ -258,7 +258,7 @@ async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) 
 
     let mut child = parent.new_batch();
     for _ in 0..updates {
-        let key = Sha256::hash(&counter.to_be_bytes());
+        let key = Sha256::hash(&[&counter.to_be_bytes()]);
         counter += 1;
         child = child.set(key, make_fixed_value(&mut rng));
     }

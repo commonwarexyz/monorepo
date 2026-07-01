@@ -130,9 +130,11 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
 
             // Compute digests
             self.hasher.update(&payload_a);
-            let digest_a = self.hasher.finalize();
+            let (hasher, digest_a) = core::mem::take(&mut self.hasher).finalize();
+            self.hasher = hasher;
             self.hasher.update(&payload_b);
-            let digest_b = self.hasher.finalize();
+            let (hasher, digest_b) = core::mem::take(&mut self.hasher).finalize();
+            self.hasher = hasher;
 
             let proposal_a = Proposal::new(next_round, view, digest_a);
             let proposal_b = Proposal::new(next_round, view, digest_b);
