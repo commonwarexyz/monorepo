@@ -176,10 +176,6 @@ impl<B: Blob> Write<B> {
             // if merge is possible after.
             let chunk_end = current_offset + chunk_len as u64;
             if self.buffer.offset < chunk_end {
-                if !self.buffer.is_empty() {
-                    // Flushing the tip mutates the blob and must not overtake a started sync.
-                    self.sync_state.wait_for_pending().await?;
-                }
                 if let Some((old_buf, old_offset)) = self.buffer.take() {
                     self.sync_state
                         .write_at(&self.blob, old_offset, old_buf)
@@ -215,9 +211,6 @@ impl<B: Blob> Write<B> {
     /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
     /// before resizing the underlying blob.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
-        // Resizing mutates the blob and must not overtake a started sync.
-        self.sync_state.wait_for_pending().await?;
-
         // Flush buffered data to the underlying blob.
         //
         // This can only happen if the new size is greater than the current size.
@@ -233,8 +226,6 @@ impl<B: Blob> Write<B> {
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&mut self) -> Result<(), Error> {
         if !self.buffer.is_empty() {
-            // Draining the tip writes new bytes and must wait for any started sync.
-            self.sync_state.wait_for_pending().await?;
             let (buf, offset) = self
                 .buffer
                 .take()
@@ -249,13 +240,9 @@ impl<B: Blob> Write<B> {
     ///
     /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
-    /// mutate the blob first wait for any outstanding start_sync handles.
+    /// mutate the blob wait before issuing blob operations.
     pub async fn start_sync(&mut self) -> Handle<()> {
         if !self.buffer.is_empty() {
-            // New buffered bytes must not be flushed into the prior started sync.
-            if let Err(err) = self.sync_state.wait_for_pending().await {
-                return Handle::ready(Err(err));
-            }
             let (buf, offset) = self
                 .buffer
                 .take()

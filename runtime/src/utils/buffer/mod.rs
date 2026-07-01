@@ -1589,7 +1589,6 @@ mod tests {
                 "sync must wait for the outstanding start_sync handle"
             );
             blocked_rx.await.expect("sync never waited on start_sync");
-            drop(sync);
 
             let (_, _, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(full_syncs, 0);
@@ -1597,7 +1596,7 @@ mod tests {
 
             // Releasing the original handle lets sync observe the completed disk sync.
             release_tx.send(Ok(())).unwrap();
-            writer.sync().await.unwrap();
+            sync.await.unwrap();
             handle.await.unwrap();
             let (_, _, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(full_syncs, 1);
@@ -1619,7 +1618,7 @@ mod tests {
             let handle = writer.start_sync().await;
             started_rx.await.expect("started sync was not issued");
 
-            // New bytes stay buffered while sync waits on the earlier sync.
+            // The tip must not reach the blob while the earlier sync is pending.
             writer.write_at(0, b"abc").await.unwrap();
             let mut sync = Box::pin(writer.sync());
             assert!(
@@ -1627,7 +1626,6 @@ mod tests {
                 "sync must wait for the outstanding start_sync before flushing the small write"
             );
             blocked_rx.await.expect("sync never waited on start_sync");
-            drop(sync);
 
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 0);
@@ -1636,7 +1634,7 @@ mod tests {
 
             // After the earlier sync completes, the buffered write can be persisted.
             release_tx.send(Ok(())).unwrap();
-            writer.sync().await.unwrap();
+            sync.await.unwrap();
             handle.await.unwrap();
 
             let (durable, writes, full_syncs, range_syncs) = inner.snapshot();
@@ -1662,26 +1660,25 @@ mod tests {
             let handle = writer.start_sync().await;
             started_rx.await.expect("started sync was not issued");
 
-            // This write stays buffered at the tip while the earlier sync is pending.
+            // This append is local while the earlier sync is pending.
             writer.write_at(3, b"abc").await.unwrap();
 
-            // An overlapping write would flush the tip, so it must stop at the pending sync first.
+            // The drained tip must not reach the blob while the earlier sync is pending.
             let mut write = Box::pin(writer.write_at(2, b"ZZ"));
             assert!(
                 write.as_mut().now_or_never().is_none(),
                 "overlapping write must wait for the outstanding start_sync before flushing"
             );
             blocked_rx.await.expect("write never waited on start_sync");
-            drop(write);
 
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 1);
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
-            // Dropping the parked write leaves the buffered tip available for the retry.
+            // Releasing the sync lets the parked write reach the blob.
             release_tx.send(Ok(())).unwrap();
-            writer.write_at(2, b"ZZ").await.unwrap();
+            write.await.unwrap();
             handle.await.unwrap();
 
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
@@ -1707,7 +1704,7 @@ mod tests {
             started_rx.await.expect("started sync was not issued");
             let original_size = inner.size();
 
-            // Resize reaches the pending sync wait before it can shrink the blob.
+            // Resize must not reach the blob while the earlier sync is pending.
             let mut resize = Box::pin(writer.resize(3));
             assert!(
                 resize.as_mut().now_or_never().is_none(),
@@ -1719,11 +1716,10 @@ mod tests {
                 original_size,
                 "resize must not mutate the blob before the pending sync finishes"
             );
-            drop(resize);
 
             // Releasing the sync lets the resize apply.
             release_tx.send(Ok(())).unwrap();
-            writer.resize(3).await.unwrap();
+            resize.await.unwrap();
             handle.await.unwrap();
             assert_eq!(writer.size(), 3);
             assert_eq!(inner.size(), 3);
