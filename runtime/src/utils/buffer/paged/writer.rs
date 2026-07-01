@@ -388,6 +388,7 @@ impl<B: Blob> Writer<B> {
         Ok(offset)
     }
 
+    /// Publish the state changes for a flush after all emitted blob writes have succeeded.
     fn commit_flush(
         &mut self,
         bytes_to_drain: usize,
@@ -409,6 +410,125 @@ impl<B: Blob> Writer<B> {
         );
     }
 
+    /// Write prepared physical pages, skipping any CRC slot that protects existing bytes.
+    async fn write_physical_pages(
+        &mut self,
+        mut physical_pages: IoBufs,
+        write_at_offset: u64,
+        logical_page_size: usize,
+        physical_page_size: usize,
+        protected_regions: Option<(usize, Slot)>,
+        sync: bool,
+    ) -> Result<bool, Error> {
+        match protected_regions {
+            Some((prefix_len, Slot::First)) => {
+                // Protected CRC is first: [page_size..page_size+6].
+                //
+                // If only one of these writes is emitted, it can be made durable here. If
+                // both are emitted, keep them plain so one later sync covers both.
+                //
+                // Write 1: new data in first page [prefix_len..page_size].
+                let has_first_write = prefix_len < logical_page_size;
+                if has_first_write {
+                    let _ = physical_pages.split_to(prefix_len);
+                    let first_payload = physical_pages.split_to(logical_page_size - prefix_len);
+                    let has_second_write = physical_pages.len() > CHECKSUM_SLOT_SIZE;
+                    self.write_at_maybe_sync(
+                        write_at_offset + prefix_len as u64,
+                        first_payload,
+                        sync && !has_second_write,
+                    )
+                    .await?;
+                    if !has_second_write {
+                        Ok(sync)
+                    } else {
+                        // Write 2: second CRC of first page + all remaining pages
+                        // [page_size+6..end].
+                        let _ = physical_pages.split_to(CHECKSUM_SLOT_SIZE);
+                        self.write_at_maybe_sync(
+                            write_at_offset + (logical_page_size + CHECKSUM_SLOT_SIZE) as u64,
+                            physical_pages,
+                            false,
+                        )
+                        .await?;
+                        Ok(false)
+                    }
+                } else {
+                    // Skip the protected first page bytes when they are fully covered.
+                    let _ = physical_pages.split_to(logical_page_size);
+                    if physical_pages.len() > CHECKSUM_SLOT_SIZE {
+                        let _ = physical_pages.split_to(CHECKSUM_SLOT_SIZE);
+                        self.write_at_maybe_sync(
+                            write_at_offset + (logical_page_size + CHECKSUM_SLOT_SIZE) as u64,
+                            physical_pages,
+                            sync,
+                        )
+                        .await?;
+                        Ok(sync)
+                    } else {
+                        Ok(false)
+                    }
+                }
+            }
+            Some((prefix_len, Slot::Second)) => {
+                // Protected CRC is second: [page_size+6..page_size+12].
+                //
+                // If only one of these writes is emitted, it can be made durable here. If
+                // both are emitted, keep them plain so one later sync covers both.
+                //
+                // Write 1: new data + first CRC of first page [prefix_len..page_size+6].
+                let first_crc_end = logical_page_size + CHECKSUM_SLOT_SIZE;
+                let skip = physical_page_size - first_crc_end;
+                let has_first_write = prefix_len < first_crc_end;
+                if has_first_write {
+                    let _ = physical_pages.split_to(prefix_len);
+                    let first_payload = physical_pages.split_to(first_crc_end - prefix_len);
+                    let has_second_write = physical_pages.len() > skip;
+                    self.write_at_maybe_sync(
+                        write_at_offset + prefix_len as u64,
+                        first_payload,
+                        sync && !has_second_write,
+                    )
+                    .await?;
+                    if !has_second_write {
+                        Ok(sync)
+                    } else {
+                        // Write 2: all remaining pages (if any) [physical_page_size..end].
+                        let _ = physical_pages.split_to(skip);
+                        self.write_at_maybe_sync(
+                            write_at_offset + physical_page_size as u64,
+                            physical_pages,
+                            false,
+                        )
+                        .await?;
+                        Ok(false)
+                    }
+                } else {
+                    // Skip the fully protected first segment when no bytes from it need update.
+                    let _ = physical_pages.split_to(first_crc_end);
+                    if physical_pages.len() > skip {
+                        let _ = physical_pages.split_to(skip);
+                        self.write_at_maybe_sync(
+                            write_at_offset + physical_page_size as u64,
+                            physical_pages,
+                            sync,
+                        )
+                        .await?;
+                        Ok(sync)
+                    } else {
+                        Ok(false)
+                    }
+                }
+            }
+            None => {
+                // No protected CRC, so all prepared pages can be emitted in one write.
+                self.write_at_maybe_sync(write_at_offset, physical_pages, sync)
+                    .await?;
+                Ok(sync)
+            }
+        }
+    }
+
     /// Flush all full pages from the buffer to disk, resetting the buffer to contain only the bytes
     /// in any final partial page.
     ///
@@ -428,7 +548,7 @@ impl<B: Blob> Writer<B> {
     ) -> Result<bool, Error> {
         // Prepare the *physical* pages corresponding to the data in the buffer.
         // Pass the old partial page state so the CRC record is constructed correctly.
-        let (mut physical_pages, partial_page_state) = self.to_physical_pages(
+        let (physical_pages, partial_page_state) = self.to_physical_pages(
             &self.buffer,
             write_partial_page,
             self.partial_page_state.as_ref(),
@@ -461,115 +581,16 @@ impl<B: Blob> Writer<B> {
         // Identify protected regions based on the OLD partial page state.
         let protected_regions = Self::identify_protected_regions(self.partial_page_state.as_ref());
 
-        // Write the physical pages to the blob.
-        // If there are protected regions in the first page, we need to write around them.
-        let synced = match protected_regions {
-            Some((prefix_len, Slot::First)) => {
-                // Protected CRC is first: [page_size..page_size+6].
-                //
-                // If only one of these writes is emitted, it can be made durable here. If
-                // both are emitted, keep them plain so one later sync covers both.
-                //
-                // Write 1: new data in first page [prefix_len..page_size].
-                let has_first_write = prefix_len < logical_page_size;
-                if has_first_write {
-                    let _ = physical_pages.split_to(prefix_len);
-                    let first_payload = physical_pages.split_to(logical_page_size - prefix_len);
-                    let has_second_write = physical_pages.len() > CHECKSUM_SLOT_SIZE;
-                    self.write_at_maybe_sync(
-                        write_at_offset + prefix_len as u64,
-                        first_payload,
-                        sync && !has_second_write,
-                    )
-                    .await?;
-                    if !has_second_write {
-                        sync
-                    } else {
-                        // Write 2: second CRC of first page + all remaining pages
-                        // [page_size+6..end].
-                        let _ = physical_pages.split_to(CHECKSUM_SLOT_SIZE);
-                        self.write_at_maybe_sync(
-                            write_at_offset + (logical_page_size + CHECKSUM_SLOT_SIZE) as u64,
-                            physical_pages,
-                            false,
-                        )
-                        .await?;
-                        false
-                    }
-                } else {
-                    // Skip the protected first page bytes when they are fully covered.
-                    let _ = physical_pages.split_to(logical_page_size);
-                    if physical_pages.len() > CHECKSUM_SLOT_SIZE {
-                        let _ = physical_pages.split_to(CHECKSUM_SLOT_SIZE);
-                        self.write_at_maybe_sync(
-                            write_at_offset + (logical_page_size + CHECKSUM_SLOT_SIZE) as u64,
-                            physical_pages,
-                            sync,
-                        )
-                        .await?;
-                        sync
-                    } else {
-                        false
-                    }
-                }
-            }
-            Some((prefix_len, Slot::Second)) => {
-                // Protected CRC is second: [page_size+6..page_size+12].
-                //
-                // If only one of these writes is emitted, it can be made durable here. If
-                // both are emitted, keep them plain so one later sync covers both.
-                //
-                // Write 1: new data + first CRC of first page [prefix_len..page_size+6].
-                let first_crc_end = logical_page_size + CHECKSUM_SLOT_SIZE;
-                let skip = physical_page_size - first_crc_end;
-                let has_first_write = prefix_len < first_crc_end;
-                if has_first_write {
-                    let _ = physical_pages.split_to(prefix_len);
-                    let first_payload = physical_pages.split_to(first_crc_end - prefix_len);
-                    let has_second_write = physical_pages.len() > skip;
-                    self.write_at_maybe_sync(
-                        write_at_offset + prefix_len as u64,
-                        first_payload,
-                        sync && !has_second_write,
-                    )
-                    .await?;
-                    if !has_second_write {
-                        sync
-                    } else {
-                        // Write 2: all remaining pages (if any) [physical_page_size..end].
-                        let _ = physical_pages.split_to(skip);
-                        self.write_at_maybe_sync(
-                            write_at_offset + physical_page_size as u64,
-                            physical_pages,
-                            false,
-                        )
-                        .await?;
-                        false
-                    }
-                } else {
-                    // Skip the fully protected first segment when no bytes from it need update.
-                    let _ = physical_pages.split_to(first_crc_end);
-                    if physical_pages.len() > skip {
-                        let _ = physical_pages.split_to(skip);
-                        self.write_at_maybe_sync(
-                            write_at_offset + physical_page_size as u64,
-                            physical_pages,
-                            sync,
-                        )
-                        .await?;
-                        sync
-                    } else {
-                        false
-                    }
-                }
-            }
-            None => {
-                // No protected regions, write everything in one operation
-                self.write_at_maybe_sync(write_at_offset, physical_pages, sync)
-                    .await?;
-                sync
-            }
-        };
+        let synced = self
+            .write_physical_pages(
+                physical_pages,
+                write_at_offset,
+                logical_page_size,
+                physical_page_size,
+                protected_regions,
+                sync,
+            )
+            .await?;
 
         self.commit_flush(
             bytes_to_drain,
@@ -1942,7 +1963,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    // Verifies a canceled full-page flush leaves the paged tip as the source of truth.
+    // If a page flush is canceled during the blob write, keep the data in the tip.
     fn test_flush_cancel_preserves_paged_tip() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -1960,6 +1981,7 @@ mod tests {
             writer.append(&expected).await.unwrap();
             expected.push(9);
 
+            // This append overflows the buffer and starts a full-page flush. Cancel during it.
             {
                 let append = writer.append(&[9]);
                 pin_mut!(append);
@@ -1968,6 +1990,7 @@ mod tests {
             }
             drop(release);
 
+            // Nothing should have moved from the tip into page/cache state yet.
             assert_eq!(writer.current_page, 0);
             assert!(writer.partial_page_state.is_none());
             assert_eq!(writer.size(), expected.len() as u64);
@@ -1975,6 +1998,7 @@ mod tests {
             let read = writer.read_at(0, expected.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), expected.as_slice());
 
+            // Retrying sync should flush the same bytes and publish the page state.
             writer.sync().await.unwrap();
             assert_eq!(writer.current_page, 2);
             assert!(writer.partial_page_state.is_some());
@@ -1984,7 +2008,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    // Verifies a canceled direct append does not publish pages, cache, or suffix state.
+    // If a large direct append is canceled during the blob write, publish nothing.
     fn test_append_owned_cancel_preserves_state() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -1999,6 +2023,8 @@ mod tests {
                 .unwrap();
 
             let data: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+            // This takes the direct path: full pages go straight to the blob.
+            // Cancel before those pages are allowed to publish into writer state.
             {
                 let append = writer.append_owned(IoBuf::from(data.clone()));
                 pin_mut!(append);
@@ -2007,6 +2033,7 @@ mod tests {
             }
             drop(release);
 
+            // The direct append was canceled, so it should not change size, cache, or page count.
             assert_eq!(writer.current_page, 0);
             assert!(writer.partial_page_state.is_none());
             assert_eq!(writer.size(), 0);
@@ -2014,6 +2041,7 @@ mod tests {
             let mut probe = vec![0u8; PAGE_SIZE.get() as usize];
             assert_eq!(writer.cache_ref.read_cached(writer.id, &mut probe, 0), 0);
 
+            // Retrying should write and publish the full append normally.
             writer
                 .append_owned(IoBuf::from(data.clone()))
                 .await
@@ -2025,6 +2053,7 @@ mod tests {
             writer.sync().await.unwrap();
             drop(writer);
 
+            // The retried append must survive reopening.
             let (blob, blob_size) = context
                 .open("test_partition", b"append_owned_cancel")
                 .await
@@ -2039,7 +2068,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    // Verifies a canceled sync keeps a partial page in the tip until retry succeeds.
+    // If sync is canceled during a partial-page write, keep that partial page in the tip.
     fn test_sync_cancel_preserves_paged_tip() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -2056,6 +2085,7 @@ mod tests {
             let data: Vec<u8> = (0..50).map(|i| i as u8).collect();
             writer.append(&data).await.unwrap();
 
+            // Sync writes the partial page and its checksum. Cancel during that write.
             {
                 let sync = writer.sync();
                 pin_mut!(sync);
@@ -2064,6 +2094,7 @@ mod tests {
             }
             drop(release);
 
+            // The canceled sync must not publish a partial-page checksum state.
             assert_eq!(writer.current_page, 0);
             assert!(writer.partial_page_state.is_none());
             assert_eq!(writer.size(), data.len() as u64);
@@ -2071,6 +2102,7 @@ mod tests {
             let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data.as_slice());
 
+            // Retrying sync should write the partial page and publish its checksum.
             writer.sync().await.unwrap();
             assert_eq!(writer.current_page, 0);
             assert!(writer.partial_page_state.is_some());

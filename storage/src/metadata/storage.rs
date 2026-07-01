@@ -337,6 +337,7 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
     /// Atomically commit the current state of [Metadata].
     pub async fn sync(&mut self) -> Result<(), Error> {
+        // Snapshot commit metadata before staging writes.
         let cursor = self.state.cursor;
         let next_version = self.state.next_version;
         let key_order_changed = self.state.key_order_changed;
@@ -349,8 +350,11 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         let past_version = self.state.blobs[cursor].version;
         let next_next_version = next_version.checked_add(1).expect("version overflow");
 
+        // Writes go to the inactive blob; the cursor is published only after it succeeds.
         let target_cursor = 1 - cursor;
 
+        // Stage overwrite data without mutating the target wrapper. If any update cannot fit in
+        // its existing slot, fall back to a full rewrite.
         let mut overwrite = true;
         let mut overwrite_data = self.state.blobs[target_cursor].data.clone();
         let mut write_ops: Vec<(u64, Vec<u8>)> = Vec::new();
@@ -363,10 +367,12 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
                     let new_value = self.map.get(key).expect("key must exist");
                     let encoded = new_value.encode_mut();
                     if info.length == encoded.len() {
+                        // Overwrite existing value.
                         overwrite_data[info.start..info.start + info.length]
                             .copy_from_slice(&encoded);
                         write_ops.push((info.start as u64, encoded.to_vec()));
                     } else {
+                        // Length changed, so rewrite all data.
                         overwrite = false;
                         break;
                     }
@@ -378,10 +384,12 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         if overwrite {
+            // Update version in the staged data.
             let version = next_version.to_be_bytes();
             overwrite_data[0..8].copy_from_slice(&version);
             write_ops.push((0, version.to_vec()));
 
+            // Update checksum in the staged data.
             let checksum_index = overwrite_data.len() - crc32::Digest::SIZE;
             let checksum = Crc32::checksum(&overwrite_data[..checksum_index]).to_be_bytes();
             overwrite_data[checksum_index..].copy_from_slice(&checksum);
@@ -393,24 +401,28 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
                     .into_iter()
                     .map(|(offset, data)| target.blob.write_at(offset, data))
                     .collect();
+                // Persist staged bytes before clearing modified keys.
                 try_join_all(writes).await?;
                 target.blob.sync().await?;
 
+                // Publish staged target state only after writes and sync succeed.
                 target.version = next_version;
                 target.data = overwrite_data;
                 target.modified.clear();
             }
+            // Publish cursor and version only after the target blob succeeds.
             self.state.cursor = target_cursor;
             self.state.next_version = next_next_version;
             self.sync_overwrites.inc();
             return Ok(());
         }
 
-        // Since we can't overwrite in place, we rewrite the entire blob.
+        // Build the rewritten blob image without touching the current target state.
         let mut lengths = HashMap::new();
         let mut next_data = Vec::with_capacity(self.state.blobs[target_cursor].data.len());
         next_data.put_u64(next_version);
 
+        // Encode every key/value into staged blob data.
         for (key, value) in &self.map {
             key.write(&mut next_data);
             let start = next_data.len();
@@ -432,11 +444,13 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
                 target.blob.write_at_sync(0, next_data.clone()).await?;
             }
 
+            // Publish rewritten target state after the durable write succeeds.
             target.version = next_version;
             target.lengths = lengths;
             target.data = next_data;
             target.modified.clear();
         }
+        // Publish cursor and version only after the target blob succeeds.
         self.state.cursor = target_cursor;
         self.state.next_version = next_next_version;
 

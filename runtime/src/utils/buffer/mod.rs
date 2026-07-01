@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     #[test_traced]
-    // Verifies a canceled overlap flush keeps the buffered tip readable and retryable.
+    // If an overlapping write is canceled while flushing the old tip, keep the old tip.
     fn test_write_overlap_flush_cancel_preserves_tip() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1159,6 +1159,8 @@ mod tests {
             writer.write_at(0, b"abcdefghij").await.unwrap();
             assert_eq!(writer.size(), 10);
 
+            // The overlapping write must flush the old tip before it can continue.
+            // Drop that future while the flush write is blocked.
             {
                 let write = writer.write_at(5, b"0123456789");
                 pin_mut!(write);
@@ -1167,6 +1169,7 @@ mod tests {
             }
             drop(release);
 
+            // The canceled flush must not have drained the tip or touched the blob.
             assert_eq!(writer.size(), 10);
             let read = writer.read_at(0, 10).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), b"abcdefghij");
@@ -1174,6 +1177,7 @@ mod tests {
             assert!(durable.is_empty());
             assert_eq!(writes, 0);
 
+            // Retrying the write should flush the same tip bytes and finish normally.
             writer.write_at(5, b"0123456789").await.unwrap();
             writer.sync().await.unwrap();
             let read = writer.read_at(0, 15).await.unwrap().coalesce();
@@ -1257,7 +1261,7 @@ mod tests {
     }
 
     #[test_traced]
-    // Verifies a canceled grow-resize flush keeps the old buffered size and bytes.
+    // If a grow resize is canceled while flushing the tip, keep the old size and bytes.
     fn test_write_resize_grow_flush_cancel_preserves_tip() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1266,6 +1270,7 @@ mod tests {
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
             writer.write_at(0, b"hello").await.unwrap();
+            // Growing past buffered data must flush that data first. Cancel during that flush.
             {
                 let resize = writer.resize(10);
                 pin_mut!(resize);
@@ -1274,11 +1279,13 @@ mod tests {
             }
             drop(release);
 
+            // The resize was canceled, so the writer should still look like it did before.
             assert_eq!(writer.size(), 5);
             let read = writer.read_at(0, 5).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), b"hello");
             assert_eq!(inner.size(), 0);
 
+            // Retrying the resize should persist the buffered prefix and grow with zeros.
             writer.resize(10).await.unwrap();
             assert_eq!(writer.size(), 10);
             writer.sync().await.unwrap();
@@ -1918,7 +1925,7 @@ mod tests {
     }
 
     #[test_traced]
-    // Verifies a canceled sync keeps buffered bytes available for a later sync.
+    // If sync is canceled during the tip write, keep the tip for the next sync.
     fn test_write_sync_cancel_preserves_tip() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1928,6 +1935,7 @@ mod tests {
             writer.sync().await.unwrap();
 
             writer.write_at(0, b"abc").await.unwrap();
+            // Cancel while sync is trying to write the buffered tip to the blob.
             {
                 let sync = writer.sync();
                 pin_mut!(sync);
@@ -1936,6 +1944,7 @@ mod tests {
             }
             drop(release);
 
+            // The tip should still be visible, and the blob should not have seen the write.
             assert_eq!(writer.size(), 3);
             let read = writer.read_at(0, 3).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), b"abc");
@@ -1945,6 +1954,7 @@ mod tests {
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 0);
 
+            // A later sync can still persist the buffered bytes.
             writer.sync().await.unwrap();
             let (durable, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(durable.as_slice(), b"abc");
