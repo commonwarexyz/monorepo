@@ -23,7 +23,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
+use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -433,15 +433,19 @@ where
                         count += 1;
                     }
 
-                    // Hash the batch's leaves in parallel, then append them.
-                    let digests =
-                        batch
-                            .strategy()
-                            .map_collect_vec(items.iter().enumerate(), |(i, item)| {
-                                let pos = Position::try_from(first + i as u64)
-                                    .expect("valid leaf location");
-                                hasher.leaf_digest(pos, item.encode().as_ref())
-                            });
+                    // Hash the batch's leaves in parallel, then append them. A per-worker scratch
+                    // buffer avoids a per-leaf allocation (mirrors `add_many`).
+                    let digests = batch.strategy().map_init_collect_vec(
+                        items.iter().enumerate(),
+                        Vec::new,
+                        |buf, (i, item)| {
+                            let pos =
+                                Position::try_from(first + i as u64).expect("valid leaf location");
+                            buf.clear();
+                            item.write(buf);
+                            hasher.leaf_digest(pos, buf.as_slice())
+                        },
+                    );
                     for digest in digests {
                         batch = batch.add_leaf_digest(digest);
                     }
