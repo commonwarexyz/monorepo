@@ -145,7 +145,8 @@ mod tests {
         Storage,
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{sync::Mutex, NZUsize};
+    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
+    use futures::pin_mut;
     use std::sync::Arc;
 
     #[derive(Default)]
@@ -272,6 +273,84 @@ mod tests {
 
         async fn start_sync(&self) -> Handle<()> {
             Handle::ready(self.sync().await)
+        }
+    }
+
+    type StartedWriteSender = Arc<Mutex<Option<oneshot::Sender<()>>>>;
+    type ReleaseWriteReceiver = Arc<Mutex<Option<oneshot::Receiver<()>>>>;
+
+    #[derive(Clone)]
+    struct DelayedWriteBlob {
+        inner: SyncTrackingBlob,
+        started: StartedWriteSender,
+        release: ReleaseWriteReceiver,
+    }
+
+    impl DelayedWriteBlob {
+        fn new(inner: SyncTrackingBlob) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            (
+                Self {
+                    inner,
+                    started: Arc::new(Mutex::new(Some(started_tx))),
+                    release: Arc::new(Mutex::new(Some(release_rx))),
+                },
+                started_rx,
+                release_tx,
+            )
+        }
+
+        async fn delay_once(&self) {
+            let started = self.started.lock().take();
+            let release = self.release.lock().take();
+            if let Some(started) = started {
+                let _ = started.send(());
+            }
+            if let Some(release) = release {
+                let _ = release.await;
+            }
+        }
+    }
+
+    impl crate::Blob for DelayedWriteBlob {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            buf: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, buf).await
+        }
+
+        async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.delay_once().await;
+            self.inner.write_at(offset, buf).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.delay_once().await;
+            self.inner.write_at_sync(offset, buf).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
         }
     }
 
@@ -959,6 +1038,39 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_write_overlap_flush_cancel_preserves_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, started, release) = DelayedWriteBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(10));
+
+            writer.write_at(0, b"abcdefghij").await.unwrap();
+            assert_eq!(writer.size(), 10);
+
+            {
+                let write = writer.write_at(5, b"0123456789");
+                pin_mut!(write);
+                assert!(write.as_mut().now_or_never().is_none());
+                started.await.unwrap();
+            }
+            drop(release);
+
+            assert_eq!(writer.size(), 10);
+            let read = writer.read_at(0, 10).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"abcdefghij");
+            let (durable, writes, _, _) = inner.snapshot();
+            assert!(durable.is_empty());
+            assert_eq!(writes, 0);
+
+            writer.write_at(5, b"0123456789").await.unwrap();
+            writer.sync().await.unwrap();
+            let read = writer.read_at(0, 15).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"abcde0123456789");
+        });
+    }
+
+    #[test_traced]
     fn test_write_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1030,6 +1142,37 @@ mod tests {
             // Ensure the blob is empty
             let (_, size_z) = context.open("partition", b"resize_zero").await.unwrap();
             assert_eq!(size_z, 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_resize_grow_flush_cancel_preserves_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, started, release) = DelayedWriteBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            writer.write_at(0, b"hello").await.unwrap();
+            {
+                let resize = writer.resize(10);
+                pin_mut!(resize);
+                assert!(resize.as_mut().now_or_never().is_none());
+                started.await.unwrap();
+            }
+            drop(release);
+
+            assert_eq!(writer.size(), 5);
+            let read = writer.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+            assert_eq!(inner.size(), 0);
+
+            writer.resize(10).await.unwrap();
+            assert_eq!(writer.size(), 10);
+            writer.sync().await.unwrap();
+            let read = writer.read_at(0, 10).await.unwrap().coalesce();
+            assert_eq!(&read.as_ref()[..5], b"hello");
+            assert_eq!(&read.as_ref()[5..], &[0; 5]);
         });
     }
 
@@ -1462,6 +1605,42 @@ mod tests {
             assert_eq!(writes, 1);
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_sync_cancel_preserves_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, started, release) = DelayedWriteBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+            writer.sync().await.unwrap();
+
+            writer.write_at(0, b"abc").await.unwrap();
+            {
+                let sync = writer.sync();
+                pin_mut!(sync);
+                assert!(sync.as_mut().now_or_never().is_none());
+                started.await.unwrap();
+            }
+            drop(release);
+
+            assert_eq!(writer.size(), 3);
+            let read = writer.read_at(0, 3).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"abc");
+            let (durable, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert!(durable.is_empty());
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            writer.sync().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 2);
+            assert_eq!(range_syncs, 0);
         });
     }
 

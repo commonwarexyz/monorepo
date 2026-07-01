@@ -13,8 +13,9 @@ use std::num::NonZeroUsize;
 /// - Subsequent writes reuse that backing, copy-on-write allocation only occurs when buffered data
 ///   is shared (for example, after handing out immutable views) or a merge needs more capacity.
 /// - Sparse writes merged into tip extend logical length and zero-fill any gap in-buffer.
-/// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) hand drained
-///   bytes to the blob and leave the tip detached until the next buffered write.
+/// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) hand a view
+///   of buffered bytes to the blob, then detach the flushed prefix after the blob operation
+///   succeeds.
 ///
 /// # Access
 ///
@@ -175,14 +176,16 @@ impl<B: Blob> Write<B> {
             // Chunk cannot be merged, so flush the buffer if the range overlaps, and check
             // if merge is possible after.
             let chunk_end = current_offset + chunk_len as u64;
-            if self.buffer.offset < chunk_end {
-                if let Some((old_buf, old_offset)) = self.buffer.take() {
-                    self.write_blob(old_offset, old_buf).await?;
-                    if self.buffer.merge(chunk, current_offset) {
-                        bufs.advance(chunk_len);
-                        current_offset += chunk_len as u64;
-                        continue;
-                    }
+            if self.buffer.offset < chunk_end && !self.buffer.is_empty() {
+                let old_offset = self.buffer.offset;
+                let old_len = self.buffer.len();
+                let old_buf = self.buffer.slice(..);
+                self.write_blob(old_offset, old_buf).await?;
+                self.buffer.commit_prefix(old_len);
+                if self.buffer.merge(chunk, current_offset) {
+                    bufs.advance(chunk_len);
+                    current_offset += chunk_len as u64;
+                    continue;
                 }
             }
 
@@ -207,24 +210,30 @@ impl<B: Blob> Write<B> {
     /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
     /// before resizing the underlying blob.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
-        // Flush buffered data to the underlying blob.
-        //
-        // This can only happen if the new size is greater than the current size.
-        if let Some((buf, offset)) = self.buffer.resize(len) {
+        if len > self.buffer.size() && !self.buffer.is_empty() {
+            let offset = self.buffer.offset;
+            let buffered = self.buffer.len();
+            let buf = self.buffer.slice(..);
             self.write_blob(offset, buf).await?;
+            self.buffer.commit_prefix(buffered);
         }
 
-        // Resize the underlying blob.
         self.blob.resize(len).await?;
         self.sync_state.mark_dirty();
+        self.buffer.commit_resize(len);
 
         Ok(())
     }
 
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        if let Some((buf, offset)) = self.buffer.take() {
-            return self.write_blob_sync(offset, buf).await;
+        if !self.buffer.is_empty() {
+            let offset = self.buffer.offset;
+            let buffered = self.buffer.len();
+            let buf = self.buffer.slice(..);
+            self.write_blob_sync(offset, buf).await?;
+            self.buffer.commit_prefix(buffered);
+            return Ok(());
         }
 
         self.sync_blob().await
