@@ -43,6 +43,15 @@ enum SyncState {
 }
 
 impl SyncState {
+    /// Mark a new unsynced mutation.
+    fn mark_dirty(&mut self) {
+        assert!(
+            !matches!(self, Self::Pending(_)),
+            "pending sync must be joined before marking dirty"
+        );
+        *self = Self::Dirty;
+    }
+
     /// Wait for an in-flight sync before reusing or mutating the blob.
     async fn wait_for_pending(&mut self) -> Result<(), crate::Error> {
         let Self::Pending(pending) = self else {
@@ -70,7 +79,7 @@ impl SyncState {
     ) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
         blob.write_at(offset, bufs).await?;
-        *self = Self::Dirty;
+        self.mark_dirty();
         Ok(())
     }
 
@@ -92,7 +101,7 @@ impl SyncState {
             }
             Self::Clean => {
                 // If this fails, a later sync must still cover the attempted write.
-                *self = Self::Dirty;
+                self.mark_dirty();
                 blob.write_at_sync(offset, bufs).await?;
                 *self = Self::Clean;
                 Ok(())
@@ -105,7 +114,7 @@ impl SyncState {
     async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
         blob.resize(len).await?;
-        *self = Self::Dirty;
+        self.mark_dirty();
         Ok(())
     }
 
