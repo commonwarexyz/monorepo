@@ -53,7 +53,7 @@ impl<const N: usize> BitMap<N> {
     pub const EMPTY_CHUNK: [u8; N] = [0u8; N];
 
     /// A chunk of all 1s.
-    const FULL_CHUNK: [u8; N] = [u8::MAX; N];
+    pub const FULL_CHUNK: [u8; N] = [u8::MAX; N];
 
     /* Constructors */
 
