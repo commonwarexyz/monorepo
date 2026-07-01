@@ -552,19 +552,16 @@ mod tests {
         assert!(H::Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref().len(), H::Digest::SIZE);
 
-        // Reuse hasher without reset
+        // Reuse the reset hasher
         hasher.update(b"hello world");
         let digest_again = hasher.finalize();
         assert!(H::Digest::decode(digest_again.as_ref()).is_ok());
         assert_eq!(digest, digest_again);
 
-        // Reuse hasher with reset
-        hasher.update(b"hello mars");
-        hasher.reset();
-        hasher.update(b"hello world");
-        let digest_reset = hasher.finalize();
-        assert!(H::Digest::decode(digest_reset.as_ref()).is_ok());
-        assert_eq!(digest, digest_reset);
+        // Hash via the one-shot API
+        let digest_oneshot = H::hash([b"hello world"]);
+        assert!(H::Digest::decode(digest_oneshot.as_ref()).is_ok());
+        assert_eq!(digest, digest_oneshot);
 
         // Hash different data
         hasher.update(b"hello mars");
