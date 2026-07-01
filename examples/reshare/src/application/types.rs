@@ -111,7 +111,7 @@ where
     type Digest = H::Digest;
 
     fn digest(&self) -> H::Digest {
-        H::hash(&self.encode())
+        H::hash(&[&self.encode()])
     }
 }
 

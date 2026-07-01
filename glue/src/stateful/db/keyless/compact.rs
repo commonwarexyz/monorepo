@@ -695,7 +695,7 @@ mod tests {
             // A larger target the resolver never serves. Its sync attempt
             // hangs so the test can observe the gauges while they diverge.
             let unservable_target = sync::compact::Target {
-                root: Sha256::hash(&[0xFF]),
+                root: Sha256::hash(&[&[0xFF]]),
                 leaf_count: Location::new(*target.leaf_count + 1),
             };
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);

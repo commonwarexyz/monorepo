@@ -940,7 +940,7 @@ mod test {
 
             // Establish a durable state whose last commit declares an early inactivity floor.
             for i in 0u64..ELEMENTS {
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::hash(&[&i.to_be_bytes()]);
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 (db, _) = apply_entries(db, [(k, Some(v))]).await;
             }
@@ -950,7 +950,7 @@ mod test {
             // Apply (but do not commit) entries that advance the in-memory floor past the
             // durable commit's floor.
             for i in 0u64..ELEMENTS {
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::hash(&[&i.to_be_bytes()]);
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 (db, _) = apply_entries(db, [(k, Some(v))]).await;
             }
@@ -983,7 +983,7 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for i in 0u64..ELEMENTS {
-                    let k = Blake3::hash(&i.to_be_bytes());
+                    let k = Blake3::hash(&[&i.to_be_bytes()]);
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                     batch = batch.update(k, v);
                 }
@@ -995,7 +995,7 @@ mod test {
 
             // Apply the updates and commit them.
             for i in 0u64..ELEMENTS {
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::hash(&[&i.to_be_bytes()]);
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 (db, _) = apply_entries(db, [(k, Some(v.clone()))]).await;
             }
@@ -1006,7 +1006,7 @@ mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::hash(&[&i.to_be_bytes()]);
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 (db, _) = apply_entries(db, [(k, Some(v.clone()))]).await;
             }
@@ -1018,7 +1018,7 @@ mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::hash(&[&i.to_be_bytes()]);
                 (db, _) = apply_entries(db, [(k, None)]).await;
             }
             let db = db.commit().await.unwrap();
@@ -1045,8 +1045,8 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = create_test_store(context.child("store").with_attribute("index", 0)).await;
-            let key0 = Blake3::hash(&0u64.to_be_bytes());
-            let key1 = Blake3::hash(&1u64.to_be_bytes());
+            let key0 = Blake3::hash(&[&0u64.to_be_bytes()]);
+            let key1 = Blake3::hash(&[&1u64.to_be_bytes()]);
             let value0 = vec![0, 1, 2];
             let value1 = vec![3, 4, 5, 6];
 
