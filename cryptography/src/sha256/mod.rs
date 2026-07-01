@@ -91,6 +91,71 @@ fn finalize_fixed_fresh(scratch: &mut [u8; 2 * BLOCK_LENGTH], len: usize) -> [u8
     digest_from_state(state)
 }
 
+/// Specialize the hot merkle shapes: constant offsets let the compiler inline
+/// the copies and drop the runtime-length bookkeeping. The rare/general case is
+/// outlined into [`hash_general`] so this stays small enough to inline.
+#[inline(always)]
+fn hash_specialized(parts: &[&[u8]]) -> Digest {
+    match parts {
+        [p, l, r] if p.len() == 8 && l.len() == 32 && r.len() == 32 => {
+            let mut scratch = [0u8; 2 * BLOCK_LENGTH];
+            scratch[..8].copy_from_slice(p);
+            scratch[8..40].copy_from_slice(l);
+            scratch[40..72].copy_from_slice(r);
+            Digest(finalize_fixed_fresh(&mut scratch, 72))
+        }
+        [a, b] if a.len() == 32 && b.len() == 32 => {
+            let mut scratch = [0u8; 2 * BLOCK_LENGTH];
+            scratch[..32].copy_from_slice(a);
+            scratch[32..64].copy_from_slice(b);
+            Digest(finalize_fixed_fresh(&mut scratch, 64))
+        }
+        [p, d] if p.len() == 8 && d.len() == 32 => {
+            let mut scratch = [0u8; 2 * BLOCK_LENGTH];
+            scratch[..8].copy_from_slice(p);
+            scratch[8..40].copy_from_slice(d);
+            Digest(finalize_fixed_fresh(&mut scratch, 40))
+        }
+        [p, d] if p.len() == 4 && d.len() == 32 => {
+            let mut scratch = [0u8; 2 * BLOCK_LENGTH];
+            scratch[..4].copy_from_slice(p);
+            scratch[4..36].copy_from_slice(d);
+            Digest(finalize_fixed_fresh(&mut scratch, 36))
+        }
+        _ => hash_general(parts),
+    }
+}
+
+/// General-purpose assembly + streaming fallback for shapes that miss the
+/// specialized arms. Outlined and marked cold so it never bloats callers.
+#[cold]
+#[inline(never)]
+fn hash_general(parts: &[&[u8]]) -> Digest {
+    let mut scratch = [0u8; 2 * BLOCK_LENGTH];
+    let mut len = 0usize;
+    let mut parts = parts.iter();
+    loop {
+        match parts.next() {
+            Some(part) if len + part.len() <= MAX_FIXED => {
+                scratch[len..len + part.len()].copy_from_slice(part);
+                len += part.len();
+            }
+            Some(part) => {
+                let mut hasher = ISha256::new();
+                hasher.update(&scratch[..len]);
+                hasher.update(part);
+                for part in parts {
+                    hasher.update(part);
+                }
+                let array: [u8; DIGEST_LENGTH] = hasher.finalize().into();
+                return Digest(array);
+            }
+            None => break,
+        }
+    }
+    Digest(finalize_fixed_fresh(&mut scratch, len))
+}
+
 /// SHA-256 hasher.
 #[derive(Debug, Default)]
 pub struct Sha256 {
@@ -118,33 +183,7 @@ impl Hasher for Sha256 {
 
     #[inline]
     fn hash(parts: &[&[u8]]) -> Self::Digest {
-        // Fast path: assemble small inputs into a stack buffer and compress
-        // directly, bypassing the streaming hasher entirely.
-        let mut scratch = [0u8; 2 * BLOCK_LENGTH];
-        let mut len = 0usize;
-        let mut parts = parts.iter();
-        loop {
-            match parts.next() {
-                Some(part) if len + part.len() <= MAX_FIXED => {
-                    scratch[len..len + part.len()].copy_from_slice(part);
-                    len += part.len();
-                }
-                // Total input is too large for the fast path; fall back to
-                // streaming whatever we've buffered plus the remaining parts.
-                Some(part) => {
-                    let mut hasher = ISha256::new();
-                    hasher.update(&scratch[..len]);
-                    hasher.update(part);
-                    for part in parts {
-                        hasher.update(part);
-                    }
-                    let array: [u8; DIGEST_LENGTH] = hasher.finalize().into();
-                    return Digest(array);
-                }
-                None => break,
-            }
-        }
-        Digest(finalize_fixed_fresh(&mut scratch, len))
+        hash_specialized(parts)
     }
 
     #[inline]
