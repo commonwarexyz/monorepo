@@ -1,81 +1,76 @@
-use crate::merkle::{
-    hasher::Standard, verification::ProofStore, Error, Family, Location, Position, Proof,
-};
+use crate::merkle::{verification::ProofStore, Error, Family, Location, Position, Proof};
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 
 /// Verify that a [Proof] is valid for a range of operations and a target root.
-pub fn verify_proof<F, Op, H, D>(
-    hasher: &Standard<H>,
-    proof: &Proof<F, D>,
+pub fn verify_proof<H, F, Op>(
+    proof: &Proof<F, H::Digest>,
     start_loc: Location<F>,
     operations: &[Op],
-    target_root: &D,
+    target_root: &H::Digest,
 ) -> bool
 where
+    H: Hasher,
     F: Family,
     Op: Encode,
-    H: Hasher<Digest = D>,
-    D: Digest,
 {
+    let hasher = crate::qmdb::hasher::<H>();
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion(hasher, &elements, start_loc, target_root)
+    proof.verify_range_inclusion(&hasher, &elements, start_loc, target_root)
 }
 
 /// Verify that both a [Proof] and a set of pinned nodes are valid with respect to a target root.
-pub fn verify_proof_and_pinned_nodes<F, Op, H, D>(
-    hasher: &Standard<H>,
-    proof: &Proof<F, D>,
+pub fn verify_proof_and_pinned_nodes<H, F, Op>(
+    proof: &Proof<F, H::Digest>,
     start_loc: Location<F>,
     operations: &[Op],
-    pinned_nodes: &[D],
-    target_root: &D,
+    pinned_nodes: &[H::Digest],
+    target_root: &H::Digest,
 ) -> bool
 where
+    H: Hasher,
     F: Family,
     Op: Encode,
-    H: Hasher<Digest = D>,
-    D: Digest,
 {
+    let hasher = crate::qmdb::hasher::<H>();
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_proof_and_pinned_nodes(hasher, &elements, start_loc, pinned_nodes, target_root)
+    proof.verify_proof_and_pinned_nodes(&hasher, &elements, start_loc, pinned_nodes, target_root)
 }
 
 /// Verify that a [Proof] is valid for a range of operations and extract all digests (and their
 /// positions) in the range of the [Proof].
-pub fn verify_proof_and_extract_digests<F, Op, H, D>(
-    hasher: &Standard<H>,
-    proof: &Proof<F, D>,
+#[allow(clippy::type_complexity)]
+pub fn verify_proof_and_extract_digests<H, F, Op>(
+    proof: &Proof<F, H::Digest>,
     start_loc: Location<F>,
     operations: &[Op],
-    target_root: &D,
-) -> Result<Vec<(Position<F>, D)>, Error<F>>
+    target_root: &H::Digest,
+) -> Result<Vec<(Position<F>, H::Digest)>, Error<F>>
 where
+    H: Hasher,
     F: Family,
     Op: Encode,
-    H: Hasher<Digest = D>,
-    D: Digest,
 {
+    let hasher = crate::qmdb::hasher::<H>();
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion_and_extract_digests(hasher, &elements, start_loc, target_root)
+    proof.verify_range_inclusion_and_extract_digests(&hasher, &elements, start_loc, target_root)
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
-pub fn create_proof_store<F, Op, H, D>(
-    hasher: &Standard<H>,
-    proof: &Proof<F, D>,
+pub fn create_proof_store<H, F, Op>(
+    proof: &Proof<F, H::Digest>,
     start_loc: Location<F>,
     operations: &[Op],
-    root: &D,
-) -> Result<ProofStore<F, D>, Error<F>>
+    root: &H::Digest,
+) -> Result<ProofStore<F, H::Digest>, Error<F>>
 where
+    H: Hasher,
     F: Family,
     Op: Encode,
-    H: Hasher<Digest = D>,
-    D: Digest,
 {
+    let hasher = crate::qmdb::hasher::<H>();
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    ProofStore::new(hasher, proof, &elements, start_loc, root)
+    ProofStore::new(&hasher, proof, &elements, start_loc, root)
 }
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
@@ -100,30 +95,29 @@ where
 }
 
 /// Verify a Multi-Proof for operations at specific locations.
-pub fn verify_multi_proof<F, Op, H, D>(
-    hasher: &Standard<H>,
-    proof: &Proof<F, D>,
+pub fn verify_multi_proof<H, F, Op>(
+    proof: &Proof<F, H::Digest>,
     operations: &[(Location<F>, Op)],
-    target_root: &D,
+    target_root: &H::Digest,
 ) -> bool
 where
+    H: Hasher,
     F: Family,
     Op: Encode,
-    H: Hasher<Digest = D>,
-    D: Digest,
 {
+    let hasher = crate::qmdb::hasher::<H>();
     let elements = operations
         .iter()
         .map(|(loc, op)| (op.encode(), *loc))
         .collect::<Vec<_>>();
-    proof.verify_multi_inclusion(hasher, &elements, target_root)
+    proof.verify_multi_inclusion(&hasher, &elements, target_root)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        merkle::{build_range_proof, mem::Mem, Bagging::ForwardFold, LocationRangeExt as _},
+        merkle::{build_range_proof, hasher::Standard, mem::Mem, LocationRangeExt as _},
         mmb, mmr,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -136,7 +130,7 @@ mod tests {
     }
 
     fn test_hasher() -> Standard<Sha256> {
-        Standard::new(ForwardFold)
+        crate::qmdb::hasher::<Sha256>()
     }
 
     fn qmdb_range_proof<F: Family>(
@@ -184,8 +178,7 @@ mod tests {
         );
 
         // Verify the proof
-        assert!(verify_proof(
-            &hasher,
+        assert!(verify_proof::<Sha256, _, _>(
             &proof,
             Location::<F>::new(0), // start_loc
             &operations,
@@ -194,8 +187,7 @@ mod tests {
 
         // Verify the proof with the wrong root
         let wrong_root = test_digest(99);
-        assert!(!verify_proof(
-            &hasher,
+        assert!(!verify_proof::<Sha256, _, _>(
             &proof,
             Location::<F>::new(0),
             &operations,
@@ -204,8 +196,7 @@ mod tests {
 
         // Verify the proof with the wrong operations
         let wrong_operations = vec![9, 10, 11];
-        assert!(!verify_proof(
-            &hasher,
+        assert!(!verify_proof::<Sha256, _, _>(
             &proof,
             Location::<F>::new(0),
             &wrong_operations,
@@ -255,11 +246,15 @@ mod tests {
         );
 
         // Verify with correct start location
-        assert!(verify_proof(&hasher, &proof, start_loc, &operations, &root));
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
+            start_loc,
+            &operations,
+            &root
+        ));
 
         // Verify fails with wrong start location
-        assert!(!verify_proof(
-            &hasher,
+        assert!(!verify_proof::<Sha256, _, _>(
             &proof,
             Location::<F>::new(0), // wrong start_loc
             &operations,
@@ -299,8 +294,7 @@ mod tests {
         let proof = qmdb_range_proof(&hasher, &merkle, 0, range.clone());
 
         // Verify and extract digests for subset of operations
-        let result = verify_proof_and_extract_digests(
-            &hasher,
+        let result = verify_proof_and_extract_digests::<Sha256, _, _>(
             &proof,
             Location::<F>::new(1), // start_loc
             &operations[range.to_usize_range()],
@@ -312,8 +306,7 @@ mod tests {
 
         // Should fail with wrong root
         let wrong_root = test_digest(99);
-        assert!(verify_proof_and_extract_digests(
-            &hasher,
+        assert!(verify_proof_and_extract_digests::<Sha256, _, _>(
             &proof,
             Location::<F>::new(1),
             &operations[range.to_usize_range()],
@@ -355,8 +348,7 @@ mod tests {
         let proof = qmdb_range_proof(&hasher, &merkle, 0, range.clone());
 
         // Create proof store
-        let result = create_proof_store(
-            &hasher,
+        let result = create_proof_store::<Sha256, _, _>(
             &proof,
             range.start,                         // start_loc
             &operations[range.to_usize_range()], // Only the first 3 operations covered by the proof
@@ -370,8 +362,7 @@ mod tests {
         let sub_proof = proof_store.range_proof(&hasher, range.clone()).unwrap();
 
         // Verify the sub-proof
-        assert!(verify_proof(
-            &hasher,
+        assert!(verify_proof::<Sha256, _, _>(
             &sub_proof,
             range.start,
             &operations[range.to_usize_range()],
@@ -411,8 +402,7 @@ mod tests {
 
         // Should fail with invalid root
         let wrong_root = test_digest(99);
-        assert!(create_proof_store(
-            &hasher,
+        assert!(create_proof_store::<Sha256, _, _>(
             &proof,
             Location::<F>::new(0),
             &operations,
@@ -460,7 +450,8 @@ mod tests {
 
         // Create proof store
         let proof_store =
-            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
+            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root)
+                .unwrap();
 
         // Generate multi-proof for specific locations
         let target_locations = vec![
@@ -479,8 +470,7 @@ mod tests {
             .collect();
 
         // Verify the multi-proof
-        assert!(verify_multi_proof(
-            &hasher,
+        assert!(verify_multi_proof::<Sha256, _, _>(
             &multi_proof,
             &selected_ops,
             &root
@@ -519,8 +509,7 @@ mod tests {
         // Proof store starts at 32, so the first peak is folded into the proof prefix.
         let range = Location::<F>::new(32)..Location::<F>::new(49);
         let proof = qmdb_range_proof(&hasher, &merkle, inactive_peaks, range.clone());
-        let proof_store = create_proof_store(
-            &hasher,
+        let proof_store = create_proof_store::<Sha256, _, _>(
             &proof,
             range.start,
             &operations[range.to_usize_range()],
@@ -531,15 +520,13 @@ mod tests {
 
         let mut tampered = proof.clone();
         tampered.inactive_peaks = 0;
-        assert!(!verify_proof(
-            &hasher,
+        assert!(!verify_proof::<Sha256, _, _>(
             &tampered,
             range.start,
             &operations[range.to_usize_range()],
             &root
         ));
-        assert!(create_proof_store(
-            &hasher,
+        assert!(create_proof_store::<Sha256, _, _>(
             &tampered,
             range.start,
             &operations[range.to_usize_range()],
@@ -549,15 +536,13 @@ mod tests {
 
         let mut tampered = proof;
         tampered.inactive_peaks = inactive_peaks + 1;
-        assert!(!verify_proof(
-            &hasher,
+        assert!(!verify_proof::<Sha256, _, _>(
             &tampered,
             range.start,
             &operations[range.to_usize_range()],
             &root
         ));
-        assert!(create_proof_store(
-            &hasher,
+        assert!(create_proof_store::<Sha256, _, _>(
             &tampered,
             range.start,
             &operations[range.to_usize_range()],
@@ -596,8 +581,7 @@ mod tests {
             .iter()
             .map(|&loc| (loc, operations[*loc as usize]))
             .collect();
-        assert!(verify_multi_proof(
-            &hasher,
+        assert!(verify_multi_proof::<Sha256, _, _>(
             &multi_proof,
             &selected_ops,
             &root
@@ -605,8 +589,7 @@ mod tests {
 
         let mut tampered = multi_proof;
         tampered.inactive_peaks = 0;
-        assert!(!verify_multi_proof(
-            &hasher,
+        assert!(!verify_multi_proof::<Sha256, _, _>(
             &tampered,
             &selected_ops,
             &root
@@ -654,7 +637,8 @@ mod tests {
         ];
         let proof = qmdb_range_proof(&hasher, &merkle, 0, Location::<F>::new(0)..merkle.leaves());
         let proof_store =
-            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
+            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root)
+                .unwrap();
         let multi_proof = create_multi_proof(&proof_store, &target_locations, &[]).unwrap();
 
         // Verify with correct operations
@@ -663,8 +647,7 @@ mod tests {
             (Location::<F>::new(4), operations[4]),
             (Location::<F>::new(7), operations[7]),
         ];
-        assert!(verify_multi_proof(
-            &hasher,
+        assert!(verify_multi_proof::<Sha256, _, _>(
             &multi_proof,
             &selected_ops,
             &root
@@ -676,8 +659,7 @@ mod tests {
             (Location::<F>::new(4), operations[4]),
             (Location::<F>::new(7), operations[7]),
         ];
-        assert!(!verify_multi_proof(
-            &hasher,
+        assert!(!verify_multi_proof::<Sha256, _, _>(
             &multi_proof,
             &wrong_ops,
             &root
@@ -689,8 +671,7 @@ mod tests {
             (Location::<F>::new(4), operations[4]),
             (Location::<F>::new(7), operations[7]),
         ];
-        assert!(!verify_multi_proof(
-            &hasher,
+        assert!(!verify_multi_proof::<Sha256, _, _>(
             &multi_proof,
             &wrong_locations,
             &root
@@ -716,8 +697,7 @@ mod tests {
 
         // Empty proof should verify against an empty merkle structure.
         let empty_proof = Proof::default();
-        assert!(verify_multi_proof(
-            &hasher,
+        assert!(verify_multi_proof::<Sha256, _, _>(
             &empty_proof,
             &[] as &[(Location<F>, u64)],
             &empty_root
@@ -737,7 +717,8 @@ mod tests {
         let root = merkle.root(&hasher, 0).unwrap();
         let proof = qmdb_range_proof(&hasher, &merkle, 0, Location::<F>::new(0)..merkle.leaves());
         let proof_store =
-            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
+            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root)
+                .unwrap();
         assert!(matches!(
             create_multi_proof(&proof_store, &[], &[]),
             Err(crate::merkle::Error::Empty)
@@ -781,14 +762,14 @@ mod tests {
             Location::<F>::new(0)..Location::<F>::new(3),
         );
         let proof_store =
-            create_proof_store(&hasher, &proof, Location::<F>::new(0), &operations, &root).unwrap();
+            create_proof_store::<Sha256, _, _>(&proof, Location::<F>::new(0), &operations, &root)
+                .unwrap();
 
         // Generate multi-proof for single element
         let multi_proof = create_multi_proof(&proof_store, &[Location::<F>::new(1)], &[]).unwrap();
 
         // Verify single element
-        assert!(verify_multi_proof(
-            &hasher,
+        assert!(verify_multi_proof::<Sha256, _, _>(
             &multi_proof,
             &[(Location::<F>::new(1), operations[1])],
             &root

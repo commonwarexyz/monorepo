@@ -125,7 +125,6 @@ pub(crate) mod test {
             Location as GenericLocation,
         },
         qmdb::{
-            self,
             any::{
                 test::fixed_db_config,
                 unordered::{fixed::Operation, Update},
@@ -906,9 +905,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            let hasher = qmdb::hasher::<Sha256>();
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
@@ -930,8 +927,7 @@ pub(crate) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
@@ -954,7 +950,6 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
 
             let mut db = create_test_db(context.child("first")).await;
             // Apply ops in multiple batches; each apply_ops ends in a commit, so the size
@@ -972,9 +967,7 @@ pub(crate) mod test {
             // Verify a single-op proof at the full commit size.
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
-            assert!(verify_proof(
-                &hasher,
-                &proof,
+            assert!(verify_proof::<Sha256, _, _>(&proof,
                 Location::new(1),
                 &proof_ops,
                 &root));
@@ -1022,7 +1015,6 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ops = create_test_ops(100);
-            let hasher = qmdb::hasher::<Sha256>();
             let start_loc = Location::new(2);
             let max_ops = NZU64!(10);
 
@@ -1052,8 +1044,7 @@ pub(crate) mod test {
                 assert_eq!(historical_proof.leaves, reference_proof.leaves);
                 assert_eq!(historical_proof.digests, reference_proof.digests);
                 assert_eq!(historical_ops, reference_ops);
-                assert!(verify_proof(
-                    &hasher,
+                assert!(verify_proof::<Sha256, _, _>(
                     &historical_proof,
                     start_loc,
                     &historical_ops,
@@ -1064,8 +1055,7 @@ pub(crate) mod test {
             // Verify the current full-size proof against the current root as a final sanity check.
             let full_root = db.root();
             let (full_proof, full_ops) = db.proof(start_loc, max_ops).await.unwrap();
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &full_proof,
                 start_loc,
                 &full_ops,

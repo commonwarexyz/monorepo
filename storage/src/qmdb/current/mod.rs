@@ -452,7 +452,6 @@ where
     let ops_size = any.log.merkle.size();
     let ops_leaves = crate::merkle::Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
-        &hasher,
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
@@ -470,8 +469,7 @@ where
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.root();
-    let root = db::compute_db_root(
-        &hasher,
+    let root = db::compute_db_root::<F, H, _, _, N>(
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
@@ -514,9 +512,8 @@ pub mod tests {
     pub use super::BitmapPrunedBits;
     use super::{ordered, unordered, FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig};
     use crate::{
-        merkle::{self, mmb, mmr, Bagging::ForwardFold},
+        merkle::{self, mmb, mmr},
         qmdb::{
-            self,
             any::{
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
@@ -1383,7 +1380,6 @@ pub mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
@@ -1451,17 +1447,17 @@ pub mod tests {
 
             // Honest exclusion proving refuses a live key.
             assert!(matches!(
-                db.exclusion_proof(&hasher, &c).await,
+                db.exclusion_proof(&c).await,
                 Err(Error::KeyExists)
             ));
 
             // Forge attempt: package `b`'s authenticated update as an exclusion proof for `c`. The
             // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
             // [b, a), which cyclically covered `c` and verified).
-            let kvp = db.key_value_proof(&hasher, b.clone()).await.unwrap();
+            let kvp = db.key_value_proof(b.clone()).await.unwrap();
             let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
             assert!(!ForgedExclusionDb::verify_exclusion_proof(
-                &hasher, &c, &forged, &root
+                &c, &forged, &root
             ));
 
             db.destroy().await.unwrap();
@@ -1955,8 +1951,7 @@ pub mod tests {
             assert_eq!(reopened.get(&k).await.unwrap(), expected);
 
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
-            let hasher = qmdb::hasher::<Sha256>();
-            let _proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let _proof = reopened.key_value_proof(k).await.unwrap();
 
             reopened.destroy().await.unwrap();
         });
@@ -2196,10 +2191,8 @@ pub mod tests {
                 mmb_commit(&mut db, [(key(1), Some(val(round)))]).await;
             }
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = db.key_value_proof(&hasher, k).await.unwrap();
+            let proof = db.key_value_proof(k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2219,10 +2212,8 @@ pub mod tests {
 
             assert_eq!(reopened.root(), target_root);
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let proof = reopened.key_value_proof(k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2446,11 +2437,9 @@ pub mod tests {
                     "root mismatch after prune at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -2479,11 +2468,9 @@ pub mod tests {
                     "value mismatch after reopen at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -3885,7 +3872,7 @@ pub mod tests {
     /// Regression: `ops_historical_proof` must verify with QMDB's ops-tree hasher configuration.
     #[test_traced("INFO")]
     fn test_current_mmb_ops_historical_proof_verifies_with_backward_bagging() {
-        use crate::{merkle::hasher::Standard, qmdb::verify_proof};
+        use crate::qmdb::verify_proof;
         use commonware_utils::NZU64;
 
         let executor = deterministic::Runner::default();
@@ -3911,19 +3898,7 @@ pub mod tests {
                 .unwrap();
 
             // Verifies under the QMDB ops-tree hasher configuration.
-            let hasher = qmdb::hasher::<Sha256>();
-            assert!(verify_proof(
-                &hasher,
-                &proof,
-                Location::new(0),
-                &ops,
-                &ops_root
-            ));
-
-            // Sanity: a different Merkle hasher configuration must not accept this proof.
-            let plain = Standard::<Sha256>::new(ForwardFold);
-            assert!(!verify_proof(
-                &plain,
+            assert!(verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(0),
                 &ops,

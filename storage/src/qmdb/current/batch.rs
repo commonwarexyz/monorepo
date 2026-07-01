@@ -652,7 +652,6 @@ where
 
     let hasher = qmdb::hasher::<H>();
     let new_leaves = compute_grafted_leaves::<F, H, S, N>(
-        &hasher,
         &ops_tree_adapter,
         chunks_to_update,
         &current_db.strategy,
@@ -710,7 +709,6 @@ where
         }
     };
     let canonical_root = compute_db_root::<F, H, _, _, N>(
-        &hasher,
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,

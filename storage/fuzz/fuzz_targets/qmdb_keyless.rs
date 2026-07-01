@@ -8,9 +8,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{
-        self, full::Config as MerkleConfig, mmb, mmr, Bagging::BackwardFold, Family, Location,
-    },
+    merkle::{full::Config as MerkleConfig, mmb, mmr, Family, Location},
     qmdb::{
         keyless::variable::{Config, Db as Keyless},
         verify_proof, Error,
@@ -222,7 +220,6 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
         let cfg = test_config(suffix, &context, strategy.clone());
         let mut db: Db<F, S> = Db::init(context.child("storage"), cfg)
             .await
@@ -426,9 +423,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     let root = db.root();
                     if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
-                                verify_proof(
-                                    &hasher,
-                                    &proof,
+                                verify_proof::<Sha256, _, _>(&proof,
                                     start_loc,
                                     &ops,
                                     &root),
@@ -465,9 +460,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
-                                verify_proof(
-                                    &hasher,
-                                    &proof,
+                                verify_proof::<Sha256, _, _>(&proof,
                                     start_loc,
                                     &ops,
                                     &root),
