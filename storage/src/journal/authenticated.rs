@@ -423,12 +423,27 @@ where
             while merkle_leaves < journal_size {
                 let batch = {
                     let mut batch = merkle.new_batch();
+                    let first = batch.leaves();
+                    let mut items = Vec::new();
                     let mut count = 0u64;
                     while count < apply_batch_size && merkle_leaves < journal_size {
                         let op = journal.read(*merkle_leaves).await?;
-                        batch = batch.add(hasher, &op.encode());
+                        items.push(op);
                         merkle_leaves += 1;
                         count += 1;
+                    }
+
+                    // Hash the batch's leaves in parallel, then append them.
+                    let digests =
+                        batch
+                            .strategy()
+                            .map_collect_vec(items.iter().enumerate(), |(i, item)| {
+                                let pos = Position::try_from(first + i as u64)
+                                    .expect("valid leaf location");
+                                hasher.leaf_digest(pos, item.encode().as_ref())
+                            });
+                    for digest in digests {
+                        batch = batch.add_leaf_digest(digest);
                     }
                     batch
                 };
