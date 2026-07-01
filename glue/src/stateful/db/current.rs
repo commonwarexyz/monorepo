@@ -224,7 +224,8 @@ where
     ///
     /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
     /// assigned the returned range. Expansion does not deduplicate against previously staged keys
-    /// and does not observe values computed for earlier staged slots but not yet passed to `set`.
+    /// and does not observe values computed for earlier staged slots but not yet passed to
+    /// `merkleize`.
     pub async fn expand(
         self,
         keys: &[&U::Key],
@@ -269,20 +270,24 @@ where
     /// before this method if more keys must be read into the staged index space.
     ///
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
-    /// [`expand`](CurrentStaged::expand) ranges.
-    pub async fn set(
+    /// [`expand`](CurrentStaged::expand) ranges. `metadata` is committed with the returned batch;
+    /// if it is `None`, metadata set before staging is used.
+    pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
+        metadata: Option<V::Value>,
     ) -> Result<CurrentMerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>, Error<F>> {
         let Self {
             staged,
             db,
-            metadata,
+            metadata: staged_metadata,
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.set(updates, upserts, &*guard, metadata).await?
+            staged
+                .merkleize(updates, upserts, metadata.or(staged_metadata), &*guard)
+                .await?
         };
         Ok(CurrentMerkleized { inner, db })
     }
@@ -307,20 +312,24 @@ where
     /// before this method if more keys must be read into the staged index space.
     ///
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
-    /// [`expand`](CurrentStaged::expand) ranges.
-    pub async fn set(
+    /// [`expand`](CurrentStaged::expand) ranges. `metadata` is committed with the returned batch;
+    /// if it is `None`, metadata set before staging is used.
+    pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
+        metadata: Option<V::Value>,
     ) -> Result<CurrentMerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>, Error<F>> {
         let Self {
             staged,
             db,
-            metadata,
+            metadata: staged_metadata,
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.set(updates, upserts, &*guard, metadata).await?
+            staged
+                .merkleize(updates, upserts, metadata.or(staged_metadata), &*guard)
+                .await?
         };
         Ok(CurrentMerkleized { inner, db })
     }
@@ -1361,11 +1370,11 @@ mod tests {
     }
 
     /// The glue staged wrapper (`CurrentUnmerkleized::stage` -> `CurrentStaged::expand` ->
-    /// `CurrentStaged::set`) must return the same values and root as an explicit `get_many` +
-    /// `write` + `merkleize`, including a staged delete, an upsert, and metadata set before the
-    /// read. This guards metadata flow and db-handle pairing through the wrapper.
+    /// `CurrentStaged::merkleize`) must return the same values and root as an explicit `get_many` +
+    /// `write` + `merkleize`, including a staged delete, an upsert, and metadata passed to staged
+    /// merkleize. This guards metadata flow and db-handle pairing through the wrapper.
     #[test]
-    fn current_glue_staged_set_matches_explicit_writes() {
+    fn current_glue_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("ordered-fixed-glue-staged", &context);
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
@@ -1413,17 +1422,15 @@ mod tests {
                     .unwrap()
                     .root();
 
-            // Staged path (metadata set before the read).
-            let staged_batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
-                .await
-                .with_metadata(metadata);
+            // Staged path.
+            let staged_batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
             let split = 2;
             let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
             let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
             assert_eq!(range, split..keys.len());
             staged_values.extend(suffix_values);
             let staged_root = staged
-                .set(indexed_updates.clone(), upserts.clone())
+                .merkleize(indexed_updates.clone(), upserts.clone(), Some(metadata))
                 .await
                 .unwrap()
                 .root();

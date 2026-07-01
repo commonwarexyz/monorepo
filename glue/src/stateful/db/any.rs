@@ -223,7 +223,8 @@ where
     ///
     /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
     /// assigned the returned range. Expansion does not deduplicate against previously staged keys
-    /// and does not observe values computed for earlier staged slots but not yet passed to `set`.
+    /// and does not observe values computed for earlier staged slots but not yet passed to
+    /// `merkleize`.
     pub async fn expand(
         self,
         keys: &[&U::Key],
@@ -267,20 +268,24 @@ where
     /// this method if more keys must be read into the staged index space.
     ///
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
-    /// [`expand`](AnyStaged::expand) ranges.
-    pub async fn set(
+    /// [`expand`](AnyStaged::expand) ranges. `metadata` is committed with the returned batch; if it
+    /// is `None`, metadata set before staging is used.
+    pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
+        metadata: Option<V::Value>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>, Error<F>> {
         let Self {
             staged,
             db,
-            metadata,
+            metadata: staged_metadata,
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.set(updates, upserts, &*guard, metadata).await?
+            staged
+                .merkleize(updates, upserts, metadata.or(staged_metadata), &*guard)
+                .await?
         };
         Ok(AnyMerkleized { inner, db })
     }
@@ -304,20 +309,24 @@ where
     /// this method if more keys must be read into the staged index space.
     ///
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
-    /// [`expand`](AnyStaged::expand) ranges.
-    pub async fn set(
+    /// [`expand`](AnyStaged::expand) ranges. `metadata` is committed with the returned batch; if it
+    /// is `None`, metadata set before staging is used.
+    pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
+        metadata: Option<V::Value>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>, Error<F>> {
         let Self {
             staged,
             db,
-            metadata,
+            metadata: staged_metadata,
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged.set(updates, upserts, &*guard, metadata).await?
+            staged
+                .merkleize(updates, upserts, metadata.or(staged_metadata), &*guard)
+                .await?
         };
         Ok(AnyMerkleized { inner, db })
     }
