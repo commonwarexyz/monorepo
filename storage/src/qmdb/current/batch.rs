@@ -108,6 +108,12 @@ impl<const N: usize> ChunkOverlay<N> {
     }
 }
 
+/// Compute grafted leaf digests for dirty graftable chunks against a speculative ops batch.
+///
+/// The ops tree is a batch layered over a base tree. New h=G subtree roots may already exist in the
+/// batch, while unchanged roots still live in the base tree. Each returned pair is
+/// `(chunk_idx, hash(chunk || ops_h_G_node))`, with the zero-chunk identity preserving the ops
+/// digest directly.
 async fn compute_grafted_leaves_from_batch<F, H, R, B, S, const N: usize>(
     hasher: &StandardHasher<H>,
     ops_tree: &BatchStorageAdapter<'_, F, H::Digest, R, B>,
@@ -125,6 +131,8 @@ where
     let mut inputs = Vec::new();
     let mut misses = Vec::new();
 
+    // First resolve h=G ops nodes from the speculative batch. Preserve input order by recording
+    // each base-tree miss at the index where its digest belongs.
     for (chunk_idx, chunk) in chunks {
         let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
         let pos = F::subtree_root_position(leaf_start, grafting_height);
@@ -136,6 +144,8 @@ where
         }
     }
 
+    // Fill batch misses from the base ops tree. Missing base nodes indicate the caller passed a
+    // chunk that is not graftable for this batch/base snapshot.
     let base = ops_tree.base;
     for (input_idx, digest) in try_join_all(misses.into_iter().map(|(input_idx, pos)| async move {
         let digest = base
@@ -149,6 +159,8 @@ where
         inputs[input_idx].1 = Some(digest);
     }
 
+    // Compute grafted leaf digests. All-zero chunks do not change the h=G ops digest, so preserve
+    // it directly instead of hashing an empty bitmap chunk into it.
     let zero_chunk = [0u8; N];
     Ok(strategy.map_init_collect_vec(
         inputs,
