@@ -1,13 +1,13 @@
 //! Constantinople-shape harness: load+write+merkleize at 32k updates / 1M keys.
 //!
-//! Times the full per-block state pipeline (get_many load, staged set+merkleize, root) on the
+//! Times the full per-block state pipeline (staged load, staged merkleize, root) on the
 //! tokio runtime with EightCap, matching the production validator shape. Runs against the
 //! unordered or ordered fixed `any`/`current` DBs over `mmb`. Prints per-iteration latency with
-//! a load/set+merkleize phase split and the speculative root (a cross-binary parity check:
+//! a load/merkleize phase split and the speculative root (a cross-binary parity check:
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [updates] [reads] [threads] [read_chunks]
+//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
 //!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
@@ -17,10 +17,10 @@
 //! - depth: number of pending ancestor batches under the timed batch
 //! - iters: timed iterations (default 15)
 //! - keys: total seeded keys (default 1,000,000)
-//! - updates: keys written per batch (default 32,768)
 //! - reads: keys loaded per batch (default 32,768)
-//! - threads: strategy pool threads (default 8)
 //! - read_chunks: split reads into `stage` + `expand` chunks (default 1)
+//! - updates: keys written per batch (default 32,768)
+//! - threads: strategy pool threads (default 8)
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_parallel::Rayon;
@@ -169,11 +169,11 @@ fn report(db: &str, args: &Args, mut times_ms: Vec<f64>) {
     let p = |q: f64| times_ms[((times_ms.len() - 1) as f64 * q) as usize];
     let mean: f64 = times_ms.iter().sum::<f64>() / times_ms.len() as f64;
     println!(
-        "RESULT db={db} depth={} updates={} reads={} read_chunks={} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
+        "RESULT db={db} depth={} reads={} read_chunks={} updates={} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
         args.depth,
-        args.num_updates,
         args.num_reads,
         args.read_chunks,
+        args.num_updates,
         p(0.1),
         p(0.5),
         mean,
@@ -246,7 +246,7 @@ macro_rules! run_pipeline {
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 
-            // Timed: load all touched keys, set the selected keys, merkleize, read root. The
+            // Timed: load all touched keys, merkleize selected updates, read root. The
             // load returns a staged batch that consumes `(read_index, value)` pairs after the
             // caller has computed them.
             let start = Instant::now();
@@ -272,7 +272,7 @@ macro_rules! run_pipeline {
 
             times_ms.push(elapsed.as_secs_f64() * 1000.0);
             println!(
-                "iter={iter} ms={:.2} load={:.2} set_merk={:.2} root={root}",
+                "iter={iter} ms={:.2} load={:.2} merkleize={:.2} root={root}",
                 times_ms[iter],
                 t_load.as_secs_f64() * 1000.0,
                 (elapsed - t_load).as_secs_f64() * 1000.0
@@ -299,12 +299,12 @@ fn main() {
         depth: raw.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
         iters: raw.get(3).and_then(|s| s.parse().ok()).unwrap_or(15),
         num_keys: raw.get(4).and_then(|s| s.parse().ok()).unwrap_or(1_000_000),
-        num_updates: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
-        num_reads: raw.get(6).and_then(|s| s.parse().ok()).unwrap_or(32_768),
-        read_chunks: raw.get(8).and_then(|s| s.parse().ok()).unwrap_or(1),
+        num_reads: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
+        read_chunks: raw.get(6).and_then(|s| s.parse().ok()).unwrap_or(1),
+        num_updates: raw.get(7).and_then(|s| s.parse().ok()).unwrap_or(32_768),
     };
     let threads: NonZeroUsize = raw
-        .get(7)
+        .get(8)
         .and_then(|s| s.parse().ok())
         .unwrap_or(NZUsize!(8));
     assert!(
@@ -328,8 +328,8 @@ fn main() {
     assert!(args.read_chunks > 0, "read_chunks must be non-zero");
 
     eprintln!(
-        "constantinople db={db_kind} depth={} iters={} keys={} updates={} reads={} threads={threads} read_chunks={}",
-        args.depth, args.iters, args.num_keys, args.num_updates, args.num_reads, args.read_chunks
+        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads}",
+        args.depth, args.iters, args.num_keys, args.num_reads, args.read_chunks, args.num_updates
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
