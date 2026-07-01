@@ -422,7 +422,7 @@ where
 
             while merkle_leaves < journal_size {
                 let batch = {
-                    let mut batch = merkle.new_batch();
+                    let batch = merkle.new_batch();
                     let first = batch.leaves();
                     let mut items = Vec::new();
                     let mut count = 0u64;
@@ -446,10 +446,7 @@ where
                             hasher.leaf_digest(pos, buf.as_slice())
                         },
                     );
-                    for digest in digests {
-                        batch = batch.add_leaf_digest(digest);
-                    }
-                    batch
+                    batch.add_leaf_digests(digests)
                 };
                 let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
                 merkle.apply_batch(&batch)?;

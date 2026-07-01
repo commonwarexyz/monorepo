@@ -208,7 +208,6 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         )
         .await?;
 
-        let hasher = crate::qmdb::hasher::<H>();
         let partial_chunk_digest =
             partial_chunk::<_, N>(status).map(|(chunk, _)| hasher.digest(chunk.as_slice()));
 

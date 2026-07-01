@@ -205,7 +205,7 @@ where
     )
     .await?;
     let ops_root = any.root();
-    let hasher = crate::qmdb::hasher::<H>();
+    let hasher = qmdb::hasher::<H>();
     let partial_digest = partial.map(|(chunk, next_bit)| {
         let digest = hasher.digest(chunk.as_slice());
         (next_bit, digest)

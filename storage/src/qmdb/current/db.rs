@@ -275,7 +275,7 @@ where
             self.any.inactivity_floor_loc,
         )
         .await?;
-        let hasher = crate::qmdb::hasher::<H>();
+        let hasher = qmdb::hasher::<H>();
         let partial_chunk = partial_chunk::<_, N>(self.any.bitmap.as_ref())
             .map(|(chunk, next_bit)| (next_bit, hasher.digest(chunk.as_slice())));
         let pending_chunk_digest: F::PendingChunk<H::Digest> = pending_chunk::<F, _, N>(
@@ -898,7 +898,7 @@ pub(super) fn combine_roots<H: Hasher>(
     pending: Option<&H::Digest>,
     partial: Option<(u64, &H::Digest)>,
 ) -> H::Digest {
-    let hasher = crate::qmdb::hasher::<H>();
+    let hasher = qmdb::hasher::<H>();
     match (pending, partial) {
         (None, None) => hasher.hash([ops_root.as_ref(), grafted_root.as_ref()]),
         (Some(pe), None) => hasher.hash([ops_root.as_ref(), grafted_root.as_ref(), pe.as_ref()]),
@@ -951,7 +951,7 @@ pub(super) async fn compute_db_root<
     let grafted_root =
         compute_grafted_root::<F, H, B, S, N>(status, storage, ops_leaves, inactivity_floor)
             .await?;
-    let hasher = crate::qmdb::hasher::<H>();
+    let hasher = qmdb::hasher::<H>();
     let pending = pending_chunk::<F, B, N>(status, ops_leaves, grafting::height::<N>())?
         .map(|chunk| hasher.digest(&chunk));
     let partial = partial_chunk.map(|(chunk, next_bit)| {
@@ -1056,7 +1056,7 @@ pub(super) async fn compute_grafted_leaves<
     let zero_chunk = [0u8; N];
     Ok(strategy.map_init_collect_vec(
         inputs,
-        || crate::qmdb::hasher::<H>(),
+        || qmdb::hasher::<H>(),
         |h, (chunk_idx, chunk_ops_digest, chunk)| {
             if chunk == zero_chunk {
                 (chunk_idx, chunk_ops_digest)
@@ -1131,7 +1131,7 @@ pub(super) async fn build_grafted_tree<
             let batch = grafted_tree.new_batch_with_strategy(strategy.clone());
             let batch = batch.add_leaf_digests(leaves.iter().map(|&(_, digest)| digest));
             let grafted_hasher =
-                grafting::GraftedHasher::<F, _>::new(crate::qmdb::hasher::<H>(), grafting_height);
+                grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<H>(), grafting_height);
             batch.merkleize(&grafted_tree, &grafted_hasher)
         };
         grafted_tree.apply_batch(&batch)?;

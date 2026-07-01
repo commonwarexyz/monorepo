@@ -60,6 +60,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
+    /// Add a run of pre-computed leaf digests, in order.
+    pub(crate) fn add_leaf_digests(self, digests: impl IntoIterator<Item = D>) -> Self {
+        Self {
+            inner: self.inner.add_leaf_digests(digests),
+        }
+    }
+
     /// The number of leaves visible through this batch.
     pub fn leaves(&self) -> Location<F> {
         self.inner.leaves()

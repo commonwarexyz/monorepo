@@ -60,9 +60,12 @@
 //!
 //! The grafted tree is incrementally maintained when grafted leaves change.
 
-use crate::merkle::{
-    self, hasher::Hasher as HasherTrait, storage::Storage as StorageTrait, Family, Graftable,
-    Location, Position, Readable,
+use crate::{
+    merkle::{
+        self, hasher::Hasher as HasherTrait, storage::Storage as StorageTrait, Family, Graftable,
+        Location, Position, Readable,
+    },
+    qmdb,
 };
 use commonware_cryptography::Hasher;
 use commonware_utils::bitmap::BitMap;
@@ -263,7 +266,7 @@ impl<'a, F: Graftable, H: Hasher> Verifier<'a, F, H> {
         graftable_chunks: u64,
     ) -> Self {
         Self {
-            hasher: crate::qmdb::hasher::<H>(),
+            hasher: qmdb::hasher::<H>(),
             grafting_height,
             chunks,
             start_chunk_index,
@@ -369,7 +372,7 @@ impl<
             grafted_tree,
             grafting_height,
             ops_tree,
-            grafted_hasher: GraftedHasher::new(crate::qmdb::hasher::<H>(), grafting_height),
+            grafted_hasher: GraftedHasher::new(qmdb::hasher::<H>(), grafting_height),
             _phantom: PhantomData,
         }
     }
@@ -566,7 +569,7 @@ mod tests {
         // combine the chunk (chunk_idx >= graftable_chunks).
         let pos_at_g = mmr::Family::subtree_root_position(Location::new(0), GH);
 
-        let standard = crate::qmdb::hasher::<Sha256>();
+        let standard = qmdb::hasher::<Sha256>();
         let expected_no_combine = <StandardHasher<Sha256> as HasherTrait<mmr::Family>>::node_digest(
             &standard, pos_at_g, &left, &right,
         );
@@ -620,7 +623,7 @@ mod tests {
         if !chunks.is_empty() {
             // Use a separate hasher for leaf digest computation to avoid borrow conflict
             // with grafted_hasher (which borrows standard via fork()).
-            let leaf_hasher = crate::qmdb::hasher::<Sha256>();
+            let leaf_hasher = qmdb::hasher::<Sha256>();
             let batch = {
                 let mut batch = grafted_mmr.new_batch();
                 for (i, chunk) in chunks.iter().enumerate() {
@@ -730,7 +733,7 @@ mod tests {
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
 
-            let standard = crate::qmdb::hasher::<Sha256>();
+            let standard = qmdb::hasher::<Sha256>();
             let mmr = Mmr::new();
             let ops_mmr = build_test_mmr(&standard, mmr, NUM_ELEMENTS);
 
@@ -773,7 +776,7 @@ mod tests {
 
     #[test_traced]
     fn test_merkleize_grafted() {
-        let standard = crate::qmdb::hasher::<Sha256>();
+        let standard = qmdb::hasher::<Sha256>();
         let grafting_height = 1u32;
 
         // Build ops MMR with 4 leaves.
@@ -797,7 +800,7 @@ mod tests {
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
 
         let batch = {
-            let leaf_hasher = crate::qmdb::hasher::<Sha256>();
+            let leaf_hasher = qmdb::hasher::<Sha256>();
             let sub0 = ops_mmr.get_node(pos0).unwrap();
             let batch = grafted
                 .new_batch()
@@ -830,7 +833,7 @@ mod tests {
             let b2 = Sha256::fill(0x02);
             let b3 = Sha256::fill(0x03);
             let b4 = Sha256::fill(0x04);
-            let hasher = crate::qmdb::hasher::<Sha256>();
+            let hasher = qmdb::hasher::<Sha256>();
 
             // Build an ops MMR with 4 leaves.
             let mut ops_mmr = Mmr::new();
@@ -1070,7 +1073,7 @@ mod tests {
     #[test_traced]
     fn test_grafted_mmr_basic() {
         let grafting_height = 1u32;
-        let standard = crate::qmdb::hasher::<Sha256>();
+        let standard = qmdb::hasher::<Sha256>();
 
         // Build a grafted MMR with 2 leaves.
         let d0 = Sha256::fill(0x01);
@@ -1104,7 +1107,7 @@ mod tests {
     #[test_traced]
     fn test_grafted_mmr_with_pruning() {
         let grafting_height = 1u32;
-        let standard = crate::qmdb::hasher::<Sha256>();
+        let standard = qmdb::hasher::<Sha256>();
 
         // Simulate pruning 4 chunks. The pruned sub-MMR has 4 grafted leaves,
         // mmr_size(4) = 7, with one peak at grafted position 6.
