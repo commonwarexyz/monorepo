@@ -43,6 +43,7 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type Value = V::Value;
     type ValueEncoding = V;
     type Cached = K;
+    const STAGE_DELETES: bool = false;
 
     fn key(&self) -> &K {
         &self.key

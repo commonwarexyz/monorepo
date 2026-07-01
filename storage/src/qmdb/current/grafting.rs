@@ -65,6 +65,7 @@ use crate::merkle::{
     Location, Position, Readable,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_parallel::Strategy;
 use commonware_utils::bitmap::BitMap;
 use core::{cmp::Ordering, marker::PhantomData};
 use tracing::debug;
@@ -72,6 +73,34 @@ use tracing::debug;
 /// Get the grafting height for a bitmap with chunk size determined by N.
 pub const fn height<const N: usize>() -> u32 {
     BitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
+}
+
+/// Hash resolved `(chunk_idx, ops_h_G_digest, chunk)` triples into `(chunk_idx, hash(chunk ||
+/// ops_h_G_digest))` grafted leaf pairs. For all-zero chunks the grafted leaf equals the ops
+/// digest directly (zero-chunk identity).
+pub(super) fn hash_grafted_leaves<H, S, const N: usize>(
+    hasher: &merkle::hasher::Standard<H>,
+    inputs: impl IntoIterator<IntoIter: Send, Item = (usize, H::Digest, [u8; N])> + Send,
+    strategy: &S,
+) -> Vec<(usize, H::Digest)>
+where
+    H: CHasher,
+    S: Strategy,
+{
+    strategy.map_init_collect_vec(
+        inputs,
+        || hasher.clone(),
+        |h, (chunk_idx, chunk_ops_digest, chunk)| {
+            if chunk == BitMap::<N>::EMPTY_CHUNK {
+                (chunk_idx, chunk_ops_digest)
+            } else {
+                (
+                    chunk_idx,
+                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
+                )
+            }
+        },
+    )
 }
 
 /// Return the number of bitmap chunks that have a corresponding height-G ancestor in the ops tree.

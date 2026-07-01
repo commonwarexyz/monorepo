@@ -302,12 +302,14 @@ pub mod test {
                 }
                 let explicit_root = explicit.merkleize(&db, None).await.unwrap().root();
 
-                let (staged_values, staged) = new_batch().stage(&keys, &db).await.unwrap();
-                let staged_root = staged
-                    .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
-                    .await
-                    .unwrap()
-                    .root();
+                let (staged_values, mut staged) = new_batch().stage(&keys, &db).await.unwrap();
+                for (slot, value) in &indexed_updates {
+                    staged = staged.write(read_keys[*slot], *value);
+                }
+                for (k, v) in &upserts {
+                    staged = staged.write(*k, *v);
+                }
+                let staged_root = staged.merkleize(&db, None).await.unwrap().root();
 
                 assert_eq!(
                     explicit_values, staged_values,
@@ -316,17 +318,16 @@ pub mod test {
                 assert_eq!(explicit_root, staged_root, "root mismatch at depth={depth}");
 
                 let split = 3;
-                let (mut expanded_values, staged) =
+                let (mut expanded_values, mut staged) =
                     new_batch().stage(&keys[..split], &db).await.unwrap();
-                let (range, suffix_values, staged) =
-                    staged.expand(&keys[split..], &db).await.unwrap();
-                assert_eq!(range, split..keys.len());
-                expanded_values.extend(suffix_values);
-                let expanded_root = staged
-                    .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
-                    .await
-                    .unwrap()
-                    .root();
+                expanded_values.extend(staged.read(&keys[split..], &db).await.unwrap());
+                for (slot, value) in &indexed_updates {
+                    staged = staged.write(read_keys[*slot], *value);
+                }
+                for (k, v) in &upserts {
+                    staged = staged.write(*k, *v);
+                }
+                let expanded_root = staged.merkleize(&db, None).await.unwrap().root();
 
                 assert_eq!(
                     explicit_values, expanded_values,
@@ -339,30 +340,18 @@ pub mod test {
 
                 let planned = val(7_000);
                 let duplicate_update = val(7_001);
-                let (first_values, staged) = new_batch().stage(&keys[..1], &db).await.unwrap();
-                let (duplicate_range, duplicate_values, staged) =
-                    staged.expand(&keys[..1], &db).await.unwrap();
-                assert_eq!(duplicate_range, 1..2);
+                let (_, mut staged) = new_batch().stage(&keys[..1], &db).await.unwrap();
+                staged = staged.write(read_keys[0], Some(planned));
+                let reread_values = staged.read(&keys[..1], &db).await.unwrap();
                 assert_eq!(
-                    first_values[0], duplicate_values[0],
-                    "duplicate expansion must assign a new slot without changing the base read"
-                );
-                assert_ne!(
-                    duplicate_values[0],
+                    reread_values[0],
                     Some(planned),
-                    "expand must not observe values computed for earlier staged slots"
+                    "staged reads must observe pending writes"
                 );
 
                 let duplicate_root = staged
-                    .merkleize(
-                        vec![
-                            (0, Some(planned)),
-                            (duplicate_range.start, Some(duplicate_update)),
-                        ],
-                        Vec::new(),
-                        None,
-                        &db,
-                    )
+                    .write(read_keys[0], Some(duplicate_update))
+                    .merkleize(&db, None)
                     .await
                     .unwrap()
                     .root();
@@ -375,7 +364,7 @@ pub mod test {
                     .root();
                 assert_eq!(
                     expected_duplicate_root, duplicate_root,
-                    "duplicate expanded slots should use normal update-order semantics"
+                    "re-read and re-written keys keep normal last-write-wins semantics"
                 );
             }
         });

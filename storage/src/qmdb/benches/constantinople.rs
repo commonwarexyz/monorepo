@@ -1,9 +1,9 @@
 //! Constantinople-shape harness: load+write+merkleize at 32k updates / 1M keys.
 //!
-//! Times the full per-block state pipeline (staged load, staged merkleize, root) on the
+//! Times the full per-block state pipeline (staged load, batch writes, merkleize, root) on the
 //! tokio runtime with EightCap, matching the production validator shape. Runs against the
 //! unordered or ordered fixed `any`/`current` DBs over `mmb`. Prints per-iteration latency with
-//! a load/merkleize phase split and the speculative root (a cross-binary parity check:
+//! a load/write/merkleize phase split and the speculative root (a cross-binary parity check:
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
@@ -18,7 +18,7 @@
 //! - iters: timed iterations (default 15)
 //! - keys: total seeded keys (default 1,000,000)
 //! - reads: keys loaded per batch (default 32,768)
-//! - read_chunks: split reads into `stage` + `expand` chunks (default 1)
+//! - read_chunks: split reads into `stage` + `read` chunks (default 1)
 //! - updates: keys written per batch (default 32,768)
 //! - threads: strategy pool threads (default 8)
 
@@ -36,7 +36,7 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, seq::SliceRandom, RngCore, SeedableRng};
 use std::{
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -229,53 +229,46 @@ macro_rules! run_pipeline {
                 chain.push(b.merkleize(&db, None).await.unwrap());
             }
 
+            // Randomly select which read slots are written back.
             let reads = gen_muts(&mut rng, args.num_reads, args.num_keys);
             let keys: Vec<&Digest> = reads.iter().map(|(k, _)| k).collect();
             let mut slots: Vec<_> = (0..reads.len()).collect();
-            for i in 0..args.num_updates as usize {
-                let j = i + (rng.next_u64() as usize % (slots.len() - i));
-                slots.swap(i, j);
-            }
-            let updates: Vec<_> = slots[..args.num_updates as usize]
-                .iter()
-                .map(|&idx| (idx, Some(reads[idx].1)))
-                .collect();
+            let (updated, _) = slots.partial_shuffle(&mut rng, args.num_updates as usize);
+            let updates: Vec<_> = updated.iter().map(|&idx| reads[idx]).collect();
             let new_batch = || {
                 chain
                     .last()
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 
-            // Timed: load all touched keys, merkleize selected updates, read root. The
-            // load returns a staged batch that consumes `(read_index, value)` pairs after the
-            // caller has computed them.
+            // Timed: load all touched keys, write the selected subset, merkleize, read root.
+            // Staged reads carry resolved locations into merkleize for the written keys.
             let start = Instant::now();
             let b = new_batch();
-            let read_chunks = args.read_chunks.min(keys.len()).max(1);
-            let chunk_len = keys.len().div_ceil(read_chunks);
+            let chunk_len = keys.len().div_ceil(args.read_chunks);
             let mut chunks = keys.chunks(chunk_len);
             let first = chunks.next().expect("reads must be non-empty");
             let (mut values, mut staged) = b.stage(first, &db).await.unwrap();
             for chunk in chunks {
-                let (_, more, next) = staged.expand(chunk, &db).await.unwrap();
-                values.extend(more);
-                staged = next;
+                values.extend(staged.read(chunk, &db).await.unwrap());
             }
             black_box(&values);
             let t_load = start.elapsed();
-            let merkleized = staged
-                .merkleize(updates, Vec::new(), None, &db)
-                .await
-                .unwrap();
+            for (k, v) in &updates {
+                staged = staged.write(*k, Some(*v));
+            }
+            let t_write = start.elapsed();
+            let merkleized = staged.merkleize(&db, None).await.unwrap();
             let root = merkleized.root();
             let elapsed = start.elapsed();
 
             times_ms.push(elapsed.as_secs_f64() * 1000.0);
             println!(
-                "iter={iter} ms={:.2} load={:.2} merkleize={:.2} root={root}",
+                "iter={iter} ms={:.2} load={:.2} write={:.2} merkleize={:.2} root={root}",
                 times_ms[iter],
                 t_load.as_secs_f64() * 1000.0,
-                (elapsed - t_load).as_secs_f64() * 1000.0
+                (t_write - t_load).as_secs_f64() * 1000.0,
+                (elapsed - t_write).as_secs_f64() * 1000.0
             );
         }
 

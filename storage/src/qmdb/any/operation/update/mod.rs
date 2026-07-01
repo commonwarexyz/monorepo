@@ -26,6 +26,12 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync {
     /// Payload cached alongside the resolved location of a batch read, consumed by merkleize.
     type Cached: Send + Sync;
 
+    /// Whether staged merkleization may emit a delete directly at a cached location. An unordered
+    /// delete just emits a `Delete` at that location, whereas an ordered delete must rewrite the
+    /// deleted key's predecessor via a snapshot-bucket scan the cached location cannot skip, so
+    /// ordered deletes fall back to normal mutations.
+    const STAGE_DELETES: bool;
+
     /// The updated key.
     fn key(&self) -> &Self::Key;
 

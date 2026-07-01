@@ -38,10 +38,7 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
-use std::{
-    ops::{Deref, Range},
-    sync::Arc,
-};
+use std::{ops::Deref, sync::Arc};
 
 // Matches commonware_storage::qmdb::any::BITMAP_CHUNK_BYTES, which is crate-private.
 const ANY_BITMAP_CHUNK_BYTES: usize = 64;
@@ -84,6 +81,72 @@ where
     metadata: Option<U::Value>,
 }
 
+impl<F, E, C, I, H, U, S> AnyUnmerkleized<F, E, C, I, H, U, S>
+where
+    F: Family,
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Read multiple values and enter the staged state (see [`AnyStaged`]).
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn stage(
+        self,
+        keys: &[&U::Key],
+    ) -> Result<(Vec<Option<U::Value>>, AnyStaged<F, E, C, I, H, U, S>), Error<F>> {
+        let (values, staged) = {
+            let guard = self.db.read().await;
+            self.batch.stage(keys, &*guard).await?
+        };
+        Ok((
+            values,
+            AnyStaged {
+                staged,
+                db: self.db,
+                metadata: self.metadata,
+            },
+        ))
+    }
+}
+
+impl<F, E, C, I, H, U, S> AnyStaged<F, E, C, I, H, U, S>
+where
+    F: Family,
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Set commit metadata included in the next [`merkleize`](AnyStaged::merkleize) call.
+    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    /// Read more values by key, falling back to committed state.
+    ///
+    /// Returns results in the same order as the input keys. Reads observe values recorded by
+    /// [`write`](AnyStaged::write).
+    pub async fn read(&mut self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+        let guard = self.db.read().await;
+        self.staged.read(keys, &*guard).await
+    }
+
+    /// Record a mutation. `Some(value)` for upsert, `None` for delete.
+    pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
+        self.staged = self.staged.write(key, value);
+        self
+    }
+}
+
 /// Key-value operations for the `any` unordered update kind.
 impl<F, E, C, I, H, K, V, S> AnyUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, S>
 where
@@ -116,36 +179,6 @@ where
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &*db).await
-    }
-
-    /// Read multiple values and return a staged batch for the same keys.
-    pub async fn stage(
-        self,
-        keys: &[&K],
-    ) -> Result<
-        (
-            Vec<Option<V::Value>>,
-            AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>,
-        ),
-        Error<F>,
-    > {
-        let Self {
-            batch,
-            db,
-            metadata,
-        } = self;
-        let (values, staged) = {
-            let guard = db.read().await;
-            batch.stage(keys, &*guard).await?
-        };
-        Ok((
-            values,
-            AnyStaged {
-                staged,
-                db,
-                metadata,
-            },
-        ))
     }
 
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.
@@ -208,48 +241,6 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, S> AnyStaged<F, E, C, I, H, U, S>
-where
-    F: Family,
-    E: Storage + Clock + Metrics,
-    U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>> + 'static,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    /// Expand this staged batch with more reads.
-    ///
-    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
-    /// assigned the returned range. Expansion does not deduplicate against previously staged keys
-    /// and does not observe values computed for earlier staged slots but not yet passed to
-    /// `merkleize`.
-    pub async fn expand(
-        self,
-        keys: &[&U::Key],
-    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata,
-        } = self;
-        let (range, values, staged) = {
-            let guard = db.read().await;
-            staged.expand(keys, &*guard).await?
-        };
-        Ok((
-            range,
-            values,
-            Self {
-                staged,
-                db,
-                metadata,
-            },
-        ))
-    }
-}
-
 impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>
 where
     F: Family,
@@ -262,32 +253,15 @@ where
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
-    ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
-    /// this method if more keys must be read into the staged index space.
-    ///
-    /// Update indices refer to the staged read set: the initial `stage` input followed by any
-    /// [`expand`](AnyStaged::expand) ranges. `metadata` is committed with the returned batch; if it
-    /// is `None`, metadata set before staging is used.
+    /// Resolve mutations into operations and compute the root digest.
     pub async fn merkleize(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>, Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata: staged_metadata,
-        } = self;
         let inner = {
-            let guard = db.read().await;
-            staged
-                .merkleize(updates, upserts, metadata.or(staged_metadata), &*guard)
-                .await?
+            let guard = self.db.read().await;
+            self.staged.merkleize(&*guard, self.metadata).await?
         };
-        Ok(AnyMerkleized { inner, db })
+        Ok(AnyMerkleized { inner, db: self.db })
     }
 }
 
@@ -303,32 +277,15 @@ where
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
-    ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
-    /// this method if more keys must be read into the staged index space.
-    ///
-    /// Update indices refer to the staged read set: the initial `stage` input followed by any
-    /// [`expand`](AnyStaged::expand) ranges. `metadata` is committed with the returned batch; if it
-    /// is `None`, metadata set before staging is used.
+    /// Resolve mutations into operations and compute the root digest.
     pub async fn merkleize(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>, Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata: staged_metadata,
-        } = self;
         let inner = {
-            let guard = db.read().await;
-            staged
-                .merkleize(updates, upserts, metadata.or(staged_metadata), &*guard)
-                .await?
+            let guard = self.db.read().await;
+            self.staged.merkleize(&*guard, self.metadata).await?
         };
-        Ok(AnyMerkleized { inner, db })
+        Ok(AnyMerkleized { inner, db: self.db })
     }
 }
 
@@ -364,36 +321,6 @@ where
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &*db).await
-    }
-
-    /// Read multiple values and return a staged batch for the same keys.
-    pub async fn stage(
-        self,
-        keys: &[&K],
-    ) -> Result<
-        (
-            Vec<Option<V::Value>>,
-            AnyStaged<F, E, C, I, H, ordered::Update<K, V>, S>,
-        ),
-        Error<F>,
-    > {
-        let Self {
-            batch,
-            db,
-            metadata,
-        } = self;
-        let (values, staged) = {
-            let guard = db.read().await;
-            batch.stage(keys, &*guard).await?
-        };
-        Ok((
-            values,
-            AnyStaged {
-                staged,
-                db,
-                metadata,
-            },
-        ))
     }
 
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.

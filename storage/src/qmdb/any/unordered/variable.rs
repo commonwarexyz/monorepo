@@ -296,12 +296,14 @@ pub(crate) mod test {
             }
             let explicit_root = explicit.merkleize(&db, None).await.unwrap().root();
 
-            let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
-            let staged_root = staged
-                .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
-                .await
-                .unwrap()
-                .root();
+            let (staged_values, mut staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            for (slot, value) in &indexed_updates {
+                staged = staged.write(read_keys[*slot], value.clone());
+            }
+            for (k, v) in &upserts {
+                staged = staged.write(*k, v.clone());
+            }
+            let staged_root = staged.merkleize(&db, None).await.unwrap().root();
 
             assert_eq!(explicit_values, staged_values);
             assert_eq!(explicit_root, staged_root);

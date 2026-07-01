@@ -1639,14 +1639,6 @@ pub mod tests {
         Sha256::hash(&(i + 10000).to_be_bytes())
     }
 
-    fn trait_write<B, Db>(batch: B, key: Digest, value: Digest) -> B
-    where
-        B: qmdb::any::traits::UnmerkleizedBatch<Db, K = Digest, V = Digest>,
-        Db: ?Sized,
-    {
-        <B as qmdb::any::traits::UnmerkleizedBatch<Db>>::write(batch, key, Some(value))
-    }
-
     async fn mmb_commit(
         db: &mut UnorderedVariableMmbDb,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
@@ -1673,29 +1665,6 @@ pub mod tests {
         let range = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         range
-    }
-
-    #[test_traced("INFO")]
-    fn test_current_trait_write_dispatches_to_batch_write() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let ctx = context.child("db");
-            let mut db: UnorderedFixedDb = UnorderedFixedDb::init(
-                ctx.child("storage"),
-                fixed_config::<OneCap>("current-trait-write-dispatch", &ctx),
-            )
-            .await
-            .unwrap();
-            let key = key(9000);
-            let value = val(9000);
-
-            let batch = trait_write::<_, UnorderedFixedDb>(db.new_batch(), key, value);
-            let batch = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(batch).await.unwrap();
-
-            assert_eq!(db.get(&key).await.unwrap(), Some(value));
-            db.destroy().await.unwrap();
-        });
     }
 
     #[test_traced("INFO")]
