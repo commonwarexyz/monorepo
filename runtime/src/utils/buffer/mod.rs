@@ -44,6 +44,9 @@ enum SyncState {
 
 impl SyncState {
     /// Mark a new unsynced mutation.
+    ///
+    /// Called before awaiting the blob operation so a failed or dropped mutation is still
+    /// covered by a later sync.
     fn mark_dirty(&mut self) {
         assert!(
             !matches!(self, Self::Pending(_)),
@@ -78,7 +81,6 @@ impl SyncState {
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
-        // If this fails or is dropped, a later sync must still cover the attempted write.
         self.mark_dirty();
         blob.write_at(offset, bufs).await?;
         Ok(())
@@ -114,7 +116,6 @@ impl SyncState {
     /// Resize the blob and require a later sync.
     async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
-        // If this fails or is dropped, a later sync must still cover the attempted resize.
         self.mark_dirty();
         blob.resize(len).await?;
         Ok(())

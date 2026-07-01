@@ -165,7 +165,8 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
             return Ok((BTreeMap::new(), Wrapper::empty(blob)));
         }
 
-        // Extract checksum
+        // The checksum must sit at the physical end of the blob (sync enforces this with a
+        // resize); on a mismatch the other blob still holds the last committed state.
         let checksum_index = buf.len() - crc32::Digest::SIZE;
         let stored_checksum =
             u32::from_be_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
@@ -414,8 +415,8 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         }
         next_data.put_u32(Crc32::checksum(&next_data[..]));
 
-        // Always enforce the physical length with a resize: recovery requires the checksum at
-        // the physical end of the blob, and a dropped earlier sync whose write still landed may
+        // Enforce the physical length with a resize: recovery requires the checksum at the
+        // physical end of the blob, and a dropped earlier sync whose write still landed may
         // have left the blob longer than the in-memory mirror suggests.
         let target = &self.state.blobs[target_cursor];
         target.blob.write_at(0, next_data.clone()).await?;

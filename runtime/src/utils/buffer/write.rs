@@ -13,9 +13,6 @@ use std::num::NonZeroUsize;
 /// - Subsequent writes reuse that backing, copy-on-write allocation only occurs when buffered data
 ///   is shared (for example, after handing out immutable views) or a merge needs more capacity.
 /// - Sparse writes merged into tip extend logical length and zero-fill any gap in-buffer.
-/// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) hand a view
-///   of buffered bytes to the blob, then detach the flushed prefix after the blob operation
-///   succeeds.
 ///
 /// # Cancellation
 ///
@@ -121,19 +118,19 @@ impl<B: Blob> Write<B> {
         }
 
         // Entirely in buffered tip.
-        if offset >= self.buffer.offset {
-            let start = (offset - self.buffer.offset) as usize;
+        if offset >= self.buffer.offset() {
+            let start = (offset - self.buffer.offset()) as usize;
             let end = start + len;
             return Ok(self.buffer.slice(start..end).into());
         }
 
         // Entirely in blob.
-        if end_offset <= self.buffer.offset {
+        if end_offset <= self.buffer.offset() {
             return self.read_blob(offset, len).await;
         }
 
         // Overlaps blob and buffered tip.
-        let blob_len = (self.buffer.offset - offset) as usize;
+        let blob_len = (self.buffer.offset() - offset) as usize;
         let tip_len = len - blob_len;
         let tip = self.buffer.slice(..tip_len);
 
@@ -182,7 +179,7 @@ impl<B: Blob> Write<B> {
             // Chunk cannot be merged, so flush the buffer if the range overlaps, and check
             // if merge is possible after.
             let chunk_end = current_offset + chunk_len as u64;
-            if self.buffer.offset < chunk_end && !self.buffer.is_empty() {
+            if self.buffer.offset() < chunk_end && !self.buffer.is_empty() {
                 self.flush_buffered(false).await?;
                 if self.buffer.merge(chunk, current_offset) {
                     bufs.advance(chunk_len);
@@ -203,7 +200,7 @@ impl<B: Blob> Write<B> {
 
             // Maintain the "buffer at tip" invariant by advancing offset to the end of this
             // write if it extended the underlying blob.
-            self.buffer.offset = self.buffer.offset.max(current_offset);
+            self.buffer.advance_to(current_offset);
         }
 
         Ok(())
@@ -226,6 +223,8 @@ impl<B: Blob> Write<B> {
 
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&mut self) -> Result<(), Error> {
+        // A durable flush leaves the state clean, so the trailing sync only acts when nothing
+        // was buffered.
         self.flush_buffered(true).await?;
         self.sync_state.sync(&self.blob).await
     }
@@ -252,7 +251,7 @@ impl<B: Blob> Write<B> {
             return Ok(());
         }
 
-        let offset = self.buffer.offset;
+        let offset = self.buffer.offset();
         let buffered = self.buffer.len();
         let buf = self.buffer.slice(..);
         if durable {

@@ -269,7 +269,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
         self.blobs
             .remove(&section)
-            .expect("removed section must still be tracked");
+            .expect("removed section must be tracked");
         self.tracked.dec();
         Ok(size)
     }
@@ -343,14 +343,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     }
 
     /// Remove all underlying blobs.
-    pub async fn destroy(self) -> Result<(), Error> {
-        for (section, blob) in self.blobs.into_iter() {
-            let size = blob.size();
-            drop(blob);
+    pub async fn destroy(mut self) -> Result<(), Error> {
+        while let Some((&section, _)) = self.blobs.first_key_value() {
+            let size = self.remove_blob(section).await?;
             debug!(section, size, "destroyed blob");
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
         }
         match self.context.remove(&self.partition, None).await {
             Ok(()) => {}

@@ -917,6 +917,13 @@ mod tests {
                 .await
                 .expect("Failed to append data");
             journal.sync(4u64).await.expect("Failed to sync blob");
+
+            // Destroy also tolerates a section whose blob is already gone.
+            context
+                .remove(&cfg.partition, Some(&4u64.to_be_bytes()))
+                .await
+                .expect("Failed to remove blob");
+            journal.destroy().await.expect("Failed to destroy journal");
         });
     }
 

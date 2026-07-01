@@ -332,24 +332,27 @@ impl<B: Blob> Writer<B> {
         // is a copy staged outside the tip, so a dropped append publishes nothing: tip, page,
         // and cache state advance only after the blob write succeeds.
         let tail_len = self.buffer.len();
-        let fill = if tail_len > 0 {
-            logical_page_size - tail_len
-        } else {
+        if tail_len == 0 {
             assert!(
                 self.partial_page_state.is_none(),
                 "an empty tip implies no partial page state"
             );
+        }
+        let fill = if tail_len > 0 {
+            logical_page_size - tail_len
+        } else {
             0
         };
         let mut physical_pages = IoBufs::default();
-        let first_page = (fill > 0).then(|| {
+        let mut first_page = None;
+        if fill > 0 {
             let mut page = self.cache_ref.pool().alloc(logical_page_size);
             page.put_slice(self.buffer.as_ref());
             page.put_slice(&buf.as_ref()[..fill]);
             let page = page.freeze();
             self.append_full_pages(&page, self.partial_page_state.as_ref(), &mut physical_pages);
-            page
-        });
+            first_page = Some(page);
+        }
 
         // Prepare physical pages for the whole pages of `buf` past `fill` without copying
         // logical payload bytes.
@@ -357,48 +360,10 @@ impl<B: Blob> Writer<B> {
         let bulk = buf.slice(fill..fill + bulk_len);
         self.append_full_pages(&bulk, None, &mut physical_pages);
 
-        // Direct blob writes must not overtake an earlier started sync barrier.
-        self.sync_state.wait_for_pending().await?;
-
-        // Write everything as one batch starting at the tip page, skipping any protected CRC
-        // slot of a committed partial tail.
-        let physical_page_size = logical_page_size as u64 + CHECKSUM_SIZE;
-        let write_at_offset = self.current_page * physical_page_size;
-        let protected_regions = Self::identify_protected_regions(self.partial_page_state.as_ref());
-        self.write_physical_pages(
-            physical_pages,
-            write_at_offset,
-            logical_page_size,
-            protected_regions,
-            false,
-        )
-        .await?;
-
-        // The direct write succeeded, so publish the cache, page, and tip state. Insert in
-        // write-buffer-sized chunks. The capacity is a whole number of pages (see
-        // [adjusted_capacity]), so each chunk is page-aligned.
-        let mut cache_offset = self.buffer.offset;
-        if let Some(first_page) = first_page {
-            let remaining = self
-                .cache_ref
-                .cache(self.id, first_page.as_ref(), cache_offset);
-            assert_eq!(remaining, 0, "cached completed page must be page-aligned");
-            cache_offset += logical_page_size as u64;
-            self.current_page += 1;
-            self.partial_page_state = None;
-        }
-        let chunk_len = self.buffer.capacity;
-        for chunk in bulk.as_ref().chunks(chunk_len) {
-            let remaining = self.cache_ref.cache(self.id, chunk, cache_offset);
-            assert_eq!(remaining, 0, "cached bulk pages must be page-aligned");
-            cache_offset += chunk.len() as u64;
-        }
-        self.current_page += (bulk_len / logical_page_size) as u64;
-
-        // Seed the tip with the partial-page suffix of `buf`. The suffix (less than one page) is
-        // copied: a sub-page tip is never drained by flush, so seeding it with a view of `buf`
-        // would pin the entire backing allocation until the next append to this blob (or forever,
-        // if there is none).
+        // Stage a copy of the partial-page suffix of `buf` for the new tip. The suffix (less
+        // than one page) is copied: a sub-page tip is never drained by flush, so seeding it
+        // with a view of `buf` would pin the entire backing allocation until the next append
+        // to this blob (or forever, if there is none).
         let suffix = buf.slice(fill + bulk_len..);
         let suffix = if suffix.is_empty() {
             suffix
@@ -407,50 +372,87 @@ impl<B: Blob> Writer<B> {
             copied.put_slice(suffix.as_ref());
             copied.freeze()
         };
-        self.buffer.replace(cache_offset, suffix);
 
-        // Make sure the buffer offset and underlying blob agree on the state of the tip.
-        assert_eq!(
-            self.current_page * self.cache_ref.page_size(),
-            self.buffer.offset
-        );
+        // Direct blob writes must not overtake an earlier started sync barrier.
+        self.sync_state.wait_for_pending().await?;
+
+        self.write_physical_pages(physical_pages, false).await?;
+        self.commit_append(first_page, &bulk, suffix);
 
         Ok(offset)
     }
 
-    /// Publish the state changes for a flush after all emitted blob writes have succeeded.
-    fn commit_flush(
-        &mut self,
-        bytes_to_drain: usize,
-        cache_pages: Option<(u64, IoBuf)>,
-        pages_to_cache: usize,
-        partial_page_state: Option<Checksum>,
-    ) {
-        self.buffer.commit_prefix(bytes_to_drain);
-        if let Some((cache_offset, pages)) = cache_pages {
-            let remaining = self.cache_ref.cache(self.id, pages.as_ref(), cache_offset);
+    /// Publish tip, page, and cache state for a direct append after its blob writes succeed.
+    fn commit_append(&mut self, first_page: Option<IoBuf>, bulk: &IoBuf, suffix: IoBuf) {
+        let page_size = self.cache_ref.page_size();
+
+        // Cache the page that completed the old tail, retiring its partial-page record.
+        let mut cache_offset = self.buffer.offset();
+        if let Some(first_page) = first_page {
+            let remaining = self
+                .cache_ref
+                .cache(self.id, first_page.as_ref(), cache_offset);
+            assert_eq!(remaining, 0, "cached completed page must be page-aligned");
+            cache_offset += page_size;
+            self.current_page += 1;
+            self.partial_page_state = None;
+        }
+
+        // Cache the bulk pages in write-buffer-sized chunks. The capacity is a whole number of
+        // pages (see [adjusted_capacity]), so each chunk is page-aligned.
+        for chunk in bulk.as_ref().chunks(self.buffer.capacity) {
+            let remaining = self.cache_ref.cache(self.id, chunk, cache_offset);
+            assert_eq!(remaining, 0, "cached bulk pages must be page-aligned");
+            cache_offset += chunk.len() as u64;
+        }
+        self.current_page += bulk.len() as u64 / page_size;
+
+        // Seed the tip with the staged suffix past the last written page.
+        let new_tip_offset = cache_offset;
+        self.buffer.replace(new_tip_offset, suffix);
+
+        assert_eq!(
+            self.current_page * self.cache_ref.page_size(),
+            self.buffer.offset()
+        );
+    }
+
+    /// Drain all full pages from the buffer into the page cache and adopt the new partial-page
+    /// record. Call only after the corresponding blob writes succeed.
+    fn commit_flush(&mut self, partial_page_state: Option<Checksum>) {
+        let page_size = self.cache_ref.page_size() as usize;
+        let full_bytes = self.buffer.len() / page_size * page_size;
+        if full_bytes > 0 {
+            let remaining = self.cache_ref.cache(
+                self.id,
+                &self.buffer.as_ref()[..full_bytes],
+                self.buffer.offset(),
+            );
             assert_eq!(remaining, 0, "cached full-page prefix must be page-aligned");
         }
-        self.current_page += pages_to_cache as u64;
+        self.buffer.commit_prefix(full_bytes);
+        self.current_page += (full_bytes / page_size) as u64;
         self.partial_page_state = partial_page_state;
 
         assert_eq!(
             self.current_page * self.cache_ref.page_size(),
-            self.buffer.offset
+            self.buffer.offset()
         );
     }
 
-    /// Write prepared physical pages, skipping any CRC slot that protects existing bytes.
+    /// Write prepared physical pages at the tip page, skipping any CRC slot that protects the
+    /// committed partial page.
     ///
     /// Returns `true` if the emitted writes were made durable, so no additional sync is needed.
     async fn write_physical_pages(
         &mut self,
         mut physical_pages: IoBufs,
-        write_at_offset: u64,
-        logical_page_size: usize,
-        protected_regions: Option<(usize, Slot)>,
         sync: bool,
     ) -> Result<bool, Error> {
+        let logical_page_size = self.cache_ref.page_size() as usize;
+        let write_at_offset = self.current_page * (logical_page_size as u64 + CHECKSUM_SIZE);
+        let protected_regions = Self::identify_protected_regions(self.partial_page_state.as_ref());
+
         // No protected CRC, so all prepared pages can be emitted in one write.
         let Some((prefix_len, slot)) = protected_regions else {
             self.write_at_maybe_sync(write_at_offset, physical_pages, sync)
@@ -498,7 +500,8 @@ impl<B: Blob> Writer<B> {
             .await?;
         }
 
-        Ok(sync && (has_first_write != has_second_write))
+        let made_durable = has_first_write != has_second_write;
+        Ok(sync && made_durable)
     }
 
     /// Flush all full pages from the buffer to disk, resetting the buffer to contain only the bytes
@@ -534,41 +537,8 @@ impl<B: Blob> Writer<B> {
         // A flush mutates the blob, so first resolve any outstanding start_sync barrier.
         self.sync_state.wait_for_pending().await?;
 
-        // Split buffered bytes into full logical pages to hand off now, leaving any trailing
-        // partial page in tip for continued buffering.
-        let logical_page_size = self.cache_ref.page_size() as usize;
-        let pages_to_cache = self.buffer.len() / logical_page_size;
-        let bytes_to_drain = pages_to_cache * logical_page_size;
-
-        // Remember the logical start offset and page bytes for caching of flushed full pages.
-        let cache_pages = if pages_to_cache > 0 {
-            Some((self.buffer.offset, self.buffer.slice(..bytes_to_drain)))
-        } else {
-            None
-        };
-
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
-        let write_at_offset = self.current_page * physical_page_size as u64;
-
-        // Identify protected regions based on the OLD partial page state.
-        let protected_regions = Self::identify_protected_regions(self.partial_page_state.as_ref());
-
-        let synced = self
-            .write_physical_pages(
-                physical_pages,
-                write_at_offset,
-                logical_page_size,
-                protected_regions,
-                sync,
-            )
-            .await?;
-
-        self.commit_flush(
-            bytes_to_drain,
-            cache_pages,
-            pages_to_cache,
-            partial_page_state,
-        );
+        let synced = self.write_physical_pages(physical_pages, sync).await?;
+        self.commit_flush(partial_page_state);
         Ok(synced)
     }
 
@@ -584,7 +554,7 @@ impl<B: Blob> Writer<B> {
             cache_ref: &self.cache_ref,
             id: self.id,
             size: self.buffer.size(),
-            tail_offset: self.buffer.offset,
+            tail_offset: self.buffer.offset(),
             tail: self.buffer.as_ref(),
         }
     }
@@ -726,8 +696,8 @@ impl<B: Blob> Writer<B> {
         padded.put_slice(&crc_record.to_bytes());
         write_buffer.append(padded.freeze());
 
-        // Return the CRC record that matches what we wrote to disk, so that future flushes
-        // correctly identify which slot is protected.
+        // Return the CRC record matching the prepared partial page, so a later flush
+        // identifies the protected slot.
         (write_buffer, Some(crc_record))
     }
 
@@ -1021,36 +991,30 @@ impl<B: Blob> Writer<B> {
         // the tip is repopulated.
         self.cache_ref.invalidate_from(self.id, full_pages);
 
+        // Shrink to a page boundary: no CRC-slot rewrite. Publish the shrunken state before
+        // the truncate: if the truncate is dropped, the writer claims no more than the blob
+        // holds and later appends overwrite the excess. The truncate is unconditional because
+        // the entry sync leaves any tip recorded, so a boundary shrink always reduces the
+        // physical page count.
         if partial_bytes == 0 {
-            // Shrink to a page boundary, which requires no CRC-slot rewrite. Publish the
-            // shrunken state before the truncate: if the truncate is dropped, the writer
-            // claims no more than the blob holds and later appends overwrite the excess.
             self.partial_page_state = None;
             self.current_page = full_pages;
-            self.buffer.offset = tail_offset;
-            self.buffer.clear();
-        } else if new_physical_size != current_physical_size {
-            // The truncate below deletes the page backing the current partial-page record.
-            // Drop the record first (with no await in between) so a dropped truncate cannot
-            // leave a stale record that makes a later flush skip rewriting the tip.
-            self.partial_page_state = None;
+            self.buffer.reset_to(tail_offset);
+            return self.sync_state.resize(&self.blob, new_physical_size).await;
         }
 
-        // A logical shrink can leave the physical page count unchanged. Only real physical
-        // resizes need to create a pending sync.
+        // Shrink into a partial page. A same-page shrink leaves the physical page count
+        // unchanged; otherwise the truncate deletes the page backing the current partial-page
+        // record, so drop the record first (with no await in between) so a dropped truncate
+        // cannot leave a stale record that makes a later flush skip rewriting the tip.
         if new_physical_size != current_physical_size {
+            self.partial_page_state = None;
             self.sync_state
                 .resize(&self.blob, new_physical_size)
                 .await?;
         }
-
-        if partial_bytes > 0 {
-            return self
-                .shrink_to_partial(full_pages, partial_bytes, logical_page_size, tail_offset)
-                .await;
-        }
-
-        Ok(())
+        self.shrink_to_partial(full_pages, partial_bytes, logical_page_size, tail_offset)
+            .await
     }
 
     /// Perform a shrink to a partial page tip and make the shorter CRC slot authoritative.
@@ -1082,8 +1046,7 @@ impl<B: Blob> Writer<B> {
             .await?;
 
         self.current_page = full_pages;
-        self.buffer.offset = tail_offset;
-        self.buffer.clear();
+        self.buffer.reset_to(tail_offset);
         let over_capacity = self.buffer.append(new_data);
         assert!(!over_capacity);
         self.partial_page_state = Some(final_record);
@@ -1103,7 +1066,7 @@ impl<B: Blob> Writer<B> {
         let full_pages = self.current_page;
         assert_eq!(
             full_pages.checked_mul(logical_page_size),
-            Some(self.buffer.offset),
+            Some(self.buffer.offset()),
             "flushed page count is inconsistent with the buffer offset"
         );
         let partial_page = if self.buffer.is_empty() {
