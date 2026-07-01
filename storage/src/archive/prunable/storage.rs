@@ -584,10 +584,13 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     async fn sync(&mut self) -> Result<(), Error> {
         self.sync_state.wait_all().await?;
-        for section in self.sync_state.take_pending(&self.syncs) {
-            self.oversized.sync(section).await?;
-        }
+        let pending = self.sync_state.take_pending(&self.syncs);
+        self.oversized.sync(pending).await?;
         Ok(())
+    }
+
+    async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+        Self::start_sync(self).await
     }
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {

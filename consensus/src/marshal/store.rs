@@ -2,7 +2,7 @@
 
 use crate::{simplex::types::Finalization, types::Height, Block};
 use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
-use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Clock, Handle, Metrics, Storage};
 use commonware_storage::{
     archive::{self, immutable, prunable, Archive, Identifier},
     translator::Translator,
@@ -46,8 +46,32 @@ pub trait Certificates: Send + Sync + 'static {
         finalization: Finalization<Self::Scheme, Self::Commitment>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+    /// Buffer a finalization certificate and start syncing the resulting write.
+    fn put_start_sync(
+        &mut self,
+        height: Height,
+        digest: Self::BlockDigest,
+        finalization: Finalization<Self::Scheme, Self::Commitment>,
+    ) -> impl Future<Output = Result<Handle<()>, Self::Error>> + Send {
+        async move {
+            self.put(height, digest, finalization).await?;
+            self.start_sync().await
+        }
+    }
+
     /// Flush all buffered writes to durable storage.
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Request that all buffered writes are flushed to durable storage.
+    ///
+    /// Implementations without a non-blocking sync path may complete the sync before returning an
+    /// already-finished handle.
+    fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Self::Error>> + Send {
+        async move {
+            self.sync().await?;
+            Ok(Handle::ready(Ok(())))
+        }
+    }
 
     /// Retrieve a [Finalization] by height or corresponding block digest.
     ///
@@ -110,8 +134,30 @@ pub trait Blocks: Send + Sync + 'static {
     /// * `block`: The finalized block, which provides its `height()` and `digest()`.
     fn put(&mut self, block: Self::Block) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+    /// Buffer a finalized block and start syncing the resulting write.
+    fn put_start_sync(
+        &mut self,
+        block: Self::Block,
+    ) -> impl Future<Output = Result<Handle<()>, Self::Error>> + Send {
+        async move {
+            self.put(block).await?;
+            self.start_sync().await
+        }
+    }
+
     /// Flush all buffered writes to durable storage.
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Request that all buffered writes are flushed to durable storage.
+    ///
+    /// Implementations without a non-blocking sync path may complete the sync before returning an
+    /// already-finished handle.
+    fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Self::Error>> + Send {
+        async move {
+            self.sync().await?;
+            Ok(Handle::ready(Ok(())))
+        }
+    }
 
     /// Retrieve a finalized block by height or block digest.
     ///
@@ -213,6 +259,10 @@ where
         Archive::sync(self).await
     }
 
+    async fn start_sync(&mut self) -> Result<Handle<()>, Self::Error> {
+        Archive::start_sync(self).await
+    }
+
     async fn get(
         &self,
         id: Identifier<'_, Self::BlockDigest>,
@@ -249,6 +299,10 @@ where
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
         Archive::sync(self).await
+    }
+
+    async fn start_sync(&mut self) -> Result<Handle<()>, Self::Error> {
+        Archive::start_sync(self).await
     }
 
     async fn get(
@@ -306,6 +360,10 @@ where
         Archive::sync(self).await
     }
 
+    async fn start_sync(&mut self) -> Result<Handle<()>, Self::Error> {
+        Archive::start_sync(self).await
+    }
+
     async fn get(
         &self,
         id: Identifier<'_, Self::BlockDigest>,
@@ -342,6 +400,10 @@ where
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
         Archive::sync(self).await
+    }
+
+    async fn start_sync(&mut self) -> Result<Handle<()>, Self::Error> {
+        Archive::start_sync(self).await
     }
 
     async fn get(
