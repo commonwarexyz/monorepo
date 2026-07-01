@@ -134,7 +134,7 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{index::Unordered as _, mmr, translator::TwoCap};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;

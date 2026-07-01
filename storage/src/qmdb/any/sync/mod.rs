@@ -2,7 +2,7 @@
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db] variants
 //! (ordered/unordered, fixed/variable).
 //!
-//! Callers verifying `any` sync proofs directly should use `qmdb::hasher`.
+//! Callers verifying `any` sync proofs directly should use [`crate::qmdb::verify_proof`].
 
 use crate::{
     index::Factory as IndexFactory,
