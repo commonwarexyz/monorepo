@@ -1141,7 +1141,7 @@ where
         }
         staged_updates
             .entries
-            .sort_unstable_by(|a, b| a.1.cmp(&b.1));
+            .sort_unstable_by_key(|entry| entry.1);
         for (slot, update_idx) in latest.into_iter().enumerate() {
             let Some(update_idx) = update_idx else {
                 continue;
