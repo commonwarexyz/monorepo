@@ -7,7 +7,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{self, mmb, mmr, Bagging::BackwardFold, Family as MerkleFamily, Location},
+    merkle::{mmb, mmr, Family as MerkleFamily, Location},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         immutable::{variable::Db as Immutable, Config},
@@ -153,7 +153,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     .await
                     .unwrap();
 
-            let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
             let mut keys_set: Vec<(Digest, Location<F>)> = Vec::new();
             let mut set_locations: Vec<(Digest, Location<F>)> = Vec::new();
             let mut last_commit_loc: Option<Location<F>> = None;
@@ -272,7 +271,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             last_commit_loc = Some(db.bounds().end - 1);
                             if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
                                 let root = db.root();
-                                let _ = verify_proof(&hasher, &proof, safe_start, &ops, &root);
+                                let _ =
+                                    verify_proof::<Sha256, _, _>(&proof, safe_start, &ops, &root);
                             }
                         }
                     }

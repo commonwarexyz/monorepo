@@ -450,10 +450,8 @@ where
         });
     }
 
-    let hasher = qmdb::hasher::<DB::Hasher>();
     let last_commit_loc = Location::new(*state.leaf_count - 1);
-    if !verify_proof(
-        &hasher,
+    if !verify_proof::<DB::Hasher, _, _>(
         &state.last_commit_proof,
         last_commit_loc,
         std::slice::from_ref(&state.last_commit_op),
