@@ -204,8 +204,8 @@ impl Buffer {
     /// Appends the provided `data` to the buffer, and returns `true` if the buffer is over capacity
     /// after the append.
     ///
-    /// If the buffer is above capacity, the caller is responsible for using `take` to bring it back
-    /// under. Further appends are safe, but will continue growing the buffer beyond its capacity.
+    /// If the buffer is above capacity, the caller is responsible for flushing and committing a
+    /// prefix. Further appends are safe, but will continue growing the buffer beyond its capacity.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
         let end = self.len + data.len();
         let mut writable = self.writable(end);
