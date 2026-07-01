@@ -250,7 +250,7 @@ pub struct Verifier<'a, F: Graftable, H: Hasher> {
 }
 
 impl<'a, F: Graftable, H: Hasher> Verifier<'a, F, H> {
-    /// Create a new Verifier whose internal hasher uses the supplied bagging policy.
+    /// Create a new verifier using QMDB's fixed Merkle hasher configuration.
     ///
     /// `start_chunk_index` is the chunk index corresponding to `chunks[0]`.
     /// `graftable_chunks` is the number of chunks committed by the grafted tree; any chunk index
@@ -261,10 +261,9 @@ impl<'a, F: Graftable, H: Hasher> Verifier<'a, F, H> {
         start_chunk_index: u64,
         chunks: Vec<&'a [u8]>,
         graftable_chunks: u64,
-        bagging: merkle::Bagging,
     ) -> Self {
         Self {
-            hasher: merkle::hasher::Standard::new(bagging),
+            hasher: crate::qmdb::hasher::<H>(),
             grafting_height,
             chunks,
             start_chunk_index,
@@ -437,7 +436,7 @@ impl<
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mmr, Bagging::ForwardFold},
+        merkle::conformance::build_test_mmr,
         mmb, mmr,
         mmr::{
             iterator::{pos_to_height, PeakIterator},
@@ -567,12 +566,12 @@ mod tests {
         // combine the chunk (chunk_idx >= graftable_chunks).
         let pos_at_g = mmr::Family::subtree_root_position(Location::new(0), GH);
 
-        let standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
+        let standard = crate::qmdb::hasher::<Sha256>();
         let expected_no_combine = <StandardHasher<Sha256> as HasherTrait<mmr::Family>>::node_digest(
             &standard, pos_at_g, &left, &right,
         );
 
-        let v = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 0, ForwardFold);
+        let v = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 0);
         let got = <Verifier<'_, mmr::Family, Sha256> as HasherTrait<mmr::Family>>::node_digest(
             &v, pos_at_g, &left, &right,
         );
@@ -582,7 +581,7 @@ mod tests {
         );
 
         // Sanity: with graftable_chunks=1 the chunk IS combined, so the digest differs.
-        let v_graftable = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 1, ForwardFold);
+        let v_graftable = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 1);
         let got_graftable =
             <Verifier<'_, mmr::Family, Sha256> as HasherTrait<mmr::Family>>::node_digest(
                 &v_graftable,
@@ -621,7 +620,7 @@ mod tests {
         if !chunks.is_empty() {
             // Use a separate hasher for leaf digest computation to avoid borrow conflict
             // with grafted_hasher (which borrows standard via fork()).
-            let leaf_hasher = StandardHasher::<Sha256>::new(ForwardFold);
+            let leaf_hasher = crate::qmdb::hasher::<Sha256>();
             let batch = {
                 let mut batch = grafted_mmr.new_batch();
                 for (i, chunk) in chunks.iter().enumerate() {
@@ -731,7 +730,7 @@ mod tests {
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
 
-            let standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
+            let standard = crate::qmdb::hasher::<Sha256>();
             let mmr = Mmr::new();
             let ops_mmr = build_test_mmr(&standard, mmr, NUM_ELEMENTS);
 
@@ -774,7 +773,7 @@ mod tests {
 
     #[test_traced]
     fn test_merkleize_grafted() {
-        let standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
+        let standard = crate::qmdb::hasher::<Sha256>();
         let grafting_height = 1u32;
 
         // Build ops MMR with 4 leaves.
@@ -798,7 +797,7 @@ mod tests {
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
 
         let batch = {
-            let leaf_hasher = StandardHasher::<Sha256>::new(ForwardFold);
+            let leaf_hasher = crate::qmdb::hasher::<Sha256>();
             let sub0 = ops_mmr.get_node(pos0).unwrap();
             let batch = grafted
                 .new_batch()
@@ -831,7 +830,7 @@ mod tests {
             let b2 = Sha256::fill(0x02);
             let b3 = Sha256::fill(0x03);
             let b4 = Sha256::fill(0x04);
-            let hasher: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
+            let hasher = crate::qmdb::hasher::<Sha256>();
 
             // Build an ops MMR with 4 leaves.
             let mut ops_mmr = Mmr::new();
@@ -892,7 +891,6 @@ mod tests {
                         0,
                         vec![&c1],
                         ALL_CHUNKS_GRAFTABLE,
-                        ForwardFold,
                     );
                     assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
 
@@ -911,7 +909,6 @@ mod tests {
                         1,
                         vec![&c2],
                         ALL_CHUNKS_GRAFTABLE,
-                        ForwardFold,
                     );
                     assert!(proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
 
@@ -933,7 +930,6 @@ mod tests {
                         1,
                         vec![&c2],
                         ALL_CHUNKS_GRAFTABLE,
-                        ForwardFold,
                     );
                     assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
 
@@ -957,7 +953,6 @@ mod tests {
                         0,
                         vec![&c1],
                         ALL_CHUNKS_GRAFTABLE,
-                        ForwardFold,
                     );
                     assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
 
@@ -967,7 +962,6 @@ mod tests {
                         2,
                         vec![&c2],
                         ALL_CHUNKS_GRAFTABLE,
-                        ForwardFold,
                     );
                     assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
                 }
@@ -988,7 +982,6 @@ mod tests {
                         0,
                         vec![&c1, &c2],
                         ALL_CHUNKS_GRAFTABLE,
-                        ForwardFold,
                     );
                     assert!(proof.verify_range_inclusion(
                         &verifier,
@@ -1003,7 +996,6 @@ mod tests {
                         0,
                         vec![&c1],
                         ALL_CHUNKS_GRAFTABLE,
-                        ForwardFold,
                     );
                     assert!(!proof.verify_range_inclusion(
                         &verifier,
@@ -1058,7 +1050,6 @@ mod tests {
                 0,
                 vec![&c1],
                 ALL_CHUNKS_GRAFTABLE,
-                ForwardFold,
             );
             assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
 
@@ -1067,7 +1058,6 @@ mod tests {
                 0,
                 vec![],
                 ALL_CHUNKS_GRAFTABLE,
-                ForwardFold,
             );
             let loc = Location::new(4);
             let proof = merkle::verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
@@ -1080,7 +1070,7 @@ mod tests {
     #[test_traced]
     fn test_grafted_mmr_basic() {
         let grafting_height = 1u32;
-        let standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
+        let standard = crate::qmdb::hasher::<Sha256>();
 
         // Build a grafted MMR with 2 leaves.
         let d0 = Sha256::fill(0x01);
@@ -1114,7 +1104,7 @@ mod tests {
     #[test_traced]
     fn test_grafted_mmr_with_pruning() {
         let grafting_height = 1u32;
-        let standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
+        let standard = crate::qmdb::hasher::<Sha256>();
 
         // Simulate pruning 4 chunks. The pruned sub-MMR has 4 grafted leaves,
         // mmr_size(4) = 7, with one peak at grafted position 6.

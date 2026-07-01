@@ -355,7 +355,6 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             start_chunk,
             chunk_vec,
             graftable_chunks,
-            qmdb::ROOT_BAGGING,
         );
 
         if self.pending_chunk_digest.as_ref().is_some() != has_pending_chunk {
