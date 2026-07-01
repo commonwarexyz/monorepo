@@ -1,6 +1,6 @@
 use crate::{
     buffer::{tip::Buffer, SyncState},
-    Blob, Buf, BufferPool, BufferPooler, Error, IoBufs,
+    Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs,
 };
 use std::num::NonZeroUsize;
 
@@ -180,7 +180,9 @@ impl<B: Blob> Write<B> {
                 let old_offset = self.buffer.offset;
                 let old_len = self.buffer.len();
                 let old_buf = self.buffer.slice(..);
-                self.write_blob(old_offset, old_buf).await?;
+                self.sync_state
+                    .write_at(&self.blob, old_offset, old_buf)
+                    .await?;
                 self.buffer.commit_prefix(old_len);
                 if self.buffer.merge(chunk, current_offset) {
                     bufs.advance(chunk_len);
@@ -194,7 +196,9 @@ impl<B: Blob> Write<B> {
             // once when the buffer is flushed above, then again when we write the chunk
             // below. Removing this inefficiency may not be worth the additional complexity.
             let direct = bufs.split_to(chunk_len);
-            self.write_blob(current_offset, direct).await?;
+            self.sync_state
+                .write_at(&self.blob, current_offset, direct)
+                .await?;
             current_offset += chunk_len as u64;
 
             // Maintain the "buffer at tip" invariant by advancing offset to the end of this
@@ -214,12 +218,11 @@ impl<B: Blob> Write<B> {
             let offset = self.buffer.offset;
             let buffered = self.buffer.len();
             let buf = self.buffer.slice(..);
-            self.write_blob(offset, buf).await?;
+            self.sync_state.write_at(&self.blob, offset, buf).await?;
             self.buffer.commit_prefix(buffered);
         }
 
-        self.blob.resize(len).await?;
-        self.sync_state.mark_dirty();
+        self.sync_state.resize(&self.blob, len).await?;
         self.buffer.commit_resize(len);
 
         Ok(())
@@ -239,13 +242,23 @@ impl<B: Blob> Write<B> {
         self.sync_blob().await
     }
 
-    /// Write bytes to the underlying blob and mark them as needing sync.
-    async fn write_blob(
-        &mut self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.sync_state.write_at(&self.blob, offset, bufs).await
+    /// Flush buffered bytes and begin durably syncing mutations tracked by this writer.
+    ///
+    /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
+    /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
+    /// mutate the blob wait before issuing blob operations.
+    pub async fn start_sync(&mut self) -> Handle<()> {
+        if !self.buffer.is_empty() {
+            let offset = self.buffer.offset;
+            let buffered = self.buffer.len();
+            let buf = self.buffer.slice(..);
+            if let Err(err) = self.sync_state.write_at(&self.blob, offset, buf).await {
+                return Handle::ready(Err(err));
+            }
+            self.buffer.commit_prefix(buffered);
+        }
+
+        self.sync_state.start_sync(&self.blob).await
     }
 
     /// Write bytes to the underlying blob and make them durable.
