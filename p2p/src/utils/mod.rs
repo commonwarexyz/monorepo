@@ -11,6 +11,7 @@ use commonware_utils::{
 };
 
 pub mod codec;
+pub mod interleave;
 pub mod limited;
 #[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
