@@ -1317,10 +1317,13 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// Return true when reads can bypass uncommitted overlay resolution and go directly to the DB.
     fn reads_committed_only(&self) -> bool {
         self.mutations.is_empty() && self.base.parent().is_none()
     }
 
+    /// Resolve keys against this batch and any live ancestor diffs, returning partial results and
+    /// the unresolved slots that still need committed DB reads.
     fn resolve_uncommitted_reads<'a>(
         &self,
         keys: &[&'a U::Key],
