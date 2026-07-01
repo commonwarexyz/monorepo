@@ -111,13 +111,11 @@ fn fuzz(input: FuzzInput) {
         MutationType::AddMultipleElementsThenSubtractSum => {
             let num_elements = (input.num_elements as usize % 32) + 1;
             let mut elements = Vec::new();
-            let mut sum_hash = LtHash::new();
 
             // Add random elements and collect them
             for _ in 0..num_elements {
                 let element = generate_random_bytes(&mut rng, 1, 256);
                 lthash.add(&element);
-                sum_hash.add(&element);
                 elements.push(element);
             }
 
