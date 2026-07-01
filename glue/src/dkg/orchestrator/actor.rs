@@ -44,7 +44,7 @@ use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::Duration,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 struct Channels<C, S, R>
 where
@@ -353,13 +353,13 @@ where
                 debug!("context shutdown, stopping orchestrator");
             },
             Some((their_epoch, (from, _))) = channels.vote_backup.recv() else {
-                warn!("vote mux backup channel closed, shutting down orchestrator");
+                debug!("vote mux backup channel closed, shutting down orchestrator");
                 break;
             } => {
                 self.handle_backup_vote(&epocher, active.epoch, their_epoch, from);
             },
             Some(message) = self.mailbox.recv() else {
-                warn!("mailbox closed, shutting down orchestrator");
+                debug!("mailbox closed, shutting down orchestrator");
                 break;
             } => match message {
                 Message::Finalized {
