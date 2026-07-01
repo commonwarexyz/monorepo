@@ -6,6 +6,7 @@
 //!
 //! - `portable`: Enables `portable` feature on `blst` (<https://github.com/supranational/blst?tab=readme-ov-file#platform-and-language-compatibility>).
 
+pub mod batch_tle;
 pub mod certificate;
 #[cfg(feature = "std")]
 pub mod dkg;
