@@ -1,4 +1,4 @@
-use crate::algebra::{Additive, FieldNTT, Ring};
+use crate::algebra::{Additive, FieldNTT, Ring, Space};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
@@ -40,13 +40,18 @@ fn reverse_slice<T>(bit_width: u32, out: &mut [T]) {
 
 /// Calculate an NTT, or an inverse NTT (with FORWARD=false), in place.
 ///
-/// We implement this generically over anything we can index into, which allows
-/// performing NTTs in place.
-fn ntt<const FORWARD: bool, F: FieldNTT, M: IndexMut<(usize, usize), Output = F>>(
-    rows: usize,
-    cols: usize,
-    matrix: &mut M,
-) {
+/// Generic over any element type `T` that is an [`Additive`] [`Space`] over the
+/// scalar field `F`, so it works for both field elements (e.g. [`Scalar`]) and
+/// group elements (e.g. G1, G2). We implement this over anything we can index
+/// into, which allows performing NTTs in place.
+///
+/// For a single column use `rows = data.len()`, `cols = 1`, and a [`Columns`]
+/// with one slice (e.g. `Columns { data: [data] }`).
+pub fn ntt<const FORWARD: bool, F: FieldNTT, T, M>(rows: usize, cols: usize, matrix: &mut M)
+where
+    T: Additive + Space<F> + Clone,
+    M: IndexMut<(usize, usize), Output = T>,
+{
     let lg_rows = rows.ilog2() as usize;
     assert_eq!(1 << lg_rows, rows, "rows should be a power of 2");
     // A number w such that w^(2^lg_rows) = 1.
@@ -60,6 +65,20 @@ fn ntt<const FORWARD: bool, F: FieldNTT, M: IndexMut<(usize, usize), Output = F>
             // making that left-hand term the inverse of w.
             w.exp(&[(1 << lg_rows) - 1])
         }
+    };
+    // For the inverse NTT, we defer normalization (the 1/2 per stage) to a
+    // single 1/n pass at the end. This reduces the inverse butterfly from 3
+    // scalar multiplications to 1 (matching the forward butterfly).
+    let inv_n = if FORWARD {
+        None
+    } else {
+        // rows = 2^lg_rows, so compute n by repeated doubling of 1.
+        let two = F::one() + &F::one();
+        let mut n = F::one();
+        for _ in 0..lg_rows {
+            n *= &two;
+        }
+        Some(n.inv())
     };
     // The inverse algorithm consists of carefully undoing the work of the
     // standard algorithm, so we describe that in detail.
@@ -140,18 +159,16 @@ fn ntt<const FORWARD: bool, F: FieldNTT, M: IndexMut<(usize, usize), Output = F>
                 for k in 0..cols {
                     let (a, b) = (matrix[(index_a, k)].clone(), matrix[(index_b, k)].clone());
                     if FORWARD {
-                        let w_j_b = w_j.clone() * &b;
+                        let w_j_b = b.clone() * &w_j;
                         matrix[(index_a, k)] = a.clone() + &w_j_b;
                         matrix[(index_b, k)] = a - &w_j_b;
                     } else {
-                        // To check the math, convince yourself that applying the forward
-                        // transformation, and then this transformation, with w_j being the
-                        // inverse of the value above, that you get (a, b).
-                        // (a + w_j * b) + (a - w_j * b) = 2 * a
-                        matrix[(index_a, k)] = (a.clone() + &b).div_2();
-                        // (a + w_j * b) - (a - w_j * b) = 2 * w_j * b.
-                        // w_j in this branch is the inverse of w_j in the other branch.
-                        matrix[(index_b, k)] = ((a - &b) * &w_j).div_2();
+                        // Inverse butterfly without per-stage normalization.
+                        // We compute: a' = a + b, b' = (a - b) * w_j^{-1}
+                        // The 1/n normalization is applied once at the end.
+                        let diff_w = (a.clone() - &b) * &w_j;
+                        matrix[(index_a, k)] = a + &b;
+                        matrix[(index_b, k)] = diff_w;
                     }
                 }
                 w_j *= &w;
@@ -159,24 +176,36 @@ fn ntt<const FORWARD: bool, F: FieldNTT, M: IndexMut<(usize, usize), Output = F>
             i += 2 * skip;
         }
     }
+
+    // For inverse NTT, apply the deferred 1/n normalization in a single pass.
+    if !FORWARD {
+        let inv_n_ref = inv_n.as_ref().expect("inv_n set when FORWARD is false");
+        for i in 0..rows {
+            for k in 0..cols {
+                let val = matrix[(i, k)].clone() * inv_n_ref;
+                matrix[(i, k)] = val;
+            }
+        }
+    }
 }
 
 /// Columns of some larger piece of data.
 ///
 /// This allows us to easily do NTTs over partial segments of some bigger matrix.
-struct Columns<'a, const N: usize, F> {
-    data: [&'a mut [F]; N],
+/// For a single column use `Columns { data: [my_slice] }` and call [`ntt`] with `cols = 1`.
+pub struct Columns<'a, const N: usize, T> {
+    pub data: [&'a mut [T]; N],
 }
 
-impl<'a, const N: usize, F> Index<(usize, usize)> for Columns<'a, N, F> {
-    type Output = F;
+impl<'a, const N: usize, T> Index<(usize, usize)> for Columns<'a, N, T> {
+    type Output = T;
 
     fn index(&self, (i, j): (usize, usize)) -> &Self::Output {
         &self.data[j][i]
     }
 }
 
-impl<'a, const N: usize, F> IndexMut<(usize, usize)> for Columns<'a, N, F> {
+impl<'a, const N: usize, T> IndexMut<(usize, usize)> for Columns<'a, N, T> {
     fn index_mut(&mut self, (i, j): (usize, usize)) -> &mut Self::Output {
         &mut self.data[j][i]
     }
@@ -588,7 +617,7 @@ impl<F: FieldNTT> EvaluationColumn<F> {
                             chunk.swap(i, 2 * i);
                         }
                         // Turn the polynomials into evaluations.
-                        ntt::<true, _, _>(
+                        ntt::<true, F, F, _>(
                             next_chunk_size,
                             2,
                             &mut Columns {
@@ -607,9 +636,9 @@ impl<F: FieldNTT> EvaluationColumn<F> {
                 let should_be_evaluated = next_chunk_size >= len;
                 if should_be_evaluated != evaluated {
                     if evaluated {
-                        ntt::<false, _, _>(next_chunk_size, 1, &mut Columns { data: [chunk] });
+                        ntt::<false, F, F, _>(next_chunk_size, 1, &mut Columns { data: [chunk] });
                     } else {
-                        ntt::<true, _, _>(next_chunk_size, 1, &mut Columns { data: [chunk] });
+                        ntt::<true, F, F, _>(next_chunk_size, 1, &mut Columns { data: [chunk] });
                     }
                 }
             }
@@ -621,7 +650,7 @@ impl<F: FieldNTT> EvaluationColumn<F> {
 
     pub fn interpolate(self) -> PolynomialColumn<F> {
         let mut data = self.evaluations;
-        ntt::<false, _, _>(
+        ntt::<false, F, F, _>(
             data.len(),
             1,
             &mut Columns {
@@ -642,7 +671,7 @@ impl<F: FieldNTT> PolynomialColumn<F> {
     /// Evaluate this polynomial over the domain, returning
     pub fn evaluate(self) -> EvaluationColumn<F> {
         let mut data = self.coefficients;
-        ntt::<true, _, _>(
+        ntt::<true, F, F, _>(
             data.len(),
             1,
             &mut Columns {
@@ -829,7 +858,7 @@ impl<F: Additive> Matrix<F> {
 
 impl<F: FieldNTT> Matrix<F> {
     fn ntt<const FORWARD: bool>(&mut self) {
-        ntt::<FORWARD, F, Self>(self.rows, self.cols, self)
+        ntt::<FORWARD, F, F, Self>(self.rows, self.cols, self)
     }
 }
 
@@ -1054,8 +1083,8 @@ impl<F: FieldNTT> PolynomialVector<F> {
         let skew_inv = F::coset_shift_inv();
         self.divide_roots(skew.clone());
         q.divide_roots(skew);
-        ntt::<true, F, _>(self.data.rows, self.data.cols, &mut self.data);
-        ntt::<true, F, _>(
+        ntt::<true, F, F, _>(self.data.rows, self.data.cols, &mut self.data);
+        ntt::<true, F, F, _>(
             q.coefficients.len(),
             1,
             &mut Columns {
@@ -1075,7 +1104,7 @@ impl<F: FieldNTT> PolynomialVector<F> {
             }
         }
         // Interpolate back, using the inverse skew
-        ntt::<false, F, _>(self.data.rows, self.data.cols, &mut self.data);
+        ntt::<false, F, F, _>(self.data.rows, self.data.cols, &mut self.data);
         self.divide_roots(skew_inv);
     }
 }
@@ -1455,6 +1484,7 @@ pub mod fuzz {
         }
     }
 
+    #[commonware_macros::test_group("slow")]
     #[test]
     fn test_fuzz() {
         use commonware_invariants::minifuzz;
