@@ -2394,7 +2394,7 @@ mod trait_impls {
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            UnmerkleizedBatch::write(self, key, value)
+            Self::write(self, key, value)
         }
 
         fn merkleize(
@@ -2427,7 +2427,7 @@ mod trait_impls {
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            UnmerkleizedBatch::write(self, key, value)
+            Self::write(self, key, value)
         }
 
         fn merkleize(
