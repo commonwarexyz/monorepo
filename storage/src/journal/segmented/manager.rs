@@ -313,7 +313,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     }
 
     /// Start syncing the given `sections` to storage.
-    pub async fn start_sync(&mut self, sections: impl crate::Sections) -> Result<Handle<()>, Error> {
+    pub async fn start_sync(
+        &mut self,
+        sections: impl crate::Sections,
+    ) -> Result<Handle<()>, Error> {
         let handles = self
             .start_syncs(sections)
             .await?
@@ -702,10 +705,7 @@ mod tests {
                 .get_or_create(1)
                 .await
                 .expect("failed to create section");
-            let handle = manager
-                .start_sync(1)
-                .await
-                .expect("failed to start sync");
+            let handle = manager.start_sync(1).await.expect("failed to start sync");
             assert_eq!(pending.lock().len(), 1);
 
             let completed = Arc::new(AtomicUsize::new(0));
@@ -751,10 +751,7 @@ mod tests {
                 .get_or_create(1)
                 .await
                 .expect("failed to create section");
-            let handle = manager
-                .start_sync(1)
-                .await
-                .expect("failed to start sync");
+            let handle = manager.start_sync(1).await.expect("failed to start sync");
             assert_eq!(pending.lock().len(), 1);
 
             let completed = Arc::new(AtomicUsize::new(0));

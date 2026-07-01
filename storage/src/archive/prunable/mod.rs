@@ -702,12 +702,10 @@ mod tests {
                 pending: pending.clone(),
             };
             let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
-            let mut archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context.child("storage"),
-                cfg,
-            )
-            .await
-            .expect("Failed to initialize archive");
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
 
             let first = archive
                 .put_start_sync(1, test_key("aaa"), 10)
@@ -754,12 +752,10 @@ mod tests {
                 pending: pending.clone(),
             };
             let cfg = test_config(&context, NZU64!(1));
-            let mut archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context.child("storage"),
-                cfg,
-            )
-            .await
-            .expect("Failed to initialize archive");
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
 
             let first = archive
                 .put_start_sync(1, test_key("aaa"), 10)
@@ -803,12 +799,10 @@ mod tests {
                 pending: pending.clone(),
             };
             let cfg = test_config(&context, NZU64!(1));
-            let mut archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context.child("storage"),
-                cfg,
-            )
-            .await
-            .expect("Failed to initialize archive");
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
 
             let first = archive
                 .put_start_sync(1, test_key("aaa"), 10)
@@ -848,12 +842,10 @@ mod tests {
                 pending: pending.clone(),
             };
             let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
-            let mut archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context.child("storage"),
-                cfg,
-            )
-            .await
-            .expect("Failed to initialize archive");
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
 
             let first = archive
                 .put_start_sync(1, test_key("aaa"), 10)
