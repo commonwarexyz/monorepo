@@ -73,6 +73,7 @@
 //!   Instances whose type includes EC2 NVMe instance store automatically mount it at `/home/ubuntu`.
 //! * Run:
 //!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
+//!       The binary uses the default allocator on the target Linux platform.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //!     * **Node Exporter**: Exposes system metrics at `:9100`.
 //!     * **Pyroscope Agent**: Forwards `perf` profiles to Pyroscope on the monitoring instance.
@@ -80,6 +81,9 @@
 //!     * Deployer IP access (TCP 0-65535).
 //!     * Monitoring IP access to `:9090` and `:9100` for Prometheus.
 //!     * User-defined ports from the configuration.
+//!
+//! _For allocator-sensitive workloads, consider compiling the binary with `jemalloc` or
+//! `mimalloc`._
 //!
 //! ## Networking
 //!
@@ -319,13 +323,6 @@ cfg_if::cfg_if! {
                 }
             }
 
-            /// Returns the Linux library path component for jemalloc
-            pub const fn linux_lib(&self) -> &'static str {
-                match self {
-                    Self::Arm64 => "aarch64-linux-gnu",
-                    Self::X86_64 => "x86_64-linux-gnu",
-                }
-            }
         }
 
         impl std::fmt::Display for Architecture {
