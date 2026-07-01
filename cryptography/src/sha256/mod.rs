@@ -38,6 +38,18 @@ use rand_core::CryptoRngCore;
 use sha2::{Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 
+#[cfg(any(
+    all(target_arch = "aarch64", target_feature = "sha2"),
+    all(target_arch = "aarch64", feature = "std"),
+    all(
+        target_arch = "x86_64",
+        target_feature = "sha",
+        target_feature = "avx2",
+        target_feature = "ssse3",
+        target_feature = "sse4.1",
+    ),
+    all(target_arch = "x86_64", feature = "std"),
+))]
 mod simd;
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
@@ -86,9 +98,24 @@ impl Hasher for Sha256 {
     }
 
     fn hash_pair(&self, left: &[u8], right: &[u8]) -> (Self::Digest, Self::Digest) {
-        if let Some(pair) = simd::hash_pair(left, right) {
-            return pair;
+        #[cfg(any(
+            all(target_arch = "aarch64", target_feature = "sha2"),
+            all(target_arch = "aarch64", feature = "std"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "sha",
+                target_feature = "avx2",
+                target_feature = "ssse3",
+                target_feature = "sse4.1",
+            ),
+            all(target_arch = "x86_64", feature = "std"),
+        ))]
+        {
+            if let Some(pair) = simd::hash_pair(left, right) {
+                return pair;
+            }
         }
+
         (Self::hash(left), Self::hash(right))
     }
 }

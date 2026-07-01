@@ -1,4 +1,4 @@
-use super::{digest, digests, final_blocks, Digest, K, STATE, BLOCK_LENGTH, DIGEST_LENGTH};
+use super::{digest, digests, final_blocks, Digest, BLOCK_LENGTH, DIGEST_LENGTH, K, STATE};
 
 pub fn hash_pair(left: &[u8], right: &[u8]) -> (Digest, Digest) {
     debug_assert_eq!(left.len(), right.len());

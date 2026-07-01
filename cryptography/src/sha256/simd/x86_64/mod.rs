@@ -1,4 +1,4 @@
-use super::{digest, final_blocks, Align16, Digest, K, STATE, BLOCK_LENGTH};
+use super::{digest, final_blocks, Align16, Digest, BLOCK_LENGTH, K, STATE};
 
 static BYTE_SWAP_MASK: Align16<[u8; 16]> =
     Align16([3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12]);
