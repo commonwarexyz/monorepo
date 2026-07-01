@@ -287,15 +287,16 @@ mod tests {
     type StartedWriteSender = Arc<Mutex<Option<oneshot::Sender<()>>>>;
     type ReleaseWriteReceiver = Arc<Mutex<Option<oneshot::Receiver<()>>>>;
 
+    /// Blob wrapper that lets tests hold one write open until explicitly released.
     #[derive(Clone)]
-    struct DelayedWriteBlob {
-        inner: SyncTrackingBlob,
+    pub struct DelayedWriteBlob<B: crate::Blob> {
+        inner: B,
         started: StartedWriteSender,
         release: ReleaseWriteReceiver,
     }
 
-    impl DelayedWriteBlob {
-        fn new(inner: SyncTrackingBlob) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    impl<B: crate::Blob> DelayedWriteBlob<B> {
+        pub fn new(inner: B) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             (
@@ -321,7 +322,7 @@ mod tests {
         }
     }
 
-    impl crate::Blob for DelayedWriteBlob {
+    impl<B: crate::Blob> crate::Blob for DelayedWriteBlob<B> {
         async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
             self.inner.read_at(offset, len).await
         }
@@ -1147,6 +1148,7 @@ mod tests {
     }
 
     #[test_traced]
+    // Verifies a canceled overlap flush keeps the buffered tip readable and retryable.
     fn test_write_overlap_flush_cancel_preserves_tip() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1255,6 +1257,7 @@ mod tests {
     }
 
     #[test_traced]
+    // Verifies a canceled grow-resize flush keeps the old buffered size and bytes.
     fn test_write_resize_grow_flush_cancel_preserves_tip() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1915,6 +1918,7 @@ mod tests {
     }
 
     #[test_traced]
+    // Verifies a canceled sync keeps buffered bytes available for a later sync.
     fn test_write_sync_cancel_preserves_tip() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

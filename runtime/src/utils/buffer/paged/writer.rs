@@ -1138,7 +1138,7 @@ mod tests {
     use crate::{
         buffer::{
             paged::CHECKSUM_SLOT_LEN_SIZE,
-            tests::{DelayedStartSyncBlob, SyncTrackingBlob},
+            tests::{DelayedStartSyncBlob, DelayedWriteBlob, SyncTrackingBlob},
         },
         deterministic,
         telemetry::metrics::Registry,
@@ -1942,6 +1942,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    // Verifies a canceled full-page flush leaves the paged tip as the source of truth.
     fn test_flush_cancel_preserves_paged_tip() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -1983,6 +1984,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    // Verifies a canceled direct append does not publish pages, cache, or suffix state.
     fn test_append_owned_cancel_preserves_state() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -2037,6 +2039,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    // Verifies a canceled sync keeps a partial page in the tip until retry succeeds.
     fn test_sync_cancel_preserves_paged_tip() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -2310,84 +2313,6 @@ mod tests {
             let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data);
         });
-    }
-
-    type StartedWriteSender = Arc<Mutex<Option<oneshot::Sender<()>>>>;
-    type ReleaseWriteReceiver = Arc<Mutex<Option<oneshot::Receiver<()>>>>;
-
-    #[derive(Clone)]
-    struct DelayedWriteBlob<B: Blob> {
-        inner: B,
-        started: StartedWriteSender,
-        release: ReleaseWriteReceiver,
-    }
-
-    impl<B: Blob> DelayedWriteBlob<B> {
-        fn new(inner: B) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
-            let (started_tx, started_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
-            (
-                Self {
-                    inner,
-                    started: Arc::new(Mutex::new(Some(started_tx))),
-                    release: Arc::new(Mutex::new(Some(release_rx))),
-                },
-                started_rx,
-                release_tx,
-            )
-        }
-
-        async fn delay_once(&self) {
-            let started = self.started.lock().take();
-            let release = self.release.lock().take();
-            if let Some(started) = started {
-                let _ = started.send(());
-            }
-            if let Some(release) = release {
-                let _ = release.await;
-            }
-        }
-    }
-
-    impl<B: Blob> crate::Blob for DelayedWriteBlob<B> {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.inner.read_at(offset, len).await
-        }
-
-        async fn read_at_buf(
-            &self,
-            offset: u64,
-            len: usize,
-            buf: impl Into<IoBufsMut> + Send,
-        ) -> Result<IoBufsMut, Error> {
-            self.inner.read_at_buf(offset, len, buf).await
-        }
-
-        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            self.delay_once().await;
-            self.inner.write_at(offset, bufs).await
-        }
-
-        async fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            self.delay_once().await;
-            self.inner.write_at_sync(offset, bufs).await
-        }
-
-        async fn resize(&self, len: u64) -> Result<(), Error> {
-            self.inner.resize(len).await
-        }
-
-        async fn sync(&self) -> Result<(), Error> {
-            self.inner.sync().await
-        }
-
-        async fn start_sync(&self) -> Handle<()> {
-            self.inner.start_sync().await
-        }
     }
 
     #[test_traced("DEBUG")]
