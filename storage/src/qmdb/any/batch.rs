@@ -2539,11 +2539,7 @@ mod tests {
 
     fn trait_write<B, Db>(batch: B, key: sha256::Digest, value: sha256::Digest) -> B
     where
-        B: crate::qmdb::any::traits::UnmerkleizedBatch<
-            Db,
-            K = sha256::Digest,
-            V = sha256::Digest,
-        >,
+        B: crate::qmdb::any::traits::UnmerkleizedBatch<Db, K = sha256::Digest, V = sha256::Digest>,
         Db: ?Sized,
     {
         <B as crate::qmdb::any::traits::UnmerkleizedBatch<Db>>::write(batch, key, Some(value))
