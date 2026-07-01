@@ -2,8 +2,13 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-flood.svg)](https://crates.io/crates/commonware-flood)
 
-Flood peers [deployed to AWS EC2](https://docs.rs/commonware-deployer/latest/commonware_deployer/ec2/index.html) with
-random messages.
+This example demonstrates how to build an application that employs
+[commonware-p2p::authenticated::discovery](https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/discovery/index.html)
+to flood peers deployed to AWS EC2 with random messages and measure delivery latency. Peers are identified using
+[commonware-cryptography::ed25519](https://docs.rs/commonware-cryptography/latest/commonware_cryptography/ed25519/index.html)
+key pairs and deployed across multiple AWS regions using
+[commonware-deployer](https://docs.rs/commonware-deployer/latest/commonware_deployer/ec2/index.html). Performance is
+tracked via Prometheus metrics and visualized with a Grafana dashboard.
 
 ## Setup
 
