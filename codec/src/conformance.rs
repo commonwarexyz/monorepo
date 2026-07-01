@@ -9,7 +9,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_conformance::Conformance;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use std::{fmt::Debug, marker::PhantomData};
+use std::marker::PhantomData;
 
 /// Initial size of the random buffer used for generating arbitrary values.
 const INITIAL_BUFFER_SIZE: usize = 4096;
