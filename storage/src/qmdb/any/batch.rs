@@ -3184,8 +3184,7 @@ mod tests {
             let split = 3;
             let (mut expanded_values, staged) =
                 db.new_batch().stage(&keys[..split], &db).await.unwrap();
-            let (range, suffix_values, staged) =
-                staged.expand(&keys[split..], &db).await.unwrap();
+            let (range, suffix_values, staged) = staged.expand(&keys[split..], &db).await.unwrap();
             assert_eq!(range, split..keys.len());
             expanded_values.extend(suffix_values);
             let expanded = staged
@@ -3315,8 +3314,7 @@ mod tests {
             let split = 3;
             let (mut expanded_values, staged) =
                 db.new_batch().stage(&keys[..split], &db).await.unwrap();
-            let (range, suffix_values, staged) =
-                staged.expand(&keys[split..], &db).await.unwrap();
+            let (range, suffix_values, staged) = staged.expand(&keys[split..], &db).await.unwrap();
             assert_eq!(range, split..keys.len());
             expanded_values.extend(suffix_values);
             let expanded = staged

@@ -275,15 +275,7 @@ pub mod test {
                         .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
                 };
 
-                let read_keys = [
-                    key(5),
-                    key(6),
-                    key(9000),
-                    key(5),
-                    key(0),
-                    key(20),
-                    key(105),
-                ];
+                let read_keys = [key(5), key(6), key(9000), key(5), key(0), key(20), key(105)];
                 let keys: Vec<&Digest> = read_keys.iter().collect();
                 let indexed_updates = vec![
                     (0, Some(val(5_000))),
