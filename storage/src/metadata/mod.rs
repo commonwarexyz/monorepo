@@ -176,6 +176,45 @@ mod tests {
         });
     }
 
+    // A rewrite must truncate trailing bytes a dropped earlier sync may have left in the target
+    // blob: recovery requires the checksum at the physical end of the blob.
+    #[test_traced]
+    fn test_sync_rewrite_truncates_stale_blob_bytes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Sync once so the next sync targets the other ("left") blob.
+            metadata.put(U64::new(1), b"one".to_vec());
+            metadata.sync().await.unwrap();
+
+            // Simulate a dropped rewrite whose write still landed: leave bytes in the next
+            // target blob beyond the length the in-memory mirror knows about.
+            let (blob, _) = context.open("test", b"left").await.unwrap();
+            blob.write_at_sync(0, vec![0xAB; 4096]).await.unwrap();
+            drop(blob);
+
+            // Adding a key forces the rewrite path on the next sync.
+            metadata.put(U64::new(2), b"two".to_vec());
+            metadata.sync().await.unwrap();
+
+            // The synced state must survive a restart despite the stale trailing bytes.
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)), Some(&b"one".to_vec()));
+            assert_eq!(metadata.get(&U64::new(2)), Some(&b"two".to_vec()));
+        });
+    }
+
     #[test_traced]
     fn test_put_returns_previous_value() {
         let executor = deterministic::Runner::default();

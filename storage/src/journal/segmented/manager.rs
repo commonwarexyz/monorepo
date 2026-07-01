@@ -247,6 +247,33 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
+    /// Remove `section`'s blob from storage, then stop tracking it. Returns the blob's size.
+    ///
+    /// Storage removal happens before the map update so a dropped future leaves the section
+    /// tracked; a missing blob is tolerated so retrying such a removal succeeds.
+    async fn remove_blob(&mut self, section: u64) -> Result<u64, Error> {
+        let size = self
+            .blobs
+            .get(&section)
+            .expect("removed section must be tracked")
+            .size();
+        match self
+            .context
+            .remove(&self.partition, Some(&section.to_be_bytes()))
+            .await
+        {
+            Ok(()) => {}
+            // A dropped removal may have unlinked the blob without untracking it.
+            Err(RError::BlobMissing(_, _)) => {}
+            Err(err) => return Err(Error::Runtime(err)),
+        }
+        self.blobs
+            .remove(&section)
+            .expect("removed section must still be tracked");
+        self.tracked.dec();
+        Ok(size)
+    }
+
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
         // Prune any blobs that are smaller than the minimum
@@ -257,24 +284,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
                 break;
             }
 
-            let size = self
-                .blobs
-                .get(&section)
-                .expect("section observed by first_key_value must exist")
-                .size();
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-            let (removed, blob) = self
-                .blobs
-                .pop_first()
-                .expect("section removed from storage must still be tracked");
-            assert_eq!(removed, section);
-            drop(blob);
+            let size = self.remove_blob(section).await?;
             pruned = true;
-
             debug!(section, size, "pruned blob");
-            self.tracked.dec();
             self.pruned.inc();
         }
 
@@ -322,22 +334,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
         self.prune_guard(section)?;
 
-        if let Some(blob) = self.blobs.get(&section) {
-            let size = blob.size();
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-            let blob = self
-                .blobs
-                .remove(&section)
-                .expect("section removed from storage must still be tracked");
-            drop(blob);
-            self.tracked.dec();
-            debug!(section, size, "removed section");
-            Ok(true)
-        } else {
-            Ok(false)
+        if !self.blobs.contains_key(&section) {
+            return Ok(false);
         }
+        let size = self.remove_blob(section).await?;
+        debug!(section, size, "removed section");
+        Ok(true)
     }
 
     /// Remove all underlying blobs.
@@ -364,23 +366,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Unlike `destroy`, this keeps the manager alive so it can be reused.
     pub async fn clear(&mut self) -> Result<(), Error> {
         while let Some((&section, _)) = self.blobs.first_key_value() {
-            let size = self
-                .blobs
-                .get(&section)
-                .expect("section observed by first_key_value must exist")
-                .size();
+            let size = self.remove_blob(section).await?;
             debug!(section, size, "cleared blob");
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-            let (removed, blob) = self
-                .blobs
-                .pop_first()
-                .expect("section removed from storage must still be tracked");
-            assert_eq!(removed, section);
-            drop(blob);
         }
-        let _ = self.tracked.try_set(0);
         self.oldest_retained_section = 0;
         Ok(())
     }
@@ -398,16 +386,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         };
 
         for s in sections_to_remove {
-            self.context
-                .remove(&self.partition, Some(&s.to_be_bytes()))
-                .await?;
-            let blob = self
-                .blobs
-                .remove(&s)
-                .expect("section removed from storage must still be tracked");
-            drop(blob);
-            self.tracked.dec();
-            debug!(section = s, "removed blob during rewind");
+            let size = self.remove_blob(s).await?;
+            debug!(section = s, size, "removed blob during rewind");
         }
 
         // If the section exists, truncate it to the given size

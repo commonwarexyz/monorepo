@@ -17,6 +17,12 @@ use std::num::NonZeroUsize;
 ///   of buffered bytes to the blob, then detach the flushed prefix after the blob operation
 ///   succeeds.
 ///
+/// # Cancellation
+///
+/// Dropping an in-flight operation leaves the buffered tip intact and the writer retryable.
+/// The blob range touched by the dropped operation is indeterminate until it is rewritten and
+/// synced: on some runtimes the dropped write may still reach storage.
+///
 /// # Access
 ///
 /// [Write] is a single-owner buffered handle that owns mutation ordering and durability
@@ -177,13 +183,7 @@ impl<B: Blob> Write<B> {
             // if merge is possible after.
             let chunk_end = current_offset + chunk_len as u64;
             if self.buffer.offset < chunk_end && !self.buffer.is_empty() {
-                let old_offset = self.buffer.offset;
-                let old_len = self.buffer.len();
-                let old_buf = self.buffer.slice(..);
-                self.sync_state
-                    .write_at(&self.blob, old_offset, old_buf)
-                    .await?;
-                self.buffer.commit_prefix(old_len);
+                self.flush_buffered(false).await?;
                 if self.buffer.merge(chunk, current_offset) {
                     bufs.advance(chunk_len);
                     current_offset += chunk_len as u64;
@@ -211,15 +211,11 @@ impl<B: Blob> Write<B> {
 
     /// Resize the logical blob to `len`.
     ///
-    /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
+    /// If buffered data exists and the resize does not shrink below it, buffered data is flushed
     /// before resizing the underlying blob.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
-        if len > self.buffer.size() && !self.buffer.is_empty() {
-            let offset = self.buffer.offset;
-            let buffered = self.buffer.len();
-            let buf = self.buffer.slice(..);
-            self.sync_state.write_at(&self.blob, offset, buf).await?;
-            self.buffer.commit_prefix(buffered);
+        if len >= self.buffer.size() {
+            self.flush_buffered(false).await?;
         }
 
         self.sync_state.resize(&self.blob, len).await?;
@@ -230,16 +226,8 @@ impl<B: Blob> Write<B> {
 
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        if !self.buffer.is_empty() {
-            let offset = self.buffer.offset;
-            let buffered = self.buffer.len();
-            let buf = self.buffer.slice(..);
-            self.write_blob_sync(offset, buf).await?;
-            self.buffer.commit_prefix(buffered);
-            return Ok(());
-        }
-
-        self.sync_blob().await
+        self.flush_buffered(true).await?;
+        self.sync_state.sync(&self.blob).await
     }
 
     /// Flush buffered bytes and begin durably syncing mutations tracked by this writer.
@@ -248,35 +236,34 @@ impl<B: Blob> Write<B> {
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
     /// mutate the blob wait before issuing blob operations.
     pub async fn start_sync(&mut self) -> Handle<()> {
-        if !self.buffer.is_empty() {
-            let offset = self.buffer.offset;
-            let buffered = self.buffer.len();
-            let buf = self.buffer.slice(..);
-            if let Err(err) = self.sync_state.write_at(&self.blob, offset, buf).await {
-                return Handle::ready(Err(err));
-            }
-            self.buffer.commit_prefix(buffered);
+        if let Err(err) = self.flush_buffered(false).await {
+            return Handle::ready(Err(err));
         }
 
         self.sync_state.start_sync(&self.blob).await
     }
 
-    /// Write bytes to the underlying blob and make them durable.
+    /// Flush all buffered bytes to the blob, detaching the flushed prefix only after the blob
+    /// write succeeds. A dropped flush leaves the tip intact for retry.
     ///
-    /// Uses [`Blob::write_at_sync`] when there are no earlier unsynced mutations. Otherwise, writes
-    /// the bytes and then syncs the blob.
-    async fn write_blob_sync(
-        &mut self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.sync_state
-            .write_at_sync(&self.blob, offset, bufs)
-            .await
-    }
+    /// When `durable` is true, the flushed bytes are made durable before returning.
+    async fn flush_buffered(&mut self, durable: bool) -> Result<(), Error> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
 
-    /// Sync the underlying blob if there are unsynced mutations.
-    async fn sync_blob(&mut self) -> Result<(), Error> {
-        self.sync_state.sync(&self.blob).await
+        let offset = self.buffer.offset;
+        let buffered = self.buffer.len();
+        let buf = self.buffer.slice(..);
+        if durable {
+            self.sync_state
+                .write_at_sync(&self.blob, offset, buf)
+                .await?;
+        } else {
+            self.sync_state.write_at(&self.blob, offset, buf).await?;
+        }
+        self.buffer.commit_prefix(buffered);
+
+        Ok(())
     }
 }

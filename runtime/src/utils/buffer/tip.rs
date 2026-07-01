@@ -115,15 +115,22 @@ impl Buffer {
     }
 
     /// Adjusts the tip after a blob resize has succeeded.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tip holds bytes at or above `len`: callers must flush and commit buffered
+    /// data before a resize that does not shrink below it.
     pub(super) fn commit_resize(&mut self, len: u64) {
         if self.is_empty() {
             self.offset = len;
             return;
         }
 
-        if len >= self.size() {
-            self.offset = len;
-        } else if len >= self.offset {
+        assert!(
+            len < self.size(),
+            "resize over buffered bytes must flush first"
+        );
+        if len >= self.offset {
             self.len = (len - self.offset) as usize;
         } else {
             self.len = 0;

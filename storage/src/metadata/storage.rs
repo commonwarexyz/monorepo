@@ -336,8 +336,11 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     }
 
     /// Atomically commit the current state of [Metadata].
+    ///
+    /// All changes are staged and persisted to the inactive blob first; in-memory state is
+    /// published only after the writes and sync succeed, so a dropped sync leaves [Metadata]
+    /// unchanged and the next sync retries.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Snapshot commit metadata before staging writes.
         let cursor = self.state.cursor;
         let next_version = self.state.next_version;
         let key_order_changed = self.state.key_order_changed;
@@ -350,79 +353,59 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         let past_version = self.state.blobs[cursor].version;
         let next_next_version = next_version.checked_add(1).expect("version overflow");
 
-        // Writes go to the inactive blob; the cursor is published only after it succeeds.
         let target_cursor = 1 - cursor;
 
-        // Stage overwrite data without mutating the target wrapper. If any update cannot fit in
-        // its existing slot, fall back to a full rewrite.
-        let mut overwrite = true;
-        let mut overwrite_data = self.state.blobs[target_cursor].data.clone();
-        let mut write_ops: Vec<(u64, Vec<u8>)> = Vec::new();
-        {
+        // Overwrite values in place when the key order is unchanged and every modified value
+        // still fits its slot. Otherwise, fall through to a full rewrite.
+        if key_order_changed < past_version {
             let target = &self.state.blobs[target_cursor];
-            if key_order_changed < past_version {
-                write_ops.reserve(target.modified.len() + 2);
-                for key in target.modified.iter() {
-                    let info = target.lengths.get(key).expect("key must exist");
-                    let new_value = self.map.get(key).expect("key must exist");
-                    let encoded = new_value.encode_mut();
-                    if info.length == encoded.len() {
-                        // Overwrite existing value.
-                        overwrite_data[info.start..info.start + info.length]
-                            .copy_from_slice(&encoded);
-                        write_ops.push((info.start as u64, encoded.to_vec()));
-                    } else {
-                        // Length changed, so rewrite all data.
-                        overwrite = false;
-                        break;
-                    }
+            let mut overwrite_data = target.data.clone();
+            let mut writes = Vec::with_capacity(target.modified.len() + 2);
+            let mut overwrite = true;
+            for key in target.modified.iter() {
+                let info = target.lengths.get(key).expect("key must exist");
+                let new_value = self.map.get(key).expect("key must exist");
+                let encoded = new_value.encode_mut();
+                if info.length != encoded.len() {
+                    overwrite = false;
+                    break;
                 }
-            } else {
-                // If the key order has changed, we need to rewrite all data.
-                overwrite = false;
+                overwrite_data[info.start..info.start + info.length].copy_from_slice(&encoded);
+                writes.push(target.blob.write_at(info.start as u64, encoded));
             }
-        }
 
-        if overwrite {
-            // Update version in the staged data.
-            let version = next_version.to_be_bytes();
-            overwrite_data[0..8].copy_from_slice(&version);
-            write_ops.push((0, version.to_vec()));
+            if overwrite {
+                let version = next_version.to_be_bytes();
+                overwrite_data[0..8].copy_from_slice(&version);
+                writes.push(target.blob.write_at(0, version.as_slice().into()));
 
-            // Update checksum in the staged data.
-            let checksum_index = overwrite_data.len() - crc32::Digest::SIZE;
-            let checksum = Crc32::checksum(&overwrite_data[..checksum_index]).to_be_bytes();
-            overwrite_data[checksum_index..].copy_from_slice(&checksum);
-            write_ops.push((checksum_index as u64, checksum.to_vec()));
+                let checksum_index = overwrite_data.len() - crc32::Digest::SIZE;
+                let checksum = Crc32::checksum(&overwrite_data[..checksum_index]).to_be_bytes();
+                overwrite_data[checksum_index..].copy_from_slice(&checksum);
+                writes.push(
+                    target
+                        .blob
+                        .write_at(checksum_index as u64, checksum.as_slice().into()),
+                );
 
-            {
-                let target = &mut self.state.blobs[target_cursor];
-                let writes: Vec<_> = write_ops
-                    .into_iter()
-                    .map(|(offset, data)| target.blob.write_at(offset, data))
-                    .collect();
-                // Persist staged bytes before clearing modified keys.
                 try_join_all(writes).await?;
                 target.blob.sync().await?;
 
-                // Publish staged target state only after writes and sync succeed.
+                let target = &mut self.state.blobs[target_cursor];
                 target.version = next_version;
                 target.data = overwrite_data;
                 target.modified.clear();
+                self.state.cursor = target_cursor;
+                self.state.next_version = next_next_version;
+                self.sync_overwrites.inc();
+                return Ok(());
             }
-            // Publish cursor and version only after the target blob succeeds.
-            self.state.cursor = target_cursor;
-            self.state.next_version = next_next_version;
-            self.sync_overwrites.inc();
-            return Ok(());
         }
 
-        // Build the rewritten blob image without touching the current target state.
+        // Rewrite the entire blob from the current map.
         let mut lengths = HashMap::new();
         let mut next_data = Vec::with_capacity(self.state.blobs[target_cursor].data.len());
         next_data.put_u64(next_version);
-
-        // Encode every key/value into staged blob data.
         for (key, value) in &self.map {
             key.write(&mut next_data);
             let start = next_data.len();
@@ -431,29 +414,21 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         }
         next_data.put_u32(Crc32::checksum(&next_data[..]));
 
-        {
-            let target = &mut self.state.blobs[target_cursor];
-            // Shrinking rewrites must also persist the resize, so they need a full sync.
-            if next_data.len() < target.data.len() {
-                target.blob.write_at(0, next_data.clone()).await?;
-                target.blob.resize(next_data.len() as u64).await?;
-                target.blob.sync().await?;
-            } else {
-                // Non-shrinking rewrites are a single write and can use range-scoped
-                // durability.
-                target.blob.write_at_sync(0, next_data.clone()).await?;
-            }
+        // Always enforce the physical length with a resize: recovery requires the checksum at
+        // the physical end of the blob, and a dropped earlier sync whose write still landed may
+        // have left the blob longer than the in-memory mirror suggests.
+        let target = &self.state.blobs[target_cursor];
+        target.blob.write_at(0, next_data.clone()).await?;
+        target.blob.resize(next_data.len() as u64).await?;
+        target.blob.sync().await?;
 
-            // Publish rewritten target state after the durable write succeeds.
-            target.version = next_version;
-            target.lengths = lengths;
-            target.data = next_data;
-            target.modified.clear();
-        }
-        // Publish cursor and version only after the target blob succeeds.
+        let target = &mut self.state.blobs[target_cursor];
+        target.version = next_version;
+        target.lengths = lengths;
+        target.data = next_data;
+        target.modified.clear();
         self.state.cursor = target_cursor;
         self.state.next_version = next_next_version;
-
         self.sync_rewrites.inc();
         Ok(())
     }
