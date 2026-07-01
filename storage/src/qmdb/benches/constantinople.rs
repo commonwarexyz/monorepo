@@ -232,7 +232,7 @@ macro_rules! run_pipeline {
             }
             let updates: Vec<_> = slots[..args.num_updates as usize]
                 .iter()
-                .map(|&idx| (idx, reads[idx].1))
+                .map(|&idx| (idx, Some(reads[idx].1)))
                 .collect();
             let new_batch = || {
                 chain
@@ -245,10 +245,10 @@ macro_rules! run_pipeline {
             // caller has computed them.
             let start = Instant::now();
             let b = new_batch();
-            let (values, staged) = b.get_many_staged(&keys, &db).await.unwrap();
+            let (values, staged) = b.stage(&keys, &db).await.unwrap();
             black_box(&values);
             let t_load = start.elapsed();
-            let merkleized = staged.set(&updates, &[], &db, None).await.unwrap();
+            let merkleized = staged.set(updates, Vec::new(), &db, None).await.unwrap();
             let root = merkleized.root();
             let elapsed = start.elapsed();
 

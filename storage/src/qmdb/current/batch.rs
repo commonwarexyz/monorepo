@@ -273,7 +273,7 @@ where
     bitmap_parent: BitmapBatch<N>,
 }
 
-/// Staged batch returned by [`UnmerkleizedBatch::get_many_staged`].
+/// Staged batch returned by [`UnmerkleizedBatch::stage`].
 pub struct Staged<F, H, U, const N: usize, S: Strategy>
 where
     F: Graftable,
@@ -383,10 +383,16 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// A `Some` value is an upsert; `None` is a delete.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
     pub async fn set<E, C, I>(
         self,
-        updates: &[(usize, V::Value)],
-        upserts: &[(K, V::Value)],
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>, Error<F>>
@@ -400,7 +406,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, staged_updates) = inner.into_merkleize_parts(updates, upserts);
+        let (inner, staged_updates) = inner.into_merkleize_parts(updates, upserts, true);
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
@@ -422,10 +428,16 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// A `Some` value is an upsert; `None` is a delete.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
     pub async fn set<E, C, I>(
         self,
-        updates: &[(usize, V::Value)],
-        upserts: &[(K, V::Value)],
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>, Error<F>>
@@ -439,7 +451,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, staged_updates) = inner.into_merkleize_parts(updates, upserts);
+        let (inner, staged_updates) = inner.into_merkleize_parts(updates, upserts, false);
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
@@ -492,7 +504,7 @@ where
     }
 
     /// Batch read multiple keys and return a staged batch for the same keys.
-    pub async fn get_many_staged<E, C, I>(
+    pub async fn stage<E, C, I>(
         self,
         keys: &[&K],
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -513,7 +525,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (values, inner) = inner.get_many_staged(keys, &db.any).await?;
+        let (values, inner) = inner.stage(keys, &db.any).await?;
         Ok((
             values,
             Staged {
@@ -599,7 +611,7 @@ where
     }
 
     /// Batch read multiple keys and return a staged batch for the same keys.
-    pub async fn get_many_staged<E, C, I>(
+    pub async fn stage<E, C, I>(
         self,
         keys: &[&K],
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
@@ -620,7 +632,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (values, inner) = inner.get_many_staged(keys, &db.any).await?;
+        let (values, inner) = inner.stage(keys, &db.any).await?;
         Ok((
             values,
             Staged {

@@ -251,6 +251,97 @@ pub mod test {
         });
     }
 
+    /// The staged path (`stage` + `Staged::set`) must produce a root byte-identical to an explicit
+    /// `get_many` + `write` + `merkleize` over the current layer, across updates, deletes, upserts,
+    /// duplicate read slots, and missing keys, both rooted at the DB (D=0) and through one pending
+    /// ancestor (D=1). This guards the current-layer threading of `bitmap_parent`/`grafted_parent`
+    /// and `compute_current_layer` for non-empty staged updates.
+    #[test_traced("WARN")]
+    pub fn test_current_unordered_fixed_staged_merkleize_parity() {
+        fn key(i: u64) -> Digest {
+            Sha256::hash(&i.to_be_bytes())
+        }
+        fn val(i: u64) -> Digest {
+            Sha256::hash(&(i + 10000).to_be_bytes())
+        }
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = open_db(ctx.child("current"), "staged-parity".to_string()).await;
+
+            let mut seed = db.new_batch();
+            for i in 0..2000u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            for depth in [0u8, 1u8] {
+                // At D=1 a pending ancestor updates keys 0..50 and deletes 100..110, so reads of
+                // key(0)/key(105) resolve through the ancestor diff (never cached) and exercise
+                // the staged fallback-to-mutation path.
+                let parent = if depth == 1 {
+                    let mut p = db.new_batch();
+                    for i in 0..50u64 {
+                        p = p.write(key(i), Some(val(i + 1_000)));
+                    }
+                    for i in 100..110u64 {
+                        p = p.write(key(i), None);
+                    }
+                    Some(p.merkleize(&db, None).await.unwrap())
+                } else {
+                    None
+                };
+                let new_batch = || {
+                    parent
+                        .as_ref()
+                        .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
+                };
+
+                // Read set: key(5) duplicated at slots 0/3, read-only key(6), missing key(9000),
+                // ancestor-resolved key(0), key(20) deleted via index, ancestor-deleted key(105).
+                let read_keys = [key(5), key(6), key(9000), key(5), key(0), key(20), key(105)];
+                let keys: Vec<&Digest> = read_keys.iter().collect();
+                // (read_slot, Some=upsert | None=delete).
+                let indexed_updates = vec![
+                    (0, Some(val(5_000))),
+                    (2, Some(val(5_001))),
+                    (3, Some(val(5_002))),
+                    (4, Some(val(5_003))),
+                    (5, None),
+                    (6, Some(val(5_004))),
+                ];
+                // Upserts for unread keys: create, update existing, override key(5), delete existing.
+                let upserts = vec![
+                    (key(7000), Some(val(6_000))),
+                    (key(30), Some(val(6_001))),
+                    (key(5), Some(val(6_002))),
+                    (key(31), None),
+                ];
+
+                let mut explicit = new_batch();
+                let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
+                for (slot, value) in &indexed_updates {
+                    explicit = explicit.write(read_keys[*slot], *value);
+                }
+                for (k, v) in &upserts {
+                    explicit = explicit.write(*k, *v);
+                }
+                let explicit_root = explicit.merkleize(&db, None).await.unwrap().root();
+
+                let (staged_values, staged) = new_batch().stage(&keys, &db).await.unwrap();
+                let staged_root = staged
+                    .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                    .await
+                    .unwrap()
+                    .root();
+
+                assert_eq!(explicit_values, staged_values, "value mismatch at depth={depth}");
+                assert_eq!(explicit_root, staged_root, "root mismatch at depth={depth}");
+            }
+        });
+    }
+
     /// The sync boundary recorded from a merkleized batch must match the boundary the database
     /// reports once that batch is applied. These can diverge if the batch boundary is derived from
     /// physical bitmap pruning rather than the batch's declared inactivity floor, because the floor

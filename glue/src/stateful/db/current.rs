@@ -117,7 +117,7 @@ where
     }
 
     /// Read multiple values and return a staged batch for the same keys.
-    pub async fn get_many_staged(
+    pub async fn stage(
         self,
         keys: &[&K],
     ) -> Result<
@@ -134,7 +134,7 @@ where
         } = self;
         let (values, staged) = {
             let guard = db.read().await;
-            batch.get_many_staged(keys, &*guard).await?
+            batch.stage(keys, &*guard).await?
         };
         Ok((
             values,
@@ -222,8 +222,8 @@ where
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     pub async fn set(
         self,
-        updates: &[(usize, V::Value)],
-        upserts: &[(K, V::Value)],
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
     ) -> Result<CurrentMerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>, Error<F>> {
         let Self {
             staged,
@@ -254,8 +254,8 @@ where
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     pub async fn set(
         self,
-        updates: &[(usize, V::Value)],
-        upserts: &[(K, V::Value)],
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
     ) -> Result<CurrentMerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>, Error<F>> {
         let Self {
             staged,
@@ -306,7 +306,7 @@ where
     }
 
     /// Read multiple values and return a staged batch for the same keys.
-    pub async fn get_many_staged(
+    pub async fn stage(
         self,
         keys: &[&K],
     ) -> Result<
@@ -323,7 +323,7 @@ where
         } = self;
         let (values, staged) = {
             let guard = db.read().await;
-            batch.get_many_staged(keys, &*guard).await?
+            batch.stage(keys, &*guard).await?
         };
         Ok((
             values,
@@ -1301,6 +1301,72 @@ mod tests {
                 &proof,
                 &guard.root(),
             ));
+        });
+    }
+
+    /// The glue staged wrapper (`CurrentUnmerkleized::stage` -> `CurrentStaged::set`) must return
+    /// the same values and root as an explicit `get_many` + `write` + `merkleize`, including a
+    /// staged delete, an upsert, and metadata set before the read. This guards metadata flow and
+    /// db-handle pairing through the wrapper.
+    #[test]
+    fn current_glue_staged_set_matches_explicit_writes() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("ordered-fixed-glue-staged", &context);
+            let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+                .await
+                .unwrap();
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+
+            let key = |i: u64| Sha256::hash(&i.to_be_bytes());
+            let val = |i: u64| Sha256::hash(&(i + 10_000).to_be_bytes());
+            let metadata = Sha256::hash(b"metadata");
+
+            // Seed keys 0..50 and finalize.
+            let mut seed = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            for i in 0..50u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
+                .await
+                .unwrap();
+            {
+                let mut guard = db.write().await;
+                <OrderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
+                    .await
+                    .unwrap();
+            }
+
+            // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
+            let read_keys = [key(1), key(2), key(999)];
+            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let indexed_updates = vec![(0, Some(val(1_000))), (1, None), (2, Some(val(1_001)))];
+            let upserts = vec![(key(3), Some(val(1_002)))];
+
+            // Explicit path.
+            let mut explicit = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let explicit_values = explicit.get_many(&keys).await.unwrap();
+            for (slot, value) in &indexed_updates {
+                explicit = explicit.write(read_keys[*slot], *value);
+            }
+            for (k, v) in &upserts {
+                explicit = explicit.write(*k, *v);
+            }
+            let explicit_root = crate::stateful::db::Unmerkleized::merkleize(
+                explicit.with_metadata(metadata),
+            )
+            .await
+            .unwrap()
+            .root();
+
+            // Staged path (metadata set before the read).
+            let staged_batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .with_metadata(metadata);
+            let (staged_values, staged) = staged_batch.stage(&keys).await.unwrap();
+            let staged_root = staged.set(indexed_updates.clone(), upserts.clone()).await.unwrap().root();
+
+            assert_eq!(explicit_values, staged_values);
+            assert_eq!(explicit_root, staged_root);
         });
     }
 

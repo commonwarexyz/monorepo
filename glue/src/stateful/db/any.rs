@@ -116,7 +116,7 @@ where
     }
 
     /// Read multiple values and return a staged batch for the same keys.
-    pub async fn get_many_staged(
+    pub async fn stage(
         self,
         keys: &[&K],
     ) -> Result<
@@ -133,7 +133,7 @@ where
         } = self;
         let (values, staged) = {
             let guard = db.read().await;
-            batch.get_many_staged(keys, &*guard).await?
+            batch.stage(keys, &*guard).await?
         };
         Ok((
             values,
@@ -220,8 +220,8 @@ where
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     pub async fn set(
         self,
-        updates: &[(usize, V::Value)],
-        upserts: &[(K, V::Value)],
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>, Error<F>> {
         let Self {
             staged,
@@ -251,8 +251,8 @@ where
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     pub async fn set(
         self,
-        updates: &[(usize, V::Value)],
-        upserts: &[(K, V::Value)],
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>, Error<F>> {
         let Self {
             staged,
@@ -302,7 +302,7 @@ where
     }
 
     /// Read multiple values and return a staged batch for the same keys.
-    pub async fn get_many_staged(
+    pub async fn stage(
         self,
         keys: &[&K],
     ) -> Result<
@@ -319,7 +319,7 @@ where
         } = self;
         let (values, staged) = {
             let guard = db.read().await;
-            batch.get_many_staged(keys, &*guard).await?
+            batch.stage(keys, &*guard).await?
         };
         Ok((
             values,

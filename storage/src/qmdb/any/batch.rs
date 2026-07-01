@@ -51,30 +51,34 @@ type StagedUpdate<F, U> = (
     <U as update::Update>::Key,
     Location<F>,
     <U as update::Update>::Cached,
-    <U as update::Update>::Value,
+    Option<<U as update::Update>::Value>,
 );
 
-/// Pending updates whose old committed location was already resolved by a staged read.
+/// Pending mutations whose old committed location was already resolved by a staged read. The
+/// value is `Some` for an update and `None` for a delete; only the unordered path stages deletes
+/// (the ordered path cannot skip the deleted key's predecessor-bucket scan, so its deletes fall
+/// back to normal mutations).
 pub(crate) struct StagedUpdates<F: Family, U: update::Update> {
     entries: Vec<StagedUpdate<F, U>>,
 }
 
 impl<F: Family, U: update::Update> StagedUpdates<F, U> {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             entries: Vec::new(),
         }
     }
 }
 
-/// Committed locations resolved by `get_many_staged`, keyed by the original input slot.
+/// Committed locations resolved by [`UnmerkleizedBatch::stage`], keyed by the original input slot.
 struct StagedCache<F: Family, U: update::Update> {
     cached: Vec<(usize, Location<F>, U::Cached)>,
 }
 
-/// Staged batch returned by [`UnmerkleizedBatch::get_many_staged`].
+/// Staged batch returned by [`UnmerkleizedBatch::stage`].
 ///
-/// Owns the batch and its read cache, so the cache cannot be paired with a different batch.
+/// Owns the batch and the locations its reads resolved, so the staged reads cannot be paired with a
+/// different batch.
 pub struct Staged<F: Family, H, U: update::Update, S: Strategy>
 where
     U: update::Update + Send + Sync,
@@ -982,25 +986,38 @@ where
 {
     fn apply_upserts(
         mut batch: UnmerkleizedBatch<F, H, U, S>,
-        upserts: &[(U::Key, U::Value)],
+        upserts: Vec<(U::Key, Option<U::Value>)>,
     ) -> UnmerkleizedBatch<F, H, U, S> {
         for (key, value) in upserts {
-            batch = batch.write(key.clone(), Some(value.clone()));
+            batch = batch.write(key, value);
         }
         batch
     }
 
     /// Build the inputs for staged merkleization represented by this staged handle.
     ///
-    /// Each update is `(read_index, value)`, where `read_index` is the position of the key in
-    /// the original `get_many_staged` input. Duplicate keys retain last-write-wins semantics
-    /// according to the update order. Upserts are `(key, value)` writes for keys outside the
-    /// staged read set. Upserts are applied last; if a caller passes an overlapping key, the
-    /// upsert follows normal `write` semantics and wins.
+    /// Each update is `(read_index, value)`, where `read_index` is the position of the key in the
+    /// original [`stage`](UnmerkleizedBatch::stage) input and `value` is `Some(v)` for an upsert or
+    /// `None` for a delete. Duplicate keys retain last-write-wins semantics according to the update
+    /// order. Upserts are `(key, value)` writes (`None` deletes) for keys outside the staged read
+    /// set. Upserts are applied last; if a caller passes an overlapping key, the upsert follows
+    /// normal `write` semantics and wins.
+    ///
+    /// Committed-resolved updates reuse the staged location. Committed-resolved deletes reuse it
+    /// only when `stage_deletes` is set (the unordered path): an unordered delete just emits a
+    /// `Delete` at the cached location, whereas an ordered delete must rewrite the deleted key's
+    /// predecessor via a snapshot-bucket scan the cached location cannot skip, so ordered passes
+    /// `stage_deletes = false` and its deletes fall back to normal mutations. Keys resolved from
+    /// ancestors or missing from committed state always fall back.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
     pub(crate) fn into_merkleize_parts(
         mut self,
-        updates: &[(usize, U::Value)],
-        upserts: &[(U::Key, U::Value)],
+        mut updates: Vec<(usize, Option<U::Value>)>,
+        upserts: Vec<(U::Key, Option<U::Value>)>,
+        stage_deletes: bool,
     ) -> (UnmerkleizedBatch<F, H, U, S>, StagedUpdates<F, U>) {
         let mut staged_updates = StagedUpdates::new();
         if updates.is_empty() {
@@ -1018,6 +1035,9 @@ where
             )
         };
 
+        // Each update value is consumed at most once: last-write-wins means at most one update
+        // index survives per read slot, so values are moved out with `Option::take` rather than
+        // cloned.
         let mut latest = vec![None; self.keys.len()];
         let mut seen = AHashMap::with_capacity(updates.len());
         for (update_idx, (slot, _)) in updates.iter().enumerate() {
@@ -1040,29 +1060,31 @@ where
             }
         }
 
-        // Keys resolved from the committed DB keep their staged location/payload; keys resolved
-        // from ancestors or missing committed state fall back to normal mutations.
+        // Committed-resolved updates (and, when `stage_deletes`, deletes) reuse the staged
+        // location/payload. Ordered deletes, keys resolved from ancestors, and keys missing from
+        // committed state fall back to normal mutations: leaving `latest[slot]` set routes them to
+        // the fallback loop below.
         let selected_count = latest.iter().filter(|idx| idx.is_some()).count();
         staged_updates.entries.reserve(selected_count);
         for (slot, loc, payload) in self.cache.cached {
             let Some(update_idx) = latest[slot] else {
                 continue;
             };
+            if updates[update_idx].1.is_none() && !stage_deletes {
+                continue;
+            }
             latest[slot] = None;
-            staged_updates.entries.push((
-                self.keys[slot].clone(),
-                loc,
-                payload,
-                updates[update_idx].1.clone(),
-            ));
+            let value = updates[update_idx].1.take();
+            staged_updates
+                .entries
+                .push((self.keys[slot].clone(), loc, payload, value));
         }
         for (slot, update_idx) in latest.into_iter().enumerate() {
             let Some(update_idx) = update_idx else {
                 continue;
             };
-            self.batch
-                .mutations
-                .insert(self.keys[slot].clone(), Some(updates[update_idx].1.clone()));
+            let value = updates[update_idx].1.take();
+            self.batch.mutations.insert(self.keys[slot].clone(), value);
         }
         (Self::apply_upserts(self.batch, upserts), staged_updates)
     }
@@ -1076,10 +1098,17 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// A `Some` value is an upsert; `None` is a delete. See
+    /// [`into_merkleize_parts`](Self::into_merkleize_parts) for the read-index update semantics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
     pub async fn set<E, C, I, const N: usize>(
         self,
-        updates: &[(usize, V::Value)],
-        upserts: &[(K, V::Value)],
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
@@ -1088,7 +1117,8 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts);
+        // Unordered deletes emit a `Delete` at the cached location, so they may be staged.
+        let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts, true);
         batch
             .merkleize_with_floor_scan(
                 db,
@@ -1108,10 +1138,17 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// A `Some` value is an upsert; `None` is a delete. See
+    /// [`into_merkleize_parts`](Self::into_merkleize_parts) for the read-index update semantics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
     pub async fn set<E, C, I, const N: usize>(
         self,
-        updates: &[(usize, V::Value)],
-        upserts: &[(K, V::Value)],
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
@@ -1120,7 +1157,9 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts);
+        // Ordered deletes must rewrite the deleted key's predecessor, so they fall back to normal
+        // mutations rather than reusing the cached location.
+        let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts, false);
         batch
             .merkleize_with_floor_scan(
                 db,
@@ -1225,7 +1264,7 @@ where
     ///
     /// Returns results in the same order as the input keys. The staged batch records updates by
     /// input position, so callers may load a broad read set and then update only a subset of it.
-    pub async fn get_many_staged<E, C, I, const N: usize>(
+    pub async fn stage<E, C, I, const N: usize>(
         self,
         keys: &[&U::Key],
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -1234,7 +1273,6 @@ where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
-        U::Cached: Clone,
     {
         if keys.is_empty() {
             return Ok((
@@ -1375,10 +1413,12 @@ where
         I: UnorderedIndex<Value = Location<F>>,
     {
         let (mut mutations, m) = self.into_parts();
+        // `value` is `Some` for a staged update and `None` for a staged delete; `emit` maps each
+        // to an `Update`/`Delete` at the cached location.
         let mut cached: Vec<(K, Location<F>, Option<V::Value>)> =
             Vec::with_capacity(staged_updates.entries.len());
         for (key, loc, (), value) in staged_updates.entries {
-            cached.push((key, loc, Some(value)));
+            cached.push((key, loc, value));
         }
 
         // Resolve existing keys.
@@ -1522,9 +1562,9 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// Consumes updates recorded by [`Staged::set`], allowing loaded keys to skip the index probe
-    /// and journal re-read their resolution would otherwise require (the cached old value and next
-    /// key feed op generation directly). Deletes never consume staged updates. Deleting a key
-    /// requires rewriting its predecessor, which may be a colliding key in the deleted key's
+    /// and journal re-read their resolution would otherwise require (the caller's new value and the
+    /// cached next key feed op generation directly). Deletes never consume staged updates. Deleting
+    /// a key requires rewriting its predecessor, which may be a colliding key in the deleted key's
     /// snapshot bucket, so that bucket must be scanned regardless and the cached location saves
     /// nothing.
     #[allow(clippy::type_complexity)]
@@ -1575,10 +1615,12 @@ where
         let (mut mutations, m) = self.into_parts();
 
         // Staged updates skip the index probe and journal re-read, and their old op's next key
-        // feeds the candidate sets directly.
+        // feeds the candidate sets directly. The ordered path never stages deletes (see
+        // `into_merkleize_parts`), so every staged entry carries a value.
         let mut cached: Vec<(K, V::Value, Location<F>, K)> =
             Vec::with_capacity(staged_updates.entries.len());
         for (key, loc, old_next, value) in staged_updates.entries {
+            let value = value.expect("ordered path never stages deletes");
             cached.push((key, value, loc, old_next));
         }
 
@@ -2300,7 +2342,7 @@ mod trait_impls {
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            UnmerkleizedBatch::write(self, key, value)
+            Self::write(self, key, value)
         }
 
         fn merkleize(
@@ -2333,7 +2375,7 @@ mod trait_impls {
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            UnmerkleizedBatch::write(self, key, value)
+            Self::write(self, key, value)
         }
 
         fn merkleize(
@@ -3014,11 +3056,15 @@ mod tests {
             let read_only = colliding_digest(0x41, 1);
             let unread_existing = colliding_digest(0x41, 2);
             let unread_missing = colliding_digest(0x40, 10);
+            let del_read = colliding_digest(0x41, 3);
+            let del_unread = colliding_digest(0x41, 4);
             let v0 = colliding_digest(0x50, 0);
             let v1 = colliding_digest(0x50, 1);
             let v2 = colliding_digest(0x51, 0);
             let read_only_value = colliding_digest(0x51, 1);
             let unread_existing_value = colliding_digest(0x51, 2);
+            let del_read_value = colliding_digest(0x51, 3);
+            let del_unread_value = colliding_digest(0x51, 4);
 
             let seed = db
                 .new_batch()
@@ -3027,34 +3073,34 @@ mod tests {
                 .write(k2, Some(v2))
                 .write(read_only, Some(read_only_value))
                 .write(unread_existing, Some(unread_existing_value))
+                .write(del_read, Some(del_read_value))
+                .write(del_unread, Some(del_unread_value))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
             db.commit().await.unwrap();
 
-            let updates = vec![
-                (k0, colliding_digest(0x60, 0)),
-                (missing, colliding_digest(0x60, 1)),
-                (k1, colliding_digest(0x60, 2)),
-                (k0, colliding_digest(0x60, 3)),
-                (missing, colliding_digest(0x60, 4)),
-                (k2, colliding_digest(0x60, 5)),
-            ];
-            let upserts = vec![
-                (unread_existing, colliding_digest(0x60, 6)),
-                (unread_missing, colliding_digest(0x60, 7)),
-                (k0, colliding_digest(0x60, 8)),
-            ];
-            let read_keys = vec![k0, read_only, missing, k1, k0, missing, k2];
+            // Read set with duplicate slots for k0 (0,4) and missing (2,5), plus del_read at 7.
+            let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
             let keys: Vec<_> = read_keys.iter().collect();
+            // (read_slot, Some=upsert | None=delete). Slot 7 deletes a committed-resolved read
+            // key; duplicate slots exercise last-write-wins by update order.
             let indexed_updates = vec![
-                (0, updates[0].1),
-                (2, updates[1].1),
-                (3, updates[2].1),
-                (4, updates[3].1),
-                (5, updates[4].1),
-                (6, updates[5].1),
+                (0, Some(colliding_digest(0x60, 0))),
+                (2, Some(colliding_digest(0x60, 1))),
+                (3, Some(colliding_digest(0x60, 2))),
+                (4, Some(colliding_digest(0x60, 3))),
+                (5, Some(colliding_digest(0x60, 4))),
+                (6, Some(colliding_digest(0x60, 5))),
+                (7, None),
+            ];
+            // Upserts for unread keys: set two, override k0 (overlaps slots 0/4), delete one.
+            let upserts = vec![
+                (unread_existing, Some(colliding_digest(0x60, 6))),
+                (unread_missing, Some(colliding_digest(0x60, 7))),
+                (k0, Some(colliding_digest(0x60, 8))),
+                (del_unread, None),
             ];
             let loaded_values = vec![
                 Some(v0),
@@ -3064,38 +3110,40 @@ mod tests {
                 Some(v0),
                 None,
                 Some(v2),
+                Some(del_read_value),
             ];
+
+            // Explicit path: read, then apply the same logical writes in the same order (updates
+            // by read-slot key, then upserts). Must produce a byte-identical root to the staged
+            // path, which skips the journal re-read for committed-resolved updated keys.
             let mut explicit = db.new_batch();
             let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
-            for (key, value) in &updates {
-                explicit = explicit.write(*key, Some(*value));
+            for (slot, value) in &indexed_updates {
+                explicit = explicit.write(read_keys[*slot], *value);
             }
             for (key, value) in &upserts {
-                explicit = explicit.write(*key, Some(*value));
+                explicit = explicit.write(*key, *value);
             }
             let explicit = explicit.merkleize(&db, None).await.unwrap();
 
-            let cached_token = db.new_batch();
-            let (cached_token_values, staged) =
-                cached_token.get_many_staged(&keys, &db).await.unwrap();
-            let cached_token = staged
-                .set(&indexed_updates, &upserts, &db, None)
-                .await
-                .unwrap();
+            let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let staged = staged.set(indexed_updates.clone(), upserts.clone(), &db, None).await.unwrap();
 
             assert_eq!(explicit_values, loaded_values);
-            assert_eq!(explicit_values, cached_token_values);
+            assert_eq!(explicit_values, staged_values);
 
-            assert_eq!(explicit.root(), cached_token.root());
+            assert_eq!(explicit.root(), staged.root());
 
-            db.apply_batch(cached_token).await.unwrap();
-            assert_eq!(db.get(&k0).await.unwrap(), Some(upserts[2].1));
-            assert_eq!(db.get(&missing).await.unwrap(), Some(updates[4].1));
-            assert_eq!(db.get(&k1).await.unwrap(), Some(updates[2].1));
-            assert_eq!(db.get(&k2).await.unwrap(), Some(updates[5].1));
+            db.apply_batch(staged).await.unwrap();
+            assert_eq!(db.get(&k0).await.unwrap(), upserts[2].1);
+            assert_eq!(db.get(&missing).await.unwrap(), indexed_updates[4].1);
+            assert_eq!(db.get(&k1).await.unwrap(), indexed_updates[2].1);
+            assert_eq!(db.get(&k2).await.unwrap(), indexed_updates[5].1);
             assert_eq!(db.get(&read_only).await.unwrap(), Some(read_only_value));
-            assert_eq!(db.get(&unread_existing).await.unwrap(), Some(upserts[0].1));
-            assert_eq!(db.get(&unread_missing).await.unwrap(), Some(upserts[1].1));
+            assert_eq!(db.get(&unread_existing).await.unwrap(), upserts[0].1);
+            assert_eq!(db.get(&unread_missing).await.unwrap(), upserts[1].1);
+            assert_eq!(db.get(&del_read).await.unwrap(), None);
+            assert_eq!(db.get(&del_unread).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -3125,11 +3173,15 @@ mod tests {
             let read_only = colliding_digest(0x43, 1);
             let unread_existing = colliding_digest(0x43, 2);
             let unread_missing = colliding_digest(0x42, 10);
+            let del_read = colliding_digest(0x43, 3);
+            let del_unread = colliding_digest(0x43, 4);
             let v0 = colliding_digest(0x52, 0);
             let v1 = colliding_digest(0x52, 1);
             let v2 = colliding_digest(0x53, 0);
             let read_only_value = colliding_digest(0x53, 1);
             let unread_existing_value = colliding_digest(0x53, 2);
+            let del_read_value = colliding_digest(0x53, 3);
+            let del_unread_value = colliding_digest(0x53, 4);
 
             let seed = db
                 .new_batch()
@@ -3138,34 +3190,35 @@ mod tests {
                 .write(k2, Some(v2))
                 .write(read_only, Some(read_only_value))
                 .write(unread_existing, Some(unread_existing_value))
+                .write(del_read, Some(del_read_value))
+                .write(del_unread, Some(del_unread_value))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
             db.commit().await.unwrap();
 
-            let updates = vec![
-                (k0, colliding_digest(0x62, 0)),
-                (missing, colliding_digest(0x62, 1)),
-                (k1, colliding_digest(0x62, 2)),
-                (k0, colliding_digest(0x62, 3)),
-                (missing, colliding_digest(0x62, 4)),
-                (k2, colliding_digest(0x62, 5)),
+            // Read set with duplicate slots for k0 (0,4) and missing (2,5), plus del_read at 7.
+            let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
+            let keys: Vec<_> = read_keys.iter().collect();
+            // Slot 7 deletes a committed-resolved read key. For the ordered path a staged delete
+            // must fall back to a normal mutation (the deleted key's predecessor is rewritten via
+            // a snapshot-bucket scan the cached location cannot skip), exercised here alongside
+            // staged updates that share del_read's collision bucket.
+            let indexed_updates = vec![
+                (0, Some(colliding_digest(0x62, 0))),
+                (2, Some(colliding_digest(0x62, 1))),
+                (3, Some(colliding_digest(0x62, 2))),
+                (4, Some(colliding_digest(0x62, 3))),
+                (5, Some(colliding_digest(0x62, 4))),
+                (6, Some(colliding_digest(0x62, 5))),
+                (7, None),
             ];
             let upserts = vec![
-                (unread_existing, colliding_digest(0x62, 6)),
-                (unread_missing, colliding_digest(0x62, 7)),
-                (k0, colliding_digest(0x62, 8)),
-            ];
-            let read_keys = vec![k0, read_only, missing, k1, k0, missing, k2];
-            let keys: Vec<_> = read_keys.iter().collect();
-            let indexed_updates = vec![
-                (0, updates[0].1),
-                (2, updates[1].1),
-                (3, updates[2].1),
-                (4, updates[3].1),
-                (5, updates[4].1),
-                (6, updates[5].1),
+                (unread_existing, Some(colliding_digest(0x62, 6))),
+                (unread_missing, Some(colliding_digest(0x62, 7))),
+                (k0, Some(colliding_digest(0x62, 8))),
+                (del_unread, None),
             ];
             let loaded_values = vec![
                 Some(v0),
@@ -3175,40 +3228,68 @@ mod tests {
                 Some(v0),
                 None,
                 Some(v2),
+                Some(del_read_value),
             ];
             let mut explicit = db.new_batch();
             let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
-            for (key, value) in &updates {
-                explicit = explicit.write(*key, Some(*value));
+            for (slot, value) in &indexed_updates {
+                explicit = explicit.write(read_keys[*slot], *value);
             }
             for (key, value) in &upserts {
-                explicit = explicit.write(*key, Some(*value));
+                explicit = explicit.write(*key, *value);
             }
             let explicit = explicit.merkleize(&db, None).await.unwrap();
 
-            let cached_token = db.new_batch();
-            let (cached_token_values, staged) =
-                cached_token.get_many_staged(&keys, &db).await.unwrap();
-            let cached_token = staged
-                .set(&indexed_updates, &upserts, &db, None)
-                .await
-                .unwrap();
+            let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let staged = staged.set(indexed_updates.clone(), upserts.clone(), &db, None).await.unwrap();
 
             assert_eq!(explicit_values, loaded_values);
-            assert_eq!(explicit_values, cached_token_values);
+            assert_eq!(explicit_values, staged_values);
 
-            assert_eq!(explicit.root(), cached_token.root());
+            assert_eq!(explicit.root(), staged.root());
 
-            db.apply_batch(cached_token).await.unwrap();
-            assert_eq!(db.get(&k0).await.unwrap(), Some(upserts[2].1));
-            assert_eq!(db.get(&missing).await.unwrap(), Some(updates[4].1));
-            assert_eq!(db.get(&k1).await.unwrap(), Some(updates[2].1));
-            assert_eq!(db.get(&k2).await.unwrap(), Some(updates[5].1));
+            db.apply_batch(staged).await.unwrap();
+            assert_eq!(db.get(&k0).await.unwrap(), upserts[2].1);
+            assert_eq!(db.get(&missing).await.unwrap(), indexed_updates[4].1);
+            assert_eq!(db.get(&k1).await.unwrap(), indexed_updates[2].1);
+            assert_eq!(db.get(&k2).await.unwrap(), indexed_updates[5].1);
             assert_eq!(db.get(&read_only).await.unwrap(), Some(read_only_value));
-            assert_eq!(db.get(&unread_existing).await.unwrap(), Some(upserts[0].1));
-            assert_eq!(db.get(&unread_missing).await.unwrap(), Some(upserts[1].1));
+            assert_eq!(db.get(&unread_existing).await.unwrap(), upserts[0].1);
+            assert_eq!(db.get(&unread_missing).await.unwrap(), upserts[1].1);
+            assert_eq!(db.get(&del_read).await.unwrap(), None);
+            assert_eq!(db.get(&del_unread).await.unwrap(), None);
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// An update whose read-index is outside the staged read set is a caller-contract violation
+    /// and must panic rather than silently misapply.
+    #[test]
+    #[should_panic(expected = "update index out of staged read range")]
+    fn staged_set_rejects_out_of_range_update_index() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("staged-bad-index", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let k0 = colliding_digest(0x40, 0);
+            let keys = vec![&k0];
+            let (_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            // Slot 1 is out of range for a single-key read set.
+            let _ = staged
+                .set(vec![(1, Some(colliding_digest(0x50, 0)))], Vec::new(), &db, None)
+                .await;
         });
     }
 
@@ -3232,7 +3313,7 @@ mod tests {
             let indexed_updates: Vec<_> = suffixes
                 .iter()
                 .enumerate()
-                .map(|(slot, suffix)| (slot, val(suffix + 3_000)))
+                .map(|(slot, suffix)| (slot, Some(val(suffix + 3_000))))
                 .collect();
             let mut roots = Vec::new();
 
@@ -3270,7 +3351,7 @@ mod tests {
                     let read_keys: Vec<_> = suffixes.iter().map(|suffix| key(*suffix)).collect();
                     let keys: Vec<_> = read_keys.iter().collect();
                     let child = parent.new_batch::<Sha256>();
-                    let (values, staged) = child.get_many_staged(&keys, &db).await.unwrap();
+                    let (values, staged) = child.stage(&keys, &db).await.unwrap();
                     for (slot, suffix) in suffixes.iter().enumerate() {
                         let expected = if *suffix < 10 {
                             val(suffix + 1_000)
@@ -3282,7 +3363,7 @@ mod tests {
 
                     db.apply_batch(grandparent).await.unwrap();
                     db.commit().await.unwrap();
-                    staged.set(&indexed_updates, &[], &db, None).await.unwrap()
+                    staged.set(indexed_updates.clone(), Vec::new(), &db, None).await.unwrap()
                 } else {
                     let mut child = parent.new_batch::<Sha256>();
                     db.apply_batch(grandparent).await.unwrap();
@@ -3331,7 +3412,7 @@ mod tests {
             let indexed_updates: Vec<_> = suffixes
                 .iter()
                 .enumerate()
-                .map(|(slot, suffix)| (slot, val(suffix + 3_000)))
+                .map(|(slot, suffix)| (slot, Some(val(suffix + 3_000))))
                 .collect();
             let mut roots = Vec::new();
 
@@ -3369,7 +3450,7 @@ mod tests {
                     let read_keys: Vec<_> = suffixes.iter().map(|suffix| key(*suffix)).collect();
                     let keys: Vec<_> = read_keys.iter().collect();
                     let child = parent.new_batch::<Sha256>();
-                    let (values, staged) = child.get_many_staged(&keys, &db).await.unwrap();
+                    let (values, staged) = child.stage(&keys, &db).await.unwrap();
                     for (slot, suffix) in suffixes.iter().enumerate() {
                         let expected = if *suffix < 10 {
                             val(suffix + 1_000)
@@ -3381,7 +3462,7 @@ mod tests {
 
                     db.apply_batch(grandparent).await.unwrap();
                     db.commit().await.unwrap();
-                    staged.set(&indexed_updates, &[], &db, None).await.unwrap()
+                    staged.set(indexed_updates.clone(), Vec::new(), &db, None).await.unwrap()
                 } else {
                     let mut child = parent.new_batch::<Sha256>();
                     db.apply_batch(grandparent).await.unwrap();

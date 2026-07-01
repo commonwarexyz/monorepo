@@ -251,6 +251,65 @@ pub(crate) mod test {
         db.apply_batch(merkleized).await.unwrap();
     }
 
+    /// The staged path (`stage` + `Staged::set`) must produce the same values and root as an
+    /// explicit `get_many` + `write` + `merkleize` for variable-encoded values, across updates,
+    /// a delete, upserts, a duplicate read slot, and a missing key. Guards the staged
+    /// cached-location reuse against a fixed-vs-variable op-encoding divergence.
+    #[test_traced("WARN")]
+    fn unordered_variable_staged_matches_explicit_writes() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = create_test_db(context.child("staged")).await;
+
+            let key = |i: u64| Sha256::hash(&i.to_be_bytes());
+
+            let mut seed = db.new_batch();
+            for i in 0..200u64 {
+                seed = seed.write(key(i), Some(to_bytes(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Read set: key(5) duplicated at slots 0/3, read-only key(6), missing key(9000),
+            // key(20) deleted via index at slot 4.
+            let read_keys = [key(5), key(6), key(9000), key(5), key(20)];
+            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let indexed_updates = vec![
+                (0, Some(to_bytes(5_000))),
+                (2, Some(to_bytes(5_001))),
+                (3, Some(to_bytes(5_002))),
+                (4, None),
+            ];
+            let upserts = vec![
+                (key(7000), Some(to_bytes(6_000))),
+                (key(30), Some(to_bytes(6_001))),
+                (key(31), None),
+            ];
+
+            let mut explicit = db.new_batch();
+            let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
+            for (slot, value) in &indexed_updates {
+                explicit = explicit.write(read_keys[*slot], value.clone());
+            }
+            for (k, v) in &upserts {
+                explicit = explicit.write(*k, v.clone());
+            }
+            let explicit_root = explicit.merkleize(&db, None).await.unwrap().root();
+
+            let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let staged_root = staged
+                .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                .await
+                .unwrap()
+                .root();
+
+            assert_eq!(explicit_values, staged_values);
+            assert_eq!(explicit_root, staged_root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
         let cfg = create_test_config(0, &context);
