@@ -442,9 +442,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_put_start_sync_returns_before_handle_completes() {
+    fn test_put_after_start_sync_is_accepted_before_handle_completes() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let pending = Arc::new(Mutex::new(Vec::new()));
             let context = DelayedSyncContext {
                 inner: context,
@@ -470,8 +470,9 @@ mod tests {
                 .put_start_sync(1, test_key("aaa"), 10)
                 .await
                 .expect("Failed to start sync");
+            let pending_after_start = pending.lock().len();
             assert!(
-                !pending.lock().is_empty(),
+                pending_after_start > 0,
                 "put_start_sync should return while the sync handle is still pending"
             );
 
@@ -479,10 +480,33 @@ mod tests {
                 .put(2, test_key("bbb"), 20)
                 .await
                 .expect("archive should remain usable before sync completion");
+            assert_eq!(
+                pending.lock().len(),
+                pending_after_start,
+                "put should not issue a new storage sync while accepting later data"
+            );
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
 
             release_pending_syncs(&pending);
             handle.await.expect("sync handle should complete");
+
+            let follow_up = archive.start_sync().await.expect("Failed to start next sync");
+            assert!(
+                !pending.lock().is_empty(),
+                "the later put must remain pending for a future sync"
+            );
+            release_pending_syncs(&pending);
+            follow_up.await.expect("follow-up sync should complete");
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .expect("Failed to reopen archive");
+
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
         });
     }
 

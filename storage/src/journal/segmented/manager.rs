@@ -34,7 +34,8 @@ pub trait SectionBuffer: Send + Sync {
     ///
     /// The returned handle covers data accepted before this call returns. It does not cover later
     /// writes. Implementations may accept later writes before the handle completes, but any later
-    /// operation that mutates the underlying blob must first wait for the outstanding handle.
+    /// operation that mutates the underlying blob must first wait for the outstanding handle. A
+    /// repeated call may return another handle for the same in-flight sync instead of waiting.
     fn start_sync(&mut self) -> impl Future<Output = Handle<()>> + Send;
 
     /// Wait for any started sync without starting a new sync.
@@ -569,6 +570,9 @@ mod tests {
         }
 
         async fn start_sync(&mut self) -> Handle<()> {
+            if let Some(syncing) = &self.syncing {
+                return syncing.handle();
+            }
             let (sender, receiver) = oneshot::channel();
             self.pending.lock().push(sender);
             let sync = Completion::from(Handle::from_future(async move {
@@ -675,6 +679,58 @@ mod tests {
                 commonware_runtime::reschedule().await;
             }
             waiter.await.expect("sync waiter failed");
+            manager.destroy().await.expect("destroy failed");
+        });
+    }
+
+    #[test]
+    fn test_start_sync_reuses_in_flight_section_handle_without_waiting() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let wait_for_syncs = Arc::new(AtomicUsize::new(0));
+            let cfg = test_config(pending.clone(), wait_for_syncs);
+            let mut manager = Manager::init(context.child("manager"), cfg)
+                .await
+                .expect("failed to initialize manager");
+
+            manager
+                .get_or_create(1)
+                .await
+                .expect("failed to create section");
+            let first = manager.start_sync(1).await.expect("failed to start sync");
+            assert_eq!(pending.lock().len(), 1);
+
+            let second = manager
+                .start_sync(1)
+                .await
+                .expect("failed to observe in-flight sync");
+            assert_eq!(
+                pending.lock().len(),
+                1,
+                "repeated start_sync should observe the in-flight section sync"
+            );
+
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let waiter = context.child("reused").spawn(|_| async move {
+                second.await.expect("reused sync handle should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "reused start_sync handle must wait for the in-flight sync"
+            );
+
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            waiter.await.expect("reused sync waiter failed");
             manager.destroy().await.expect("destroy failed");
         });
     }
