@@ -781,14 +781,14 @@ where
                     break;
                 }
 
+                // `read_candidates` omits locations already superseded by this diff. Keep
+                // `resolved` and `outcomes` in that filtered order, then walk `candidates`
+                // below so superseded locations still advance the floor in scan order.
                 let read_candidates: Vec<_> = candidates
                     .iter()
                     .copied()
                     .filter(|candidate| superseded_locs.binary_search(candidate).is_err())
                     .collect();
-                // `read_candidates` omits locations already superseded by this diff. Keep
-                // `resolved` and `outcomes` in that filtered order, then walk `candidates`
-                // below so superseded locations still advance the floor in scan order.
                 let (resolved, outcomes): (_, Vec<Vec<FloorOutcome<F>>>) =
                     if read_candidates.is_empty() {
                         (Vec::new(), Vec::new())
@@ -840,6 +840,9 @@ where
                             }
                         };
 
+                        // Classification is already partitioned by candidate chunk, so use
+                        // manual strategy execution and keep each location aligned with the
+                        // operation resolved for the same filtered candidate.
                         let manual = strategy.manual();
                         let chunk_len = read_candidates.len().div_ceil(manual.parallelism_hint());
                         let chunks: Vec<CandidateChunk<'_, F, U>> = read_candidates
