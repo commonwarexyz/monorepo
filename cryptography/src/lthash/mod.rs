@@ -142,9 +142,7 @@ impl LtHash {
         for (chunk, val) in bytes.chunks_exact_mut(2).zip(&self.state) {
             chunk.copy_from_slice(&val.to_le_bytes());
         }
-        let mut hasher = Blake3::default();
-        hasher.update(&bytes);
-        hasher.finalize()
+        Blake3::hash([&bytes])
     }
 
     /// Reset the [LtHash] to the initial zero state.
