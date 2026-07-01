@@ -148,14 +148,14 @@ struct Args {
 }
 
 fn key(i: u64) -> Digest {
-    Sha256::hash(&[&i.to_be_bytes()])
+    Sha256::hash([&i.to_be_bytes()])
 }
 
 fn gen_muts(rng: &mut StdRng, num_updates: u64, num_keys: u64) -> Vec<(Digest, Digest)> {
     (0..num_updates)
         .map(|_| {
             let idx = rng.next_u64() % num_keys;
-            (key(idx), Sha256::hash(&[&rng.next_u32().to_be_bytes()]))
+            (key(idx), Sha256::hash([&rng.next_u32().to_be_bytes()]))
         })
         .collect()
 }
@@ -185,7 +185,7 @@ macro_rules! run_pipeline {
         let mut rng = StdRng::seed_from_u64(42);
         let mut batch = db.new_batch();
         for i in 0..args.num_keys {
-            batch = batch.write(key(i), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
+            batch = batch.write(key(i), Some(Sha256::hash([&rng.next_u32().to_be_bytes()])));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();

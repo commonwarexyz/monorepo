@@ -266,8 +266,8 @@ mod tests {
         let epoch1 = Epoch::new(5);
         let epoch2 = Epoch::new(6);
 
-        let chunk1 = Chunk::new(sequencer.clone(), height, Sha256::hash(&[b"payload1"]));
-        let chunk2 = Chunk::new(sequencer, height, Sha256::hash(&[b"payload2"]));
+        let chunk1 = Chunk::new(sequencer.clone(), height, Sha256::hash([b"payload1"]));
+        let chunk2 = Chunk::new(sequencer, height, Sha256::hash([b"payload2"]));
 
         let cert1 = helpers::add_acks_for_indices(
             &mut acks,
@@ -313,7 +313,7 @@ mod tests {
         let height1 = Height::new(10);
         let height2 = Height::new(20);
 
-        let chunk1 = Chunk::new(sequencer.clone(), height1, Sha256::hash(&[b"chunk1"]));
+        let chunk1 = Chunk::new(sequencer.clone(), height1, Sha256::hash([b"chunk1"]));
         let cert1 =
             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk1, epoch, &[0, 1, 2])
                 .expect("Should produce certificate");
@@ -323,7 +323,7 @@ mod tests {
             Some((epoch, &cert1))
         );
 
-        let chunk2 = Chunk::new(sequencer.clone(), height2, Sha256::hash(&[b"chunk2"]));
+        let chunk2 = Chunk::new(sequencer.clone(), height2, Sha256::hash([b"chunk2"]));
         let cert2 =
             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk2, epoch, &[0, 1, 2])
                 .expect("Should produce certificate");
@@ -361,7 +361,7 @@ mod tests {
         let chunk1 = Chunk::new(
             sequencer.clone(),
             Height::new(10),
-            Sha256::hash(&[b"chunk1"]),
+            Sha256::hash([b"chunk1"]),
         );
         let cert1 =
             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk1, epoch, &[0, 1, 2])
@@ -375,7 +375,7 @@ mod tests {
         let chunk2 = Chunk::new(
             sequencer.clone(),
             Height::new(11),
-            Sha256::hash(&[b"chunk2"]),
+            Sha256::hash([b"chunk2"]),
         );
         let cert2 =
             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk2, epoch, &[0, 1, 2])
@@ -394,7 +394,7 @@ mod tests {
         let chunk3 = Chunk::new(
             sequencer.clone(),
             Height::new(12),
-            Sha256::hash(&[b"chunk3"]),
+            Sha256::hash([b"chunk3"]),
         );
         let cert3 =
             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk3, epoch, &[0, 1, 2])
@@ -436,7 +436,7 @@ mod tests {
         let epoch1 = Epoch::new(1);
         let epoch2 = Epoch::new(2);
 
-        let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash(&[b"chunk"]));
+        let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash([b"chunk"]));
 
         let cert1 = helpers::add_acks_for_indices(
             &mut acks,
@@ -481,7 +481,7 @@ mod tests {
         let epoch = Epoch::new(99);
         let sequencer = fixture.participants[1].clone();
         let height = Height::new(42);
-        let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash(&[&sequencer]));
+        let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash([&sequencer]));
 
         let cert =
             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk, epoch, &[0, 1, 2])
@@ -522,7 +522,7 @@ mod tests {
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
         let height = Height::new(10);
-        let chunk = Chunk::new(sequencer, height, Sha256::hash(&[b"payload"]));
+        let chunk = Chunk::new(sequencer, height, Sha256::hash([b"payload"]));
 
         let ack = helpers::create_ack(&fixture.schemes[0], chunk, epoch);
         assert!(acks
@@ -555,7 +555,7 @@ mod tests {
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
         let height = Height::new(10);
-        let chunk = Chunk::new(sequencer, height, Sha256::hash(&[b"payload"]));
+        let chunk = Chunk::new(sequencer, height, Sha256::hash([b"payload"]));
 
         let acks_vec =
             helpers::create_acks_for_indices(&fixture.schemes, chunk.clone(), epoch, &[0, 1, 2]);
@@ -598,8 +598,8 @@ mod tests {
         let epoch = Epoch::new(1);
         let height = Height::new(10);
 
-        let chunk1 = Chunk::new(sequencer1.clone(), height, Sha256::hash(&[b"payload1"]));
-        let chunk2 = Chunk::new(sequencer2.clone(), height, Sha256::hash(&[b"payload2"]));
+        let chunk1 = Chunk::new(sequencer1.clone(), height, Sha256::hash([b"payload1"]));
+        let chunk2 = Chunk::new(sequencer2.clone(), height, Sha256::hash([b"payload2"]));
 
         let cert1 =
             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk1, epoch, &[0, 1, 2])
@@ -635,7 +635,7 @@ mod tests {
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
         let height = Height::new(10);
-        let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash(&[b"payload"]));
+        let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash([b"payload"]));
 
         let acks_vec = helpers::create_acks_for_indices(&fixture.schemes, chunk, epoch, &[0, 1]);
         for ack in acks_vec {
@@ -672,8 +672,8 @@ mod tests {
         let epoch = Epoch::new(1);
         let height = Height::new(10);
 
-        let payload1 = Sha256::hash(&[b"payload1"]);
-        let payload2 = Sha256::hash(&[b"payload2"]);
+        let payload1 = Sha256::hash([b"payload1"]);
+        let payload2 = Sha256::hash([b"payload2"]);
 
         let chunk1 = Chunk::new(sequencer.clone(), height, payload1);
         let chunk2 = Chunk::new(sequencer, height, payload2);

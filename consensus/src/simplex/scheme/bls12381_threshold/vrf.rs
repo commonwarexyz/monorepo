@@ -922,7 +922,7 @@ mod tests {
         Proposal::new(
             Round::new(epoch, view),
             view.previous().unwrap(),
-            Sha256::hash(&[&[tag]]),
+            Sha256::hash([&[tag]]),
         )
     }
 

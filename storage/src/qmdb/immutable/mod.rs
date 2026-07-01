@@ -1097,7 +1097,7 @@ pub(super) mod test {
 
         let mut batch = db.new_batch();
         for i in 0u64..2_000 {
-            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let k = Sha256::hash([&i.to_be_bytes()]);
             let v = Sha256::fill(i as u8);
             batch = batch.set(k, v);
         }
@@ -1114,7 +1114,7 @@ pub(super) mod test {
         assert_eq!(root, db.root());
         assert_eq!(db.bounds().end, 2_000 + 2);
         for i in 0u64..2_000 {
-            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let k = Sha256::hash([&i.to_be_bytes()]);
             let v = Sha256::fill(i as u8);
             assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
         }
@@ -1147,7 +1147,7 @@ pub(super) mod test {
 
         let mut batch = db.new_batch();
         for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let k = Sha256::hash([&i.to_be_bytes()]);
             let v = Sha256::fill(i as u8);
             batch = batch.set(k, v);
         }
@@ -1161,7 +1161,7 @@ pub(super) mod test {
         // Insert another 1000 keys (different from the first batch) then commit.
         let mut batch = db.new_batch();
         for i in ELEMENTS..ELEMENTS * 2 {
-            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let k = Sha256::hash([&i.to_be_bytes()]);
             let v = Sha256::fill(i as u8);
             batch = batch.set(k, v);
         }
@@ -1243,7 +1243,7 @@ pub(super) mod test {
         // Batch writes keys in BTreeMap-sorted order, so build the sorted key
         // list to map between journal locations and keys.
         let mut sorted_keys: Vec<sha256::Digest> = (1u64..ELEMENTS + 1)
-            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .map(|i| Sha256::hash([&i.to_be_bytes()]))
             .collect();
         sorted_keys.sort();
         // Location 0: initial commit; locations 1..=ELEMENTS: Set ops in sorted
@@ -1252,7 +1252,7 @@ pub(super) mod test {
 
         let mut batch = db.new_batch();
         for i in 1u64..ELEMENTS + 1 {
-            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let k = Sha256::hash([&i.to_be_bytes()]);
             let v = Sha256::fill(i as u8);
             batch = batch.set(k, v);
         }
@@ -1447,10 +1447,10 @@ pub(super) mod test {
     {
         let mut db = open_db(context.child("db")).await;
 
-        let key1 = Sha256::hash(&[&1u64.to_be_bytes()]);
-        let key2 = Sha256::hash(&[&2u64.to_be_bytes()]);
-        let key3 = Sha256::hash(&[&3u64.to_be_bytes()]);
-        let key4 = Sha256::hash(&[&4u64.to_be_bytes()]);
+        let key1 = Sha256::hash([&1u64.to_be_bytes()]);
+        let key2 = Sha256::hash([&2u64.to_be_bytes()]);
+        let key3 = Sha256::hash([&3u64.to_be_bytes()]);
+        let key4 = Sha256::hash([&4u64.to_be_bytes()]);
 
         let value1 = Sha256::fill(11u8);
         let value2 = Sha256::fill(22u8);
@@ -1561,7 +1561,7 @@ pub(super) mod test {
 
         let first_range = commit_sets(
             &mut db,
-            (0u64..16).map(|i| (Sha256::hash(&[&i.to_be_bytes()]), Sha256::fill(i as u8))),
+            (0u64..16).map(|i| (Sha256::hash([&i.to_be_bytes()]), Sha256::fill(i as u8))),
             None,
         )
         .await;
@@ -1582,7 +1582,7 @@ pub(super) mod test {
                 (0u64..16).map(|i| {
                     let seed = round * 100 + i;
                     (
-                        Sha256::hash(&[&seed.to_be_bytes()]),
+                        Sha256::hash([&seed.to_be_bytes()]),
                         Sha256::fill(seed as u8),
                     )
                 }),
@@ -1631,7 +1631,7 @@ pub(super) mod test {
         let mut db = open_db(context.child("db")).await;
 
         // Pre-populate with key A.
-        let key_a = Sha256::hash(&[&0u64.to_be_bytes()]);
+        let key_a = Sha256::hash([&0u64.to_be_bytes()]);
         let val_a = Sha256::fill(1u8);
         db.apply_batch(
             db.new_batch()
@@ -1646,13 +1646,13 @@ pub(super) mod test {
         assert_eq!(batch.get(&key_a, &db).await.unwrap(), Some(val_a));
 
         // Set B in batch, batch.get(&B) returns the value.
-        let key_b = Sha256::hash(&[&1u64.to_be_bytes()]);
+        let key_b = Sha256::hash([&1u64.to_be_bytes()]);
         let val_b = Sha256::fill(2u8);
         batch = batch.set(key_b, val_b);
         assert_eq!(batch.get(&key_b, &db).await.unwrap(), Some(val_b));
 
         // Nonexistent key.
-        let key_c = Sha256::hash(&[&2u64.to_be_bytes()]);
+        let key_c = Sha256::hash([&2u64.to_be_bytes()]);
         assert_eq!(batch.get(&key_c, &db).await.unwrap(), None);
 
         db.destroy().await.unwrap();
@@ -1673,7 +1673,7 @@ pub(super) mod test {
         let db = open_db(context.child("db")).await;
 
         // Parent batch: set A.
-        let key_a = Sha256::hash(&[&0u64.to_be_bytes()]);
+        let key_a = Sha256::hash([&0u64.to_be_bytes()]);
         let val_a = Sha256::fill(10u8);
         let parent = db.new_batch().set(key_a, val_a);
         let parent_m = parent.merkleize(&db, None, Location::new(0));
@@ -1683,13 +1683,13 @@ pub(super) mod test {
         assert_eq!(child.get(&key_a, &db).await.unwrap(), Some(val_a));
 
         // Child sets B.
-        let key_b = Sha256::hash(&[&1u64.to_be_bytes()]);
+        let key_b = Sha256::hash([&1u64.to_be_bytes()]);
         let val_b = Sha256::fill(20u8);
         child = child.set(key_b, val_b);
         assert_eq!(child.get(&key_b, &db).await.unwrap(), Some(val_b));
 
         // Nonexistent key.
-        let key_c = Sha256::hash(&[&2u64.to_be_bytes()]);
+        let key_c = Sha256::hash([&2u64.to_be_bytes()]);
         assert_eq!(child.get(&key_c, &db).await.unwrap(), None);
 
         db.destroy().await.unwrap();
@@ -1711,12 +1711,12 @@ pub(super) mod test {
 
         // Sort keys so operations are in BTreeMap order (same as merkleize writes).
         let mut kvs_first: Vec<(Digest, Digest)> = (0u64..5)
-            .map(|i| (Sha256::hash(&[&i.to_be_bytes()]), Sha256::fill(i as u8)))
+            .map(|i| (Sha256::hash([&i.to_be_bytes()]), Sha256::fill(i as u8)))
             .collect();
         kvs_first.sort_by_key(|a| a.0);
 
         let mut kvs_second: Vec<(Digest, Digest)> = (5u64..10)
-            .map(|i| (Sha256::hash(&[&i.to_be_bytes()]), Sha256::fill(i as u8)))
+            .map(|i| (Sha256::hash([&i.to_be_bytes()]), Sha256::fill(i as u8)))
             .collect();
         kvs_second.sort_by_key(|a| a.0);
 
@@ -1762,7 +1762,7 @@ pub(super) mod test {
 
         let mut batch = db.new_batch();
         for i in 0u8..10 {
-            let k = Sha256::hash(&[&[i]]);
+            let k = Sha256::hash([&[i]]);
             batch = batch.set(k, Sha256::fill(i));
         }
         let merkleized = batch.merkleize(&db, None, Location::new(0));
@@ -1774,7 +1774,7 @@ pub(super) mod test {
         // Second batch with metadata.
         let metadata = Some(Sha256::fill(55u8));
         let mut batch = db.new_batch();
-        let k = Sha256::hash(&[&[0xAA]]);
+        let k = Sha256::hash([&[0xAA]]);
         batch = batch.set(k, Sha256::fill(0xAA));
         let merkleized = batch.merkleize(&db, metadata, Location::new(0));
         let speculative = merkleized.root();
@@ -1799,7 +1799,7 @@ pub(super) mod test {
         let mut db = open_db(context.child("db")).await;
 
         // Pre-populate base DB.
-        let key_a = Sha256::hash(&[&0u64.to_be_bytes()]);
+        let key_a = Sha256::hash([&0u64.to_be_bytes()]);
         let val_a = Sha256::fill(10u8);
         db.apply_batch(
             db.new_batch()
@@ -1810,7 +1810,7 @@ pub(super) mod test {
         .unwrap();
 
         // Create a merkleized batch with a new key.
-        let key_b = Sha256::hash(&[&1u64.to_be_bytes()]);
+        let key_b = Sha256::hash([&1u64.to_be_bytes()]);
         let val_b = Sha256::fill(20u8);
         let merkleized = db
             .new_batch()
@@ -1824,7 +1824,7 @@ pub(super) mod test {
         assert_eq!(merkleized.get(&key_b, &db).await.unwrap(), Some(val_b));
 
         // Nonexistent key.
-        let key_c = Sha256::hash(&[&2u64.to_be_bytes()]);
+        let key_c = Sha256::hash([&2u64.to_be_bytes()]);
         assert_eq!(merkleized.get(&key_c, &db).await.unwrap(), None);
 
         db.destroy().await.unwrap();
@@ -1844,7 +1844,7 @@ pub(super) mod test {
     {
         let mut db = open_db(context.child("db")).await;
 
-        let key_a = Sha256::hash(&[&0u64.to_be_bytes()]);
+        let key_a = Sha256::hash([&0u64.to_be_bytes()]);
         let val_a = Sha256::fill(1u8);
 
         // First batch.
@@ -1858,7 +1858,7 @@ pub(super) mod test {
         assert_eq!(db.get(&key_a).await.unwrap(), Some(val_a));
 
         // Second independent batch.
-        let key_b = Sha256::hash(&[&1u64.to_be_bytes()]);
+        let key_b = Sha256::hash([&1u64.to_be_bytes()]);
         let val_b = Sha256::fill(2u8);
         let m = db
             .new_batch()
@@ -1896,7 +1896,7 @@ pub(super) mod test {
             let mut batch = db.new_batch();
             for j in 0..KEYS_PER_BATCH {
                 let seed = batch_idx * 100 + j;
-                let k = Sha256::hash(&[&seed.to_be_bytes()]);
+                let k = Sha256::hash([&seed.to_be_bytes()]);
                 let v = Sha256::fill(seed as u8);
                 batch = batch.set(k, v);
                 all_kvs.push((k, v));
@@ -1937,7 +1937,7 @@ pub(super) mod test {
         let mut db = open_db(context.child("db")).await;
 
         // Apply a non-empty batch first.
-        let k = Sha256::hash(&[&[1u8]]);
+        let k = Sha256::hash([&[1u8]]);
         db.apply_batch(db.new_batch().set(k, Sha256::fill(1u8)).merkleize(
             &db,
             None,
@@ -1977,7 +1977,7 @@ pub(super) mod test {
         let mut db = open_db(context.child("db")).await;
 
         // Pre-populate base DB.
-        let key_a = Sha256::hash(&[&0u64.to_be_bytes()]);
+        let key_a = Sha256::hash([&0u64.to_be_bytes()]);
         let val_a = Sha256::fill(10u8);
         db.apply_batch(
             db.new_batch()
@@ -1988,7 +1988,7 @@ pub(super) mod test {
         .unwrap();
 
         // Parent batch sets key B.
-        let key_b = Sha256::hash(&[&1u64.to_be_bytes()]);
+        let key_b = Sha256::hash([&1u64.to_be_bytes()]);
         let val_b = Sha256::fill(1u8);
         let parent_m = db
             .new_batch()
@@ -1996,7 +1996,7 @@ pub(super) mod test {
             .merkleize(&db, None, Location::new(0));
 
         // Child batch sets key C.
-        let key_c = Sha256::hash(&[&2u64.to_be_bytes()]);
+        let key_c = Sha256::hash([&2u64.to_be_bytes()]);
         let val_c = Sha256::fill(2u8);
         let child_m =
             parent_m
@@ -2012,7 +2012,7 @@ pub(super) mod test {
         // child's own value
         assert_eq!(child_m.get(&key_c, &db).await.unwrap(), Some(val_c));
         // nonexistent key
-        let key_d = Sha256::hash(&[&3u64.to_be_bytes()]);
+        let key_d = Sha256::hash([&3u64.to_be_bytes()]);
         assert_eq!(child_m.get(&key_d, &db).await.unwrap(), None);
 
         db.destroy().await.unwrap();
@@ -2038,7 +2038,7 @@ pub(super) mod test {
 
         let mut batch = db.new_batch();
         for i in 0..N {
-            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let k = Sha256::hash([&i.to_be_bytes()]);
             let v = Sha256::fill((i % 256) as u8);
             batch = batch.set(k, v);
             kvs.push((k, v));
@@ -2076,7 +2076,7 @@ pub(super) mod test {
     {
         let mut db = open_db(context.child("db")).await;
 
-        let key = Sha256::hash(&[&0u64.to_be_bytes()]);
+        let key = Sha256::hash([&0u64.to_be_bytes()]);
         let val_parent = Sha256::fill(1u8);
         let val_child = Sha256::fill(2u8);
 
@@ -2125,7 +2125,7 @@ pub(super) mod test {
     {
         let mut db = open_db_small_sections(context.child("db")).await;
 
-        let key = Sha256::hash(&[&0u64.to_be_bytes()]);
+        let key = Sha256::hash([&0u64.to_be_bytes()]);
         let v1 = Sha256::fill(1u8);
         let v2 = Sha256::fill(2u8);
 
@@ -2178,7 +2178,7 @@ pub(super) mod test {
 
         // Batch with metadata.
         let metadata = Sha256::fill(42u8);
-        let k = Sha256::hash(&[&[1u8]]);
+        let k = Sha256::hash([&[1u8]]);
         db.apply_batch(db.new_batch().set(k, Sha256::fill(1u8)).merkleize(
             &db,
             Some(metadata),
@@ -2210,8 +2210,8 @@ pub(super) mod test {
     {
         let mut db = open_db(context.child("db")).await;
 
-        let key1 = Sha256::hash(&[&[1]]);
-        let key2 = Sha256::hash(&[&[2]]);
+        let key1 = Sha256::hash([&[1]]);
+        let key2 = Sha256::hash([&[2]]);
         let v1 = Sha256::fill(10u8);
         let v2 = Sha256::fill(20u8);
 
@@ -2261,9 +2261,9 @@ pub(super) mod test {
     {
         let mut db = open_db(context.child("db")).await;
 
-        let key1 = Sha256::hash(&[&[1]]);
-        let key2 = Sha256::hash(&[&[2]]);
-        let key3 = Sha256::hash(&[&[3]]);
+        let key1 = Sha256::hash([&[1]]);
+        let key2 = Sha256::hash([&[2]]);
+        let key3 = Sha256::hash([&[3]]);
 
         // Parent batch.
         let parent_m =
@@ -2307,9 +2307,9 @@ pub(super) mod test {
     {
         let mut db = open_db(context.child("db")).await;
 
-        let key1 = Sha256::hash(&[&[1]]);
-        let key2 = Sha256::hash(&[&[2]]);
-        let key3 = Sha256::hash(&[&[3]]);
+        let key1 = Sha256::hash([&[1]]);
+        let key2 = Sha256::hash([&[2]]);
+        let key3 = Sha256::hash([&[3]]);
         let v1 = Sha256::fill(1u8);
         let v2 = Sha256::fill(2u8);
         let v3 = Sha256::fill(3u8);
@@ -2355,8 +2355,8 @@ pub(super) mod test {
     {
         let mut db = open_db(context.child("db")).await;
 
-        let key1 = Sha256::hash(&[&[1]]);
-        let key2 = Sha256::hash(&[&[2]]);
+        let key1 = Sha256::hash([&[1]]);
+        let key2 = Sha256::hash([&[2]]);
         let v1 = Sha256::fill(1u8);
         let v2 = Sha256::fill(2u8);
 
@@ -2397,8 +2397,8 @@ pub(super) mod test {
     {
         let mut db = open_db(context.child("db")).await;
 
-        let key1 = Sha256::hash(&[&[1]]);
-        let key2 = Sha256::hash(&[&[2]]);
+        let key1 = Sha256::hash([&[1]]);
+        let key2 = Sha256::hash([&[2]]);
 
         // Build the child while the parent is still pending.
         let parent =
@@ -2438,8 +2438,8 @@ pub(super) mod test {
     {
         let mut db = open_db(context.child("db")).await;
 
-        let key1 = Sha256::hash(&[&[1]]);
-        let key2 = Sha256::hash(&[&[2]]);
+        let key1 = Sha256::hash([&[1]]);
+        let key2 = Sha256::hash([&[2]]);
 
         // Parent batch.
         let parent_m =
@@ -2482,7 +2482,7 @@ pub(super) mod test {
         let mut db = open_db(context.child("db")).await;
 
         // Populate.
-        let key1 = Sha256::hash(&[&[1]]);
+        let key1 = Sha256::hash([&[1]]);
         let v1 = Sha256::fill(10u8);
         db.apply_batch(
             db.new_batch()
@@ -2497,7 +2497,7 @@ pub(super) mod test {
         assert_eq!(snapshot.root(), db.root());
 
         // Chain a child from the snapshot, apply it.
-        let key2 = Sha256::hash(&[&[2]]);
+        let key2 = Sha256::hash([&[2]]);
         let v2 = Sha256::fill(20u8);
         let child =
             snapshot
@@ -2527,9 +2527,9 @@ pub(super) mod test {
     {
         let mut db = open_db(context.child("db")).await;
 
-        let key1 = Sha256::hash(&[&[1]]);
-        let key2 = Sha256::hash(&[&[2]]);
-        let key3 = Sha256::hash(&[&[3]]);
+        let key1 = Sha256::hash([&[1]]);
+        let key2 = Sha256::hash([&[2]]);
+        let key3 = Sha256::hash([&[3]]);
         let v1 = Sha256::fill(1u8);
         let v2 = Sha256::fill(2u8);
         let v3 = Sha256::fill(3u8);

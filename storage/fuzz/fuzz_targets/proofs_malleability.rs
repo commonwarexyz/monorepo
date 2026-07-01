@@ -266,7 +266,7 @@ fn fuzz(input: FuzzInput) {
     let digests: Vec<Digest> = input
         .elements
         .iter()
-        .map(|&v| Sha256::hash(&[&[v]]))
+        .map(|&v| Sha256::hash([&[v]]))
         .collect();
 
     match input.proof {

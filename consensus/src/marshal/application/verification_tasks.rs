@@ -80,7 +80,7 @@ mod tests {
     #[test]
     fn test_insert_and_take_returns_task() {
         let tasks = VerificationTasks::<D>::new();
-        let digest = Sha256::hash(&[b"block"]);
+        let digest = Sha256::hash([b"block"]);
         tasks.insert(round(1), digest, pending_task());
 
         assert!(tasks.take(round(1), digest).is_some());
@@ -93,14 +93,14 @@ mod tests {
     #[test]
     fn test_take_absent_key_is_none() {
         let tasks = VerificationTasks::<D>::new();
-        assert!(tasks.take(round(1), Sha256::hash(&[b"missing"])).is_none());
+        assert!(tasks.take(round(1), Sha256::hash([b"missing"])).is_none());
     }
 
     #[test]
     fn test_take_distinguishes_rounds_and_digests() {
         let tasks = VerificationTasks::<D>::new();
-        let digest_a = Sha256::hash(&[b"a"]);
-        let digest_b = Sha256::hash(&[b"b"]);
+        let digest_a = Sha256::hash([b"a"]);
+        let digest_b = Sha256::hash([b"b"]);
         tasks.insert(round(1), digest_a, pending_task());
         tasks.insert(round(2), digest_a, pending_task());
         tasks.insert(round(1), digest_b, pending_task());
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn test_retain_after_drops_at_and_below_boundary() {
         let tasks = VerificationTasks::<D>::new();
-        let digest = Sha256::hash(&[b"block"]);
+        let digest = Sha256::hash([b"block"]);
         tasks.insert(round(1), digest, pending_task());
         tasks.insert(round(2), digest, pending_task());
         tasks.insert(round(3), digest, pending_task());
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn test_retain_after_spans_epochs() {
         let tasks = VerificationTasks::<D>::new();
-        let digest = Sha256::hash(&[b"block"]);
+        let digest = Sha256::hash([b"block"]);
         let early = Round::new(Epoch::zero(), View::new(100));
         let late = Round::new(Epoch::new(1), View::zero());
         tasks.insert(early, digest, pending_task());
@@ -159,13 +159,13 @@ mod tests {
     fn test_retain_after_empty_map_is_noop() {
         let tasks = VerificationTasks::<D>::new();
         tasks.retain_after(&round(5));
-        assert!(tasks.take(round(5), Sha256::hash(&[b"x"])).is_none());
+        assert!(tasks.take(round(5), Sha256::hash([b"x"])).is_none());
     }
 
     #[test]
     fn test_default_matches_new() {
         let default = <VerificationTasks<D> as Default>::default();
-        let digest = Sha256::hash(&[b"block"]);
+        let digest = Sha256::hash([b"block"]);
         default.insert(round(1), digest, pending_task());
         assert!(default.take(round(1), digest).is_some());
     }

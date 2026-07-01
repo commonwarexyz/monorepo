@@ -438,17 +438,17 @@ pub mod tests {
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
-                let wrong_val = Sha256::hash(&[&[0xFF]]);
+                let wrong_val = Sha256::hash([&[0xFF]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     &hasher, key, wrong_val, &proof, &root
                 ));
                 // Proof should fail against the wrong key.
-                let wrong_key = Sha256::hash(&[&[0xEE]]);
+                let wrong_key = Sha256::hash([&[0xEE]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     &hasher, wrong_key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong root.
-                let wrong_root = Sha256::hash(&[&[0xDD]]);
+                let wrong_root = Sha256::hash([&[0xDD]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     &hasher,
                     key,

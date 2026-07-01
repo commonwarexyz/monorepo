@@ -45,7 +45,7 @@ pub(crate) fn partial_chunk_root<H: Hasher<mmr::Family>, const N: usize>(
     assert!(next_bit > 0);
     assert!(next_bit < UtilsBitMap::<N>::CHUNK_SIZE_BITS);
     let next_bit = next_bit.to_be_bytes();
-    hasher.hash(&[
+    hasher.hash([
         mmr_root.as_ref(),
         next_bit.as_slice(),
         last_chunk_digest.as_ref(),
@@ -679,7 +679,7 @@ mod tests {
         assert_eq!(N % 32, 0);
         let mut vec: Vec<u8> = Vec::new();
         for _ in 0..N / 32 {
-            vec.extend(Sha256::hash(&[s]).iter());
+            vec.extend(Sha256::hash([s]).iter());
         }
 
         vec.try_into().unwrap()

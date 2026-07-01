@@ -167,7 +167,7 @@ fn acquire_lock(path: &Path) -> fs::File {
 /// Generates `n_cases` commitments (using seeds 0..n_cases), and hashes
 /// all the bytes together using SHA-256.
 pub async fn compute_conformance_hash<C: Conformance>(n_cases: usize) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256::default();
 
     for seed in 0..n_cases as u64 {
         let committed = C::commit(seed).await;

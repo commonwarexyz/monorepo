@@ -7,14 +7,14 @@
 //! use commonware_cryptography::{Hasher, blake3::Blake3};
 //!
 //! // Hash data in a single shot
-//! let digest = Blake3::hash(&[b"hello,", b"world!"]);
+//! let digest = Blake3::hash([b"hello,", b"world!"]);
 //! println!("digest: {:?}", digest);
 //!
 //! // Or stream data incrementally
 //! let mut hasher = Blake3::default();
 //! hasher.update(b"hello,");
 //! hasher.update(b"world!");
-//! let (_hasher, digest) = hasher.finalize();
+//! let digest = hasher.finalize();
 //! println!("digest: {:?}", digest);
 //! ```
 
@@ -58,14 +58,7 @@ impl Clone for Blake3 {
 impl Hasher for Blake3 {
     type Digest = Digest;
 
-    fn hash(parts: &[&[u8]]) -> Self::Digest {
-        let mut hasher = Self::default();
-        for part in parts {
-            hasher.update(part);
-        }
-        hasher.finalize().1
-    }
-
+    #[inline]
     fn update(&mut self, message: &[u8]) -> &mut Self {
         #[cfg(not(feature = "blake3-parallel"))]
         self.hasher.update(message);
@@ -86,11 +79,18 @@ impl Hasher for Blake3 {
         self
     }
 
-    fn finalize(mut self) -> (Self, Self::Digest) {
+    #[inline]
+    fn finalize(&mut self) -> Self::Digest {
         let finalized = self.hasher.finalize();
         self.hasher.reset();
         let array: [u8; DIGEST_LENGTH] = finalized.into();
-        (self, Self::Digest::from(array))
+        Self::Digest::from(array)
+    }
+
+    #[inline]
+    fn reset(&mut self) -> &mut Self {
+        self.hasher = CoreBlake3::new();
+        self
     }
 }
 
@@ -106,7 +106,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Digest {
         // Generate random bytes and compute their Blake3 hash
         let len = u.int_in_range(0..=256)?;
         let data = u.bytes(len)?;
-        Ok(Blake3::hash(&[data]))
+        Ok(Blake3::hash([data]))
     }
 }
 
@@ -198,23 +198,22 @@ mod tests {
         // Generate initial hash
         let mut hasher = Blake3::default();
         hasher.update(msg);
-        let (hasher, digest) = hasher.finalize();
+        let digest = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
-        // Reuse the reset hasher
-        let mut hasher = hasher;
+        // Reuse hasher
         hasher.update(msg);
-        let (_, digest) = hasher.finalize();
+        let digest = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
-        // Test one-shot hasher
-        let hash = Blake3::hash(&[msg]);
+        // Test simple hasher
+        let hash = Blake3::hash([msg]);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
 
         // Test multi-part one-shot hasher
-        let hash = Blake3::hash(&[b"hello", b" world"]);
+        let hash = Blake3::hash([b"hello".as_slice(), b" world".as_slice()]);
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
@@ -228,7 +227,7 @@ mod tests {
         let msg = b"hello world";
         let mut hasher = Blake3::default();
         hasher.update(msg);
-        let (_, digest) = hasher.finalize();
+        let digest = hasher.finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), DIGEST_LENGTH);

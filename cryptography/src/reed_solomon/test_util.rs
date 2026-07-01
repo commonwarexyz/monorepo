@@ -53,7 +53,7 @@ where
     T: IntoIterator,
     T::Item: AsRef<[u8]>,
 {
-    let mut sha = Sha256::new();
+    let mut sha = Sha256::default();
     for shard in shards {
         sha.update(shard);
     }

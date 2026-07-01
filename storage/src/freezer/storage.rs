@@ -209,8 +209,7 @@ impl Entry {
         hasher.update(&section.to_be_bytes());
         hasher.update(&position.to_be_bytes());
         hasher.update(&added.to_be_bytes());
-        let (_, digest) = hasher.finalize();
-        digest.as_u32()
+        hasher.finalize().as_u32()
     }
 
     /// Create a new [Entry].

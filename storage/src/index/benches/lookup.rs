@@ -85,7 +85,7 @@ fn run_lookup_prebuilt<I: Unordered<Value = u64>>(
 fn bench_lookup(c: &mut Criterion) {
     let max_items = *N_ITEMS.last().unwrap();
     let keys: Vec<_> = (0..max_items)
-        .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+        .map(|i| Sha256::hash([&i.to_be_bytes()]))
         .collect();
 
     for items in N_ITEMS {

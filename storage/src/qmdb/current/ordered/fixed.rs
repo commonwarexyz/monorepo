@@ -162,7 +162,7 @@ pub mod test {
             // pushing the inactivity floor past at least one full bitmap chunk.
             let key = Sha256::fill(0x11);
             for i in 0..chunk_bits + 10 {
-                let value = Sha256::hash(&[&i.to_be_bytes()]);
+                let value = Sha256::hash([&i.to_be_bytes()]);
                 let merkleized = db
                     .new_batch()
                     .write(key, Some(value))

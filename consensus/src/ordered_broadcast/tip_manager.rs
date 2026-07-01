@@ -85,7 +85,7 @@ mod tests {
         payload: &str,
     ) -> Node<PublicKey, S, Sha256Digest> {
         let sequencer = fixture.participants[sequencer_idx].clone();
-        let digest = Sha256::hash(&[payload.as_bytes()]);
+        let digest = Sha256::hash([payload.as_bytes()]);
         let chunk = Chunk::new(sequencer, height, digest);
 
         // Sign the chunk using a deterministic ed25519 key (since Node.signature is P::Signature,

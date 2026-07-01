@@ -447,7 +447,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 
     fn test_digest(value: u64) -> Digest {
-        Sha256::hash(&[&value.to_be_bytes()])
+        Sha256::hash([&value.to_be_bytes()])
     }
 
     fn test_cfg(pooler: &impl BufferPooler) -> Config {

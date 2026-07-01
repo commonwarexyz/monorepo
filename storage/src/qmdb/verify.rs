@@ -132,7 +132,7 @@ mod tests {
     use core::ops::Range;
 
     fn test_digest(v: u8) -> Digest {
-        Sha256::hash(&[&[v]])
+        Sha256::hash([&[v]])
     }
 
     fn test_hasher() -> Standard<Sha256> {

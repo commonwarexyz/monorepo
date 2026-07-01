@@ -198,7 +198,7 @@ mod tests {
 
             assert!(matches!(
                 Mmr::init(Config {
-                    nodes: vec![Sha256::hash(&[b"node1"]), Sha256::hash(&[b"node2"])],
+                    nodes: vec![Sha256::hash([b"node1"]), Sha256::hash([b"node2"])],
                     pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 }),
@@ -207,9 +207,9 @@ mod tests {
 
             assert!(Mmr::init(Config {
                 nodes: vec![
-                    Sha256::hash(&[b"leaf1"]),
-                    Sha256::hash(&[b"leaf2"]),
-                    Sha256::hash(&[b"parent"]),
+                    Sha256::hash([b"leaf1"]),
+                    Sha256::hash([b"leaf2"]),
+                    Sha256::hash([b"parent"]),
                 ],
                 pruning_boundary: Location::new(0),
                 pinned_nodes: vec![],

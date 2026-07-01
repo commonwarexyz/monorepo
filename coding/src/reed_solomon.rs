@@ -84,7 +84,7 @@ impl<D: Digest> Chunk<D> {
         // Compute shard digest
         let mut hasher = H::default();
         hasher.update(&self.shard);
-        let (_, shard_digest) = hasher.finalize();
+        let shard_digest = hasher.finalize();
 
         // Verify proof
         self.proof
@@ -384,9 +384,7 @@ fn encode<H: Hasher, S: Strategy>(
         H::default,
         |hasher, shard| {
             hasher.update(shard);
-            let (next, digest) = core::mem::take(hasher).finalize();
-            *hasher = next;
-            digest
+            hasher.finalize()
         },
     );
     for hash in &shard_hashes {
@@ -770,9 +768,7 @@ fn verify_root<H: Hasher, S: Strategy>(
         H::default,
         |hasher, (i, shard)| {
             hasher.update(shard);
-            let (next, digest) = core::mem::take(hasher).finalize();
-            *hasher = next;
-            (i, digest)
+            (i, hasher.finalize())
         },
     ) {
         shard_digests[i] = Some(digest);
@@ -1230,7 +1226,7 @@ mod tests {
         chunk: Chunk<<Sha256 as Hasher>::Digest>,
     ) -> CheckedChunk<<Sha256 as Hasher>::Digest> {
         let Chunk { shard, index, .. } = chunk;
-        let digest = Sha256::hash(&[&shard]);
+        let digest = Sha256::hash([&shard]);
         CheckedChunk::new(root, shard, index, digest)
     }
 
@@ -1244,8 +1240,7 @@ mod tests {
         for shard in shards {
             let mut hasher = Sha256::default();
             hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&hasher.finalize());
         }
         let tree = builder.build();
         let root = tree.root();
@@ -1798,7 +1793,7 @@ mod tests {
         for shard in encoding.recovery_iter() {
             hasher.update(shard);
         }
-        let (_, digest) = hasher.finalize();
+        let digest = hasher.finalize();
         assert_eq!(
             format!("{digest}"),
             "e38bb9dbba4a102c4bd8447e212957742dab0af0c4148d4660c671f2f33d3df2",
@@ -1825,8 +1820,7 @@ mod tests {
         for shard in &shards {
             let mut hasher = Sha256::default();
             hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&hasher.finalize());
         }
         let tree = builder.build();
         let root = tree.root();
@@ -1859,7 +1853,7 @@ mod tests {
         // Create a malicious/fake root (simulating a malicious encoder)
         let mut hasher = Sha256::default();
         hasher.update(b"malicious_data_that_wasnt_actually_encoded");
-        let (_, malicious_root) = hasher.finalize();
+        let malicious_root = hasher.finalize();
 
         // Verify all proofs at incorrect root
         for i in 0..total {
@@ -1961,8 +1955,7 @@ mod tests {
         for shard in &malicious_shards {
             let mut hasher = Sha256::default();
             hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&hasher.finalize());
         }
         let malicious_tree = builder.build();
         let malicious_root = malicious_tree.root();
@@ -2019,8 +2012,7 @@ mod tests {
         for shard in &shards {
             let mut hasher = Sha256::default();
             hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&hasher.finalize());
         }
         let tree = builder.build();
         let non_canonical_root = tree.root();
@@ -2078,8 +2070,7 @@ mod tests {
         for shard in &oversized_shards {
             let mut hasher = Sha256::default();
             hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&hasher.finalize());
         }
         let oversized_tree = builder.build();
         let oversized_root = oversized_tree.root();
@@ -2120,8 +2111,7 @@ mod tests {
         for shard in &shards {
             let mut hasher = Sha256::default();
             hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&hasher.finalize());
         }
         let tree = builder.build();
         let root = tree.root();
@@ -2157,8 +2147,7 @@ mod tests {
         for shard in &shards {
             let mut hasher = Sha256::default();
             hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&hasher.finalize());
         }
         let tree = builder.build();
         let root = tree.root();

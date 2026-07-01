@@ -110,8 +110,7 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
 
                     // Hash the message
                     self.hasher.update(&block.encode());
-                    let (hasher, digest) = self.hasher.finalize();
-                    self.hasher = hasher;
+                    let digest = self.hasher.finalize();
                     info!(?block, payload = ?digest, "proposed");
 
                     // Publish to indexer

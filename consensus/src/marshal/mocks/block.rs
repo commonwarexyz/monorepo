@@ -37,7 +37,7 @@ impl<D: Digest, C: Codec> Block<D, C> {
         hasher.update(&height.get().to_be_bytes());
         hasher.update(&context.encode());
         hasher.update(&timestamp.to_be_bytes());
-        hasher.finalize().1
+        hasher.finalize()
     }
 
     pub fn new<H: Hasher<Digest = D>>(

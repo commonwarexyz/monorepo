@@ -37,7 +37,7 @@ impl<P: PublicKey> A for Automaton<P> {
             hasher.update(&payload);
         }
 
-        let (_, digest) = hasher.finalize();
+        let digest = hasher.finalize();
         sender.send(digest).unwrap();
 
         receiver

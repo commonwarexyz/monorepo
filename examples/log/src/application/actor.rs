@@ -54,8 +54,7 @@ impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
 
                     // Hash the message
                     self.hasher.update(&msg);
-                    let (hasher, digest) = self.hasher.finalize();
-                    self.hasher = hasher;
+                    let digest = self.hasher.finalize();
                     info!(msg = hex(&msg), payload = ?digest, "proposed");
 
                     // Send digest to consensus

@@ -1403,7 +1403,7 @@ mod tests {
 
     /// Generate a SHA-256 digest for the given value.
     fn test_digest(value: u64) -> Digest {
-        Sha256::hash(&[&value.to_be_bytes()])
+        Sha256::hash([&value.to_be_bytes()])
     }
 
     fn test_cfg(pooler: &impl BufferPooler, items_per_blob: NonZeroU64) -> Config {

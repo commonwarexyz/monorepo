@@ -20,7 +20,7 @@
 //! let mut hasher = Crc32::default();
 //! hasher.update(b"hello ");
 //! hasher.update(b"world");
-//! let (_hasher, digest) = hasher.finalize();
+//! let digest = hasher.finalize();
 //!
 //! // Convert digest to u32
 //! assert_eq!(digest.as_u32(), checksum);
@@ -81,22 +81,21 @@ impl Crc32 {
 impl Hasher for Crc32 {
     type Digest = Digest;
 
-    fn hash(parts: &[&[u8]]) -> Self::Digest {
-        let mut hasher = Self::default();
-        for part in parts {
-            hasher.update(part);
-        }
-        hasher.finalize().1
-    }
-
+    #[inline]
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.inner.update(message);
         self
     }
 
-    fn finalize(mut self) -> (Self, Self::Digest) {
-        let digest = Self::Digest::from(self.inner.finalize_reset() as u32);
-        (self, digest)
+    #[inline]
+    fn finalize(&mut self) -> Self::Digest {
+        Self::Digest::from(self.inner.finalize_reset() as u32)
+    }
+
+    #[inline]
+    fn reset(&mut self) -> &mut Self {
+        self.inner = crc_fast::Digest::new(ALGORITHM);
+        self
     }
 }
 
@@ -112,7 +111,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Digest {
         // Generate random bytes and compute their CRC32 checksum
         let len = u.int_in_range(0..=256)?;
         let data = u.bytes(len)?;
-        Ok(Crc32::hash(&[data]))
+        Ok(Crc32::hash([data]))
     }
 }
 
@@ -343,7 +342,7 @@ mod tests {
             for chunk in data.chunks(chunk_size) {
                 hasher.update(chunk);
             }
-            assert_eq!(hasher.finalize().1.as_u32(), expected);
+            assert_eq!(hasher.finalize().as_u32(), expected);
         }
     }
 
@@ -376,25 +375,24 @@ mod tests {
         // Generate initial hash using Hasher trait
         let mut hasher = Crc32::default();
         hasher.update(msg);
-        let (hasher, digest) = hasher.finalize();
+        let digest = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
 
         // Verify against reference
         let expected = CRC32C_REF.checksum(msg);
         assert_eq!(digest.as_u32(), expected);
 
-        // Reuse the reset hasher returned by finalize
-        let mut hasher = hasher;
+        // Reuse hasher (should auto-reset after finalize)
         hasher.update(msg);
-        let (_, digest2) = hasher.finalize();
+        let digest2 = hasher.finalize();
         assert_eq!(digest, digest2);
 
         // Test Hasher::hash convenience method
-        let hash = Crc32::hash(&[msg]);
+        let hash = Crc32::hash([msg]);
         assert_eq!(hash.as_u32(), expected);
 
         // Test multi-part one-shot
-        let hash = Crc32::hash(&[b"hello", b" world"]);
+        let hash = Crc32::hash([b"hello".as_slice(), b" world".as_slice()]);
         assert_eq!(hash.as_u32(), expected);
     }
 
@@ -409,7 +407,7 @@ mod tests {
         let msg = b"hello world";
         let mut hasher = Crc32::default();
         hasher.update(msg);
-        let (_, digest) = hasher.finalize();
+        let digest = hasher.finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), SIZE);

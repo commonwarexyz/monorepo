@@ -25,11 +25,12 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     /// Digest produced by this hasher; always matches the underlying [`CHasher`]'s digest.
     type Digest: Digest;
 
-    /// Hash a sequence of byte slices into a single digest.
+    /// Hash a fixed sequence of byte slices into a single digest.
     ///
     /// The parts are concatenated before hashing (i.e. there is no domain separation between
     /// parts). By default this forwards to the underlying [`CHasher::hash`].
-    fn hash(&self, parts: &[&[u8]]) -> Self::Digest {
+    #[inline]
+    fn hash<const N: usize>(&self, parts: [&[u8]; N]) -> Self::Digest {
         <Self::Hasher as CHasher>::hash(parts)
     }
 
@@ -44,22 +45,22 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
-        self.hash(&[&(*pos).to_be_bytes(), left, right])
+        self.hash([&(*pos).to_be_bytes(), left, right])
     }
 
     /// Computes the digest for a leaf given its position and the element it represents.
     fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
-        self.hash(&[&(*pos).to_be_bytes(), element])
+        self.hash([&(*pos).to_be_bytes(), element])
     }
 
     /// Compute the digest of a byte slice.
     fn digest(&self, data: &[u8]) -> Self::Digest {
-        self.hash(&[data])
+        self.hash([data])
     }
 
     /// Folds a peak digest into a running accumulator: `Hash(acc || peak)`.
     fn fold(&self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
-        self.hash(&[acc, peak])
+        self.hash([acc, peak])
     }
 
     /// Computes a root using `inactive_peaks` and the bagging policy carried by `self`.
@@ -140,9 +141,9 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         };
 
         if committed_inactive_peaks == 0 {
-            Some(self.hash(&[&(*leaves).to_be_bytes(), &folded_peaks]))
+            Some(self.hash([&(*leaves).to_be_bytes(), &folded_peaks]))
         } else {
-            Some(self.hash(&[
+            Some(self.hash([
                 &(*leaves).to_be_bytes(),
                 &(committed_inactive_peaks as u64).to_be_bytes(),
                 &folded_peaks,
@@ -177,14 +178,14 @@ impl<H: CHasher> Standard<H> {
         self.bagging
     }
 
-    /// Hash a sequence of byte slices into a single digest.
-    pub fn hash(&self, parts: &[&[u8]]) -> H::Digest {
+    /// Hash a fixed sequence of byte slices into a single digest.
+    pub fn hash<const N: usize>(&self, parts: [&[u8]; N]) -> H::Digest {
         H::hash(parts)
     }
 
     /// Compute the digest of a byte slice.
     pub fn digest(&self, data: &[u8]) -> H::Digest {
-        self.hash(&[data])
+        self.hash([data])
     }
 }
 
@@ -275,7 +276,7 @@ mod tests {
     }
 
     fn test_digest<H: CHasher>(value: u8) -> H::Digest {
-        H::hash(&[&[value]])
+        H::hash([&[value]])
     }
 
     fn test_leaf_digest<H: CHasher>() {

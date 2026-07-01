@@ -4369,7 +4369,7 @@ mod tests {
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let real_commitment = coded_block.commitment();
 
-                let wrong_context_digest = Sha256::hash(&[b"wrong_context"]);
+                let wrong_context_digest = Sha256::hash([b"wrong_context"]);
                 assert_ne!(
                     real_commitment.context::<Sha256Digest>(),
                     wrong_context_digest,

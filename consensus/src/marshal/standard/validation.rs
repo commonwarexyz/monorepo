@@ -281,14 +281,14 @@ mod tests {
     }
 
     fn baseline_blocks() -> (TestBlock, TestBlock) {
-        let parent_digest = Sha256::hash(&[b"parent"]);
+        let parent_digest = Sha256::hash([b"parent"]);
         let parent = TestBlock {
             digest: parent_digest,
-            parent: Sha256::hash(&[b"grandparent"]),
+            parent: Sha256::hash([b"grandparent"]),
             height: Height::new(6),
         };
         let block = TestBlock {
-            digest: Sha256::hash(&[b"block"]),
+            digest: Sha256::hash([b"block"]),
             parent: parent_digest,
             height: Height::new(7),
         };
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn test_validate_block_parent_digest_error() {
         let (parent, mut block) = baseline_blocks();
-        block.parent = Sha256::hash(&[b"wrong_parent"]);
+        block.parent = Sha256::hash([b"wrong_parent"]);
         assert_eq!(
             validate_block(&block, &parent, parent.digest()),
             Err(Error::ParentDigest)
@@ -315,7 +315,7 @@ mod tests {
     fn test_validate_block_expected_parent_digest_error() {
         let (parent, block) = baseline_blocks();
         assert_eq!(
-            validate_block(&block, &parent, Sha256::hash(&[b"wrong_expected_parent"])),
+            validate_block(&block, &parent, Sha256::hash([b"wrong_expected_parent"])),
             Err(Error::ExpectedParentDigest)
         );
     }

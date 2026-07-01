@@ -3507,7 +3507,7 @@ mod tests {
             let quorum = quorum(n) as usize;
             let notarization = |view: View, parent: View, payload: &[u8]| {
                 let proposal =
-                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(&[payload]));
+                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash([payload]));
                 let votes: Vec<_> = schemes
                     .iter()
                     .take(quorum)
@@ -3518,7 +3518,7 @@ mod tests {
             };
             let finalization = |view: View, parent: View, payload: &[u8]| {
                 let proposal =
-                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(&[payload]));
+                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash([payload]));
                 let votes: Vec<_> = schemes
                     .iter()
                     .take(quorum)
@@ -5014,15 +5014,15 @@ mod tests {
             // Choose F=1 and construct B_1, B_2A, B_2B
             let f_view = 1;
             let round_f = Round::new(Epoch::new(333), View::new(f_view));
-            let payload_b0 = Sha256::hash(&[b"B_F"]);
+            let payload_b0 = Sha256::hash([b"B_F"]);
             let proposal_b0 = Proposal::new(round_f, View::new(f_view - 1), payload_b0);
-            let payload_b1a = Sha256::hash(&[b"B_G1"]);
+            let payload_b1a = Sha256::hash([b"B_G1"]);
             let proposal_b1a = Proposal::new(
                 Round::new(Epoch::new(333), View::new(f_view + 1)),
                 View::new(f_view),
                 payload_b1a,
             );
-            let payload_b1b = Sha256::hash(&[b"B_G2"]);
+            let payload_b1b = Sha256::hash([b"B_G2"]);
             let proposal_b1b = Proposal::new(
                 Round::new(Epoch::new(333), View::new(f_view + 2)),
                 View::new(f_view),

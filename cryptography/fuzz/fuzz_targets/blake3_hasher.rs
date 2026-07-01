@@ -20,19 +20,20 @@ pub struct FuzzInput {
 fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurBlake3::default();
     let mut ref_hasher = RefBlake3::new();
+    let mut all_data = Vec::new();
 
     for chunk in chunks {
+        all_data.extend_from_slice(chunk);
         our_hasher.update(chunk);
         ref_hasher.update(chunk);
     }
 
-    let (_, our_result) = our_hasher.finalize();
+    let our_result = our_hasher.finalize();
     let ref_result = ref_hasher.finalize();
     assert_eq!(our_result.as_ref(), ref_result.as_bytes());
 
     // The one-shot API should agree with streaming.
-    let parts: Vec<&[u8]> = chunks.iter().map(|c| c.as_slice()).collect();
-    assert_eq!(OurBlake3::hash(&parts), our_result);
+    assert_eq!(OurBlake3::hash([all_data.as_slice()]), our_result);
 }
 
 fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
@@ -44,12 +45,12 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
         our_hasher.update(chunk);
         ref_hasher.update(chunk);
     }
-    let (our_hasher, our_result) = our_hasher.finalize();
+    let our_result = our_hasher.finalize();
     let ref_result = ref_hasher.finalize();
     assert_eq!(our_result.as_ref(), ref_result.as_bytes());
 
     // Reuse the reset hasher for the second round
-    let mut our_hasher = our_hasher;
+    our_hasher.reset();
     let mut ref_hasher = RefBlake3::new();
 
     for chunk in chunks {
@@ -57,7 +58,7 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
         ref_hasher.update(chunk);
     }
 
-    let (_, our_result_after_reset) = our_hasher.finalize();
+    let our_result_after_reset = our_hasher.finalize();
     let ref_result_after_reset = ref_hasher.finalize();
     assert_eq!(our_result, our_result_after_reset);
     assert_eq!(
@@ -76,14 +77,14 @@ fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
         our_hasher.update(chunk);
     }
 
-    let (_, our_final) = our_hasher.finalize();
+    let our_final = our_hasher.finalize();
 
     let ref_final = ref_hasher.update(&all_data).finalize();
     assert_eq!(our_final.as_ref(), ref_final.as_bytes());
 }
 
 fn fuzz_diff_hash(data: &[u8]) {
-    let our_hash_result = OurBlake3::hash(&[data]);
+    let our_hash_result = OurBlake3::hash([data]);
     let mut ref_hasher = RefBlake3::new();
     assert_eq!(
         our_hash_result.as_ref(),
@@ -92,7 +93,7 @@ fn fuzz_diff_hash(data: &[u8]) {
 }
 
 fn fuzz_digest_operations(data: &[u8]) {
-    let hash_result = OurBlake3::hash(&[data]);
+    let hash_result = OurBlake3::hash([data]);
     let digest_from_hash = hash_result;
 
     let slice_ref: &[u8] = &digest_from_hash;
@@ -106,7 +107,7 @@ fn fuzz_digest_operations(data: &[u8]) {
 fn fuzz_encode_decode(data: &[u8]) {
     let mut hasher = OurBlake3::default();
     hasher.update(data);
-    let (_, digest) = hasher.finalize();
+    let digest = hasher.finalize();
 
     let encoded = digest.encode();
     assert_eq!(encoded.len(), 32); // DIGEST_LENGTH = 32
@@ -128,8 +129,8 @@ fn fuzz_clone_and_format(chunks: &[Vec<u8>]) {
         second_hasher.update(chunk);
     }
 
-    let (_, original_digest) = original_hasher.finalize();
-    let (_, second_digest) = second_hasher.finalize();
+    let original_digest = original_hasher.finalize();
+    let second_digest = second_hasher.finalize();
     assert_eq!(original_digest, second_digest);
 
     let debug_str = format!("{original_digest:?}");
@@ -151,7 +152,7 @@ fn fuzz_from_hash_and_deref(data: &[u8]) {
     assert_eq!(slice, our_digest.as_ref());
 
     // Verify the conversion worked correctly
-    let our_hash = OurBlake3::hash(&[data]);
+    let our_hash = OurBlake3::hash([data]);
     assert_eq!(our_digest.as_ref(), our_hash.as_ref());
 }
 

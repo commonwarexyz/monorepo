@@ -647,9 +647,9 @@ mod tests {
             let config = fixed_config("managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Arc::new(TracedAsyncRwLock::new("test", db));
-            let key = Sha256::hash(&[&[1]]);
-            let value = Sha256::hash(&[&[2]]);
-            let metadata = Sha256::hash(&[&[3]]);
+            let key = Sha256::hash([&[1]]);
+            let value = Sha256::hash([&[2]]);
+            let metadata = Sha256::hash([&[3]]);
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -685,11 +685,11 @@ mod tests {
                 FixedDb::init(context.child("source"), fixed_config("source", &context))
                     .await
                     .unwrap();
-            let metadata = Sha256::hash(&[&[3]]);
+            let metadata = Sha256::hash([&[3]]);
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
-                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .set(Sha256::hash([&[1]]), Sha256::hash([&[2]]))
                 .merkleize(&source, Some(metadata), floor);
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
@@ -727,8 +727,8 @@ mod tests {
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
-                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
-                .merkleize(&source, Some(Sha256::hash(&[&[9]])), floor);
+                .set(Sha256::hash([&[1]]), Sha256::hash([&[2]]))
+                .merkleize(&source, Some(Sha256::hash([&[9]])), floor);
             source.apply_batch(batch).await.unwrap();
             source.sync().await.unwrap();
             let stale_target = sync::compact::Target {
@@ -739,8 +739,8 @@ mod tests {
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
-                .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
-                .merkleize(&source, Some(Sha256::hash(&[&[10]])), floor);
+                .set(Sha256::hash([&[3]]), Sha256::hash([&[4]]))
+                .merkleize(&source, Some(Sha256::hash([&[10]])), floor);
             source.apply_batch(batch).await.unwrap();
             source.sync().await.unwrap();
             let latest_target = sync::compact::Target {
@@ -786,7 +786,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(synced.target(), latest_target);
-            assert_eq!(synced.get_metadata(), Some(Sha256::hash(&[&[10]])));
+            assert_eq!(synced.get_metadata(), Some(Sha256::hash([&[10]])));
         });
     }
 
@@ -799,8 +799,8 @@ mod tests {
             let floor = db.inactivity_floor_loc();
             let batch = db
                 .new_batch()
-                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
-                .merkleize(&db, Some(Sha256::hash(&[&[11]])), floor);
+                .set(Sha256::hash([&[1]]), Sha256::hash([&[2]]))
+                .merkleize(&db, Some(Sha256::hash([&[11]])), floor);
             db.apply_batch(batch).unwrap();
             db.sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db).await;
@@ -810,8 +810,8 @@ mod tests {
                 let floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
-                    .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
-                    .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor);
+                    .set(Sha256::hash([&[i]]), Sha256::hash([&[i + 1]]))
+                    .merkleize(&db, Some(Sha256::hash([&[i * 11]])), floor);
                 db.apply_batch(batch).unwrap();
                 db.sync().await.unwrap();
             }
@@ -824,7 +824,7 @@ mod tests {
 
             let rewound_target = <FixedDb as ManagedDb<_>>::sync_target(&db).await;
             assert_eq!(rewound_target, first_target);
-            assert_eq!(db.get_metadata(), Some(Sha256::hash(&[&[11]])));
+            assert_eq!(db.get_metadata(), Some(Sha256::hash([&[11]])));
         });
     }
 
@@ -842,8 +842,8 @@ mod tests {
                 let floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
-                    .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
-                    .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor);
+                    .set(Sha256::hash([&[i]]), Sha256::hash([&[i + 1]]))
+                    .merkleize(&db, Some(Sha256::hash([&[i * 11]])), floor);
                 db.apply_batch(batch).unwrap();
                 db.sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db).await);

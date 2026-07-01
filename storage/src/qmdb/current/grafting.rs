@@ -320,7 +320,7 @@ impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
                 if chunk.iter().all(|&b| b == 0) {
                     ops_subtree_root
                 } else {
-                    self.hash(&[chunk, &ops_subtree_root])
+                    self.hash([chunk, &ops_subtree_root])
                 }
             }
         }
@@ -631,7 +631,7 @@ mod tests {
                     let ops_subtree_root = ops_mmr
                         .get_node(ops_pos)
                         .expect("ops tree missing node at mapped position");
-                    batch = batch.add_leaf_digest(leaf_hasher.hash(&[chunk, &ops_subtree_root]));
+                    batch = batch.add_leaf_digest(leaf_hasher.hash([chunk, &ops_subtree_root]));
                 }
                 batch.merkleize(&grafted_mmr, &grafted_hasher)
             };
@@ -802,11 +802,11 @@ mod tests {
             let sub0 = ops_mmr.get_node(pos0).unwrap();
             let batch = grafted
                 .new_batch()
-                .add_leaf_digest(leaf_hasher.hash(&[&c1, &sub0]));
+                .add_leaf_digest(leaf_hasher.hash([&c1, &sub0]));
 
             let sub1 = ops_mmr.get_node(pos1).unwrap();
             batch
-                .add_leaf_digest(leaf_hasher.hash(&[&c2, &sub1]))
+                .add_leaf_digest(leaf_hasher.hash([&c2, &sub1]))
                 .merkleize(&grafted, &grafted_hasher)
         };
         grafted.apply_batch(&batch).unwrap();

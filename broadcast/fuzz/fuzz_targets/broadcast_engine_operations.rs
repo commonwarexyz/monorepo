@@ -53,7 +53,7 @@ pub struct FuzzMessage {
 impl Digestible for FuzzMessage {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        Sha256::hash(&[&self.encode()])
+        Sha256::hash([&self.encode()])
     }
 }
 

@@ -1140,7 +1140,7 @@ mod tests {
 
     #[test]
     fn test_target_decode_rejects_zero_leaf_count() {
-        let unused_root = commonware_cryptography::Sha256::hash(&[b"unused"]);
+        let unused_root = commonware_cryptography::Sha256::hash([b"unused"]);
         let encoded = Target::<mmr::Family, Digest> {
             root: unused_root,
             leaf_count: crate::merkle::Location::new(0),
@@ -1155,7 +1155,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (good_state, target) = valid_state_and_target();
             let mut bad_state = good_state.clone();
-            bad_state.pinned_nodes.push(Sha256::hash(&[b"extra pin"]));
+            bad_state.pinned_nodes.push(Sha256::hash([b"extra pin"]));
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let constructions = Arc::new(AtomicUsize::new(0));
 

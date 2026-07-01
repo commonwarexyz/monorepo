@@ -26,7 +26,7 @@ impl Storage {
     /// Compute a [Sha256] digest of all blob contents.
     pub fn audit(&self) -> [u8; 32] {
         let partitions = self.partitions.lock();
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha256::default();
 
         for (partition_name, blobs) in partitions.iter() {
             for (blob_name, content) in blobs.iter() {

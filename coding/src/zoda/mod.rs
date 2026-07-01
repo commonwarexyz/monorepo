@@ -185,8 +185,7 @@ fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
     for x in row {
         h.update(&x.to_le_bytes());
     }
-    let (_, digest) = h.finalize();
-    digest
+    h.finalize()
 }
 
 mod topology;

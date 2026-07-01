@@ -10,7 +10,7 @@ fn bench_hash_message(c: &mut Criterion) {
         sampler.fill_bytes(msg.as_mut_slice());
         let msg = msg.as_slice();
         c.bench_function(&format!("{}/msg_len={}", module_path!(), msg.len()), |b| {
-            b.iter(|| Sha256::hash(&[msg]));
+            b.iter(|| Sha256::hash([msg]));
         });
     }
 }

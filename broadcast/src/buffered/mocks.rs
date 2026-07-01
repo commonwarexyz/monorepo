@@ -31,7 +31,7 @@ impl TestMessage {
 impl Digestible for TestMessage {
     type Digest = Digest;
     fn digest(&self) -> Digest {
-        Sha256::hash(&[&self.content])
+        Sha256::hash([&self.content])
     }
 }
 

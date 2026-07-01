@@ -142,7 +142,9 @@ impl LtHash {
         for (chunk, val) in bytes.chunks_exact_mut(2).zip(&self.state) {
             chunk.copy_from_slice(&val.to_le_bytes());
         }
-        Blake3::hash(&[&bytes])
+        let mut hasher = Blake3::default();
+        hasher.update(&bytes);
+        hasher.finalize()
     }
 
     /// Reset the [LtHash] to the initial zero state.
@@ -161,7 +163,7 @@ impl LtHash {
         let mut bytes = [0u8; LTHASH_SIZE];
 
         // Use Blake3 in XOF mode to expand the data to LTHASH_SIZE bytes
-        let mut hasher = CoreBlake3::new();
+        let mut hasher = CoreBlake3::default();
         hasher.update(data);
         let mut output_reader = hasher.finalize_xof();
         output_reader.fill(&mut bytes);
@@ -285,7 +287,7 @@ mod tests {
         for _ in 0..LTHASH_ELEMENTS {
             hasher.update(&0u16.to_le_bytes());
         }
-        let (_, expected) = hasher.finalize();
+        let expected = hasher.finalize();
 
         assert_eq!(empty_hash, expected);
     }

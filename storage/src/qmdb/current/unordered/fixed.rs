@@ -177,10 +177,10 @@ pub mod test {
     #[test_traced("WARN")]
     pub fn test_current_unordered_fixed_resolved_merkleize_parity() {
         fn key(i: u64) -> Digest {
-            Sha256::hash(&[&i.to_be_bytes()])
+            Sha256::hash([&i.to_be_bytes()])
         }
         fn val(i: u64) -> Digest {
-            Sha256::hash(&[&(i + 10000).to_be_bytes()])
+            Sha256::hash([&(i + 10000).to_be_bytes()])
         }
 
         deterministic::Runner::default().start(|ctx| async move {
@@ -266,7 +266,7 @@ pub mod test {
             let key = Sha256::fill(1u8);
             let mut last_batch_boundary = mmr::Location::new(0);
             for i in 0..300u64 {
-                let value = Sha256::hash(&[&i.to_be_bytes()]);
+                let value = Sha256::hash([&i.to_be_bytes()]);
                 let batch = db
                     .new_batch()
                     .write(key, Some(value))

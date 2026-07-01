@@ -22,7 +22,7 @@ impl Application {
 
     fn correct_message(context: Height) -> <Sha256 as Hasher>::Digest {
         let payload = format!("data for height {context}");
-        Sha256::hash(&[payload.as_bytes()])
+        Sha256::hash([payload.as_bytes()])
     }
 }
 
@@ -37,7 +37,7 @@ impl A for Application {
             Strategy::Correct => Self::correct_message(context),
             Strategy::Incorrect => {
                 let conflicting_payload = format!("conflicting_data for height {context}");
-                Sha256::hash(&[conflicting_payload.as_bytes()])
+                Sha256::hash([conflicting_payload.as_bytes()])
             }
             Strategy::Skip { height } => {
                 if context == *height {
