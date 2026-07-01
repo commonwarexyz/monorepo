@@ -12,7 +12,7 @@ use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
 #[stability(ALPHA)]
 use commonware_utils::{ordered::BiMap, TryFromIterator};
-use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
+use commonware_utils::{ordered::Set, Participant, NZU32};
 #[cfg(feature = "std")]
 use core::iter;
 use core::num::NonZeroU32;
@@ -325,10 +325,9 @@ impl<V: Variant> Sharing<V> {
         self.mode.all_scalars(self.total)
     }
 
-    /// Return the number of participants required to recover the secret
-    /// using the given fault model.
-    pub fn required<M: Faults>(&self) -> u32 {
-        M::quorum(self.total.get())
+    /// Return the number of participants required to recover the secret.
+    pub fn required(&self) -> u32 {
+        self.poly.required().get()
     }
 
     /// Return the total number of participants in this sharing.
@@ -440,8 +439,9 @@ impl<V: Variant> Read for Sharing<V> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use crate::bls12381::primitives::variant::MinSig;
     use commonware_invariants::minifuzz;
-    use commonware_utils::ordered::Map;
+    use commonware_utils::{ordered::Map, Faults, N3f1, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
@@ -539,13 +539,36 @@ mod tests {
             Ok(())
         });
     }
+
+    #[test]
+    fn test_required_matches_quorum() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let sharing = Sharing::<MinSig>::new(
+            Mode::NonZeroCounter,
+            NZU32!(4),
+            Poly::commit(Poly::new(&mut rng, N3f1::quorum(4) - 1)),
+        );
+        assert_eq!(sharing.required(), 3);
+    }
+
+    #[test]
+    fn test_required_can_differ_from_quorum() {
+        let mut rng = StdRng::seed_from_u64(9);
+        let sharing = Sharing::<MinSig>::new(
+            Mode::NonZeroCounter,
+            NZU32!(4),
+            Poly::commit(Poly::new(&mut rng, 1)),
+        );
+        assert_eq!(N3f1::quorum(sharing.total().get()), 3);
+        assert_eq!(sharing.required(), 2);
+    }
 }
 
 #[cfg(feature = "arbitrary")]
 mod fuzz {
     use super::*;
     use arbitrary::Arbitrary;
-    use commonware_utils::{N3f1, NZU32};
+    use commonware_utils::{Faults, N3f1, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     impl<'a> Arbitrary<'a> for Mode {

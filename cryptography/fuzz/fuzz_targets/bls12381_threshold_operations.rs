@@ -235,7 +235,7 @@ fn fuzz(op: FuzzOperation) {
             share,
             namespace,
         } => {
-            if share.index.get() <= public.required::<N3f1>() {
+            if share.index.get() <= public.required() {
                 let _ = threshold::sign_proof_of_possession::<MinPk>(&public, &share, &namespace);
             }
         }
@@ -245,7 +245,7 @@ fn fuzz(op: FuzzOperation) {
             share,
             namespace,
         } => {
-            if share.index.get() <= public.required::<N3f1>() {
+            if share.index.get() <= public.required() {
                 let _ = threshold::sign_proof_of_possession::<MinSig>(&public, &share, &namespace);
             }
         }
@@ -255,7 +255,7 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             partial,
         } => {
-            if partial.index.get() <= public.required::<N3f1>() {
+            if partial.index.get() <= public.required() {
                 let _ =
                     threshold::verify_proof_of_possession::<MinPk>(&public, &namespace, &partial);
             }
@@ -266,7 +266,7 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             partial,
         } => {
-            if partial.index.get() <= public.required::<N3f1>() {
+            if partial.index.get() <= public.required() {
                 let _ =
                     threshold::verify_proof_of_possession::<MinSig>(&public, &namespace, &partial);
             }
@@ -277,7 +277,7 @@ fn fuzz(op: FuzzOperation) {
             index,
             entries,
         } => {
-            if index.get() <= public.required::<N3f1>() && !entries.is_empty() {
+            if index.get() <= public.required() && !entries.is_empty() {
                 let entries_refs: Vec<(&[u8], &[u8], PartialSignature<MinPk>)> = entries
                     .iter()
                     .enumerate()
@@ -307,7 +307,7 @@ fn fuzz(op: FuzzOperation) {
             index,
             entries,
         } => {
-            if index.get() <= public.required::<N3f1>() && !entries.is_empty() {
+            if index.get() <= public.required() && !entries.is_empty() {
                 let entries_refs: Vec<(&[u8], &[u8], PartialSignature<MinSig>)> = entries
                     .iter()
                     .enumerate()
@@ -338,7 +338,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             partials,
         } => {
-            if public.required::<N3f1>() as usize == partials.len() {
+            if public.required() as usize == partials.len() {
                 let partials_evals: Vec<PartialSignature<MinPk>> = partials
                     .into_iter()
                     .map(|(idx, sig)| PartialSignature {
@@ -363,7 +363,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             partials,
         } => {
-            if public.required::<N3f1>() as usize == partials.len() {
+            if public.required() as usize == partials.len() {
                 let partials_evals: Vec<PartialSignature<MinSig>> = partials
                     .into_iter()
                     .map(|(idx, sig)| PartialSignature {

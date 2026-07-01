@@ -121,7 +121,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    pub fn signer(
+    pub fn signer<M: Faults>(
         namespace: &[u8],
         participants: Set<P>,
         polynomial: Sharing<V>,
@@ -131,6 +131,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
+        );
+        assert_eq!(
+            polynomial.required(),
+            M::quorum(participants.len()),
+            "polynomial threshold must equal quorum"
         );
         polynomial.precompute_partial_publics();
         let partial_public = polynomial
@@ -159,11 +164,20 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
-    pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
+    pub fn verifier<M: Faults>(
+        namespace: &[u8],
+        participants: Set<P>,
+        polynomial: Sharing<V>,
+    ) -> Self {
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
+        );
+        assert_eq!(
+            polynomial.required(),
+            M::quorum(participants.len()),
+            "polynomial threshold must equal quorum"
         );
         polynomial.precompute_partial_publics();
 
@@ -303,9 +317,11 @@ where
         namespace,
         n,
         |namespace, participants, polynomial, share| {
-            Scheme::signer(namespace, participants, polynomial, share)
+            Scheme::signer::<commonware_utils::N3f1>(namespace, participants, polynomial, share)
         },
-        |namespace, participants, polynomial| Scheme::verifier(namespace, participants, polynomial),
+        |namespace, participants, polynomial| {
+            Scheme::verifier::<commonware_utils::N3f1>(namespace, participants, polynomial)
+        },
     )
 }
 
@@ -847,7 +863,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = partials.into_iter().unzip();
 
         let quorum = self.polynomial();
-        if vote_partials.len() < quorum.required::<M>() as usize {
+        if vote_partials.len() < quorum.required() as usize {
             return None;
         }
 
@@ -901,7 +917,7 @@ mod tests {
     };
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, NZU32};
+    use commonware_utils::{test_rng, Faults, N3f1, N5f1, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
@@ -932,7 +948,7 @@ mod tests {
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(4));
         shares[0].index = Participant::new(999);
-        Scheme::<V>::signer(
+        Scheme::<V>::signer::<N3f1>(
             NAMESPACE,
             participants.keys().clone(),
             polynomial,
@@ -951,12 +967,13 @@ mod tests {
     fn test_signer_shares_must_match_participant_indices_min_sig() {
         signer_shares_must_match_participant_indices::<MinSig>();
     }
+
     fn scheme_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = test_rng();
-        let participants = ed25519_participants(&mut rng, 5);
+        let participants = ed25519_participants(&mut rng, 4);
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(4));
-        Scheme::<V>::signer(
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
+        Scheme::<V>::signer::<N3f1>(
             NAMESPACE,
             participants.keys().clone(),
             polynomial,
@@ -965,33 +982,33 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "polynomial total must equal participant len")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_scheme_polynomial_threshold_must_equal_quorum_min_pk() {
         scheme_polynomial_threshold_must_equal_quorum::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "polynomial total must equal participant len")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_scheme_polynomial_threshold_must_equal_quorum_min_sig() {
         scheme_polynomial_threshold_must_equal_quorum::<MinSig>();
     }
 
     fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = test_rng();
-        let participants = ed25519_participants(&mut rng, 5);
+        let participants = ed25519_participants(&mut rng, 4);
         let (polynomial, _) =
-            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(4));
-        Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial);
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
+        Scheme::<V>::verifier::<N3f1>(NAMESPACE, participants.keys().clone(), polynomial);
     }
 
     #[test]
-    #[should_panic(expected = "polynomial total must equal participant len")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_verifier_polynomial_threshold_must_equal_quorum_min_pk() {
         verifier_polynomial_threshold_must_equal_quorum::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "polynomial total must equal participant len")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_verifier_polynomial_threshold_must_equal_quorum_min_sig() {
         verifier_polynomial_threshold_must_equal_quorum::<MinSig>();
     }

@@ -264,7 +264,7 @@ where
     V::Signature: 'a,
     M: Faults,
 {
-    let evals = prepare_evaluations::<V>(sharing.required::<M>(), partials)?;
+    let evals = prepare_evaluations::<V>(sharing.required(), partials)?;
     sharing
         .interpolator(evals.keys())?
         .interpolate(&evals, strategy)
@@ -296,7 +296,7 @@ where
 {
     let prepared_evals = many_evals
         .into_iter()
-        .map(|evals| prepare_evaluations::<V>(sharing.required::<M>(), evals))
+        .map(|evals| prepare_evaluations::<V>(sharing.required(), evals))
         .collect::<Result<Vec<_>, _>>()?;
     let Some(first_eval) = prepared_evals.first() else {
         return Ok(Vec::new());

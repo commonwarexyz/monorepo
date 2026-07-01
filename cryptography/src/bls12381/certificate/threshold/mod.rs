@@ -82,7 +82,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    pub fn signer(
+    pub fn signer<M: Faults>(
         namespace: &[u8],
         participants: Set<P>,
         polynomial: Sharing<V>,
@@ -92,6 +92,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
+        );
+        assert_eq!(
+            polynomial.required(),
+            M::quorum(participants.len()),
+            "polynomial threshold must equal quorum"
         );
         #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
@@ -119,11 +124,20 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
-    pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
+    pub fn verifier<M: Faults>(
+        namespace: &[u8],
+        participants: Set<P>,
+        polynomial: Sharing<V>,
+    ) -> Self {
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
+        );
+        assert_eq!(
+            polynomial.required(),
+            M::quorum(participants.len()),
+            "polynomial threshold must equal quorum"
         );
         #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
@@ -326,7 +340,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
 
         let quorum = self.polynomial();
-        if partials.len() < quorum.required::<M>() as usize {
+        if partials.len() < quorum.required() as usize {
             return None;
         }
 
@@ -514,8 +528,8 @@ macro_rules! impl_certificate_bls12381_threshold {
                 rng,
                 namespace,
                 n,
-                Scheme::signer,
-                Scheme::verifier,
+                Scheme::signer::<commonware_utils::N3f1>,
+                Scheme::verifier::<commonware_utils::N3f1>,
             )
         }
 
@@ -533,14 +547,14 @@ macro_rules! impl_certificate_bls12381_threshold {
             V: $crate::bls12381::primitives::variant::Variant,
         > Scheme<P, V> {
             /// Creates a new signer instance with a private share and evaluated public polynomial.
-            pub fn signer(
+            pub fn signer<M: commonware_utils::Faults>(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
                 share: $crate::bls12381::primitives::group::Share,
             ) -> Option<Self> {
                 Some(Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::signer(
+                    generic: $crate::bls12381::certificate::threshold::Generic::signer::<M>(
                         namespace,
                         participants,
                         polynomial,
@@ -550,13 +564,13 @@ macro_rules! impl_certificate_bls12381_threshold {
             }
 
             /// Creates a verifier that can authenticate partial signatures.
-            pub fn verifier(
+            pub fn verifier<M: commonware_utils::Faults>(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
             ) -> Self {
                 Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::verifier(
+                    generic: $crate::bls12381::certificate::threshold::Generic::verifier::<M>(
                         namespace,
                         participants,
                         polynomial,
@@ -721,7 +735,9 @@ mod tests {
         bls12381::{
             dkg::feldman_desmedt as dkg,
             primitives::{
+                group::{Private, Scalar},
                 ops::threshold::sign_message,
+                sharing::{Mode, Sharing},
                 variant::{MinPk, MinSig, Variant},
             },
         },
@@ -732,9 +748,12 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_math::algebra::{Additive, Random};
+    use commonware_math::{
+        algebra::{Additive, Random},
+        poly::Poly,
+    };
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Set, test_rng, Faults, N3f1, TryCollect, NZU32};
+    use commonware_utils::{ordered::Set, test_rng, N3f1, TryCollect, NZU32};
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -786,11 +805,12 @@ mod tests {
         let signers = shares
             .into_iter()
             .map(|share| {
-                Scheme::signer(NAMESPACE, participants.clone(), polynomial.clone(), share).unwrap()
+                Scheme::signer::<N3f1>(NAMESPACE, participants.clone(), polynomial.clone(), share)
+                    .unwrap()
             })
             .collect();
 
-        let verifier = Scheme::verifier(NAMESPACE, participants, polynomial.clone());
+        let verifier = Scheme::verifier::<N3f1>(NAMESPACE, participants, polynomial.clone());
 
         (signers, verifier, polynomial)
     }
@@ -1355,7 +1375,7 @@ mod tests {
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(4));
         shares[0].index = Participant::new(999);
-        Scheme::<ed25519::PublicKey, V>::signer(
+        Scheme::<ed25519::PublicKey, V>::signer::<N3f1>(
             NAMESPACE,
             participants,
             polynomial,
@@ -1385,52 +1405,50 @@ mod tests {
             .expect("participants are unique")
     }
 
+    fn mismatched_sharing<V: Variant>(rng: &mut impl CryptoRngCore) -> (Sharing<V>, Share) {
+        let poly = Poly::new(&mut *rng, N3f1::quorum(2) - 1);
+        let share = Share::new(
+            Participant::new(0),
+            Private::new(poly.eval(&Scalar::from(1))),
+        );
+        let polynomial = Sharing::<V>::new(Mode::NonZeroCounter, NZU32!(4), Poly::commit(poly));
+        (polynomial, share)
+    }
+
     fn signer_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = test_rng();
-        let participants = make_participants(&mut rng, 5);
-        // Create a polynomial with threshold 4, but quorum of 5 participants is 4
-        // so this should succeed. Let's use threshold 2 to make it fail.
-        // quorum(5) = 4, but polynomial.required() = 2, so this should panic
-        let (polynomial, shares) =
-            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(2));
-        Scheme::<ed25519::PublicKey, V>::signer(
-            NAMESPACE,
-            participants,
-            polynomial,
-            shares[0].clone(),
-        );
+        let participants = make_participants(&mut rng, 4);
+        let (polynomial, share) = mismatched_sharing::<V>(&mut rng);
+        Scheme::<ed25519::PublicKey, V>::signer::<N3f1>(NAMESPACE, participants, polynomial, share);
     }
 
     #[test]
-    #[should_panic(expected = "polynomial total must equal participant len")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_signer_polynomial_threshold_must_equal_quorum_min_pk() {
         signer_polynomial_threshold_must_equal_quorum::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "polynomial total must equal participant len")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_signer_polynomial_threshold_must_equal_quorum_min_sig() {
         signer_polynomial_threshold_must_equal_quorum::<MinSig>();
     }
 
     fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = test_rng();
-        let participants = make_participants(&mut rng, 5);
-        // Create a polynomial with threshold 2, but quorum of 5 participants is 4
-        // quorum(5) = 4, but polynomial.required() = 2, so this should panic
-        let (polynomial, _) =
-            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(2));
-        Scheme::<ed25519::PublicKey, V>::verifier(NAMESPACE, participants, polynomial);
+        let participants = make_participants(&mut rng, 4);
+        let (polynomial, _) = mismatched_sharing::<V>(&mut rng);
+        Scheme::<ed25519::PublicKey, V>::verifier::<N3f1>(NAMESPACE, participants, polynomial);
     }
 
     #[test]
-    #[should_panic(expected = "polynomial total must equal participant len")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_verifier_polynomial_threshold_must_equal_quorum_min_pk() {
         verifier_polynomial_threshold_must_equal_quorum::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "polynomial total must equal participant len")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_verifier_polynomial_threshold_must_equal_quorum_min_sig() {
         verifier_polynomial_threshold_must_equal_quorum::<MinSig>();
     }
