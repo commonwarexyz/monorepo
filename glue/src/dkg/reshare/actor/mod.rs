@@ -135,7 +135,7 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
 use commonware_consensus::{
-    marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
+    marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
     types::{EpochPhase, FixedEpocher},
 };
 use commonware_cryptography::{
@@ -219,6 +219,9 @@ where
     /// boundary blocks.
     pub marshal: MarshalMailbox<S, MV>,
 
+    /// State sync floor commitment, if marshal is starting from a floor.
+    pub state_sync_floor: Option<MV::Commitment>,
+
     /// Epoch readiness fence.
     pub fence: Fence,
 
@@ -271,6 +274,7 @@ where
     strategy: T,
     registrar: R,
     marshal: MarshalMailbox<S, MV>,
+    state_sync_floor: Option<MV::Commitment>,
     fence: Fence,
     namespace: &'static [u8],
     sharing_mode: SharingMode,
@@ -318,6 +322,7 @@ where
                 strategy: config.strategy,
                 registrar: config.registrar,
                 marshal: config.marshal,
+                state_sync_floor: config.state_sync_floor,
                 fence: config.fence,
                 namespace: config.namespace,
                 sharing_mode: config.sharing_mode,
@@ -372,6 +377,13 @@ where
 
         let (mux, mut dealing_mux) = Muxer::new(self.context.child("mux"), sender, receiver, 128);
         mux.start();
+
+        if let Some(commitment) = self.state_sync_floor.take() {
+            self.marshal
+                .subscribe_by_commitment(commitment, CommitmentFallback::Wait)
+                .await
+                .expect("marshal must yield state sync floor block");
+        }
 
         if matches!(self.mode, Mode::Dkg { .. }) {
             self.run_dkg(&mut store, &mut dealing_mux).await;

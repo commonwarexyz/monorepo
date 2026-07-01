@@ -434,6 +434,7 @@ where
                 strategy: self.config.strategy.clone(),
                 registrar: NoopRegistrar(PhantomData),
                 marshal: marshal_mailbox.clone(),
+                state_sync_floor: None,
                 fence,
                 namespace: self.config.namespace,
                 sharing_mode: self.config.sharing_mode,

@@ -31,7 +31,12 @@ use commonware_consensus::{
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
     },
-    simplex::{self, config::ForwardingPolicy, elector::RoundRobin, types::Context},
+    simplex::{
+        self,
+        config::ForwardingPolicy,
+        elector::RoundRobin,
+        types::{Context, Finalization},
+    },
     types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
 };
@@ -792,6 +797,9 @@ impl EngineDefinition for ReshareEngine {
             public_key: public_key.clone(),
         };
         let (fence, gate) = Fence::new(fence_epoch);
+        let sync_floor: Option<Finalization<Scheme, sha256::Digest>> = plan.floor().cloned();
+        let state_sync_floor: Option<sha256::Digest> =
+            sync_floor.as_ref().map(|floor| floor.proposal.payload);
         let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
             context.child("reshare"),
             reshare::Config {
@@ -805,6 +813,7 @@ impl EngineDefinition for ReshareEngine {
                 strategy: Sequential,
                 registrar,
                 marshal: marshal.clone(),
+                state_sync_floor,
                 fence,
                 namespace: NAMESPACE,
                 sharing_mode: self.sharing_mode,
@@ -825,7 +834,6 @@ impl EngineDefinition for ReshareEngine {
             genesis: genesis.clone(),
             reshare: reshare_mailbox.clone(),
         };
-        let sync_floor = plan.floor().cloned();
         let (stateful_actor, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
             StatefulConfig {
