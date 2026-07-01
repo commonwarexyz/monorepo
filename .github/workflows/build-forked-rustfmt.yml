@@ -1,0 +1,72 @@
+name: Build Forked Rustfmt
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Commit in andresilva/rustfmt to build (short or full hash)"
+        required: true
+        type: string
+      toolchain:
+        description: "Rust toolchain used to build rustfmt"
+        required: false
+        default: "nightly-2025-11-15"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout fork
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+      with:
+        repository: andresilva/rustfmt
+        ref: ${{ inputs.commit }}
+        path: fork
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+      with:
+        toolchain: ${{ inputs.toolchain }}
+    - name: Build rustfmt
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd fork
+        cargo build --release --bin rustfmt
+        cd ..
+
+        commit="${{ inputs.commit }}"
+        asset="forked-rustfmt-${commit}-linux-x64"
+        mkdir -p dist
+        cp "fork/target/release/rustfmt" "dist/${asset}"
+        strip "dist/${asset}" || true
+        sha256sum "dist/${asset}" > "dist/${asset}.sha256"
+
+        full_commit="$(git -C fork rev-parse HEAD)"
+        sha="$(cut -d ' ' -f1 "dist/${asset}.sha256")"
+        cat > dist/RELEASE_NOTES.md <<EOF
+        Forked rustfmt build
+
+        Commit: ${full_commit}
+        Toolchain: ${{ inputs.toolchain }}
+        Asset: ${asset}
+        SHA256: ${sha}
+        EOF
+    - name: Publish release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        tag="forked-rustfmt-${{ inputs.commit }}"
+        title="Forked rustfmt ${{ inputs.commit }}"
+        if ! gh release view "$tag" >/dev/null 2>&1; then
+          gh release create "$tag" --title "$title" --notes-file dist/RELEASE_NOTES.md
+        else
+          gh release edit "$tag" --title "$title" --notes-file dist/RELEASE_NOTES.md
+        fi
+        gh release upload "$tag" dist/* --clobber
