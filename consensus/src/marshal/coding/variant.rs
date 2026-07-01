@@ -264,8 +264,12 @@ mod tests {
             leader,
             parent: (View::new(1), parent_commitment),
         };
-        let inner =
-            InnerBlock::new::<Sha256>(context, Sha256::hash(b"parent"), Height::new(7), 1_234_567);
+        let inner = InnerBlock::new::<Sha256>(
+            context,
+            Sha256::hash(&[b"parent"]),
+            Height::new(7),
+            1_234_567,
+        );
         NoCloneBlock { inner }
     }
 

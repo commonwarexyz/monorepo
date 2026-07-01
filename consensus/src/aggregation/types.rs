@@ -493,7 +493,7 @@ mod tests {
         let schemes = &fixture.schemes;
         let item = Item {
             height: Height::new(100),
-            digest: Sha256::hash(b"test_item"),
+            digest: Sha256::hash(&[b"test_item"]),
         };
 
         // Test Item codec

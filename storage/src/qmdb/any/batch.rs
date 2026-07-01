@@ -2688,21 +2688,21 @@ mod tests {
             let config = fixed_db_config::<OneCap>("mixed-ancestor-overlaps", &context);
             let mut db = TestDb::init(context, config).await.unwrap();
 
-            let key_update = Sha256::hash(b"update-through-all-layers");
-            let key_recreate_then_delete = Sha256::hash(b"recreate-then-delete");
-            let key_delete_from_uncommitted = Sha256::hash(b"delete-from-uncommitted");
-            let key_uncommitted_create = Sha256::hash(b"uncommitted-create");
+            let key_update = Sha256::hash(&[b"update-through-all-layers"]);
+            let key_recreate_then_delete = Sha256::hash(&[b"recreate-then-delete"]);
+            let key_delete_from_uncommitted = Sha256::hash(&[b"delete-from-uncommitted"]);
+            let key_uncommitted_create = Sha256::hash(&[b"uncommitted-create"]);
 
             let seed = db
                 .new_batch()
-                .write(key_update, Some(Sha256::hash(b"seed-update")))
+                .write(key_update, Some(Sha256::hash(&[b"seed-update"])))
                 .write(
                     key_recreate_then_delete,
-                    Some(Sha256::hash(b"seed-recreate")),
+                    Some(Sha256::hash(&[b"seed-recreate"])),
                 )
                 .write(
                     key_delete_from_uncommitted,
-                    Some(Sha256::hash(b"seed-delete")),
+                    Some(Sha256::hash(&[b"seed-delete"])),
                 )
                 .merkleize(&db, None)
                 .await
@@ -2711,11 +2711,11 @@ mod tests {
 
             let applied = db
                 .new_batch()
-                .write(key_update, Some(Sha256::hash(b"committed-update")))
+                .write(key_update, Some(Sha256::hash(&[b"committed-update"])))
                 .write(key_recreate_then_delete, None)
                 .write(
                     key_delete_from_uncommitted,
-                    Some(Sha256::hash(b"committed-delete-base")),
+                    Some(Sha256::hash(&[b"committed-delete-base"])),
                 )
                 .merkleize(&db, None)
                 .await
@@ -2723,21 +2723,21 @@ mod tests {
 
             let pending = applied
                 .new_batch::<Sha256>()
-                .write(key_update, Some(Sha256::hash(b"uncommitted-update")))
+                .write(key_update, Some(Sha256::hash(&[b"uncommitted-update"])))
                 .write(
                     key_recreate_then_delete,
-                    Some(Sha256::hash(b"uncommitted-recreate")),
+                    Some(Sha256::hash(&[b"uncommitted-recreate"])),
                 )
                 .write(key_delete_from_uncommitted, None)
                 .write(
                     key_uncommitted_create,
-                    Some(Sha256::hash(b"uncommitted-create")),
+                    Some(Sha256::hash(&[b"uncommitted-create"])),
                 )
                 .merkleize(&db, None)
                 .await
                 .unwrap();
 
-            let final_update = Sha256::hash(b"child-update");
+            let final_update = Sha256::hash(&[b"child-update"]);
             let child = pending
                 .new_batch::<Sha256>()
                 .write(key_update, Some(final_update))
@@ -2758,7 +2758,7 @@ mod tests {
             assert_eq!(db.get(&key_delete_from_uncommitted).await.unwrap(), None);
             assert_eq!(
                 db.get(&key_uncommitted_create).await.unwrap(),
-                Some(Sha256::hash(b"uncommitted-create"))
+                Some(Sha256::hash(&[b"uncommitted-create"]))
             );
 
             db.destroy().await.unwrap();

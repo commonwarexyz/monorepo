@@ -119,7 +119,7 @@ impl Digestible for Block {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        Sha256::hash(&self.encode())
+        Sha256::hash(&[&self.encode()])
     }
 }
 
@@ -175,7 +175,7 @@ impl App {
         height: Height,
         mut batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
-        let counter = Sha256::hash(b"counter");
+        let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batches
             .get(&counter)
             .await
@@ -183,7 +183,7 @@ impl App {
             .map_or(0, |v| digest_to_u64(&v));
         batches = batches.write(counter, Some(u64_to_digest(current + 1)));
         batches = batches.write(
-            Sha256::hash(&height.get().to_be_bytes()),
+            Sha256::hash(&[&height.get().to_be_bytes()]),
             Some(u64_to_digest(height.get())),
         );
         batches.merkleize().await.unwrap()

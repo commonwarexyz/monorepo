@@ -86,7 +86,7 @@ fn generate_key(rng: &mut StdRng, seed: u64) -> Digest {
     for (i, byte) in data.iter_mut().enumerate() {
         *byte = ((seed >> (i % 8)) & 0xFF) as u8 ^ rng.gen::<u8>();
     }
-    Sha256::hash(&data)
+    Sha256::hash(&[&data])
 }
 
 fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {

@@ -155,7 +155,7 @@ fn main() {
         let (handler, mut receiver) = mpsc::unbounded_channel();
 
         // Start handler
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha256::default();
         context.child("handler").spawn(|mut ctx| async move {
             while let Some(msg) = receiver.recv().await {
                 match msg {
@@ -168,7 +168,8 @@ fn main() {
 
                         // Compute digest
                         hasher.update(&incoming.block.encode());
-                        let digest = hasher.finalize();
+                        let (next_hasher, digest) = hasher.finalize();
+                        hasher = next_hasher;
 
                         // Store block
                         network.insert(digest, incoming.block);
