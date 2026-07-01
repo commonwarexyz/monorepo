@@ -277,14 +277,14 @@ pub mod test {
             db.apply_batch(seed).await.unwrap();
             db.commit().await.unwrap();
 
+            // At D=1, one pending ancestor updates keys 0..50 and deletes 100..110. At D=2,
+            // the grandparent updates keys 0..10 and deletes 100..110 while the parent updates
+            // keys 20..30. The read set below then resolves through both ancestors, while
+            // key(60) still falls through to the committed DB and exercises staged cache reuse
+            // behind a stacked batch.
+            // Keep every uncommitted ancestor alive until the child is merkleized; speculative
+            // batch Merkle lookups walk weak parent links for in-memory ancestor nodes.
             for depth in [0u8, 1u8, 2u8] {
-                // At D=1, one pending ancestor updates keys 0..50 and deletes 100..110. At D=2,
-                // the grandparent updates keys 0..10 and deletes 100..110 while the parent updates
-                // keys 20..30. The read set below then resolves through both ancestors, while
-                // key(60) still falls through to the committed DB and exercises staged cache reuse
-                // behind a stacked batch.
-                // Keep every uncommitted ancestor alive until the child is merkleized; speculative
-                // batch Merkle lookups walk weak parent links for in-memory ancestor nodes.
                 let mut stack = Vec::new();
                 match depth {
                     0 => {}
