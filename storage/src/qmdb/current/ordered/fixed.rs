@@ -285,7 +285,10 @@ pub mod test {
                     .unwrap()
                     .root();
 
-                assert_eq!(explicit_values, staged_values, "value mismatch at depth={depth}");
+                assert_eq!(
+                    explicit_values, staged_values,
+                    "value mismatch at depth={depth}"
+                );
                 assert_eq!(explicit_root, staged_root, "root mismatch at depth={depth}");
             }
         });

@@ -337,7 +337,10 @@ pub mod test {
                     .unwrap()
                     .root();
 
-                assert_eq!(explicit_values, staged_values, "value mismatch at depth={depth}");
+                assert_eq!(
+                    explicit_values, staged_values,
+                    "value mismatch at depth={depth}"
+                );
                 assert_eq!(explicit_root, staged_root, "root mismatch at depth={depth}");
 
                 let split = 3;
@@ -357,7 +360,10 @@ pub mod test {
                     explicit_values, expanded_values,
                     "expanded value mismatch at depth={depth}"
                 );
-                assert_eq!(explicit_root, expanded_root, "expanded root mismatch at depth={depth}");
+                assert_eq!(
+                    explicit_root, expanded_root,
+                    "expanded root mismatch at depth={depth}"
+                );
 
                 let planned = val(7_000);
                 let duplicate_update = val(7_001);
@@ -377,7 +383,10 @@ pub mod test {
 
                 let duplicate_root = staged
                     .set(
-                        vec![(0, Some(planned)), (duplicate_range.start, Some(duplicate_update))],
+                        vec![
+                            (0, Some(planned)),
+                            (duplicate_range.start, Some(duplicate_update)),
+                        ],
                         Vec::new(),
                         &db,
                         None,

@@ -1159,12 +1159,9 @@ where
         // Unordered deletes emit a `Delete` at the cached location, so they may be staged.
         let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts, true);
         batch
-            .merkleize_with_floor_scan(
-                db,
-                metadata,
-                staged_updates,
-                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
+                fill_candidates(&db.bitmap, floor, tip, limit, out)
+            })
             .await
     }
 }
@@ -1201,12 +1198,9 @@ where
         // mutations rather than reusing the cached location.
         let (batch, staged_updates) = self.into_merkleize_parts(updates, upserts, false);
         batch
-            .merkleize_with_floor_scan(
-                db,
-                metadata,
-                staged_updates,
-                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
+                fill_candidates(&db.bitmap, floor, tip, limit, out)
+            })
             .await
     }
 }
@@ -1396,7 +1390,11 @@ where
                 .sort_by(&mut cache.cached, |a, b| a.1.cmp(&b.1));
         }
 
-        Ok((results, keys.iter().map(|key| (*key).to_owned()).collect(), cache))
+        Ok((
+            results,
+            keys.iter().map(|key| (*key).to_owned()).collect(),
+            cache,
+        ))
     }
 }
 
@@ -3172,7 +3170,10 @@ mod tests {
             let explicit = explicit.merkleize(&db, None).await.unwrap();
 
             let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
-            let staged = staged.set(indexed_updates.clone(), upserts.clone(), &db, None).await.unwrap();
+            let staged = staged
+                .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                .await
+                .unwrap();
 
             assert_eq!(explicit_values, loaded_values);
             assert_eq!(explicit_values, staged_values);
@@ -3286,7 +3287,10 @@ mod tests {
             let explicit = explicit.merkleize(&db, None).await.unwrap();
 
             let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
-            let staged = staged.set(indexed_updates.clone(), upserts.clone(), &db, None).await.unwrap();
+            let staged = staged
+                .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                .await
+                .unwrap();
 
             assert_eq!(explicit_values, loaded_values);
             assert_eq!(explicit_values, staged_values);
@@ -3333,7 +3337,12 @@ mod tests {
             let (_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
             // Slot 1 is out of range for a single-key read set.
             let _ = staged
-                .set(vec![(1, Some(colliding_digest(0x50, 0)))], Vec::new(), &db, None)
+                .set(
+                    vec![(1, Some(colliding_digest(0x50, 0)))],
+                    Vec::new(),
+                    &db,
+                    None,
+                )
                 .await;
         });
     }
@@ -3408,7 +3417,10 @@ mod tests {
 
                     db.apply_batch(grandparent).await.unwrap();
                     db.commit().await.unwrap();
-                    staged.set(indexed_updates.clone(), Vec::new(), &db, None).await.unwrap()
+                    staged
+                        .set(indexed_updates.clone(), Vec::new(), &db, None)
+                        .await
+                        .unwrap()
                 } else {
                     let mut child = parent.new_batch::<Sha256>();
                     db.apply_batch(grandparent).await.unwrap();
@@ -3507,7 +3519,10 @@ mod tests {
 
                     db.apply_batch(grandparent).await.unwrap();
                     db.commit().await.unwrap();
-                    staged.set(indexed_updates.clone(), Vec::new(), &db, None).await.unwrap()
+                    staged
+                        .set(indexed_updates.clone(), Vec::new(), &db, None)
+                        .await
+                        .unwrap()
                 } else {
                     let mut child = parent.new_batch::<Sha256>();
                     db.apply_batch(grandparent).await.unwrap();

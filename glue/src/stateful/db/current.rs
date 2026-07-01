@@ -1401,19 +1401,22 @@ mod tests {
             for (k, v) in &upserts {
                 explicit = explicit.write(*k, *v);
             }
-            let explicit_root = crate::stateful::db::Unmerkleized::merkleize(
-                explicit.with_metadata(metadata),
-            )
-            .await
-            .unwrap()
-            .root();
+            let explicit_root =
+                crate::stateful::db::Unmerkleized::merkleize(explicit.with_metadata(metadata))
+                    .await
+                    .unwrap()
+                    .root();
 
             // Staged path (metadata set before the read).
             let staged_batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
                 .with_metadata(metadata);
             let (staged_values, staged) = staged_batch.stage(&keys).await.unwrap();
-            let staged_root = staged.set(indexed_updates.clone(), upserts.clone()).await.unwrap().root();
+            let staged_root = staged
+                .set(indexed_updates.clone(), upserts.clone())
+                .await
+                .unwrap()
+                .root();
 
             assert_eq!(explicit_values, staged_values);
             assert_eq!(explicit_root, staged_root);
