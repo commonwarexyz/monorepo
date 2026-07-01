@@ -70,7 +70,7 @@ impl<F: Family, U: update::Update> StagedUpdates<F, U> {
     }
 }
 
-/// Committed locations resolved by staged reads, keyed by staged read slot.
+/// Committed locations resolved by staged reads, in staged read-slot order.
 struct StagedCache<F: Family, U: update::Update> {
     cached: Vec<(usize, Location<F>, U::Cached)>,
 }
@@ -761,6 +761,12 @@ where
             let mut moved = 0u64;
             let mut scan_from = floor;
             let mut floor_diff = Vec::with_capacity(total_steps as usize);
+            let mut superseded_locs: Vec<_> = diff
+                .iter()
+                .filter_map(|(_, entry)| entry.base_old_loc())
+                .collect();
+            strategy.sort_by(&mut superseded_locs, |a, b| a.cmp(b));
+            superseded_locs.dedup();
 
             while moved < total_steps {
                 // Collect candidates, capped by the number of active ops still needed.
@@ -773,71 +779,92 @@ where
                     break;
                 }
 
-                // Batch-read candidates: page-cache hits are served by one batched read,
-                // disk misses are fetched concurrently.
-                let resolved = self.read_ops(&candidates, &ops, &db.log).await?;
+                let read_candidates: Vec<_> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|candidate| superseded_locs.binary_search(candidate).is_err())
+                    .collect();
 
-                // Classify every candidate against the pre-raise state (see [`FloorOutcome`]).
-                // Revalidation is required even for candidates whose committed bitmap bit is
-                // set: this batch's diff or an uncommitted ancestor diff may supersede the
-                // committed location, and neither source is reflected in the bitmap.
-                let classify = |candidate: Location<F>, op: &Operation<F, U>| {
-                    let Some(key) = op.key() else {
-                        return FloorOutcome::Inactive; // CommitFloor and other non-keyed ops
-                    };
-                    match diff.binary_search_by(|(k, _)| k.cmp(key)) {
-                        Ok(idx) => {
-                            let entry = &diff[idx].1;
-                            if entry.loc() == Some(candidate) {
-                                FloorOutcome::MoveExisting {
-                                    idx,
-                                    base_old_loc: entry.base_old_loc(),
-                                }
-                            } else {
-                                FloorOutcome::Inactive
-                            }
-                        }
-                        Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
-                            || {
-                                if db.snapshot.get(key).any(|&l| l == candidate) {
-                                    FloorOutcome::MoveNew {
-                                        base_old_loc: Some(candidate),
-                                    }
-                                } else {
-                                    FloorOutcome::Inactive
-                                }
-                            },
-                            |entry| {
+                let (resolved, outcomes): (_, Vec<Vec<FloorOutcome<F>>>) = if read_candidates
+                    .is_empty()
+                {
+                    (Vec::new(), Vec::new())
+                } else {
+                    // Batch-read candidates: page-cache hits are served by one batched read,
+                    // disk misses are fetched concurrently.
+                    let resolved = self.read_ops(&read_candidates, &ops, &db.log).await?;
+
+                    // Classify read candidates against the pre-raise state (see
+                    // [`FloorOutcome`]). Revalidation is required even for candidates whose
+                    // committed bitmap bit is set: an uncommitted ancestor diff may supersede
+                    // the committed location, and that is not reflected in the bitmap.
+                    let classify = |candidate: Location<F>, op: &Operation<F, U>| {
+                        let Some(key) = op.key() else {
+                            return FloorOutcome::Inactive; // CommitFloor and other non-keyed ops
+                        };
+                        match diff.binary_search_by(|(k, _)| k.cmp(key)) {
+                            Ok(idx) => {
+                                let entry = &diff[idx].1;
                                 if entry.loc() == Some(candidate) {
-                                    FloorOutcome::MoveNew {
+                                    FloorOutcome::MoveExisting {
+                                        idx,
                                         base_old_loc: entry.base_old_loc(),
                                     }
                                 } else {
                                     FloorOutcome::Inactive
                                 }
-                            },
-                        ),
-                    }
-                };
-                let chunk_len = candidates.len().div_ceil(strategy.parallelism_hint());
-                let chunks: Vec<CandidateChunk<'_, F, U>> = candidates
-                    .chunks(chunk_len)
-                    .zip(resolved.chunks(chunk_len))
-                    .collect();
-                let outcomes: Vec<Vec<FloorOutcome<F>>> =
-                    strategy.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
+                            }
+                            Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
+                                || {
+                                    if db.snapshot.get(key).any(|&l| l == candidate) {
+                                        FloorOutcome::MoveNew {
+                                            base_old_loc: Some(candidate),
+                                        }
+                                    } else {
+                                        FloorOutcome::Inactive
+                                    }
+                                },
+                                |entry| {
+                                    if entry.loc() == Some(candidate) {
+                                        FloorOutcome::MoveNew {
+                                            base_old_loc: entry.base_old_loc(),
+                                        }
+                                    } else {
+                                        FloorOutcome::Inactive
+                                    }
+                                },
+                            ),
+                        }
+                    };
+
+                    let chunk_len = read_candidates
+                        .len()
+                        .div_ceil(strategy.parallelism_hint().max(1));
+                    let chunks: Vec<CandidateChunk<'_, F, U>> = read_candidates
+                        .chunks(chunk_len)
+                        .zip(resolved.chunks(chunk_len))
+                        .collect();
+                    let outcomes = strategy.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
                         chunk_locs
                             .iter()
                             .zip(chunk_ops)
                             .map(|(loc, op)| classify(*loc, op))
                             .collect()
                     });
+                    (resolved, outcomes)
+                };
 
                 // Apply in candidate order, moving active ops to the tip.
                 let mut outcomes = outcomes.into_iter().flatten();
-                for (candidate, op) in candidates.into_iter().zip(resolved) {
-                    let outcome = outcomes.next().expect("one outcome per candidate");
+                let mut reads = read_candidates.into_iter().zip(resolved);
+                for candidate in candidates {
                     floor = Location::new(*candidate + 1);
+                    if superseded_locs.binary_search(&candidate).is_ok() {
+                        continue;
+                    }
+                    let (read_candidate, op) = reads.next().expect("one read per candidate");
+                    debug_assert_eq!(candidate, read_candidate);
+                    let outcome = outcomes.next().expect("one outcome per read candidate");
                     match outcome {
                         FloorOutcome::Inactive => continue,
                         FloorOutcome::MoveExisting { idx, base_old_loc } => {
@@ -1015,10 +1042,6 @@ where
         let (values, keys, mut cache) = self.batch.stage_reads(keys, db, start).await?;
         self.keys.extend(keys);
         self.cache.cached.append(&mut cache.cached);
-        if !self.cache.cached.is_empty() {
-            db.strategy()
-                .sort_by(&mut self.cache.cached, |a, b| a.1.cmp(&b.1));
-        }
         Ok((start..end, values, self))
     }
 
@@ -1118,6 +1141,9 @@ where
                 .entries
                 .push((self.keys[slot].clone(), loc, payload, value));
         }
+        staged_updates
+            .entries
+            .sort_unstable_by(|a, b| a.1.cmp(&b.1));
         for (slot, update_idx) in latest.into_iter().enumerate() {
             let Some(update_idx) = update_idx else {
                 continue;
@@ -1398,11 +1424,6 @@ where
                 });
             }
         }
-        if !cache.cached.is_empty() {
-            db.strategy()
-                .sort_by(&mut cache.cached, |a, b| a.1.cmp(&b.1));
-        }
-
         Ok((
             results,
             keys.iter().map(|key| (*key).to_owned()).collect(),

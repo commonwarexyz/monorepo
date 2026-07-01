@@ -6,8 +6,8 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
-        self, batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
-        storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
+        self, batch::MerkleizedBatch as GenericMerkleizedBatch, hasher::Standard as StandardHasher,
+        mem::Mem, storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
     },
     qmdb::{
         self,
@@ -19,26 +19,20 @@ use crate::{
         },
         batch_chain::Bounds,
         bitmap::Shared,
-        current::{
-            db::{compute_db_root, compute_grafted_leaves},
-            grafting,
-        },
+        current::{db::compute_db_root, grafting},
         operation::Key,
         Error,
     },
     Context,
 };
-use ahash::AHasher;
+use ahash::AHashMap;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap::{self, Readable as _};
 use core::ops::Range;
-use std::{
-    collections::{BTreeSet, HashMap},
-    hash::BuildHasherDefault,
-    sync::Arc,
-};
+use futures::future::try_join_all;
+use std::sync::Arc;
 
 /// Speculative chunk-level bitmap overlay.
 ///
@@ -49,9 +43,8 @@ use std::{
 pub(crate) struct ChunkOverlay<const N: usize> {
     /// Dirty chunks: chunk_idx -> materialized chunk bytes.
     ///
-    /// `ahash` (fast on integer keys) with `BuildHasherDefault` (no per-construction RNG
-    /// sampling). Iteration order is not observed by any consumer.
-    pub(crate) chunks: HashMap<usize, [u8; N], BuildHasherDefault<AHasher>>,
+    /// Iteration order is not observed by any consumer.
+    pub(crate) chunks: AHashMap<usize, [u8; N]>,
     /// Total number of bits (parent + new operations).
     pub(crate) len: u64,
 }
@@ -59,9 +52,9 @@ pub(crate) struct ChunkOverlay<const N: usize> {
 impl<const N: usize> ChunkOverlay<N> {
     const CHUNK_BITS: u64 = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
 
-    fn new(len: u64) -> Self {
+    fn new(len: u64, capacity: usize) -> Self {
         Self {
-            chunks: HashMap::default(),
+            chunks: AHashMap::with_capacity(capacity),
             len,
         }
     }
@@ -113,6 +106,65 @@ impl<const N: usize> ChunkOverlay<N> {
     pub(crate) const fn complete_chunks(&self) -> usize {
         (self.len / Self::CHUNK_BITS) as usize
     }
+}
+
+async fn compute_grafted_leaves_from_batch<F, H, R, B, S, const N: usize>(
+    hasher: &StandardHasher<H>,
+    ops_tree: &BatchStorageAdapter<'_, F, H::Digest, R, B>,
+    chunks: impl IntoIterator<Item = (usize, [u8; N])>,
+    strategy: &S,
+) -> Result<Vec<(usize, H::Digest)>, Error<F>>
+where
+    F: Graftable,
+    H: Hasher,
+    R: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
+    B: MerkleStorage<F, Digest = H::Digest>,
+    S: Strategy,
+{
+    let grafting_height = grafting::height::<N>();
+    let mut inputs = Vec::new();
+    let mut misses = Vec::new();
+
+    for (chunk_idx, chunk) in chunks {
+        let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
+        let pos = F::subtree_root_position(leaf_start, grafting_height);
+        if let Some(chunk_ops_digest) = ops_tree.batch.get_node(pos) {
+            inputs.push((chunk_idx, Some(chunk_ops_digest), chunk));
+        } else {
+            misses.push((inputs.len(), pos));
+            inputs.push((chunk_idx, None, chunk));
+        }
+    }
+
+    let base = ops_tree.base;
+    for (input_idx, digest) in try_join_all(misses.into_iter().map(|(input_idx, pos)| async move {
+        let digest = base
+            .get_node(pos)
+            .await?
+            .ok_or(merkle::Error::<F>::MissingGraftedLeaf(pos))?;
+        Ok::<_, Error<F>>((input_idx, digest))
+    }))
+    .await?
+    {
+        inputs[input_idx].1 = Some(digest);
+    }
+
+    let zero_chunk = [0u8; N];
+    Ok(strategy.map_init_collect_vec(
+        inputs,
+        || hasher.clone(),
+        |h, (chunk_idx, chunk_ops_digest, chunk)| {
+            let chunk_ops_digest = chunk_ops_digest.expect("all grafted leaves should be resolved");
+            if chunk == zero_chunk {
+                (chunk_idx, chunk_ops_digest)
+            } else {
+                (
+                    chunk_idx,
+                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
+                )
+            }
+        },
+    ))
 }
 
 /// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Skips locations where the
@@ -747,7 +799,8 @@ where
     U: update::Update,
 {
     let total_bits = base.len() + batch_len as u64;
-    let mut overlay = ChunkOverlay::new(total_bits);
+    let appended_chunks = (batch_len as u64).div_ceil(ChunkOverlay::<N>::CHUNK_BITS) as usize;
+    let mut overlay = ChunkOverlay::new(total_bits, diff.len() + appended_chunks + 1);
     let pruned_chunks = base.pruned_chunks();
 
     // 1. CommitFloor (last op) is always active.
@@ -854,15 +907,15 @@ where
     //   2) Pending -> graftable transitions: chunks newly graftable because the ops tree built
     //      their h=G ancestor in this batch. Their bitmap bytes may not be dirty (the chunk
     //      became graftable via ops growth alone) but they need a grafted-leaf entry now.
-    let mut chunk_indices_to_update: BTreeSet<usize> = overlay
+    let mut chunk_indices_to_update: Vec<usize> = overlay
         .chunks
         .iter()
         .filter(|(&idx, _)| idx < graftable_overlay && idx >= pruned_chunks)
         .map(|(&idx, _)| idx)
         .collect();
-    for idx in graftable_parent..graftable_overlay {
-        chunk_indices_to_update.insert(idx);
-    }
+    chunk_indices_to_update.extend(graftable_parent..graftable_overlay);
+    chunk_indices_to_update.sort_unstable();
+    chunk_indices_to_update.dedup();
     let chunks_to_update = chunk_indices_to_update.into_iter().map(|idx| {
         let chunk = overlay
             .get(idx)
@@ -872,7 +925,7 @@ where
     });
 
     let hasher = qmdb::hasher::<H>();
-    let new_leaves = compute_grafted_leaves::<F, H, S, N>(
+    let new_leaves = compute_grafted_leaves_from_batch::<F, H, _, _, S, N>(
         &hasher,
         &ops_tree_adapter,
         chunks_to_update,
@@ -1608,7 +1661,7 @@ mod tests {
         for &len in overlay_lens {
             chain = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
                 parent: chain,
-                overlay: Arc::new(ChunkOverlay::new(len)),
+                overlay: Arc::new(ChunkOverlay::new(len, 0)),
                 shared: Arc::clone(shared),
             }));
         }
