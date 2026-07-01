@@ -1163,9 +1163,12 @@ where
         // Unordered deletes emit a `Delete` at the cached location, so they may be staged.
         let (batch, staged_updates) = self.into_parts(updates, upserts, true);
         batch
-            .merkleize_with_floor_scan(db, metadata, Some(staged_updates), |floor, tip, limit, out| {
-                fill_candidates(&db.bitmap, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(
+                db,
+                metadata,
+                Some(staged_updates),
+                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            )
             .await
     }
 }
@@ -1205,9 +1208,12 @@ where
         // mutations rather than reusing the cached location.
         let (batch, staged_updates) = self.into_parts(updates, upserts, false);
         batch
-            .merkleize_with_floor_scan(db, metadata, Some(staged_updates), |floor, tip, limit, out| {
-                fill_candidates(&db.bitmap, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(
+                db,
+                metadata,
+                Some(staged_updates),
+                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            )
             .await
     }
 }
@@ -1434,12 +1440,9 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(
-            db,
-            metadata,
-            None,
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-        )
+        self.merkleize_with_floor_scan(db, metadata, None, |floor, tip, limit, out| {
+            fill_candidates(&db.bitmap, floor, tip, limit, out)
+        })
         .await
     }
 
@@ -1635,12 +1638,9 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(
-            db,
-            metadata,
-            None,
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-        )
+        self.merkleize_with_floor_scan(db, metadata, None, |floor, tip, limit, out| {
+            fill_candidates(&db.bitmap, floor, tip, limit, out)
+        })
         .await
     }
 
