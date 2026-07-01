@@ -47,6 +47,8 @@ type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 /// mutations, and staged-resolved keys are always in `updated`.
 type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
+/// Staged update entry: key, old committed location, cached payload from the old update, and
+/// replacement value (`None` for delete).
 type StagedUpdate<F, U> = (
     <U as update::Update>::Key,
     Location<F>,
@@ -784,7 +786,9 @@ where
                     .copied()
                     .filter(|candidate| superseded_locs.binary_search(candidate).is_err())
                     .collect();
-
+                // `read_candidates` omits locations already superseded by this diff. Keep
+                // `resolved` and `outcomes` in that filtered order, then walk `candidates`
+                // below so superseded locations still advance the floor in scan order.
                 let (resolved, outcomes): (_, Vec<Vec<FloorOutcome<F>>>) =
                     if read_candidates.is_empty() {
                         (Vec::new(), Vec::new())
