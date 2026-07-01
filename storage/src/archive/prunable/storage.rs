@@ -25,9 +25,10 @@ use tracing::debug;
 
 /// Tracks archive-level durability state for section writes.
 ///
-/// Writes can continue while a previously issued sync is in flight. Lower
-/// buffers serialize physical blob mutations that would overtake the sync.
-/// Operations that remove data, shut down storage, or need a full durability
+/// A started section sync covers writes accepted before that sync began. Later writes to the same
+/// section are not covered by that handle, so they are recorded in `pending` for a future sync.
+/// Lower buffers own the physical barrier: if a later write must mutate the blob, it waits there
+/// before issuing I/O. Operations that remove data, shut down storage, or need a full durability
 /// barrier call `wait_all` before proceeding.
 struct SyncState {
     /// Sections with writes not yet covered by an issued sync.
@@ -52,6 +53,8 @@ impl SyncState {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, Error>>,
     {
+        // Do not wait here: writes can be buffered while an earlier sync is still pending. This only
+        // surfaces a completed same-section sync failure before accepting another write.
         if let Some(syncing) = self.syncing.get(&section).cloned() {
             if let Some(result) = syncing.try_wait() {
                 self.syncing.remove(&section);

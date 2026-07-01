@@ -27,13 +27,20 @@ pub trait SectionBuffer: Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> u64;
 
-    /// Ensure all pending data is durably persisted.
+    /// Ensure all data accepted by this buffer is durably persisted.
     fn sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
-    /// Start syncing all pending data.
+    /// Start making data currently accepted by this buffer durable.
+    ///
+    /// The returned handle covers data accepted before this call returns. It does not cover later
+    /// writes. Implementations may accept later writes before the handle completes, but any later
+    /// operation that mutates the underlying blob must first wait for the outstanding handle.
     fn start_sync(&mut self) -> impl Future<Output = Handle<()>> + Send;
 
     /// Wait for any started sync without starting a new sync.
+    ///
+    /// This observes the result of a previous [SectionBuffer::start_sync] and does not make later
+    /// writes durable.
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
     /// Resize the logical size of the buffer.
