@@ -1193,8 +1193,9 @@ where
         // location/payload. Ordered deletes, keys resolved from ancestors, and keys missing from
         // committed state fall back to normal mutations: leaving `latest[slot]` set routes them to
         // the fallback loop below.
-        let selected_count = latest.iter().filter(|idx| idx.is_some()).count();
-        staged_updates.entries.reserve(selected_count);
+        staged_updates
+            .entries
+            .reserve(updates.len().min(self.cache.cached.len()));
         for (slot, loc, payload) in self.cache.cached {
             let Some(update_idx) = latest[slot] else {
                 continue;
@@ -1472,9 +1473,7 @@ where
                 cached: Vec::with_capacity(keys.len()),
             };
             let db_results = db
-                .get_many_map(keys, |data, loc| {
-                    (data.value().clone(), loc, data.cached())
-                })
+                .get_many_map(keys, |data, loc| (data.value().clone(), loc, data.cached()))
                 .await?;
             let results = db_results
                 .into_iter()
