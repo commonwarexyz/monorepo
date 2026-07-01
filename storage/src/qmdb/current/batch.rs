@@ -460,7 +460,7 @@ where
             .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
-                staged_updates,
+                Some(staged_updates),
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
@@ -510,7 +510,7 @@ where
             .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
-                staged_updates,
+                Some(staged_updates),
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
@@ -617,7 +617,7 @@ where
             .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
-                any::batch::StagedUpdates::new(),
+                None,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
@@ -724,7 +724,7 @@ where
             .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
-                any::batch::StagedUpdates::new(),
+                None,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;

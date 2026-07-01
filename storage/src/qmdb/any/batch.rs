@@ -1163,7 +1163,7 @@ where
         // Unordered deletes emit a `Delete` at the cached location, so they may be staged.
         let (batch, staged_updates) = self.into_parts(updates, upserts, true);
         batch
-            .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
+            .merkleize_with_floor_scan(db, metadata, Some(staged_updates), |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
             })
             .await
@@ -1205,7 +1205,7 @@ where
         // mutations rather than reusing the cached location.
         let (batch, staged_updates) = self.into_parts(updates, upserts, false);
         batch
-            .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
+            .merkleize_with_floor_scan(db, metadata, Some(staged_updates), |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
             })
             .await
@@ -1437,13 +1437,13 @@ where
         self.merkleize_with_floor_scan(
             db,
             metadata,
-            StagedUpdates::new(),
+            None,
             |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
         )
         .await
     }
 
-    /// Like [`merkleize`](Self::merkleize), but accepts staged updates and the floor-raise
+    /// Like [`merkleize`](Self::merkleize), but accepts optional staged updates and the floor-raise
     /// candidate source.
     ///
     /// The callback may skip locations only when it knows they are inactive. The floor-raise
@@ -1454,7 +1454,7 @@ where
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-        staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
+        staged_updates: Option<StagedUpdates<F, update::Unordered<K, V>>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
@@ -1465,9 +1465,10 @@ where
         // `value` is `Some` for a staged update and `None` for a staged delete; `emit` maps each
         // to an `Update`/`Delete` at the cached location.
         let (mut mutations, m) = self.into_parts();
+        let staged_entries = staged_updates.map_or_else(Vec::new, |staged| staged.entries);
         let mut cached: Vec<(K, Location<F>, Option<V::Value>)> =
-            Vec::with_capacity(staged_updates.entries.len());
-        for (key, loc, (), value) in staged_updates.entries {
+            Vec::with_capacity(staged_entries.len());
+        for (key, loc, (), value) in staged_entries {
             cached.push((key, loc, value));
         }
 
@@ -1637,13 +1638,13 @@ where
         self.merkleize_with_floor_scan(
             db,
             metadata,
-            StagedUpdates::new(),
+            None,
             |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
         )
         .await
     }
 
-    /// Like [`merkleize`](Self::merkleize), but accepts staged updates and the floor-raise
+    /// Like [`merkleize`](Self::merkleize), but accepts optional staged updates and the floor-raise
     /// candidate source.
     ///
     /// The callback may skip locations only when it knows they are inactive. The floor-raise
@@ -1654,7 +1655,7 @@ where
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-        staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
+        staged_updates: Option<StagedUpdates<F, update::Ordered<K, V>>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
@@ -1667,9 +1668,10 @@ where
         // Staged updates skip the index probe and journal re-read, and their old op's next key
         // feeds the candidate sets directly. The ordered path never stages deletes (see
         // `Staged::into_parts`), so every staged entry carries a value.
+        let staged_entries = staged_updates.map_or_else(Vec::new, |staged| staged.entries);
         let mut cached: Vec<(K, V::Value, Location<F>, K)> =
-            Vec::with_capacity(staged_updates.entries.len());
-        for (key, loc, old_next, value) in staged_updates.entries {
+            Vec::with_capacity(staged_entries.len());
+        for (key, loc, old_next, value) in staged_entries {
             let value = value.expect("ordered path never stages deletes");
             cached.push((key, value, loc, old_next));
         }
