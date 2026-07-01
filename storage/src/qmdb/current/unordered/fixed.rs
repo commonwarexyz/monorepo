@@ -253,9 +253,10 @@ pub mod test {
 
     /// The staged path (`stage` + `Staged::set`) must produce a root byte-identical to an explicit
     /// `get_many` + `write` + `merkleize` over the current layer, across updates, deletes, upserts,
-    /// duplicate read slots, and missing keys, both rooted at the DB (D=0) and through one pending
-    /// ancestor (D=1). This guards the current-layer threading of `bitmap_parent`/`grafted_parent`
-    /// and `compute_current_layer` for non-empty staged updates.
+    /// duplicate read slots, missing keys, and prefix-then-suffix expansion, both rooted at the DB
+    /// (D=0) and through one pending ancestor (D=1). This guards the current-layer threading of
+    /// `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`, and
+    /// `compute_current_layer` for non-empty staged updates.
     #[test_traced("WARN")]
     pub fn test_current_unordered_fixed_staged_merkleize_parity() {
         fn key(i: u64) -> Digest {
@@ -338,6 +339,63 @@ pub mod test {
 
                 assert_eq!(explicit_values, staged_values, "value mismatch at depth={depth}");
                 assert_eq!(explicit_root, staged_root, "root mismatch at depth={depth}");
+
+                let split = 3;
+                let (mut expanded_values, staged) =
+                    new_batch().stage(&keys[..split], &db).await.unwrap();
+                let (range, suffix_values, staged) =
+                    staged.expand(&keys[split..], &db).await.unwrap();
+                assert_eq!(range, split..keys.len());
+                expanded_values.extend(suffix_values);
+                let expanded_root = staged
+                    .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                    .await
+                    .unwrap()
+                    .root();
+
+                assert_eq!(
+                    explicit_values, expanded_values,
+                    "expanded value mismatch at depth={depth}"
+                );
+                assert_eq!(explicit_root, expanded_root, "expanded root mismatch at depth={depth}");
+
+                let planned = val(7_000);
+                let duplicate_update = val(7_001);
+                let (first_values, staged) = new_batch().stage(&keys[..1], &db).await.unwrap();
+                let (duplicate_range, duplicate_values, staged) =
+                    staged.expand(&keys[..1], &db).await.unwrap();
+                assert_eq!(duplicate_range, 1..2);
+                assert_eq!(
+                    first_values[0], duplicate_values[0],
+                    "duplicate expansion must assign a new slot without changing the base read"
+                );
+                assert_ne!(
+                    duplicate_values[0],
+                    Some(planned),
+                    "expand must not observe values computed for earlier staged slots"
+                );
+
+                let duplicate_root = staged
+                    .set(
+                        vec![(0, Some(planned)), (duplicate_range.start, Some(duplicate_update))],
+                        Vec::new(),
+                        &db,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                    .root();
+                let expected_duplicate_root = new_batch()
+                    .write(read_keys[0], Some(planned))
+                    .write(read_keys[0], Some(duplicate_update))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap()
+                    .root();
+                assert_eq!(
+                    expected_duplicate_root, duplicate_root,
+                    "duplicate expanded slots should use normal update-order semantics"
+                );
             }
         });
     }

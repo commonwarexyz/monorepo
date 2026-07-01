@@ -984,6 +984,43 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// Expand this staged batch with more reads.
+    ///
+    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
+    /// assigned the returned range. The returned values are in the same order as `keys`.
+    ///
+    /// Expansion does not deduplicate against previously staged keys. Reading the same key again
+    /// creates another staged slot in the returned range; if both slots are later updated, `set`
+    /// applies the update list's normal last-write-wins semantics.
+    ///
+    /// Expansion reads through the underlying batch, ancestor batches, and committed database state.
+    /// Values the caller has computed for earlier staged slots are not visible until they are passed
+    /// to `set`. Callers that need speculative read-your-writes behavior should maintain their own
+    /// overlay while deciding which staged slots to update.
+    pub async fn expand<E, C, I, const N: usize>(
+        mut self,
+        keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        let start = self.keys.len();
+        let end = start
+            .checked_add(keys.len())
+            .expect("staged read index overflow");
+        let (values, keys, mut cache) = self.batch.stage_reads(keys, db, start).await?;
+        self.keys.extend(keys);
+        self.cache.cached.append(&mut cache.cached);
+        if !self.cache.cached.is_empty() {
+            db.strategy()
+                .sort_by(&mut self.cache.cached, |a, b| a.1.cmp(&b.1));
+        }
+        Ok((start..end, values, self))
+    }
+
     fn apply_upserts(
         mut batch: UnmerkleizedBatch<F, H, U, S>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
@@ -997,11 +1034,12 @@ where
     /// Build the inputs for staged merkleization represented by this staged handle.
     ///
     /// Each update is `(read_index, value)`, where `read_index` is the position of the key in the
-    /// original [`stage`](UnmerkleizedBatch::stage) input and `value` is `Some(v)` for an upsert or
-    /// `None` for a delete. Duplicate keys retain last-write-wins semantics according to the update
-    /// order. Upserts are `(key, value)` writes (`None` deletes) for keys outside the staged read
-    /// set. Upserts are applied last; if a caller passes an overlapping key, the upsert follows
-    /// normal `write` semantics and wins.
+    /// staged read set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
+    /// [`expand`](Staged::expand) inputs. `value` is `Some(v)` for an upsert or `None` for a
+    /// delete. Duplicate keys retain last-write-wins semantics according to the update order.
+    /// Upserts are `(key, value)` writes (`None` deletes) for keys outside the staged read set.
+    /// Upserts are applied last; if a caller passes an overlapping key, the upsert follows normal
+    /// `write` semantics and wins.
     ///
     /// Committed-resolved updates reuse the staged location. Committed-resolved deletes reuse it
     /// only when `stage_deletes` is set (the unordered path): an unordered delete just emits a
@@ -1099,8 +1137,9 @@ where
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     ///
-    /// A `Some` value is an upsert; `None` is a delete. See
-    /// [`into_merkleize_parts`](Self::into_merkleize_parts) for the read-index update semantics.
+    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
+    /// [`expand`](Staged::expand) ranges.
     ///
     /// # Panics
     ///
@@ -1139,8 +1178,9 @@ where
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     ///
-    /// A `Some` value is an upsert; `None` is a delete. See
-    /// [`into_merkleize_parts`](Self::into_merkleize_parts) for the read-index update semantics.
+    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
+    /// [`expand`](Staged::expand) ranges.
     ///
     /// # Panics
     ///
@@ -1263,7 +1303,8 @@ where
     /// Batch read multiple keys and return a staged batch for the same keys.
     ///
     /// Returns results in the same order as the input keys. The staged batch records updates by
-    /// input position, so callers may load a broad read set and then update only a subset of it.
+    /// read index: the initial keys occupy `0..keys.len()`, and each
+    /// [`expand`](Staged::expand) appends another index range.
     pub async fn stage<E, C, I, const N: usize>(
         self,
         keys: &[&U::Key],
@@ -1274,17 +1315,28 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        if keys.is_empty() {
-            return Ok((
-                Vec::new(),
-                Staged {
-                    batch: self,
-                    keys: Vec::new(),
-                    cache: StagedCache { cached: Vec::new() },
-                },
-            ));
-        }
+        let (results, keys, cache) = self.stage_reads(keys, db, 0).await?;
+        Ok((
+            results,
+            Staged {
+                batch: self,
+                keys,
+                cache,
+            },
+        ))
+    }
 
+    async fn stage_reads<E, C, I, const N: usize>(
+        &self,
+        keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U, N, S>,
+        offset: usize,
+    ) -> Result<(Vec<Option<U::Value>>, Vec<U::Key>, StagedCache<F, U>), crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
         let mut results: Vec<Option<U::Value>> = Vec::with_capacity(keys.len());
         let mut db_indices = Vec::new();
         let mut db_keys = Vec::new();
@@ -1334,7 +1386,7 @@ where
             cache.cached.reserve(db_keys.len());
             for (slot, result) in db_indices.into_iter().zip(db_results) {
                 results[slot] = result.map(|(value, loc, cached)| {
-                    cache.cached.push((slot, loc, cached));
+                    cache.cached.push((offset + slot, loc, cached));
                     value
                 });
             }
@@ -1344,14 +1396,7 @@ where
                 .sort_by(&mut cache.cached, |a, b| a.1.cmp(&b.1));
         }
 
-        Ok((
-            results,
-            Staged {
-                batch: self,
-                keys: keys.iter().map(|key| (*key).to_owned()).collect(),
-                cache,
-            },
-        ))
+        Ok((results, keys.iter().map(|key| (*key).to_owned()).collect(), cache))
     }
 }
 

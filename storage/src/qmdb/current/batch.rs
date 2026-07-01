@@ -33,6 +33,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap::{self, Readable as _};
+use core::ops::Range;
 use std::{
     collections::{BTreeSet, HashMap},
     hash::BuildHasherDefault,
@@ -374,6 +375,48 @@ where
     }
 }
 
+impl<F, H, U, const N: usize, S: Strategy> Staged<F, H, U, N, S>
+where
+    F: Graftable,
+    U: update::Update + Send + Sync,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Expand this staged batch with more reads.
+    ///
+    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
+    /// assigned the returned range. The returned values are in the same order as `keys`.
+    ///
+    /// Expansion does not deduplicate against previously staged keys and does not observe values the
+    /// caller has computed for earlier staged slots but not yet passed to `set`.
+    pub async fn expand<E, C, I>(
+        self,
+        keys: &[&U::Key],
+        db: &super::db::Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        let (range, values, inner) = inner.expand(keys, &db.any).await?;
+        Ok((
+            range,
+            values,
+            Self {
+                inner,
+                grafted_parent,
+                bitmap_parent,
+            },
+        ))
+    }
+}
+
 impl<F, K, V, H, const N: usize, S: Strategy> Staged<F, H, update::Unordered<K, V>, N, S>
 where
     F: Graftable,
@@ -384,7 +427,8 @@ where
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     ///
-    /// A `Some` value is an upsert; `None` is a delete.
+    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges.
     ///
     /// # Panics
     ///
@@ -429,7 +473,8 @@ where
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     ///
-    /// A `Some` value is an upsert; `None` is a delete.
+    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges.
     ///
     /// # Panics
     ///

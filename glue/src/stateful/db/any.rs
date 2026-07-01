@@ -38,7 +38,10 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
-use std::{ops::Deref, sync::Arc};
+use std::{
+    ops::{Deref, Range},
+    sync::Arc,
+};
 
 // Matches commonware_storage::qmdb::any::BITMAP_CHUNK_BYTES, which is crate-private.
 const ANY_BITMAP_CHUNK_BYTES: usize = 64;
@@ -205,6 +208,47 @@ where
     }
 }
 
+impl<F, E, C, I, H, U, S> AnyStaged<F, E, C, I, H, U, S>
+where
+    F: Family,
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Expand this staged batch with more reads.
+    ///
+    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
+    /// assigned the returned range. Expansion does not deduplicate against previously staged keys
+    /// and does not observe values computed for earlier staged slots but not yet passed to `set`.
+    pub async fn expand(
+        self,
+        keys: &[&U::Key],
+    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
+        let Self {
+            staged,
+            db,
+            metadata,
+        } = self;
+        let (range, values, staged) = {
+            let guard = db.read().await;
+            staged.expand(keys, &*guard).await?
+        };
+        Ok((
+            range,
+            values,
+            Self {
+                staged,
+                db,
+                metadata,
+            },
+        ))
+    }
+}
+
 impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>
 where
     F: Family,
@@ -218,6 +262,9 @@ where
     Operation<F, unordered::Update<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// Update indices refer to the staged read set: the initial `stage` input followed by any
+    /// [`expand`](AnyStaged::expand) ranges.
     pub async fn set(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -249,6 +296,9 @@ where
     Operation<F, ordered::Update<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// Update indices refer to the staged read set: the initial `stage` input followed by any
+    /// [`expand`](AnyStaged::expand) ranges.
     pub async fn set(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
