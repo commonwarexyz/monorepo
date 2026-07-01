@@ -134,7 +134,7 @@ impl<H: Hasher> BloomFilter<H> {
         Self::_ASSERT_DIGEST_AT_LEAST_16_BYTES;
 
         // Extract two 64-bit hash values from the digest of the item
-        let digest = H::hash(item);
+        let digest = H::hash(&[item]);
         let h1 = u64::from_be_bytes(digest[0..8].try_into().unwrap());
         let mut h2 = u64::from_be_bytes(digest[8..16].try_into().unwrap());
 
