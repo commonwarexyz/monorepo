@@ -35,13 +35,22 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
       - name: Specify Target
         id: target-spec
+        env:
+          INPUT_TARGET: ${{ inputs.target }}
         run: |
-          export TARGET="${{ inputs.target }}"
+          export TARGET="${INPUT_TARGET}"
           if [[ -z $TARGET ]]; then
               export TARGET="${GIT_REF_NAME%/*}"
           fi
-          echo "Target: $TARGET"
-          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          case "$TARGET" in
+            riscv-unknown-elf-toolchain|rust-riscv32imac-cross|rust-riscv64imac-cross) ;;
+            *)
+              echo "invalid target: $TARGET" >&2
+              exit 1
+              ;;
+          esac
+          echo "Target: ${TARGET}"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
       - name: Create matrix
         id: platforms
         run: |
