@@ -263,7 +263,10 @@ macro_rules! run_pipeline {
             }
             black_box(&values);
             let t_load = start.elapsed();
-            let merkleized = staged.set(updates, Vec::new(), &db, None).await.unwrap();
+            let merkleized = staged
+                .merkleize(updates, Vec::new(), None, &db)
+                .await
+                .unwrap();
             let root = merkleized.root();
             let elapsed = start.elapsed();
 

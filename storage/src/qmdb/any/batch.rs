@@ -990,13 +990,14 @@ where
     /// assigned the returned range. The returned values are in the same order as `keys`.
     ///
     /// Expansion does not deduplicate against previously staged keys. Reading the same key again
-    /// creates another staged slot in the returned range; if both slots are later updated, `set`
-    /// applies the update list's normal last-write-wins semantics.
+    /// creates another staged slot in the returned range; if both slots are later updated,
+    /// [`merkleize`](Staged::merkleize) applies the update list's normal last-write-wins
+    /// semantics.
     ///
     /// Expansion reads through the underlying batch, ancestor batches, and committed database state.
     /// Values the caller has computed for earlier staged slots are not visible until they are passed
-    /// to `set`. Callers that need speculative read-your-writes behavior should maintain their own
-    /// overlay while deciding which staged slots to update.
+    /// to [`merkleize`](Staged::merkleize). Callers that need speculative read-your-writes behavior
+    /// should maintain their own overlay while deciding which staged slots to update.
     pub async fn expand<E, C, I, const N: usize>(
         mut self,
         keys: &[&U::Key],
@@ -1142,17 +1143,17 @@ where
     ///
     /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
-    /// [`expand`](Staged::expand) ranges.
+    /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
     ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    pub async fn set<E, C, I, const N: usize>(
+    pub async fn merkleize<E, C, I, const N: usize>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1183,17 +1184,17 @@ where
     ///
     /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
-    /// [`expand`](Staged::expand) ranges.
+    /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
     ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    pub async fn set<E, C, I, const N: usize>(
+    pub async fn merkleize<E, C, I, const N: usize>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1414,7 +1415,7 @@ where
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
-    /// Consumes updates recorded by [`Staged::set`], allowing loaded keys to skip the
+    /// Consumes updates recorded by [`Staged::merkleize`], allowing loaded keys to skip the
     /// journal re-read their resolution would otherwise require.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -1610,7 +1611,7 @@ where
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
-    /// Consumes updates recorded by [`Staged::set`], allowing loaded keys to skip the index probe
+    /// Consumes updates recorded by [`Staged::merkleize`], allowing loaded keys to skip the index probe
     /// and journal re-read their resolution would otherwise require (the caller's new value and the
     /// cached next key feed op generation directly). Deletes never consume staged updates. Deleting
     /// a key requires rewriting its predecessor, which may be a colliding key in the deleted key's
@@ -2391,7 +2392,7 @@ mod trait_impls {
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            Self::write(self, key, value)
+            UnmerkleizedBatch::write(self, key, value)
         }
 
         fn merkleize(
@@ -2424,7 +2425,7 @@ mod trait_impls {
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            Self::write(self, key, value)
+            UnmerkleizedBatch::write(self, key, value)
         }
 
         fn merkleize(
@@ -2534,6 +2535,18 @@ mod tests {
 
     fn loc(n: u64) -> Location<mmr::Family> {
         Location::new(n)
+    }
+
+    fn trait_write<B, Db>(batch: B, key: sha256::Digest, value: sha256::Digest) -> B
+    where
+        B: crate::qmdb::any::traits::UnmerkleizedBatch<
+            Db,
+            K = sha256::Digest,
+            V = sha256::Digest,
+        >,
+        Db: ?Sized,
+    {
+        <B as crate::qmdb::any::traits::UnmerkleizedBatch<Db>>::write(batch, key, Some(value))
     }
 
     fn shared_with<F>(build: F) -> Shared<BITMAP_CHUNK_BYTES>
@@ -3177,7 +3190,7 @@ mod tests {
 
             let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
             let staged_merkleized = staged
-                .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
                 .await
                 .unwrap();
 
@@ -3188,7 +3201,7 @@ mod tests {
             assert_eq!(range, split..keys.len());
             expanded_values.extend(suffix_values);
             let expanded = staged
-                .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
                 .await
                 .unwrap();
 
@@ -3307,7 +3320,7 @@ mod tests {
 
             let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
             let staged_merkleized = staged
-                .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
                 .await
                 .unwrap();
 
@@ -3318,7 +3331,7 @@ mod tests {
             assert_eq!(range, split..keys.len());
             expanded_values.extend(suffix_values);
             let expanded = staged
-                .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
                 .await
                 .unwrap();
 
@@ -3348,7 +3361,7 @@ mod tests {
     /// and must panic rather than silently misapply.
     #[test]
     #[should_panic(expected = "update index out of staged read range")]
-    fn staged_set_rejects_out_of_range_update_index() {
+    fn staged_merkleize_rejects_out_of_range_update_index() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             type TestDb = UnorderedFixedDb<
@@ -3369,13 +3382,41 @@ mod tests {
             let (_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
             // Slot 1 is out of range for a single-key read set.
             let _ = staged
-                .set(
+                .merkleize(
                     vec![(1, Some(colliding_digest(0x50, 0)))],
                     Vec::new(),
-                    &db,
                     None,
+                    &db,
                 )
                 .await;
+        });
+    }
+
+    #[test]
+    fn trait_write_dispatches_to_batch_write() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("trait-write-dispatch", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+            let key = Sha256::hash(b"trait-write-key");
+            let value = Sha256::hash(b"trait-write-value");
+
+            let batch = trait_write::<_, TestDb>(db.new_batch(), key, value);
+            let batch = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(batch).await.unwrap();
+
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            db.destroy().await.unwrap();
         });
     }
 
@@ -3450,7 +3491,7 @@ mod tests {
                     db.apply_batch(grandparent).await.unwrap();
                     db.commit().await.unwrap();
                     staged
-                        .set(indexed_updates.clone(), Vec::new(), &db, None)
+                        .merkleize(indexed_updates.clone(), Vec::new(), None, &db)
                         .await
                         .unwrap()
                 } else {
@@ -3552,7 +3593,7 @@ mod tests {
                     db.apply_batch(grandparent).await.unwrap();
                     db.commit().await.unwrap();
                     staged
-                        .set(indexed_updates.clone(), Vec::new(), &db, None)
+                        .merkleize(indexed_updates.clone(), Vec::new(), None, &db)
                         .await
                         .unwrap()
                 } else {

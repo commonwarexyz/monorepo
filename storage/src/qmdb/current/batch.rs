@@ -388,7 +388,8 @@ where
     /// assigned the returned range. The returned values are in the same order as `keys`.
     ///
     /// Expansion does not deduplicate against previously staged keys and does not observe values the
-    /// caller has computed for earlier staged slots but not yet passed to `set`.
+    /// caller has computed for earlier staged slots but not yet passed to
+    /// [`merkleize`](Staged::merkleize).
     pub async fn expand<E, C, I>(
         self,
         keys: &[&U::Key],
@@ -431,17 +432,18 @@ where
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges.
+    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
+    /// is committed with the returned batch.
     ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    pub async fn set<E, C, I>(
+    pub async fn merkleize<E, C, I>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>, Error<F>>
     where
         E: Context,
@@ -480,17 +482,18 @@ where
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges.
+    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
+    /// is committed with the returned batch.
     ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    pub async fn set<E, C, I>(
+    pub async fn merkleize<E, C, I>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>, Error<F>>
     where
         E: Context,
@@ -1221,7 +1224,7 @@ mod trait_impls {
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            Self::write(self, key, value)
+            UnmerkleizedBatch::write(self, key, value)
         }
 
         async fn merkleize(
@@ -1254,7 +1257,7 @@ mod trait_impls {
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            Self::write(self, key, value)
+            UnmerkleizedBatch::write(self, key, value)
         }
 
         async fn merkleize(

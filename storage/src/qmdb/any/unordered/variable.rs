@@ -251,7 +251,7 @@ pub(crate) mod test {
         db.apply_batch(merkleized).await.unwrap();
     }
 
-    /// The staged path (`stage` + `Staged::set`) must produce the same values and root as an
+    /// The staged path (`stage` + `Staged::merkleize`) must produce the same values and root as an
     /// explicit `get_many` + `write` + `merkleize` for variable-encoded values, across updates,
     /// a delete, upserts, a duplicate read slot, and a missing key. Guards the staged
     /// cached-location reuse against a fixed-vs-variable op-encoding divergence.
@@ -298,7 +298,7 @@ pub(crate) mod test {
 
             let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
             let staged_root = staged
-                .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
                 .await
                 .unwrap()
                 .root();

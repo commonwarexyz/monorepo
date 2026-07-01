@@ -251,7 +251,7 @@ pub mod test {
         });
     }
 
-    /// The staged path (`stage` + `Staged::set`) must produce a root byte-identical to an explicit
+    /// The staged path (`stage` + `Staged::merkleize`) must produce a root byte-identical to an explicit
     /// `get_many` + `write` + `merkleize` over the current layer, across updates, deletes, upserts,
     /// duplicate read slots, missing keys, and prefix-then-suffix expansion, rooted at the DB
     /// (D=0) and through one or two pending ancestors (D=1/D=2). This guards the current-layer
@@ -368,7 +368,7 @@ pub mod test {
 
                 let (staged_values, staged) = new_batch().stage(&keys, &db).await.unwrap();
                 let staged_root = staged
-                    .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                    .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
                     .await
                     .unwrap()
                     .root();
@@ -387,7 +387,7 @@ pub mod test {
                 assert_eq!(range, split..keys.len());
                 expanded_values.extend(suffix_values);
                 let expanded_root = staged
-                    .set(indexed_updates.clone(), upserts.clone(), &db, None)
+                    .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
                     .await
                     .unwrap()
                     .root();
@@ -418,14 +418,14 @@ pub mod test {
                 );
 
                 let duplicate_root = staged
-                    .set(
+                    .merkleize(
                         vec![
                             (0, Some(planned)),
                             (duplicate_range.start, Some(duplicate_update)),
                         ],
                         Vec::new(),
-                        &db,
                         None,
+                        &db,
                     )
                     .await
                     .unwrap()
