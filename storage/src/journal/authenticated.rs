@@ -421,33 +421,47 @@ where
             );
 
             while merkle_leaves < journal_size {
-                let batch = {
-                    let batch = merkle.new_batch();
-                    let first = batch.leaves();
-                    let mut items = Vec::new();
-                    let mut count = 0u64;
-                    while count < apply_batch_size && merkle_leaves < journal_size {
-                        let op = journal.read(*merkle_leaves).await?;
-                        items.push(op);
-                        merkle_leaves += 1;
-                        count += 1;
-                    }
+                let first = merkle_leaves;
+                let mut items = Vec::new();
+                let mut count = 0u64;
+                while count < apply_batch_size && merkle_leaves < journal_size {
+                    let op = journal.read(*merkle_leaves).await?;
+                    items.push(op);
+                    merkle_leaves += 1;
+                    count += 1;
+                }
 
-                    // Hash the batch's leaves in parallel, then append them. A per-worker scratch
-                    // buffer avoids a per-leaf allocation (mirrors `add_many`).
-                    let digests = batch.strategy().map_init_collect_vec(
-                        items.iter().enumerate(),
-                        Vec::new,
-                        |buf, (i, item)| {
-                            let pos =
-                                Position::try_from(first + i as u64).expect("valid leaf location");
+                // Hash the batch's leaves across the strategy. The serial path appends in place;
+                // the parallel path hashes with a per-worker scratch buffer to avoid a per-leaf
+                // allocation (mirrors `add_many`), then appends the collected digests.
+                let strategy = merkle.strategy();
+                let batch = strategy.run(
+                    items.len(),
+                    || {
+                        let mut buf = Vec::new();
+                        let mut batch = merkle.new_batch();
+                        for item in &items {
                             buf.clear();
-                            item.write(buf);
-                            hasher.leaf_digest(pos, buf.as_slice())
-                        },
-                    );
-                    batch.add_leaf_digests(digests)
-                };
+                            item.write(&mut buf);
+                            batch = batch.add(hasher, &buf);
+                        }
+                        batch
+                    },
+                    || {
+                        let digests = strategy.map_init_collect_vec(
+                            items.iter().enumerate(),
+                            Vec::new,
+                            |buf, (i, item)| {
+                                let pos = Position::try_from(first + i as u64)
+                                    .expect("valid leaf location");
+                                buf.clear();
+                                item.write(buf);
+                                hasher.leaf_digest(pos, buf.as_slice())
+                            },
+                        );
+                        merkle.new_batch().add_leaf_digests(digests)
+                    },
+                );
                 let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
                 merkle.apply_batch(&batch)?;
             }
