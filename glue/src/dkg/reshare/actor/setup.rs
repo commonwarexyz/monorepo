@@ -104,6 +104,10 @@ where
         let epoch = bounds.epoch();
 
         let Some(info) = self.boundary_epoch_info(epoch).await else {
+            assert!(
+                height > bounds.first(),
+                "boundary epoch info unavailable at first block {height} of epoch {epoch}",
+            );
             return Some(Setup::Follow);
         };
         if info.epoch != epoch {
