@@ -5,6 +5,9 @@
 //! and workloads with overlapping indices should use [MultiArchive] (allows all items with the same index
 //! to be retrieved). The same key may be stored at multiple indices in either case, and a key lookup may
 //! return any of the associated values.
+//!
+//! Storage errors from mutable operations are considered fatal for the current handle and may
+//! leave its in-memory state inconsistent with the underlying storage.
 
 use commonware_codec::Codec;
 use commonware_runtime::Handle;
