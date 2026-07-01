@@ -225,11 +225,7 @@ impl<B: Blob> Write<B> {
 
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        if !self.buffer.is_empty() {
-            let (buf, offset) = self
-                .buffer
-                .take()
-                .expect("take must succeed when sync observes buffered data");
+        if let Some((buf, offset)) = self.buffer.take() {
             return self.write_blob_sync(offset, buf).await;
         }
 
@@ -242,11 +238,7 @@ impl<B: Blob> Write<B> {
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
     /// mutate the blob wait before issuing blob operations.
     pub async fn start_sync(&mut self) -> Handle<()> {
-        if !self.buffer.is_empty() {
-            let (buf, offset) = self
-                .buffer
-                .take()
-                .expect("take must succeed when start_sync observes buffered data");
+        if let Some((buf, offset)) = self.buffer.take() {
             if let Err(err) = self.sync_state.write_at(&self.blob, offset, buf).await {
                 return Handle::ready(Err(err));
             }
