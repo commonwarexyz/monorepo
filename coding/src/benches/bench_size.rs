@@ -26,7 +26,7 @@ fn bench_size<S: Scheme>(name: &str) {
                 data
             };
 
-            let (_, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+            let (_, shards) = S::encode(&config, data, &STRATEGY).unwrap();
             let shard = &shards[0];
             println!(
                 "{} (shard)/msg_len={} chunks={}: {} B",

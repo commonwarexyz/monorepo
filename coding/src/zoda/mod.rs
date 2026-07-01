@@ -521,11 +521,12 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
     fn encode(
         namespace: &[u8],
         config: &Config,
-        data: impl bytes::Buf,
+        data: impl Into<bytes::Bytes>,
         strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
-        let data_bytes = data.remaining();
+        let data: bytes::Bytes = data.into();
+        let data_bytes = data.len();
         let topology = Topology::reckon(config, data_bytes);
         let data = Matrix::init(
             topology.data_rows,
@@ -706,7 +707,8 @@ mod tests {
         };
         let data = b"duplicate shard coverage";
         let (commitment, shards) =
-            Zoda::<Sha256>::encode(b"", &config, &data[..], &STRATEGY).unwrap();
+            Zoda::<Sha256>::encode(b"", &config, bytes::Bytes::copy_from_slice(data), &STRATEGY)
+                .unwrap();
         let shard0 = shards[0].clone();
         let (checking_data, checked_shard0, _weak_shard0) =
             Zoda::<Sha256>::weaken(b"", &config, &commitment, 0, shard0).unwrap();
@@ -762,7 +764,7 @@ mod tests {
         };
         let data = vec![0x5Au8; 256 * 1024];
         let (commitment, mut shards) =
-            Zoda::<Sha256>::encode(b"", &config, &data[..], &STRATEGY).unwrap();
+            Zoda::<Sha256>::encode(b"", &config, data, &STRATEGY).unwrap();
 
         let leader_i = 0usize;
         let a_i = 1usize;

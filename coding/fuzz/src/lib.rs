@@ -72,7 +72,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
         minimum_shards: NZU16!(min),
         extra_shards: NZU16!(recovery),
     };
-    let (commitment, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+    let (commitment, shards) = S::encode(&config, data.clone(), &STRATEGY).unwrap();
     assert_eq!(shards.len(), (recovery + min) as usize);
     let mut shards = (0u16..).zip(shards).collect::<Vec<_>>();
     shuffle.shuffle(&mut shards);
@@ -101,7 +101,7 @@ pub fn fuzz_phased<S: PhasedScheme>(input: FuzzInput) {
         minimum_shards: NZU16!(min),
         extra_shards: NZU16!(recovery),
     };
-    let (commitment, shards) = S::encode(b"", &config, data.as_slice(), &STRATEGY).unwrap();
+    let (commitment, shards) = S::encode(b"", &config, data.clone(), &STRATEGY).unwrap();
     assert_eq!(shards.len(), (recovery + min) as usize);
     let mut shards = (0u16..).zip(shards).collect::<Vec<_>>();
     shuffle.shuffle(&mut shards);

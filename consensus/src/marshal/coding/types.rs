@@ -168,7 +168,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         inner.write(&mut buf);
         config.write(&mut buf);
 
-        C::encode(&config, buf.as_slice(), strategy).expect("must encode block successfully")
+        C::encode(&config, buf, strategy).expect("must encode block successfully")
     }
 
     /// Create a new [`CodedBlock`] from a [`Block`] and a configuration.
@@ -346,7 +346,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
         inner.write(&mut buf);
         config.write(&mut buf);
         let (commitment, shards) =
-            C::encode(&config, buf.as_slice(), &Sequential).map_err(|_| {
+            C::encode(&config, buf, &Sequential).map_err(|_| {
                 commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
             })?;
 

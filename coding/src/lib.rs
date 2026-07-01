@@ -10,7 +10,7 @@
 )]
 
 commonware_macros::stability_scope!(ALPHA {
-    use bytes::Buf;
+    use bytes::{Buf, Bytes};
     use commonware_codec::{Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
@@ -176,7 +176,7 @@ commonware_macros::stability_scope!(ALPHA {
         #[allow(clippy::type_complexity)]
         fn encode(
             config: &Config,
-            data: impl Buf,
+            data: impl Into<Bytes>,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
@@ -317,7 +317,7 @@ commonware_macros::stability_scope!(ALPHA {
         fn encode(
             namespace: &[u8],
             config: &Config,
-            data: impl Buf,
+            data: impl Into<Bytes>,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error>;
 
@@ -422,7 +422,7 @@ commonware_macros::stability_scope!(ALPHA {
 
         fn encode(
             config: &Config,
-            data: impl Buf,
+            data: impl Into<Bytes>,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
             P::encode(b"", config, data, strategy).map_err(PhasedAsSchemeError::Scheme)
@@ -534,7 +534,7 @@ mod test {
         use commonware_parallel::Sequential;
 
         fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
-            let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
+            let (commitment, shards) = S::encode(config, Bytes::copy_from_slice(data), &Sequential).unwrap();
             let read_cfg = CodecConfig {
                 maximum_shard_size: MAX_SHARD_SIZE,
             };
@@ -563,8 +563,8 @@ mod test {
             data_a: &[u8],
             data_b: &[u8],
         ) {
-            let (commitment_a, shards_a) = S::encode(config, data_a, &Sequential).unwrap();
-            let (commitment_b, shards_b) = S::encode(config, data_b, &Sequential).unwrap();
+            let (commitment_a, shards_a) = S::encode(config, Bytes::copy_from_slice(data_a), &Sequential).unwrap();
+            let (commitment_b, shards_b) = S::encode(config, Bytes::copy_from_slice(data_b), &Sequential).unwrap();
 
             let checked_a = S::check(config, &commitment_a, 0, &shards_a[0]).unwrap();
             let checked_b = S::check(config, &commitment_b, 1, &shards_b[1]).unwrap();
@@ -582,7 +582,7 @@ mod test {
         }
 
         fn decode_rejects_empty_checked_shards<S: Scheme>(config: &Config, data: &[u8]) {
-            let (commitment, _) = S::encode(config, data, &Sequential).unwrap();
+            let (commitment, _) = S::encode(config, Bytes::copy_from_slice(data), &Sequential).unwrap();
             let result = S::decode(config, &commitment, core::iter::empty(), &Sequential);
             assert!(
                 result.is_err(),
@@ -669,7 +669,7 @@ mod test {
 
         fn roundtrip<S: PhasedScheme>(config: &Config, data: &[u8], selected: &[u16]) {
             let owner = *selected.first().expect("selected must not be empty");
-            let (commitment, shards) = S::encode(b"", config, data, &Sequential).unwrap();
+            let (commitment, shards) = S::encode(b"", config, Bytes::copy_from_slice(data), &Sequential).unwrap();
             let read_cfg = CodecConfig {
                 maximum_shard_size: MAX_SHARD_SIZE,
             };
@@ -725,8 +725,8 @@ mod test {
             data_a: &[u8],
             data_b: &[u8],
         ) {
-            let (commitment_a, shards_a) = S::encode(b"", config, data_a, &Sequential).unwrap();
-            let (commitment_b, shards_b) = S::encode(b"", config, data_b, &Sequential).unwrap();
+            let (commitment_a, shards_a) = S::encode(b"", config, Bytes::copy_from_slice(data_a), &Sequential).unwrap();
+            let (commitment_b, shards_b) = S::encode(b"", config, Bytes::copy_from_slice(data_b), &Sequential).unwrap();
 
             let (checking_data_a, checked_a, _) =
                 S::weaken(b"", config, &commitment_a, 0, shards_a[0].clone()).unwrap();
