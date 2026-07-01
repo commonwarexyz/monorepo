@@ -7,7 +7,7 @@
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [updates] [reads] [threads]
+//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [updates] [reads] [threads] [read_chunks]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
 //!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
@@ -20,6 +20,7 @@
 //! - updates: keys written per batch (default 32,768)
 //! - reads: keys loaded per batch (default 32,768)
 //! - threads: strategy pool threads (default 8)
+//! - read_chunks: split reads into `stage` + `expand` chunks (default 1)
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_parallel::Rayon;
@@ -147,6 +148,7 @@ struct Args {
     num_keys: u64,
     num_updates: u64,
     num_reads: u64,
+    read_chunks: usize,
 }
 
 fn key(i: u64) -> Digest {
@@ -162,12 +164,16 @@ fn gen_muts(rng: &mut StdRng, num_updates: u64, num_keys: u64) -> Vec<(Digest, D
         .collect()
 }
 
-fn report(db: &str, depth: u8, mut times_ms: Vec<f64>) {
+fn report(db: &str, args: &Args, mut times_ms: Vec<f64>) {
     times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p = |q: f64| times_ms[((times_ms.len() - 1) as f64 * q) as usize];
     let mean: f64 = times_ms.iter().sum::<f64>() / times_ms.len() as f64;
     println!(
-        "RESULT db={db} depth={depth} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
+        "RESULT db={db} depth={} updates={} reads={} read_chunks={} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
+        args.depth,
+        args.num_updates,
+        args.num_reads,
+        args.read_chunks,
         p(0.1),
         p(0.5),
         mean,
@@ -245,7 +251,16 @@ macro_rules! run_pipeline {
             // caller has computed them.
             let start = Instant::now();
             let b = new_batch();
-            let (values, staged) = b.stage(&keys, &db).await.unwrap();
+            let read_chunks = args.read_chunks.min(keys.len()).max(1);
+            let chunk_len = keys.len().div_ceil(read_chunks);
+            let mut chunks = keys.chunks(chunk_len);
+            let first = chunks.next().expect("reads must be non-empty");
+            let (mut values, mut staged) = b.stage(first, &db).await.unwrap();
+            for chunk in chunks {
+                let (_, more, next) = staged.expand(chunk, &db).await.unwrap();
+                values.extend(more);
+                staged = next;
+            }
             black_box(&values);
             let t_load = start.elapsed();
             let merkleized = staged.set(updates, Vec::new(), &db, None).await.unwrap();
@@ -261,7 +276,7 @@ macro_rules! run_pipeline {
             );
         }
 
-        report($label, args.depth, times_ms);
+        report($label, &args, times_ms);
         db.destroy().await.unwrap();
     }};
 }
@@ -283,6 +298,7 @@ fn main() {
         num_keys: raw.get(4).and_then(|s| s.parse().ok()).unwrap_or(1_000_000),
         num_updates: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
         num_reads: raw.get(6).and_then(|s| s.parse().ok()).unwrap_or(32_768),
+        read_chunks: raw.get(8).and_then(|s| s.parse().ok()).unwrap_or(1),
     };
     let threads: NonZeroUsize = raw
         .get(7)
@@ -306,10 +322,11 @@ fn main() {
             && args.num_reads >= args.num_updates,
         "iters, keys, and updates must be non-zero, and reads must be >= updates"
     );
+    assert!(args.read_chunks > 0, "read_chunks must be non-zero");
 
     eprintln!(
-        "constantinople db={db_kind} depth={} iters={} keys={} updates={} reads={} threads={threads}",
-        args.depth, args.iters, args.num_keys, args.num_updates, args.num_reads
+        "constantinople db={db_kind} depth={} iters={} keys={} updates={} reads={} threads={threads} read_chunks={}",
+        args.depth, args.iters, args.num_keys, args.num_updates, args.num_reads, args.read_chunks
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
