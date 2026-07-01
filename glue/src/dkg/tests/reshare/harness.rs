@@ -26,6 +26,7 @@ use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as
 use commonware_consensus::{
     marshal::{
         self,
+        ancestry::Ancestry,
         core::{Actor as MarshalActor, CommitmentFallback, Mailbox as MarshalMailbox},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
@@ -69,7 +70,6 @@ use commonware_utils::{
     sync::{Mutex, TracedAsyncRwLock},
     test_rng, test_rng_seeded, N3f1, NZDuration, NZUsize, NZU16, NZU32, NZU64,
 };
-use futures::{Stream, StreamExt};
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -246,12 +246,11 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: &mut Self::InputProvider,
     ) -> Option<Proposed<Self, E>> {
-        let mut ancestry = Box::pin(ancestry.peekable());
-        let parent = ancestry.as_mut().peek().await?.clone();
+        let parent = ancestry.peek()?.clone();
         let height = Height::new(parent.height().get() + 1);
         let payload = if Self::final_block(height) {
             self.reshare.epoch_info(ancestry).await
@@ -274,11 +273,10 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let mut ancestry = Box::pin(ancestry.peekable());
-        let tip = ancestry.as_mut().peek().await?.clone();
+        let tip = ancestry.peek()?.clone();
         if Self::final_block(tip.height()) {
             let payload = self.reshare.epoch_info(ancestry).await;
             if payload != tip.payload() {

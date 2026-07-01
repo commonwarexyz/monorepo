@@ -36,6 +36,20 @@ where
     }
 }
 
+/// Prepends a fixed sequence of blocks to an existing ancestry stream.
+///
+/// Blocks are yielded in iterator order before the tail is polled.
+pub fn with_prefix<B, S>(blocks: impl IntoIterator<Item = B>, tail: S) -> impl Ancestry<B>
+where
+    B: Block,
+    S: Stream<Item = B> + Send + Unpin + 'static,
+{
+    PrefixedAncestry {
+        blocks: blocks.into_iter().collect(),
+        tail,
+    }
+}
+
 struct BoundedAncestry<B: Block> {
     blocks: VecDeque<B>,
 }
@@ -53,6 +67,38 @@ impl<B: Block> Stream for BoundedAncestry<B> {
 
     fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(self.blocks.pop_front())
+    }
+}
+
+struct PrefixedAncestry<B: Block, S> {
+    blocks: VecDeque<B>,
+    tail: S,
+}
+
+impl<B: Block, S> Unpin for PrefixedAncestry<B, S> {}
+
+impl<B, S> Ancestry<B> for PrefixedAncestry<B, S>
+where
+    B: Block,
+    S: Stream<Item = B> + Send + Unpin + 'static,
+{
+    fn peek(&self) -> Option<&B> {
+        self.blocks.front()
+    }
+}
+
+impl<B, S> Stream for PrefixedAncestry<B, S>
+where
+    B: Block,
+    S: Stream<Item = B> + Send + Unpin + 'static,
+{
+    type Item = B;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(block) = self.blocks.pop_front() {
+            return Poll::Ready(Some(block));
+        }
+        Pin::new(&mut self.tail).poll_next(cx)
     }
 }
 

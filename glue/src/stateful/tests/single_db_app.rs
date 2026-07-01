@@ -19,6 +19,7 @@ use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as
 use commonware_consensus::{
     marshal::{
         self,
+        ancestry::Ancestry,
         core::{Actor as MarshalActor, CommitmentFallback},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
@@ -61,7 +62,7 @@ use commonware_utils::{
     sync::{Mutex, TracedAsyncRwLock},
     test_rng, NZDuration, NZUsize, NZU64,
 };
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use rand::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -204,7 +205,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: &mut Self::InputProvider,
     ) -> Option<Proposed<Self, E>> {
@@ -226,7 +227,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let mut ancestry = Box::pin(ancestry);
