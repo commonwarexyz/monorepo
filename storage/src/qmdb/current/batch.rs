@@ -71,7 +71,7 @@ impl<const N: usize> ChunkOverlay<N> {
             } else if idx == base_complete && base_has_partial {
                 base.last_chunk().0
             } else {
-                [0u8; N]
+                bitmap::BitMap::<N>::EMPTY_CHUNK
             }
         })
     }
@@ -161,13 +161,12 @@ where
 
     // Compute grafted leaf digests. All-zero chunks do not change the h=G ops digest, so preserve
     // it directly instead of hashing an empty bitmap chunk into it.
-    let zero_chunk = [0u8; N];
     Ok(strategy.map_init_collect_vec(
         inputs,
         || hasher.clone(),
         |h, (chunk_idx, chunk_ops_digest, chunk)| {
             let chunk_ops_digest = chunk_ops_digest.expect("all grafted leaves should be resolved");
-            if chunk == zero_chunk {
+            if chunk == bitmap::BitMap::<N>::EMPTY_CHUNK {
                 (chunk_idx, chunk_ops_digest)
             } else {
                 (
@@ -1101,7 +1100,7 @@ impl<const N: usize> bitmap::Readable<N> for BitmapBatch<N> {
     fn last_chunk(&self) -> ([u8; N], u64) {
         let total = self.len();
         if total == 0 {
-            return ([0u8; N], 0);
+            return (bitmap::BitMap::<N>::EMPTY_CHUNK, 0);
         }
         let rem = total % Self::CHUNK_SIZE_BITS;
         let bits_in_last = if rem == 0 { Self::CHUNK_SIZE_BITS } else { rem };
