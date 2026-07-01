@@ -1457,6 +1457,9 @@ where
         ))
     }
 
+    /// Read keys through this batch and return the values, owned staged keys, and committed-read
+    /// cache entries. `offset` is the staged index assigned to `keys[0]`, so cached entries can be
+    /// appended by [`stage`](Self::stage) and [`expand`](Staged::expand) without rewriting slots.
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
