@@ -68,6 +68,10 @@ where
 }
 
 /// Staged batch for a [`CurrentUnmerkleized`] batch.
+///
+/// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
+/// stays valid only while every batch finalized on the database is an ancestor of this batch
+/// (see [`MerkleizedBatch`]'s branch-validity contract).
 pub struct CurrentStaged<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
@@ -272,6 +276,10 @@ where
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
     /// [`expand`](CurrentStaged::expand) ranges. `metadata` is committed with the returned batch;
     /// if it is `None`, metadata set before staging is used.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
     pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -314,6 +322,10 @@ where
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
     /// [`expand`](CurrentStaged::expand) ranges. `metadata` is committed with the returned batch;
     /// if it is `None`, metadata set before staging is used.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
     pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -1437,6 +1449,19 @@ mod tests {
 
             assert_eq!(explicit_values, staged_values);
             assert_eq!(explicit_root, staged_root);
+
+            // Metadata set before staging must be committed when staged merkleize passes `None`.
+            let fallback_batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .with_metadata(metadata);
+            let (fallback_values, staged) = fallback_batch.stage(&keys).await.unwrap();
+            let fallback_root = staged
+                .merkleize(indexed_updates.clone(), upserts.clone(), None)
+                .await
+                .unwrap()
+                .root();
+            assert_eq!(explicit_values, fallback_values);
+            assert_eq!(explicit_root, fallback_root);
         });
     }
 

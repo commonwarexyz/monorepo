@@ -251,11 +251,12 @@ impl<B: Blob> View<'_, B> {
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
 
         // Map missed reads back to range indices: each remaining read starts at its range's
-        // offset, and both lists are sorted.
+        // offset, and both lists are sorted. Zero-length ranges never miss but may share an
+        // offset with the range that follows them, so they are skipped.
         let mut misses = Vec::with_capacity(cache_ranges.len());
         let mut idx = 0;
         for (_, offset) in cache_ranges {
-            while ranges[idx].0 != offset {
+            while ranges[idx].1 == 0 || ranges[idx].0 != offset {
                 idx += 1;
             }
             misses.push(idx);

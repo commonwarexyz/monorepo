@@ -13,7 +13,7 @@ use crate::{
         self,
         any::{
             self,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
+            batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
             operation::{update, Operation},
             ValueEncoding,
         },
@@ -501,6 +501,11 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
+    #[tracing::instrument(
+        name = "qmdb.current.unordered.batch.merkleize.staged",
+        level = "info",
+        skip_all
+    )]
     pub async fn merkleize<E, C, I>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -523,7 +528,7 @@ where
             .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
-                Some(staged_updates),
+                staged_updates,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
@@ -551,6 +556,11 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
+    #[tracing::instrument(
+        name = "qmdb.current.ordered.batch.merkleize.staged",
+        level = "info",
+        skip_all
+    )]
     pub async fn merkleize<E, C, I>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -573,7 +583,7 @@ where
             .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
-                Some(staged_updates),
+                staged_updates,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
@@ -677,9 +687,12 @@ where
         } = self;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
-            .merkleize_with_floor_scan(&db.any, metadata, None, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(
+                &db.any,
+                metadata,
+                StagedUpdates::new(),
+                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
+            )
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
@@ -781,9 +794,12 @@ where
         } = self;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
-            .merkleize_with_floor_scan(&db.any, metadata, None, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(
+                &db.any,
+                metadata,
+                StagedUpdates::new(),
+                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
+            )
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }

@@ -275,7 +275,19 @@ pub mod test {
                         .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
                 };
 
-                let read_keys = [key(5), key(6), key(9000), key(5), key(0), key(20), key(105)];
+                // key(60) is untouched by the depth-1/2 ancestors, so its staged read stays
+                // committed-resolved and exercises staged cached-location reuse behind stacked
+                // batches.
+                let read_keys = [
+                    key(5),
+                    key(6),
+                    key(9000),
+                    key(5),
+                    key(0),
+                    key(20),
+                    key(60),
+                    key(105),
+                ];
                 let keys: Vec<&Digest> = read_keys.iter().collect();
                 let indexed_updates = vec![
                     (0, Some(val(5_000))),
@@ -284,6 +296,7 @@ pub mod test {
                     (4, Some(val(5_003))),
                     (5, None),
                     (6, Some(val(5_004))),
+                    (7, Some(val(5_005))),
                 ];
                 let upserts = vec![
                     (key(7000), Some(val(6_000))),

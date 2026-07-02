@@ -68,6 +68,10 @@ where
 }
 
 /// Staged batch for an [`AnyUnmerkleized`] batch.
+///
+/// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
+/// stays valid only while every batch finalized on the database is an ancestor of this batch
+/// (see [`MerkleizedBatch`]'s branch-validity contract).
 pub struct AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -270,6 +274,10 @@ where
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
     /// [`expand`](AnyStaged::expand) ranges. `metadata` is committed with the returned batch; if it
     /// is `None`, metadata set before staging is used.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
     pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -311,6 +319,10 @@ where
     /// Update indices refer to the staged read set: the initial `stage` input followed by any
     /// [`expand`](AnyStaged::expand) ranges. `metadata` is committed with the returned batch; if it
     /// is `None`, metadata set before staging is used.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
     pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,

@@ -10,11 +10,11 @@
 //!
 //! Timing is coarse by design: each measured call records one wall-clock sample. Queueing on a
 //! shared pool is included in a parallel sample's elapsed time, so contention pushes the
-//! parallel estimate up and steers concurrent callers back toward serial. A path that has never
-//! been measured is probed only when its projected cost stays under [`SAMPLE_LIMIT_NS`]; for
-//! serial that projection is parallel's wall time multiplied by pool parallelism (an upper
-//! bound on the probe's cost). Both paths produce identical results, so a misjudged call only
-//! costs throughput, never correctness.
+//! parallel estimate up and steers concurrent callers back toward serial. Parallel is seeded
+//! unconditionally by the first call; a never-measured serial path is probed only when its
+//! projected cost stays under [`SAMPLE_LIMIT_NS`], where the projection is parallel's wall time
+//! multiplied by pool parallelism (an upper bound on the probe's cost). Both paths produce
+//! identical results, so a misjudged call only costs throughput, never correctness.
 //!
 //! State updates are serialized per policy entry, but calls do not hold the entry lock while work
 //! executes. Concurrent calls may therefore make decisions from an estimate that another in-flight

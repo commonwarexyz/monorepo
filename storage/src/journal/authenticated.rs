@@ -321,6 +321,16 @@ where
         self.merkle.with_mem(f)
     }
 
+    /// Like [`Contiguous::read_many`], but skips the synchronous page-cache pass. Intended for
+    /// callers that already served cache hits via [`Contiguous::read_many_sync`] and are reading
+    /// the misses.
+    pub(crate) async fn read_many_misses(
+        &self,
+        positions: &[u64],
+    ) -> Result<Vec<C::Item>, JournalError> {
+        self.journal.read_many(positions).await
+    }
+
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.
     ///
     /// The batch has no items (the committed items are on disk, not in memory).
@@ -753,6 +763,9 @@ where
         // cache-lock acquisition per blob a shard touches). The sortedness pre-check keeps
         // contract violations deterministic: without it, a non-increasing batch would error
         // only when some position missed the cache.
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
         if !positions.windows(2).all(|w| w[0] < w[1]) {
             return self.journal.read_many(positions).await;
         }
@@ -1057,6 +1070,12 @@ mod tests {
             let mut unsorted = positions.clone();
             unsorted.swap(0, 1);
             assert!(Contiguous::read_many(&journal, &unsorted).await.is_err());
+
+            // An empty batch is a no-op, even with a multi-threaded strategy.
+            assert!(Contiguous::read_many(&journal, &[])
+                .await
+                .unwrap()
+                .is_empty());
         });
     }
 

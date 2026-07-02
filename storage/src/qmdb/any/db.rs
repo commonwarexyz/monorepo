@@ -279,10 +279,11 @@ where
 
         // Fallback: one batched read for positions the page cache could not serve, which also
         // validates them: every candidate position is decoded by exactly one of the two passes,
-        // so corruption detection does not depend on cache state.
+        // so corruption detection does not depend on cache state. Skip the log's synchronous
+        // cache pass: these positions just missed it.
         misses.sort_unstable_by_key(|&(_, pos)| pos);
         let positions = Self::dedup_positions(&misses);
-        let ops = self.log.read_many(&positions).await?;
+        let ops = self.log.read_many_misses(&positions).await?;
         Self::match_read_ops(keys, &misses, &positions, &ops, &map, &mut results);
         Ok(results)
     }

@@ -632,6 +632,69 @@ mod tests {
         });
     }
 
+    /// `Sealed::read_ranges_sync_cached` serves cached pages and the in-memory tail for
+    /// variable-length ranges, and maps missed ranges back to range indices, including when a
+    /// zero-length range shares its offset with the missed range that follows it.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_ranges_sync_cached() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"rranges_sync")
+                .await
+                .unwrap();
+            // Capacity of one page makes hit/miss behavior deterministic: the cache holds
+            // exactly the last page touched.
+            let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Two full pages plus a partial tail page held in memory by the sealed view.
+            let page_size = PAGE_SIZE.get() as usize;
+            let total = page_size * 2 + 50;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            // Ranges: page 0, a zero-length range sharing its offset with the page 1 range
+            // that follows it, page 1, straddling page 1 and the tail, pure tail.
+            let ranges = [
+                (0u64, 3usize),
+                (page_size as u64 + 5, 0),
+                (page_size as u64 + 5, 7),
+                ((page_size * 2 - 2) as u64, 4),
+                ((page_size * 2 + 10) as u64, 4),
+            ];
+            let total_len: usize = ranges.iter().map(|&(_, len)| len).sum();
+            let check = |out: &[u8], indices: &[usize]| {
+                let mut start = 0;
+                for (i, &(off, len)) in ranges.iter().enumerate() {
+                    if indices.contains(&i) {
+                        let off = off as usize;
+                        assert_eq!(&out[start..start + len], &data[off..off + len]);
+                    }
+                    start += len;
+                }
+            };
+
+            // With only page 0 cached, the page 1 range and the straddler's prefix miss; the
+            // zero-length range never misses; the tail range is served in memory.
+            sealed.read_at(0, page_size).await.unwrap();
+            let mut out = vec![0u8; total_len];
+            let misses = sealed.read_ranges_sync_cached(&mut out, &ranges).unwrap();
+            assert_eq!(misses, vec![2, 3]);
+            check(&out, &[0, 4]);
+
+            // With only page 1 cached, range 0 becomes the miss and the rest are served.
+            sealed.read_at(page_size as u64, page_size).await.unwrap();
+            let mut out = vec![0u8; total_len];
+            let misses = sealed.read_ranges_sync_cached(&mut out, &ranges).unwrap();
+            assert_eq!(misses, vec![0]);
+            check(&out, &[1, 2, 3, 4]);
+        });
+    }
+
     /// `Sealed::read_many_into` falls back to blob reads for full-page cache misses.
     #[test_traced("DEBUG")]
     fn test_sealed_read_many_into_cache_miss() {
