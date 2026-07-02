@@ -17,7 +17,6 @@ use futures::future::{join_all, try_join_all};
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
-    mem::take,
     num::NonZeroUsize,
 };
 use tracing::debug;
@@ -182,19 +181,6 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
 }
 
 impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
-    /// Wait for all started syncs to complete before their blobs are dropped.
-    async fn wait_for_syncs<'a>(
-        blobs: impl IntoIterator<Item = &'a mut F::Buffer>,
-    ) -> Result<(), Error>
-    where
-        F::Buffer: 'a,
-    {
-        try_join_all(blobs.into_iter().map(|blob| blob.wait_for_sync()))
-            .await
-            .map(|_| ())
-            .map_err(Error::Runtime)
-    }
-
     /// Initialize a new `Manager`.
     ///
     /// Scans the partition for existing blobs and opens them.
@@ -329,6 +315,38 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
+    /// Remove `section`'s blob from storage, then stop tracking it. Returns the blob's size.
+    ///
+    /// Storage removal happens before the map update so a dropped future leaves the section
+    /// tracked; a missing blob is tolerated so retrying such a removal succeeds. The blob
+    /// handle stays open across the unlink, which every storage backend supports.
+    async fn remove_blob(&mut self, section: u64) -> Result<u64, Error> {
+        // Join any in-flight sync first so caller-held sync handles report the sync's true
+        // result and no buffer is dropped with I/O in flight.
+        let blob = self
+            .blobs
+            .get_mut(&section)
+            .expect("removed section must be tracked");
+        blob.wait_for_sync().await.map_err(Error::Runtime)?;
+
+        match self
+            .context
+            .remove(&self.partition, Some(&section.to_be_bytes()))
+            .await
+        {
+            // A dropped removal may have unlinked the blob without untracking it.
+            Ok(()) | Err(RError::BlobMissing(..)) => {}
+            Err(err) => return Err(Error::Runtime(err)),
+        }
+
+        let blob = self
+            .blobs
+            .remove(&section)
+            .expect("removed section must be tracked");
+        self.tracked.dec();
+        Ok(blob.size())
+    }
+
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
         // Prune any blobs that are smaller than the minimum
@@ -339,20 +357,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
                 break;
             }
 
-            // Remove blob from map
-            let mut blob = self.blobs.remove(&section).unwrap();
-            blob.wait_for_sync().await?;
-            let size = blob.size();
-            drop(blob);
-
-            // Remove blob from storage
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
+            let size = self.remove_blob(section).await?;
             pruned = true;
-
             debug!(section, size, "pruned blob");
-            self.tracked.dec();
             self.pruned.inc();
         }
 
@@ -400,36 +407,23 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
         self.prune_guard(section)?;
 
-        if let Some(mut blob) = self.blobs.remove(&section) {
-            blob.wait_for_sync().await?;
-            let size = blob.size();
-            drop(blob);
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-            self.tracked.dec();
-            debug!(section, size, "removed section");
-            Ok(true)
-        } else {
-            Ok(false)
+        if !self.blobs.contains_key(&section) {
+            return Ok(false);
         }
+        let size = self.remove_blob(section).await?;
+        debug!(section, size, "removed section");
+        Ok(true)
     }
 
     /// Remove all underlying blobs.
     pub async fn destroy(mut self) -> Result<(), Error> {
-        Self::wait_for_syncs(self.blobs.values_mut()).await?;
-        for (section, blob) in self.blobs.into_iter() {
-            let size = blob.size();
-            drop(blob);
+        while let Some((&section, _)) = self.blobs.first_key_value() {
+            let size = self.remove_blob(section).await?;
             debug!(section, size, "destroyed blob");
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
         }
         match self.context.remove(&self.partition, None).await {
-            Ok(()) => {}
             // Partition already removed or never existed.
-            Err(RError::PartitionMissing(_)) => {}
+            Ok(()) | Err(RError::PartitionMissing(_)) => {}
             Err(err) => return Err(Error::Runtime(err)),
         }
         Ok(())
@@ -439,17 +433,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     ///
     /// Unlike `destroy`, this keeps the manager alive so it can be reused.
     pub async fn clear(&mut self) -> Result<(), Error> {
-        Self::wait_for_syncs(self.blobs.values_mut()).await?;
-        let blobs = take(&mut self.blobs);
-        for (section, blob) in blobs {
-            let size = blob.size();
-            drop(blob);
+        while let Some((&section, _)) = self.blobs.first_key_value() {
+            let size = self.remove_blob(section).await?;
             debug!(section, size, "cleared blob");
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
         }
-        let _ = self.tracked.try_set(0);
         self.oldest_retained_section = 0;
         Ok(())
     }
@@ -467,15 +454,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         };
 
         for s in sections_to_remove {
-            // Remove the underlying blob from storage
-            let mut blob = self.blobs.remove(&s).unwrap();
-            blob.wait_for_sync().await?;
-            drop(blob);
-            self.context
-                .remove(&self.partition, Some(&s.to_be_bytes()))
-                .await?;
-            self.tracked.dec();
-            debug!(section = s, "removed blob during rewind");
+            let size = self.remove_blob(s).await?;
+            debug!(section = s, size, "removed blob during rewind");
         }
 
         // If the section exists, truncate it to the given size. No explicit sync barrier is
