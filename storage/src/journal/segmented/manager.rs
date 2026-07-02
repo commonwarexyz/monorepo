@@ -250,28 +250,25 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Remove `section`'s blob from storage, then stop tracking it. Returns the blob's size.
     ///
     /// Storage removal happens before the map update so a dropped future leaves the section
-    /// tracked; a missing blob is tolerated so retrying such a removal succeeds.
+    /// tracked; a missing blob is tolerated so retrying such a removal succeeds. The blob
+    /// handle stays open across the unlink, which every storage backend supports.
     async fn remove_blob(&mut self, section: u64) -> Result<u64, Error> {
-        let size = self
-            .blobs
-            .get(&section)
-            .expect("removed section must be tracked")
-            .size();
         match self
             .context
             .remove(&self.partition, Some(&section.to_be_bytes()))
             .await
         {
-            Ok(()) => {}
             // A dropped removal may have unlinked the blob without untracking it.
-            Err(RError::BlobMissing(_, _)) => {}
+            Ok(()) | Err(RError::BlobMissing(..)) => {}
             Err(err) => return Err(Error::Runtime(err)),
         }
-        self.blobs
+
+        let blob = self
+            .blobs
             .remove(&section)
             .expect("removed section must be tracked");
         self.tracked.dec();
-        Ok(size)
+        Ok(blob.size())
     }
 
     /// Prune all sections less than `min`. Returns true if any were pruned.
@@ -349,9 +346,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             debug!(section, size, "destroyed blob");
         }
         match self.context.remove(&self.partition, None).await {
-            Ok(()) => {}
             // Partition already removed or never existed.
-            Err(RError::PartitionMissing(_)) => {}
+            Ok(()) | Err(RError::PartitionMissing(_)) => {}
             Err(err) => return Err(Error::Runtime(err)),
         }
         Ok(())

@@ -16,8 +16,8 @@ use std::num::NonZeroUsize;
 ///
 /// # Cancellation
 ///
-/// Dropping an in-flight operation leaves the buffered tip intact and the writer retryable.
-/// The blob range touched by the dropped operation is indeterminate until it is rewritten and
+/// Dropping an in-flight operation leaves the writer in a consistent, retryable state. The
+/// blob range touched by the dropped operation is indeterminate until it is rewritten and
 /// synced: on some runtimes the dropped write may still reach storage.
 ///
 /// # Access
@@ -179,7 +179,7 @@ impl<B: Blob> Write<B> {
             // Chunk cannot be merged, so flush the buffer if the range overlaps, and check
             // if merge is possible after.
             let chunk_end = current_offset + chunk_len as u64;
-            if self.buffer.offset < chunk_end && !self.buffer.is_empty() {
+            if self.buffer.offset < chunk_end {
                 self.flush_buffered(false).await?;
                 if self.buffer.merge(chunk, current_offset) {
                     bufs.advance(chunk_len);
@@ -216,7 +216,7 @@ impl<B: Blob> Write<B> {
         }
 
         self.sync_state.resize(&self.blob, len).await?;
-        self.buffer.commit_resize(len);
+        self.buffer.set_size(len);
 
         Ok(())
     }
@@ -261,7 +261,7 @@ impl<B: Blob> Write<B> {
         } else {
             self.sync_state.write_at(&self.blob, offset, buf).await?;
         }
-        self.buffer.commit_prefix(buffered);
+        self.buffer.advance(buffered);
 
         Ok(())
     }

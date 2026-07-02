@@ -338,9 +338,9 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
     /// Atomically commit the current state of [Metadata].
     ///
-    /// All changes are staged and persisted to the inactive blob first; in-memory state is
-    /// published only after the writes and sync succeed, so a dropped sync leaves [Metadata]
-    /// unchanged and the next sync retries.
+    /// A dropped sync leaves [Metadata] retryable: bookkeeping that steers the next sync is
+    /// updated only after the target blob is durable, and entering the rewrite path marks the
+    /// key order changed so an interrupted rewrite is always retried as a rewrite.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Extract values we need
         let cursor = self.state.cursor;
@@ -357,71 +357,71 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
         // Get target blob (the one we will modify)
         let target_cursor = 1 - cursor;
+        let target = &mut self.state.blobs[target_cursor];
 
         // Determine if we can overwrite existing data in place, and prepare the list of data to
         // write in that event.
+        let mut overwrite = true;
+        let mut writes = vec![];
         if key_order_changed < past_version {
-            let target = &self.state.blobs[target_cursor];
-            let mut overwrite_data = target.data.clone();
-            let mut writes = Vec::with_capacity(target.modified.len() + 2);
-            let mut overwrite = true;
+            let write_capacity = target.modified.len() + 2;
+            writes.reserve(write_capacity);
             for key in target.modified.iter() {
                 let info = target.lengths.get(key).expect("key must exist");
                 let new_value = self.map.get(key).expect("key must exist");
                 if info.length == new_value.encode_size() {
                     // Overwrite existing value
                     let encoded = new_value.encode_mut();
-                    overwrite_data[info.start..info.start + info.length].copy_from_slice(&encoded);
+                    target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
                     writes.push(target.blob.write_at(info.start as u64, encoded));
                 } else {
-                    // Rewrite all
+                    // Rewrite all. Mark the key order changed so an interrupted rewrite, which
+                    // may leave stale bytes at offsets an overwrite would not repair, forces
+                    // rewrites until one succeeds.
+                    self.state.key_order_changed = next_version;
                     overwrite = false;
                     break;
                 }
             }
+        } else {
+            // If the key order has changed, we need to rewrite all data
+            overwrite = false;
+        }
 
-            // Overwrite existing data
-            if overwrite {
-                // Update version
-                let version = next_version.to_be_bytes();
-                overwrite_data[0..8].copy_from_slice(&version);
-                writes.push(target.blob.write_at(0, version.as_slice().into()));
+        // Overwrite existing data
+        if overwrite {
+            // Update version
+            let version = next_version.to_be_bytes();
+            target.data[0..8].copy_from_slice(&version);
+            writes.push(target.blob.write_at(0, version.as_slice().into()));
 
-                // Update checksum
-                let checksum_index = overwrite_data.len() - crc32::Digest::SIZE;
-                let checksum = Crc32::checksum(&overwrite_data[..checksum_index]).to_be_bytes();
-                overwrite_data[checksum_index..].copy_from_slice(&checksum);
-                writes.push(
-                    target
-                        .blob
-                        .write_at(checksum_index as u64, checksum.as_slice().into()),
-                );
+            // Update checksum
+            let checksum_index = target.data.len() - crc32::Digest::SIZE;
+            let checksum = Crc32::checksum(&target.data[..checksum_index]).to_be_bytes();
+            target.data[checksum_index..].copy_from_slice(&checksum);
+            writes.push(
+                target
+                    .blob
+                    .write_at(checksum_index as u64, checksum.as_slice().into()),
+            );
 
-                // Persist changes. The resize enforces the physical length in case a dropped
-                // earlier rewrite left the blob longer (recovery requires the checksum at the
-                // physical end of the blob).
-                try_join_all(writes).await?;
-                target.blob.resize(overwrite_data.len() as u64).await?;
-                target.blob.sync().await?;
+            // Persist changes
+            try_join_all(writes).await?;
+            target.blob.sync().await?;
 
-                // Update blob state
-                let target = &mut self.state.blobs[target_cursor];
-                target.version = next_version;
-                target.data = overwrite_data;
-                // Clear modified keys to avoid writing the same data
-                target.modified.clear();
-
-                // Update the state.
-                self.state.cursor = target_cursor;
-                self.state.next_version = next_next_version;
-                self.sync_overwrites.inc();
-                return Ok(());
-            }
+            // Update state
+            target.version = next_version;
+            // Clear modified keys to avoid writing the same data
+            target.modified.clear();
+            self.state.cursor = target_cursor;
+            self.state.next_version = next_next_version;
+            self.sync_overwrites.inc();
+            return Ok(());
         }
 
         // Since we can't overwrite in place, we rewrite the entire blob.
         let mut lengths = HashMap::new();
-        let mut next_data = Vec::with_capacity(self.state.blobs[target_cursor].data.len());
+        let mut next_data = Vec::with_capacity(target.data.len());
         next_data.put_u64(next_version);
 
         // Build new data
@@ -436,19 +436,15 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         // Enforce the physical length with a resize: recovery requires the checksum at the
         // physical end of the blob, and a dropped earlier sync whose write still landed may
         // have left the blob longer than the in-memory mirror suggests.
-        let target = &self.state.blobs[target_cursor];
         target.blob.write_at(0, next_data.clone()).await?;
         target.blob.resize(next_data.len() as u64).await?;
         target.blob.sync().await?;
 
-        // Update blob state
-        let target = &mut self.state.blobs[target_cursor];
+        // Update state
         target.version = next_version;
         target.lengths = lengths;
         target.data = next_data;
         target.modified.clear();
-
-        // Update the state.
         self.state.cursor = target_cursor;
         self.state.next_version = next_next_version;
         self.sync_rewrites.inc();

@@ -320,6 +320,9 @@ mod tests {
     }
 
     /// Drives `fut` until it parks at an armed [Gate], then drops it to simulate cancellation.
+    ///
+    /// Polls once, so every await before the gate must complete within that poll (true on the
+    /// deterministic runtime).
     pub async fn cancel_at_gate<F: futures::Future>(fut: F, started: oneshot::Receiver<()>) {
         futures::pin_mut!(fut);
         assert!(fut.as_mut().now_or_never().is_none());
@@ -375,6 +378,63 @@ mod tests {
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
             self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
+        }
+    }
+
+    /// Blob wrapper that completes a resize, then blocks until released while its gate is armed.
+    ///
+    /// Unlike [DelayedWriteBlob], the gate sits after the inner operation: this tests
+    /// cancellation where the resize landed but the caller never observed it.
+    #[derive(Clone)]
+    pub struct ResizeHoldBlob<B: crate::Blob> {
+        inner: B,
+        gate: Gate,
+    }
+
+    impl<B: crate::Blob> ResizeHoldBlob<B> {
+        pub const fn with_gate(inner: B, gate: Gate) -> Self {
+            Self { inner, gate }
+        }
+    }
+
+    impl<B: crate::Blob> crate::Blob for ResizeHoldBlob<B> {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            buf: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, buf).await
+        }
+
+        async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.inner.write_at(offset, buf).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.inner.write_at_sync(offset, buf).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await?;
+            self.gate.pass_once().await;
+            Ok(())
         }
 
         async fn sync(&self) -> Result<(), Error> {
@@ -1327,6 +1387,35 @@ mod tests {
             assert_eq!(size, 5);
             let read = blob.read_at(0, 5).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), b"hello");
+        });
+    }
+
+    // If a resize is canceled during the blob resize itself, the writer keeps its old size and
+    // a retry completes.
+    #[test_traced]
+    fn test_write_resize_cancel_preserves_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let gate = Gate::default();
+            let blob = ResizeHoldBlob::with_gate(inner.clone(), gate.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            writer.write_at(0, b"hello").await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Cancel while the completed blob resize is held open.
+            let (started, release) = gate.arm();
+            cancel_at_gate(writer.resize(3), started).await;
+            drop(release);
+
+            // The tip was never adjusted, so the writer still claims the old size; the blob
+            // range past the new size is indeterminate until the resize is retried.
+            assert_eq!(writer.size(), 5);
+            writer.resize(3).await.unwrap();
+            assert_eq!(writer.size(), 3);
+            writer.sync().await.unwrap();
+            assert_eq!(inner.size(), 3);
         });
     }
 

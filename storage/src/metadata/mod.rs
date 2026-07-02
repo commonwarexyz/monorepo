@@ -201,9 +201,12 @@ mod tests {
             blob.write_at_sync(0, vec![0xAB; 4096]).await.unwrap();
             drop(blob);
 
-            // Adding a key forces the rewrite path on the next sync.
+            // The next sync rewrites "left" (a new key changed the key order), truncating the
+            // stale bytes.
             metadata.put(U64::new(2), b"two".to_vec());
             metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"));
 
             // The synced state must survive a restart despite the stale trailing bytes.
             drop(metadata);
@@ -215,11 +218,11 @@ mod tests {
         });
     }
 
-    // An overwrite sync must also truncate trailing bytes a dropped rewrite may have left in
-    // the target blob; otherwise its checksum is not at the physical end and recovery discards
-    // the acknowledged sync.
+    // A length-changing update forces rewrites until one succeeds: an interrupted rewrite may
+    // leave stale bytes at unmodified offsets that only a full rewrite repairs, so the sync
+    // after a length-change rewrite must not take the overwrite path.
     #[test_traced]
-    fn test_sync_overwrite_truncates_stale_blob_bytes() {
+    fn test_sync_rewrites_forced_after_length_change() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -231,25 +234,26 @@ mod tests {
                     .await
                     .unwrap();
 
-            // Rewrite both blobs, then position the cursor so the next sync overwrites "left".
+            // Rewrite both blobs, then reach the overwrite steady state.
             metadata.put(U64::new(1), b"aaaa".to_vec());
             metadata.sync().await.unwrap();
             metadata.sync().await.unwrap();
             metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"));
+            assert!(buffer.contains("first_sync_overwrites_total 1"));
 
-            // Simulate a dropped rewrite whose write still landed: leave bytes in "left"
-            // beyond the length the in-memory mirror knows about.
-            let (blob, size) = context.open("test", b"left").await.unwrap();
-            blob.write_at_sync(size, vec![0xAB; 512]).await.unwrap();
-            drop(blob);
-
-            // A same-length update keeps the next sync on the overwrite path.
+            // A longer value forces a rewrite, and the next sync must rewrite as well even
+            // though the value fits its slot again.
+            metadata.put(U64::new(1), b"aaaaaaaa".to_vec());
+            metadata.sync().await.unwrap();
             metadata.put(U64::new(1), b"bbbb".to_vec());
             metadata.sync().await.unwrap();
             let buffer = context.encode();
-            assert!(buffer.contains("first_sync_overwrites_total 2"));
+            assert!(buffer.contains("first_sync_rewrites_total 4"));
+            assert!(buffer.contains("first_sync_overwrites_total 1"));
 
-            // The synced state must survive a restart despite the stale trailing bytes.
+            // The synced state must survive a restart.
             drop(metadata);
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await

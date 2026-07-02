@@ -11,8 +11,8 @@ use std::ops::{Bound, RangeBounds};
 ///
 /// - Backing storage starts detached in [Self::new] and is allocated on first write.
 /// - Logical data length is tracked separately from backing view length.
-/// - Draining paths hand buffered bytes to the blob using [Self::slice], then commit the drain
-///   with [Self::commit_prefix] only after the blob operation succeeds.
+/// - Draining paths hand buffered bytes to the blob using [Self::slice], then [Self::advance]
+///   past the drained prefix only after the blob operation succeeds.
 /// - Subsequent writes are copy-on-write: [Self::writable] recovers mutable ownership when
 ///   backing is unique, otherwise allocates from the pool and copies existing bytes.
 pub(super) struct Buffer {
@@ -93,11 +93,11 @@ impl Buffer {
         self.data.slice(start..end)
     }
 
-    /// Commits a successful flush of `len` leading bytes.
+    /// Advances the tip past `len` leading bytes that are now in the blob.
     ///
-    /// Callers should use [Self::slice] to hand bytes to storage before this method. This keeps the
+    /// Callers should use [Self::slice] to hand bytes to storage before advancing. This keeps the
     /// tip recoverable if the storage future is dropped before completion.
-    pub(super) fn commit_prefix(&mut self, len: usize) {
+    pub(super) fn advance(&mut self, len: usize) {
         assert!(len <= self.len);
         if len == 0 {
             return;
@@ -113,13 +113,13 @@ impl Buffer {
         self.offset += len as u64;
     }
 
-    /// Adjusts the tip after a blob resize has succeeded.
+    /// Makes the tip agree with a blob resized to `len` bytes.
     ///
     /// # Panics
     ///
-    /// Panics if the tip is non-empty and `len` does not shrink into it: callers must flush and
-    /// commit buffered data before a grow-or-equal resize.
-    pub(super) fn commit_resize(&mut self, len: u64) {
+    /// Panics if the tip is non-empty and `len` does not shrink into it: callers must flush
+    /// buffered data before a grow-or-equal resize.
+    pub(super) fn set_size(&mut self, len: u64) {
         if self.is_empty() {
             self.offset = len;
             return;
@@ -210,8 +210,8 @@ impl Buffer {
     /// Appends the provided `data` to the buffer, and returns `true` if the buffer is over capacity
     /// after the append.
     ///
-    /// If the buffer is above capacity, the caller is responsible for flushing and committing a
-    /// prefix. Further appends are safe, but will continue growing the buffer beyond its capacity.
+    /// If the buffer is above capacity, the caller is responsible for flushing a prefix. Further
+    /// appends are safe, but will continue growing the buffer beyond its capacity.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
         let end = self.len + data.len();
         let mut writable = self.writable(end);
@@ -252,17 +252,16 @@ mod tests {
         let mut buffer = Buffer::new(50, 100, pool);
         assert_eq!(buffer.size(), 50);
         assert!(buffer.is_empty());
-        buffer.commit_prefix(0);
 
         // Add some data to the buffer.
         assert!(!buffer.append(&[1, 2, 3]));
         assert_eq!(buffer.size(), 53);
         assert!(!buffer.is_empty());
 
-        // Confirm successful prefix commits detach flushed bytes.
+        // Confirm advancing past flushed bytes detaches them.
         let flushed = buffer.slice(..);
         assert_eq!(flushed.as_ref(), &[1, 2, 3]);
-        buffer.commit_prefix(3);
+        buffer.advance(3);
         assert_eq!(buffer.size(), 53);
         assert!(buffer.is_empty());
 
@@ -277,7 +276,7 @@ mod tests {
         buf.push(43);
         let flushed = buffer.slice(..);
         assert_eq!(flushed.as_ref(), buf.as_slice());
-        buffer.commit_prefix(buf.len());
+        buffer.advance(buf.len());
         assert!(buffer.is_empty());
         assert_eq!(buffer.size(), 154);
     }
@@ -289,11 +288,11 @@ mod tests {
         buffer.append(&[1, 2, 3]);
         assert_eq!(buffer.size(), 53);
 
-        // A grow resize first flushes and commits buffered data, then publishes the new size.
+        // A grow resize first flushes buffered data and advances past it, then sets the new size.
         let flushed = buffer.slice(..);
         assert_eq!(flushed.as_ref(), &[1, 2, 3]);
-        buffer.commit_prefix(3);
-        buffer.commit_resize(60);
+        buffer.advance(3);
+        buffer.set_size(60);
         assert_eq!(buffer.size(), 60);
         assert!(buffer.is_empty());
 
@@ -301,17 +300,17 @@ mod tests {
         assert_eq!(buffer.size(), 63);
 
         // Resize the buffer down to size 61.
-        buffer.commit_resize(61);
+        buffer.set_size(61);
         assert_eq!(buffer.size(), 61);
         assert_eq!(buffer.as_ref(), &[4]);
-        buffer.commit_prefix(1);
+        buffer.advance(1);
         assert_eq!(buffer.size(), 61);
 
         buffer.append(&[7, 8, 9]);
 
         // Resize the buffer prior to the current offset of 61. This should simply reset the buffer
         // at the new size.
-        buffer.commit_resize(59);
+        buffer.set_size(59);
         assert_eq!(buffer.size(), 59);
         assert!(buffer.is_empty());
         assert_eq!(buffer.size(), 59);
@@ -333,7 +332,8 @@ mod tests {
         let mut buffer = Buffer::new(0, 16, pool);
 
         buffer.append(b"stale");
-        buffer.commit_prefix(5);
+        // `clear` keeps the backing bytes, so slices must resolve against the logical length.
+        buffer.clear();
 
         assert!(buffer.slice(..).is_empty());
         assert!(buffer.slice(0..).is_empty());
