@@ -193,11 +193,20 @@ pub trait Contiguous: Send + Sync {
 
     /// Read multiple items at strictly increasing positions, serving only those that can be
     /// read synchronously (e.g. from a page cache). Returns one entry per position: `Some(item)`
-    /// for sync hits and `None` for positions that require I/O.
+    /// for sync hits and `None` for positions that require I/O or fail to decode (the async
+    /// read path reports such errors).
     ///
     /// Default implementation serves nothing.
     fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {
         positions.iter().map(|_| None).collect()
+    }
+
+    /// Whether [`read_many_sync`](Self::read_many_sync) can ever serve items synchronously,
+    /// letting callers skip a fan-out that would produce only misses.
+    ///
+    /// Default implementation returns `false`, matching the default `read_many_sync`.
+    fn supports_read_many_sync(&self) -> bool {
+        false
     }
 
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.

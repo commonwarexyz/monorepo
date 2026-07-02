@@ -1213,9 +1213,13 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                 if misses.peek() == Some(&idx) {
                     misses.next();
                     out.push(None);
-                } else {
-                    out.push(A::decode(slice).ok());
+                } else if let Ok(item) = A::decode(slice) {
+                    out.push(Some(item));
                     hits += 1;
+                } else {
+                    // A decode failure surfaces as a miss; the caller's async fallback read
+                    // reports the error.
+                    out.push(None);
                 }
             }
         }
@@ -1339,6 +1343,10 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         self.read_many_sync_cached(positions)
     }
 
+    fn supports_read_many_sync(&self) -> bool {
+        true
+    }
+
     async fn replay(
         &self,
         start_pos: u64,
@@ -1375,6 +1383,10 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 
     fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
         self.reader().read_many_sync_cached(positions)
+    }
+
+    fn supports_read_many_sync(&self) -> bool {
+        true
     }
 
     async fn replay(
@@ -4661,6 +4673,60 @@ mod tests {
                 let single = reader.read(pos).await.unwrap();
                 assert_eq!(batch[pos as usize], single);
             }
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_sync_matches_read_many() {
+        // Cached positions are served synchronously and match the async batched read;
+        // positions that fail validation are misses rather than errors.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(4));
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
+
+            for i in 0..20u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let positions: Vec<u64> = (0..20).collect();
+            let reader = journal.snapshot().await.unwrap();
+            let expected = reader.read_many(&positions).await.unwrap();
+
+            // Every synchronously served item must match the async read; positions the
+            // 3-page test cache cannot hold are misses, never wrong values.
+            let served = reader.read_many_sync(&positions);
+            assert_eq!(served.len(), positions.len());
+            for (item, expected) in served.into_iter().zip(&expected) {
+                if let Some(item) = item {
+                    assert_eq!(item, *expected);
+                }
+            }
+
+            // The last blob (positions 16..20) spans at most the cache capacity, so after
+            // warming exactly those positions they are all served synchronously.
+            let tail: Vec<u64> = (16..20).collect();
+            reader.read_many(&tail).await.unwrap();
+            let served = reader.read_many_sync(&tail);
+            for (item, pos) in served.into_iter().zip(&tail) {
+                assert_eq!(
+                    item.expect("warmed position is served"),
+                    expected[*pos as usize]
+                );
+            }
+
+            // A long-evicted position is a miss.
+            assert!(reader.read_many_sync(&[0])[0].is_none());
+
+            // An out-of-range position is a miss, not an error, and does not poison the
+            // valid position grouped before it.
+            let served = reader.read_many_sync(&[19, 20]);
+            assert!(served[0].is_some());
+            assert!(served[1].is_none());
             drop(reader);
 
             journal.destroy().await.unwrap();

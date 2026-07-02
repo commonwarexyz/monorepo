@@ -127,7 +127,7 @@ pub(crate) mod test {
         qmdb::{
             self,
             any::{
-                test::fixed_db_config,
+                test::{fixed_db_config, fixed_db_config_with_strategy},
                 unordered::{fixed::Operation, Update},
             },
             verify_proof,
@@ -137,10 +137,10 @@ pub(crate) mod test {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics as _, Runner as _, Supervisor as _,
+        Metrics as _, Runner as _, Supervisor as _, ThreadPooler as _,
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU64};
     use core::num::NonZeroUsize;
@@ -177,6 +177,50 @@ pub(crate) mod test {
         let seed = context.next_u64();
         let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
         AnyTest::init(context, cfg).await.unwrap()
+    }
+
+    /// `get_many` over a batch large enough for the fused sharded path matches per-key `get`.
+    #[test_traced]
+    fn test_get_many_fused_sharded_matches_get() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // The fused path requires parallelism > 1 (the Sequential test config never takes
+            // it) and at least 4096 keys; the tiny test page cache pushes most keys through
+            // the batched miss fallback, and TwoCap produces translated-key collisions.
+            type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
+            let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+            let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
+            let mut db = ParTest::init(context, cfg).await.unwrap();
+            // The fused path is gated on this capability; a wrapper that forgets to forward
+            // it silently degrades every large read to the fallback.
+            assert!(crate::journal::contiguous::Contiguous::supports_read_many_sync(&db.log));
+
+            let mut rng = test_rng_seeded(7);
+            let mut keys = Vec::with_capacity(4300);
+            let mut batch = db.new_batch();
+            for _ in 0..4200 {
+                let key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                keys.push(key);
+                batch = batch.write(key, Some(value));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Mix in absent keys so some probes resolve to nothing.
+            for _ in 0..100 {
+                keys.push(Digest::random(&mut rng));
+            }
+            let refs: Vec<&Digest> = keys.iter().collect();
+            let fused = db.get_many(&refs).await.unwrap();
+            assert_eq!(fused.len(), keys.len());
+            for (key, result) in keys.iter().zip(fused) {
+                assert_eq!(result, db.get(key).await.unwrap());
+            }
+
+            db.destroy().await.unwrap();
+        });
     }
 
     /// Create n random operations using the default seed (0). Some portion of

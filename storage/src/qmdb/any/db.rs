@@ -23,7 +23,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
-use commonware_parallel::Strategy;
+use commonware_parallel::{Manual, Strategy};
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
@@ -258,8 +258,11 @@ where
         // match phases (and their barriers) below.
         let strategy = self.strategy();
         let manual = strategy.manual();
-        if keys.len() >= PARALLEL_GET_MANY_THRESHOLD && manual.parallelism_hint() > 1 {
-            return self.get_many_map_sharded(keys, &map, manual.parallelism_hint()).await;
+        if keys.len() >= PARALLEL_GET_MANY_THRESHOLD
+            && manual.parallelism_hint() > 1
+            && self.log.supports_read_many_sync()
+        {
+            return self.get_many_map_sharded(keys, &map, manual).await;
         }
 
         // Phase 1: Collect candidate locations from the in-memory index. Each key may map to
@@ -304,27 +307,46 @@ where
 
         // Phase 2: Sort by position for batched journal reads, then deduplicate.
         candidates.sort_unstable_by_key(|&(_, pos)| pos);
-
-        let mut positions: Vec<u64> = Vec::with_capacity(candidates.len());
-        for &(_, pos) in &candidates {
-            if positions.last() != Some(&pos) {
-                positions.push(pos);
-            }
-        }
+        let positions = Self::dedup_positions(&candidates);
 
         // Phase 3: Batch-read from the journal (one reader acquisition, one I/O batch).
         let ops = self.log.read_many(&positions).await?;
 
         // Phase 4: Match operations back to keys by walking the sorted position lists.
+        Self::match_read_ops(keys, &candidates, &positions, &ops, &map, &mut results);
+
+        Ok(results)
+    }
+
+    /// Collapse position-sorted `(key index, position)` candidates into deduplicated positions.
+    fn dedup_positions(candidates: &[(usize, u64)]) -> Vec<u64> {
+        let mut positions = Vec::with_capacity(candidates.len());
+        for &(_, pos) in candidates {
+            if positions.last() != Some(&pos) {
+                positions.push(pos);
+            }
+        }
+        positions
+    }
+
+    /// Match operations read for deduplicated `positions` back to their position-sorted
+    /// candidates, filling each unresolved key slot whose operation carries its exact key.
+    fn match_read_ops<T>(
+        keys: &[&U::Key],
+        candidates: &[(usize, u64)],
+        positions: &[u64],
+        ops: &[Operation<F, U>],
+        map: &impl Fn(&U, Location<F>) -> T,
+        results: &mut [Option<T>],
+    ) {
         let mut op_idx = 0;
-        for &(key_idx, pos) in &candidates {
+        for &(key_idx, pos) in candidates {
             if results[key_idx].is_some() {
                 continue;
             }
             while positions[op_idx] < pos {
                 op_idx += 1;
             }
-            assert_eq!(positions[op_idx], pos);
             let Operation::Update(data) = &ops[op_idx] else {
                 panic!("location does not reference update operation. loc={pos}");
             };
@@ -332,21 +354,21 @@ where
                 results[key_idx] = Some(map(data, Location::new(pos)));
             }
         }
-
-        Ok(results)
     }
 
     /// Fused sharded path for [`Self::get_many_map`]: each shard probes the index, sorts its
     /// candidate locations, serves page-cache hits synchronously, and matches results in one
-    /// parallel pass. Cache misses across all shards fall back to one batched journal read.
+    /// parallel pass. Positions the cache could not serve fall back to one batched journal
+    /// read, which also validates them: every candidate position is decoded by exactly one of
+    /// the two passes, so corruption detection does not depend on cache state.
     async fn get_many_map_sharded<T: Send>(
         &self,
         keys: &[&U::Key],
         map: &(impl Fn(&U, Location<F>) -> T + Send + Sync),
-        parallelism: usize,
+        manual: Manual<S>,
     ) -> Result<Vec<Option<T>>, crate::qmdb::Error<F>> {
-        let chunk = keys.len().div_ceil(parallelism);
-        let shards: Vec<ShardReads<T>> = self.strategy().manual().map_collect_vec(
+        let chunk = keys.len().div_ceil(manual.parallelism_hint());
+        let shards: Vec<ShardReads<T>> = manual.map_collect_vec(
             keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
             |(ci, shard_keys)| {
                 let base = ci * chunk;
@@ -359,29 +381,23 @@ where
 
                 // Sort by position and deduplicate for the batched cache read.
                 candidates.sort_unstable_by_key(|&(_, pos)| pos);
-                let mut positions: Vec<u64> = Vec::with_capacity(candidates.len());
-                for &(_, pos) in &candidates {
-                    if positions.last() != Some(&pos) {
-                        positions.push(pos);
-                    }
-                }
+                let positions = Self::dedup_positions(&candidates);
 
                 // Serve page-cache hits synchronously and match them back to keys; record
-                // misses (with their global key index) for the async fallback.
+                // misses (with their global key index) for the async fallback. A miss is
+                // recorded even when its key already resolved so the fallback still reads
+                // and validates the position.
                 let ops = self.log.read_many_sync(&positions);
                 let mut results: Vec<Option<T>> = (0..shard_keys.len()).map(|_| None).collect();
                 let mut misses: Vec<(usize, u64)> = Vec::new();
                 let mut op_idx = 0;
                 for &(key_idx, pos) in &candidates {
-                    if results[key_idx].is_some() {
-                        continue;
-                    }
                     while positions[op_idx] < pos {
                         op_idx += 1;
                     }
                     match &ops[op_idx] {
                         Some(Operation::Update(data)) => {
-                            if data.key() == shard_keys[key_idx] {
+                            if results[key_idx].is_none() && data.key() == shard_keys[key_idx] {
                                 results[key_idx] = Some(map(data, Location::new(pos)));
                             }
                         }
@@ -405,28 +421,9 @@ where
 
         // Fallback: one batched read for positions the page cache could not serve.
         misses.sort_unstable_by_key(|&(_, pos)| pos);
-        let mut positions: Vec<u64> = Vec::with_capacity(misses.len());
-        for &(_, pos) in &misses {
-            if positions.last() != Some(&pos) {
-                positions.push(pos);
-            }
-        }
+        let positions = Self::dedup_positions(&misses);
         let ops = self.log.read_many(&positions).await?;
-        let mut op_idx = 0;
-        for &(key_idx, pos) in &misses {
-            if results[key_idx].is_some() {
-                continue;
-            }
-            while positions[op_idx] < pos {
-                op_idx += 1;
-            }
-            let Operation::Update(data) = &ops[op_idx] else {
-                panic!("location does not reference update operation. loc={pos}");
-            };
-            if data.key() == keys[key_idx] {
-                results[key_idx] = Some(map(data, Location::new(pos)));
-            }
-        }
+        Self::match_read_ops(keys, &misses, &positions, &ops, map, &mut results);
         Ok(results)
     }
 

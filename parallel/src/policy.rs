@@ -242,10 +242,6 @@ mod tests {
 
     const PARALLELISM: usize = 4;
 
-    fn record(entry: &mut Entry, execution: Execution, elapsed: Duration) {
-        entry.record(execution, elapsed);
-    }
-
     fn choose(entry: &mut Entry) -> (Execution, bool) {
         entry.choose(PARALLELISM)
     }
@@ -255,7 +251,7 @@ mod tests {
         let mut entry = Entry::default();
 
         assert_eq!(choose(&mut entry), (Execution::Parallel, true));
-        record(&mut entry, Execution::Parallel, Duration::from_micros(100));
+        entry.record(Execution::Parallel, Duration::from_micros(100));
 
         assert_eq!(choose(&mut entry), (Execution::Serial, true));
     }
@@ -264,7 +260,7 @@ mod tests {
     fn skips_initial_serial_probe_when_parallel_is_slow() {
         let mut entry = Entry::default();
 
-        record(&mut entry, Execution::Parallel, Duration::from_millis(10));
+        entry.record(Execution::Parallel, Duration::from_millis(10));
 
         for i in 1..PREFERRED_SAMPLE_INTERVAL {
             assert_eq!(
@@ -278,8 +274,8 @@ mod tests {
     #[test]
     fn prefers_serial_when_faster() {
         let mut entry = Entry::default();
-        record(&mut entry, Execution::Parallel, Duration::from_micros(100));
-        record(&mut entry, Execution::Serial, Duration::from_micros(95));
+        entry.record(Execution::Parallel, Duration::from_micros(100));
+        entry.record(Execution::Serial, Duration::from_micros(95));
 
         assert_eq!(choose(&mut entry), (Execution::Serial, false));
     }
@@ -289,8 +285,8 @@ mod tests {
         // Serial is only 2x slower in wall time (cheaper in worker time on a 4-thread pool),
         // but the policy optimizes latency: parallel wins.
         let mut entry = Entry::default();
-        record(&mut entry, Execution::Parallel, Duration::from_micros(100));
-        record(&mut entry, Execution::Serial, Duration::from_micros(200));
+        entry.record(Execution::Parallel, Duration::from_micros(100));
+        entry.record(Execution::Serial, Duration::from_micros(200));
 
         assert_eq!(choose(&mut entry), (Execution::Parallel, false));
     }
@@ -299,8 +295,8 @@ mod tests {
     fn prefers_serial_on_tie() {
         // Equal wall time: serial occupies one worker instead of the whole pool.
         let mut entry = Entry::default();
-        record(&mut entry, Execution::Parallel, Duration::from_micros(100));
-        record(&mut entry, Execution::Serial, Duration::from_micros(100));
+        entry.record(Execution::Parallel, Duration::from_micros(100));
+        entry.record(Execution::Serial, Duration::from_micros(100));
 
         assert_eq!(choose(&mut entry), (Execution::Serial, false));
     }
@@ -309,8 +305,8 @@ mod tests {
     fn updates_ewma_with_integer_math() {
         let mut entry = Entry::default();
 
-        record(&mut entry, Execution::Serial, Duration::from_nanos(100));
-        record(&mut entry, Execution::Serial, Duration::from_nanos(200));
+        entry.record(Execution::Serial, Duration::from_nanos(100));
+        entry.record(Execution::Serial, Duration::from_nanos(200));
 
         assert_eq!(entry.serial_ns, 120);
     }
@@ -319,8 +315,8 @@ mod tests {
     fn records_parallel_samples_as_wall_time() {
         let mut entry = Entry::default();
 
-        record(&mut entry, Execution::Parallel, Duration::from_nanos(100));
-        record(&mut entry, Execution::Parallel, Duration::from_nanos(200));
+        entry.record(Execution::Parallel, Duration::from_nanos(100));
+        entry.record(Execution::Parallel, Duration::from_nanos(200));
 
         assert_eq!(entry.parallel_ns, 120);
     }
@@ -328,8 +324,8 @@ mod tests {
     #[test]
     fn resamples_other_execution() {
         let mut entry = Entry::default();
-        record(&mut entry, Execution::Parallel, Duration::from_micros(100));
-        record(&mut entry, Execution::Serial, Duration::from_micros(80));
+        entry.record(Execution::Parallel, Duration::from_micros(100));
+        entry.record(Execution::Serial, Duration::from_micros(80));
 
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
@@ -343,8 +339,8 @@ mod tests {
     #[test]
     fn skips_parallel_resample_when_parallel_is_too_slow() {
         let mut entry = Entry::default();
-        record(&mut entry, Execution::Parallel, Duration::from_micros(300));
-        record(&mut entry, Execution::Serial, Duration::from_micros(50));
+        entry.record(Execution::Parallel, Duration::from_micros(300));
+        entry.record(Execution::Serial, Duration::from_micros(50));
 
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
@@ -358,8 +354,8 @@ mod tests {
     #[test]
     fn resamples_serial_when_parallel_wins() {
         let mut entry = Entry::default();
-        record(&mut entry, Execution::Parallel, Duration::from_micros(100));
-        record(&mut entry, Execution::Serial, Duration::from_micros(150));
+        entry.record(Execution::Parallel, Duration::from_micros(100));
+        entry.record(Execution::Serial, Duration::from_micros(150));
 
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
@@ -373,8 +369,8 @@ mod tests {
     #[test]
     fn skips_serial_resample_when_serial_is_too_slow() {
         let mut entry = Entry::default();
-        record(&mut entry, Execution::Parallel, Duration::from_micros(100));
-        record(&mut entry, Execution::Serial, Duration::from_micros(900));
+        entry.record(Execution::Parallel, Duration::from_micros(100));
+        entry.record(Execution::Serial, Duration::from_micros(900));
 
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
@@ -388,8 +384,8 @@ mod tests {
     #[test]
     fn skips_serial_resample_when_parallel_is_slow() {
         let mut entry = Entry::default();
-        record(&mut entry, Execution::Parallel, Duration::from_millis(10));
-        record(&mut entry, Execution::Serial, Duration::from_millis(60));
+        entry.record(Execution::Parallel, Duration::from_millis(10));
+        entry.record(Execution::Serial, Duration::from_millis(60));
 
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
@@ -403,8 +399,8 @@ mod tests {
     #[test]
     fn refreshes_preferred_parallel_sample() {
         let mut entry = Entry::default();
-        record(&mut entry, Execution::Parallel, Duration::from_micros(100));
-        record(&mut entry, Execution::Serial, Duration::from_micros(410));
+        entry.record(Execution::Parallel, Duration::from_micros(100));
+        entry.record(Execution::Serial, Duration::from_micros(410));
 
         for i in 1..PREFERRED_SAMPLE_INTERVAL {
             assert_eq!(

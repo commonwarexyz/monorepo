@@ -563,6 +563,66 @@ mod tests {
         });
     }
 
+    /// `Sealed::read_many_sync_cached` serves cached pages and the in-memory tail, and maps
+    /// missed ranges (including straddling prefixes) back to item indices.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_many_sync_cached() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany_sync").await.unwrap();
+            // Capacity of one page makes hit/miss behavior deterministic: the cache holds
+            // exactly the last page touched.
+            let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Two full pages plus a partial tail page held in memory by the sealed view.
+            let page_size = PAGE_SIZE.get() as usize;
+            let total = page_size * 2 + 50;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            // Items: page 0, page 1, straddling page 1 and the tail, pure tail.
+            let offsets = [
+                0u64,
+                page_size as u64,
+                (page_size * 2 - 2) as u64,
+                (page_size * 2 + 10) as u64,
+            ];
+            let item_size = 4usize;
+            let check = |out: &[u8], indices: &[usize]| {
+                for &i in indices {
+                    let off = offsets[i] as usize;
+                    assert_eq!(
+                        &out[i * item_size..(i + 1) * item_size],
+                        &data[off..off + item_size],
+                    );
+                }
+            };
+
+            // With only page 0 cached, items touching page 1 are misses; the tail item is
+            // served from the sealed view's in-memory bytes.
+            sealed.read_at(0, page_size).await.unwrap();
+            let mut out = vec![0u8; offsets.len() * item_size];
+            let misses = sealed
+                .read_many_sync_cached(&mut out, &offsets, NZUsize!(item_size))
+                .unwrap();
+            assert_eq!(misses, vec![1, 2]);
+            check(&out, &[0, 3]);
+
+            // With only page 1 cached, item 0 becomes the miss and the straddler is served.
+            sealed.read_at(page_size as u64, page_size).await.unwrap();
+            let mut out = vec![0u8; offsets.len() * item_size];
+            let misses = sealed
+                .read_many_sync_cached(&mut out, &offsets, NZUsize!(item_size))
+                .unwrap();
+            assert_eq!(misses, vec![0]);
+            check(&out, &[1, 2, 3]);
+        });
+    }
+
     /// `Sealed::read_many_into` falls back to blob reads for full-page cache misses.
     #[test_traced("DEBUG")]
     fn test_sealed_read_many_into_cache_miss() {
