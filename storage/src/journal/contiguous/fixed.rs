@@ -1179,7 +1179,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                 == super::position_to_blob(*b, items_per_blob)
         }) {
             let all_misses = |out: &mut Vec<Option<A>>| out.extend(group.iter().map(|_| None));
-            if group.iter().any(|&pos| self.validate_readable(pos).is_err()) {
+            if group
+                .iter()
+                .any(|&pos| self.validate_readable(pos).is_err())
+            {
                 all_misses(&mut out);
                 continue;
             }

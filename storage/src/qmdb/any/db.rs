@@ -401,7 +401,9 @@ where
                                 results[key_idx] = Some(map(data, Location::new(pos)));
                             }
                         }
-                        Some(_) => panic!("location does not reference update operation. loc={pos}"),
+                        Some(_) => {
+                            panic!("location does not reference update operation. loc={pos}")
+                        }
                         None => misses.push((base + key_idx, pos)),
                     }
                 }
