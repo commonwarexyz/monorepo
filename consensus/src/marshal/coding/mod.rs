@@ -653,6 +653,11 @@ mod tests {
         });
     }
 
+    /// Crash-recovery shape: after an unclean shutdown, Simplex may recover a
+    /// notarized commitment while marshal has no local certification gate task and no
+    /// durable block. If enough shards or a peer response can provide the block,
+    /// certification should fetch it by notarized round and persist it instead
+    /// of treating the missing local copy as a hard failure.
     #[test_traced("WARN")]
     fn test_coding_certify_missing_candidate_fetches_by_round() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1382,7 +1387,7 @@ mod tests {
             // Re-proposals happen within the same epoch when the parent is the last block
             //
             // In the coding marshal, verify() returns shard validity while deferred_verify
-            // runs in the background. We call verify() to register the verification task,
+            // runs in the background. We call verify() to register the certification gate task,
             // then certify() returns the deferred_verify result.
             let reproposal_round = Round::new(Epoch::new(0), View::new(20));
             let reproposal_context = CodingCtx {
@@ -1392,7 +1397,7 @@ mod tests {
             };
 
             // Call verify to kick off deferred verification.
-            // We must await the verify result to ensure the verification task is
+            // We must await the verify result to ensure the certification gate task is
             // registered before calling certify.
             let shard_validity = marshaled
                 .verify(reproposal_context.clone(), boundary_commitment)
@@ -1447,7 +1452,7 @@ mod tests {
             };
 
             // Call verify to kick off deferred verification.
-            // We must await the verify result to ensure the verification task is
+            // We must await the verify result to ensure the certification gate task is
             // registered before calling certify.
             let shard_validity = marshaled
                 .verify(invalid_reproposal_context, non_boundary_commitment)
@@ -1478,7 +1483,7 @@ mod tests {
             };
 
             // Call verify to kick off deferred verification.
-            // We must await the verify result to ensure the verification task is
+            // We must await the verify result to ensure the certification gate task is
             // registered before calling certify.
             let shard_validity = marshaled
                 .verify(cross_epoch_reproposal_context.clone(), boundary_commitment)
@@ -1680,7 +1685,7 @@ mod tests {
             shards.proposed(boundary_round, coded_boundary);
             context.sleep(Duration::from_millis(10)).await;
 
-            // Certify should not return the stale closed verification task; it
+            // Certify should not return the stale closed certification gate task; it
             // should recover through the embedded-context certification path.
             let certify_rx = marshaled
                 .certify(reproposal_round, boundary_commitment)
@@ -1756,7 +1761,7 @@ mod tests {
             // Verify must not synthesize `false` when the block cannot be fetched.
             let verify_rx = marshaled.verify(reproposal_context, missing_payload).await;
 
-            // Ensure the verification task has registered its subscription, then
+            // Ensure the certification gate task has registered its subscription, then
             // force cancellation by pruning the missing commitment.
             context.sleep(Duration::from_millis(100)).await;
             shards.prune(missing_payload);
@@ -1773,7 +1778,7 @@ mod tests {
                 },
             }
 
-            // Certify should not surface the closed verification task as the final result.
+            // Certify should not surface the closed certification gate task as the final result.
             // With no block available, it remains pending on the recovery path until the
             // certifier's caller times out or data arrives.
             let mut certify_rx = marshaled.certify(round, missing_payload).await;
@@ -2156,8 +2161,8 @@ mod tests {
     #[test_traced("WARN")]
     fn test_certify_without_prior_verify_crash_recovery() {
         // After a crash, consensus may call certify() without a prior verify().
-        // The certify path (marshaled.rs:842-936) should:
-        //   1. Find no in-progress verification task
+        // The certify path should:
+        //   1. Find no in-progress certification gate task
         //   2. Subscribe to the block from the shard engine
         //   3. Use the block's embedded context for deferred_verify
         //   4. Return Ok(true) for a valid block
@@ -2598,12 +2603,9 @@ mod tests {
     }
 
     /// Regression: a validator must not vote finalize on a block that is not
-    /// durably persisted. `certify` resolves true ⟹ block is on disk for
+    /// durably persisted. If `certify` resolves true, the block is on disk for
     /// this validator. We assert this by aborting the marshal actor the
-    /// instant `certify` returns true; without the persist-before-certify
-    /// fix, the actor may have only had the `Verified` message enqueued (not
-    /// processed), and the block is lost on restart even though the validator
-    /// would have proceeded to broadcast a finalize vote.
+    /// instant `certify` returns true, then restarting from the same partition.
     #[test_traced("WARN")]
     fn test_marshaled_certify_persists_block_before_resolving() {
         for seed in 0u64..16 {
@@ -2729,16 +2731,15 @@ mod tests {
             let post_restart = marshal2.get_block(&child_digest).await;
             assert!(
                 post_restart.is_some(),
-                "certify resolved true ⟹ block must be durably persisted"
+                "certify resolved true, so block must be durably persisted"
             );
         });
     }
 
-    /// Regression: a proposer must be able to recover its own block after a
-    /// crash that occurs immediately after `Marshaled::propose()` returns a
-    /// commitment. `propose` is responsible for persisting the block via
-    /// `marshal.verified`, so the block must survive restart even if
-    /// `Relay::broadcast` never runs or marshal aborts in between.
+    /// Regression: a leader must be able to recover its own block across an unclean restart.
+    /// `propose` registers a certification gate, so the leader establishes durability by
+    /// certifying its own proposal. After certify, the block must survive restart even if
+    /// `Relay::broadcast` never runs. This is the >= f+1 guarantee for the leader's own block.
     #[test_traced("WARN")]
     fn test_marshaled_proposed_block_persists_across_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -2821,8 +2822,18 @@ mod tests {
                 .expect("propose should produce a commitment");
             assert_eq!(commitment, expected_commitment);
 
-            // Abort marshal immediately after propose returns; the propose
-            // path must already have persisted the block.
+            // The leader certifies its own proposal, which awaits the deferred propose
+            // sync handle and establishes durability before the finalize vote.
+            assert!(
+                marshaled
+                    .certify(propose_round, commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "certify must succeed for the leader's own proposal"
+            );
+
+            // Abort marshal after certify; the leader's own block must be durable.
             marshal_actor_handle.abort();
             drop(marshaled);
             drop(marshal);

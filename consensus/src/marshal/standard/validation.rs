@@ -1,7 +1,7 @@
 use crate::{
     marshal::{
         application::validation::{
-            has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
+            has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
         },
         core::{CommitmentFallback, Mailbox},
         standard::Standard,
@@ -70,7 +70,7 @@ pub(super) enum Decision<B> {
 #[inline]
 pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
     epocher: &ES,
-    marshal: &mut Mailbox<S, Standard<B>>,
+    marshal: &Mailbox<S, Standard<B>>,
     context: &Context<B::Digest, S::PublicKey>,
     digest: B::Digest,
     block: B,
@@ -111,30 +111,28 @@ where
     Some(Decision::Continue(block))
 }
 
-/// Runs the shared non-reproposal verification flow.
+/// Outcome of fetching the parent and validating structural ancestry invariants.
+pub(super) enum ParentCheck<B> {
+    /// Structurally valid; carries the fetched parent for application verification.
+    Valid(B),
+    /// Structurally invalid (bad parent linkage or non-contiguous height); the verdict is
+    /// `false` and the block must not be stored.
+    Invalid,
+}
+
+/// Fetches the expected parent and validates standard ancestry invariants (parent linkage
+/// and contiguous height).
 ///
-/// This fetches the expected parent, validates standard ancestry invariants, then
-/// calls application verification over the ancestry stream.
-///
-/// Returns:
-/// - `Some(valid)` when a verification verdict is available.
-/// - `None` when work should stop early (e.g., receiver dropped or parent unavailable).
+/// Returns `None` when work should stop early (receiver dropped or parent unavailable).
 #[inline]
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn verify_with_parent<E, S, A, B>(
-    runtime_context: E,
-    context: Context<B::Digest, S::PublicKey>,
-    block: B,
-    application: &mut A,
-    marshal: &mut Mailbox<S, Standard<B>>,
+pub(super) async fn fetch_and_validate_parent<S, B>(
+    context: &Context<B::Digest, S::PublicKey>,
+    block: &B,
+    marshal: &Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<bool>,
-    stage: Stage,
-    ancestor_fetch_duration: Timed,
-) -> Option<bool>
+) -> Option<ParentCheck<B>>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
     let (parent_view, parent_commitment) = context.parent;
@@ -167,7 +165,7 @@ where
     };
 
     // Validate parent linkage and contiguous child height before application logic.
-    if let Err(err) = validate_block(&block, &parent, parent_commitment) {
+    if let Err(err) = validate_block(block, &parent, parent_commitment) {
         debug!(
             ?err,
             expected_parent = %parent.digest(),
@@ -176,10 +174,36 @@ where
             block_height = %block.height(),
             "block failed standard invariant validation"
         );
-        return Some(false);
+        return Some(ParentCheck::Invalid);
     }
 
-    // Request verification from the application over the two-block ancestry prefix.
+    Some(ParentCheck::Valid(parent))
+}
+
+/// Runs application verification over the two-block ancestry prefix.
+///
+/// The block must already have passed [`fetch_and_validate_parent`]. Returns `None` when
+/// work should stop early (receiver dropped). The store is intentionally separate so callers
+/// can run it concurrently with this verification (durability is independent of validity).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_app_verify<E, S, A, B>(
+    runtime_context: E,
+    context: Context<B::Digest, S::PublicKey>,
+    block: &B,
+    parent: B,
+    application: &mut A,
+    marshal: &Mailbox<S, Standard<B>>,
+    tx: &mut oneshot::Sender<bool>,
+    ancestor_fetch_duration: Timed,
+) -> Option<bool>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    S: Scheme,
+    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+    B: Block + Clone,
+{
+    let (parent_view, parent_commitment) = context.parent;
     let ancestry_stream = marshal.ancestor_stream(
         Arc::new(runtime_context.child("ancestor_stream")),
         [block.clone(), parent],
@@ -198,22 +222,16 @@ where
             parent = %parent_commitment
         ));
     // If consensus drops the receiver, we can stop work early.
-    let application_valid = select! {
+    select! {
         _ = tx.closed() => {
             debug!(
                 reason = "consensus dropped receiver",
                 "skipping verification"
             );
-            return None;
+            None
         },
-        valid = validity_request => valid,
-    };
-
-    if application_valid && !stage.store(marshal, context.round, block).await {
-        debug!(round = ?context.round, "marshal unable to accept block");
-        return None;
+        valid = validity_request => Some(valid),
     }
-    Some(application_valid)
 }
 
 #[cfg(test)]
