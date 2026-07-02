@@ -316,7 +316,7 @@ pub async fn hash_file(path: &Path) -> Result<String, Error> {
         let mut file = std::fs::File::open(&path)?;
         let file_size = file.metadata()?.len() as usize;
         let buffer_size = file_size.min(MAX_HASH_BUFFER_SIZE);
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha256::default();
         let mut buffer = vec![0u8; buffer_size];
         loop {
             let bytes_read = file.read(&mut buffer)?;
@@ -325,7 +325,8 @@ pub async fn hash_file(path: &Path) -> Result<String, Error> {
             }
             hasher.update(&buffer[..bytes_read]);
         }
-        Ok(hasher.finalize().to_string())
+        let (_, digest) = hasher.finalize();
+        Ok(digest.to_string())
     })
     .await
     .map_err(|e| Error::Io(std::io::Error::other(e)))?
