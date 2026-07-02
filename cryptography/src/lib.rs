@@ -269,10 +269,6 @@ commonware_macros::stability_scope!(BETA {
 
         /// Consume the hasher, returning a freshly-reset hasher alongside the
         /// digest of everything written so far.
-        ///
-        /// Returning the reset hasher allows callers that hash many values in a
-        /// loop to reuse the underlying allocation without exposing a separate
-        /// `reset` method.
         fn finalize(self) -> (Self, Self::Digest);
     }
 });
