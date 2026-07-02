@@ -21,10 +21,11 @@
 //!
 //! This batch verification implementation is adaptive in the sense that it
 //! detects multiple signatures created with the same verification key and
-//! automatically coalesces terms in the final verification equation. In the
-//! limiting case where all signatures in the batch are made with the same
-//! verification key, coalesced batch verification runs twice as fast as ordinary
-//! batch verification.
+//! automatically coalesces terms in the final verification equation. Signatures
+//! are sharded for parallel verification, so coalescing applies to signatures
+//! that land in the same shard. In the limiting case where all signatures in
+//! the batch are made with the same verification key, coalesced batch
+//! verification runs twice as fast as ordinary batch verification.
 //!
 //! ![benchmark](https://www.zfnd.org/images/coalesced-batch-graph.png)
 //!
@@ -36,8 +37,9 @@
 
 use super::{Error, Signature, VerificationKey};
 use crate::transcript::{Summary, Transcript};
+use ahash::RandomState;
 #[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeMap as Map, vec::Vec};
+use alloc::vec::Vec;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_utils::union_unique;
@@ -48,12 +50,9 @@ use curve25519_dalek::{
     scalar::Scalar,
     traits::{IsIdentity, VartimeMultiscalarMul},
 };
+use hashbrown::HashMap;
 use rand_core::{CryptoRng, RngCore};
 use sha2::{digest::Update, Sha512};
-#[cfg(feature = "std")]
-use std::collections::HashMap;
-#[cfg(feature = "std")]
-type Map<K, V> = HashMap<K, V>;
 
 const NOISE_BATCH_VERIFY: &[u8] = b"batch_verify";
 
@@ -67,14 +66,12 @@ fn gen_u128<R: RngCore + CryptoRng>(mut rng: R) -> u128 {
 /// A batch verification context.
 #[derive(Default)]
 pub struct Verifier {
-    /// Signature data queued for verification. Payloads are copied (instead
-    /// of hashed at queue time) so the SHA-512 challenge computation for
-    /// every signature is deferred to [`Verifier::verify`], where it runs
-    /// under the caller's [`Strategy`] instead of serially at queue time.
-    signatures: Map<VerificationKey, Vec<(Vec<u8>, Signature)>>,
-    /// Caching this count avoids a map traversal to figure out
-    /// how much to preallocate.
-    batch_size: usize,
+    /// Signature data queued for verification, in insertion order. Payloads
+    /// are copied (instead of hashed at queue time) so the SHA-512 challenge
+    /// computation for every signature is deferred to [`Verifier::verify`],
+    /// where it runs under the caller's [`Strategy`] instead of serially at
+    /// queue time.
+    signatures: Vec<(VerificationKey, Vec<u8>, Signature)>,
 }
 
 impl Verifier {
@@ -97,13 +94,7 @@ impl Verifier {
             |namespace| union_unique(namespace, message),
         );
 
-        self.signatures
-            .entry(vk)
-            // The common case is 1 signature per public key.
-            // We could also consider using a smallvec here.
-            .or_insert_with(|| Vec::with_capacity(1))
-            .push((payload, sig));
-        self.batch_size += 1;
+        self.signatures.push((vk, payload, sig));
     }
 
     /// Perform batch verification, returning `Ok(())` if all signatures were
@@ -125,11 +116,10 @@ impl Verifier {
         // `n_signatures / cores` in size. Random seeds are generated for each shard, derived
         // from the provided RNG, to compute a random scalar for each signature in the shard.
         let manual = strategy.manual();
-        let groups: Vec<_> = self.signatures.into_iter().collect();
-        let shard_count = manual.parallelism_hint().min(groups.len().max(1));
-        let shard_size = groups.len().div_ceil(shard_count).max(1);
+        let shard_count = manual.parallelism_hint().min(self.signatures.len().max(1));
+        let shard_size = self.signatures.len().div_ceil(shard_count).max(1);
         let mut shards = Vec::with_capacity(shard_count);
-        for shard in groups.chunks(shard_size) {
+        for shard in self.signatures.chunks(shard_size) {
             let seed = Summary::random(&mut rng);
             shards.push((shard, seed));
         }
@@ -156,9 +146,9 @@ impl Verifier {
                 //
                 // Normally n signatures would require a multiscalar multiplication of
                 // size 2*n + 1, together with 2*n point decompressions (to obtain A_i
-                // and R_i). However, because we store batch entries in a map
-                // indexed by the verification key, we can "coalesce" all z_i * k_i
-                // terms for each distinct verification key into a single coefficient.
+                // and R_i). However, by grouping the shard's entries by verification
+                // key, we can "coalesce" all z_i * k_i terms for each distinct
+                // verification key into a single coefficient.
                 //
                 // For n signatures from m verification keys, this approach instead
                 // requires a multiscalar multiplication of size n + m + 1 together with
@@ -168,41 +158,38 @@ impl Verifier {
                 // the usual method. However, when m = 1 and all signatures are from a
                 // single verification key, this is nearly twice as fast.
 
-                let m = shard.len();
-                let batch_size = shard.iter().map(|(_, sigs)| sigs.len()).sum();
-
-                let mut A_coeffs = Vec::with_capacity(m);
-                let mut As = Vec::with_capacity(m);
-                let mut R_coeffs = Vec::with_capacity(batch_size);
-                let mut Rs = Vec::with_capacity(batch_size);
+                let n = shard.len();
+                let mut key_indices: HashMap<&[u8; 32], usize, RandomState> =
+                    HashMap::with_capacity_and_hasher(n, RandomState::default());
+                let mut A_coeffs: Vec<Scalar> = Vec::with_capacity(n);
+                let mut As = Vec::with_capacity(n);
+                let mut R_coeffs = Vec::with_capacity(n);
+                let mut Rs = Vec::with_capacity(n);
                 let mut B_coeff = Scalar::ZERO;
 
-                for (vk, sigs) in shard {
-                    let A = -vk.minus_A;
-                    let mut A_coeff = Scalar::ZERO;
-
-                    for (payload, sig) in sigs.iter() {
-                        let k = super::scalar_from_hash(
-                            Sha512::default()
-                                .chain(&sig.R_bytes[..])
-                                .chain(vk.as_bytes())
-                                .chain(payload),
-                        );
-                        let R = CompressedEdwardsY(sig.R_bytes)
-                            .decompress()
-                            .ok_or(Error::InvalidSignature)?;
-                        let s = Scalar::from_canonical_bytes(sig.s_bytes)
-                            .into_option()
-                            .ok_or(Error::InvalidSignature)?;
-                        let z = Scalar::from(gen_u128(&mut rng));
-                        B_coeff -= z * s;
-                        Rs.push(R);
-                        R_coeffs.push(z);
-                        A_coeff += z * k;
-                    }
-
-                    As.push(A);
-                    A_coeffs.push(A_coeff);
+                for (vk, payload, sig) in shard {
+                    let k = super::scalar_from_hash(
+                        Sha512::default()
+                            .chain(&sig.R_bytes[..])
+                            .chain(vk.as_bytes())
+                            .chain(payload),
+                    );
+                    let R = CompressedEdwardsY(sig.R_bytes)
+                        .decompress()
+                        .ok_or(Error::InvalidSignature)?;
+                    let s = Scalar::from_canonical_bytes(sig.s_bytes)
+                        .into_option()
+                        .ok_or(Error::InvalidSignature)?;
+                    let z = Scalar::from(gen_u128(&mut rng));
+                    B_coeff -= z * s;
+                    Rs.push(R);
+                    R_coeffs.push(z);
+                    let index = *key_indices.entry(vk.as_bytes()).or_insert_with(|| {
+                        As.push(-vk.minus_A);
+                        A_coeffs.push(Scalar::ZERO);
+                        As.len() - 1
+                    });
+                    A_coeffs[index] += z * k;
                 }
 
                 let check = EdwardsPoint::vartime_multiscalar_mul(
@@ -275,6 +262,23 @@ mod tests {
 
         // Altering any message must fail the whole batch.
         items[7].2[0] ^= 1;
+        assert!(!verify(&items));
+    }
+
+    #[test]
+    fn test_verify_interleaved_duplicate_keys() {
+        // Round-robin queueing scatters each signer's signatures across shard
+        // boundaries, exercising coalescing of non-adjacent duplicate keys
+        // within a shard and duplicate keys split across shards.
+        let grouped = signatures(2, 6);
+        let mut items = Vec::with_capacity(grouped.len());
+        for i in 0..6 {
+            items.push(grouped[i]);
+            items.push(grouped[6 + i]);
+        }
+        assert!(verify(&items));
+
+        items[5].2[0] ^= 1;
         assert!(!verify(&items));
     }
 

@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-cryptography"
 workspace = true
 
 [dependencies]
+ahash = { workspace = true, features = ["no-rng"] }
 anyhow = { workspace = true, optional = true }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 blake3 = { workspace = true, features = ["zeroize"] }
@@ -31,6 +32,7 @@ ctutils.workspace = true
 curve25519-dalek.workspace = true
 ecdsa.workspace = true
 fixedbitset.workspace = true
+hashbrown.workspace = true
 num-rational = { workspace = true, optional = true }
 num-traits = { workspace = true, optional = true }
 once_cell = { workspace = true, features = ["alloc", "race"] }
@@ -88,6 +90,8 @@ arbitrary = [
 ]
 fuzz = [ "arbitrary", "std" ]
 std = [
+	"ahash/runtime-rng",
+	"ahash/std",
 	"anyhow?/std",
 	"blake3/std",
 	"bytes/std",
