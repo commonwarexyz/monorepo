@@ -337,10 +337,6 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     }
 
     /// Atomically commit the current state of [Metadata].
-    ///
-    /// A dropped sync leaves [Metadata] retryable: bookkeeping that steers the next sync is
-    /// updated only after the target blob is durable, and entering the rewrite path marks the
-    /// key order changed so an interrupted rewrite is always retried as a rewrite.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Extract values we need
         let cursor = self.state.cursor;

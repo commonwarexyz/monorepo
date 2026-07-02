@@ -44,9 +44,6 @@ enum SyncState {
 
 impl SyncState {
     /// Mark a new unsynced mutation.
-    ///
-    /// Called before awaiting the blob operation so a failed or dropped mutation is still
-    /// covered by a later sync.
     fn mark_dirty(&mut self) {
         assert!(
             !matches!(self, Self::Pending(_)),
@@ -286,11 +283,10 @@ mod tests {
         }
     }
 
-    /// One-shot gate a blob wrapper can block on until a test releases it.
+    /// One-shot gate a blob wrapper can park on, so tests can cancel an operation mid-flight.
     ///
-    /// Starts unarmed, so gated operations pass through. [Self::arm] installs a fresh gate:
-    /// the next gated operation signals the returned `started` receiver, then blocks until the
-    /// returned `release` sender is used or dropped.
+    /// Starts unarmed, so gated operations pass through until [Self::cancel] arms the gate for
+    /// a single operation.
     #[derive(Clone, Default)]
     pub struct Gate {
         started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -298,7 +294,9 @@ mod tests {
     }
 
     impl Gate {
-        pub fn arm(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        /// Arm the gate: the next gated operation signals the returned `started` receiver,
+        /// then parks until the returned `release` sender is used or dropped.
+        fn arm(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             *self.started.lock() = Some(started_tx);
@@ -306,7 +304,7 @@ mod tests {
             (started_rx, release_tx)
         }
 
-        /// Signal and block on an armed gate, or pass through an unarmed one.
+        /// Signal and park on an armed gate, or pass through an unarmed one.
         pub async fn pass_once(&self) {
             let started = self.started.lock().take();
             let release = self.release.lock().take();
@@ -317,38 +315,41 @@ mod tests {
                 let _ = release.await;
             }
         }
+
+        /// Arm the gate, drive `fut` until it parks at the gate, then drop it to simulate
+        /// cancellation.
+        ///
+        /// Polls once, so every await before the gate must complete within that poll (true on
+        /// the deterministic runtime).
+        pub async fn cancel<F: futures::Future>(&self, fut: F) {
+            let (started, _release) = self.arm();
+            futures::pin_mut!(fut);
+            assert!(fut.as_mut().now_or_never().is_none());
+            started.await.unwrap();
+        }
     }
 
-    /// Drives `fut` until it parks at an armed [Gate], then drops it to simulate cancellation.
-    ///
-    /// Polls once, so every await before the gate must complete within that poll (true on the
-    /// deterministic runtime).
-    pub async fn cancel_at_gate<F: futures::Future>(fut: F, started: oneshot::Receiver<()>) {
-        futures::pin_mut!(fut);
-        assert!(fut.as_mut().now_or_never().is_none());
-        started.await.unwrap();
-    }
-
-    /// Blob wrapper that lets tests hold one write open until explicitly released.
+    /// Blob wrapper whose [Gate] parks the next write before it reaches the blob.
     #[derive(Clone)]
-    pub struct DelayedWriteBlob<B: crate::Blob> {
+    pub struct GatedWriteBlob<B: crate::Blob> {
         inner: B,
         gate: Gate,
     }
 
-    impl<B: crate::Blob> DelayedWriteBlob<B> {
-        pub fn new(inner: B) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    impl<B: crate::Blob> GatedWriteBlob<B> {
+        pub fn new(inner: B) -> (Self, Gate) {
             let gate = Gate::default();
-            let (started, release) = gate.arm();
-            (Self::with_gate(inner, gate), started, release)
-        }
-
-        pub const fn with_gate(inner: B, gate: Gate) -> Self {
-            Self { inner, gate }
+            (
+                Self {
+                    inner,
+                    gate: gate.clone(),
+                },
+                gate,
+            )
         }
     }
 
-    impl<B: crate::Blob> crate::Blob for DelayedWriteBlob<B> {
+    impl<B: crate::Blob> crate::Blob for GatedWriteBlob<B> {
         async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
             self.inner.read_at(offset, len).await
         }
@@ -389,23 +390,28 @@ mod tests {
         }
     }
 
-    /// Blob wrapper that completes a resize, then blocks until released while its gate is armed.
-    ///
-    /// Unlike [DelayedWriteBlob], the gate sits after the inner operation: this tests
-    /// cancellation where the resize landed but the caller never observed it.
+    /// Blob wrapper whose [Gate] parks the next resize after the inner resize completes: a
+    /// canceled caller did the work but never observed it.
     #[derive(Clone)]
-    pub struct ResizeHoldBlob<B: crate::Blob> {
+    pub struct GatedResizeBlob<B: crate::Blob> {
         inner: B,
         gate: Gate,
     }
 
-    impl<B: crate::Blob> ResizeHoldBlob<B> {
-        pub const fn with_gate(inner: B, gate: Gate) -> Self {
-            Self { inner, gate }
+    impl<B: crate::Blob> GatedResizeBlob<B> {
+        pub fn new(inner: B) -> (Self, Gate) {
+            let gate = Gate::default();
+            (
+                Self {
+                    inner,
+                    gate: gate.clone(),
+                },
+                gate,
+            )
         }
     }
 
-    impl<B: crate::Blob> crate::Blob for ResizeHoldBlob<B> {
+    impl<B: crate::Blob> crate::Blob for GatedResizeBlob<B> {
         async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
             self.inner.read_at(offset, len).await
         }
@@ -1236,7 +1242,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started, release) = DelayedWriteBlob::new(inner.clone());
+            let (blob, gate) = GatedWriteBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(10));
 
             writer.write_at(0, b"abcdefghij").await.unwrap();
@@ -1244,8 +1250,7 @@ mod tests {
 
             // The overlapping write must flush the old tip before it can continue.
             // Drop that future while the flush write is blocked.
-            cancel_at_gate(writer.write_at(5, b"0123456789"), started).await;
-            drop(release);
+            gate.cancel(writer.write_at(5, b"0123456789")).await;
 
             // The canceled flush must not have drained the tip or touched the blob.
             assert_eq!(writer.size(), 10);
@@ -1344,13 +1349,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started, release) = DelayedWriteBlob::new(inner.clone());
+            let (blob, gate) = GatedWriteBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
             writer.write_at(0, b"hello").await.unwrap();
             // Growing past buffered data must flush that data first. Cancel during that flush.
-            cancel_at_gate(writer.resize(10), started).await;
-            drop(release);
+            gate.cancel(writer.resize(10)).await;
 
             // The resize was canceled, so the writer should still look like it did before.
             assert_eq!(writer.size(), 5);
@@ -1397,17 +1401,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let gate = Gate::default();
-            let blob = ResizeHoldBlob::with_gate(inner.clone(), gate.clone());
+            let (blob, gate) = GatedResizeBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
             writer.write_at(0, b"hello").await.unwrap();
             writer.sync().await.unwrap();
 
             // Cancel while the completed blob resize is held open.
-            let (started, release) = gate.arm();
-            cancel_at_gate(writer.resize(3), started).await;
-            drop(release);
+            gate.cancel(writer.resize(3)).await;
 
             // The tip was never adjusted, so the writer still claims the old size; the blob
             // range past the new size is indeterminate until the resize is retried.
@@ -1425,13 +1426,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started, release) = DelayedWriteBlob::new(inner.clone());
+            let (blob, gate) = GatedWriteBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
             writer.write_at(0, b"hello").await.unwrap();
             // An equal-size resize must flush buffered data first. Cancel during that flush.
-            cancel_at_gate(writer.resize(5), started).await;
-            drop(release);
+            gate.cancel(writer.resize(5)).await;
 
             // The resize was canceled, so the writer should still look like it did before.
             assert_eq!(writer.size(), 5);
@@ -2083,7 +2083,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started, release) = DelayedWriteBlob::new(inner.clone());
+            let (blob, gate) = GatedWriteBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
             // Clear the constructor's dirty state so the canceled sync takes the
             // write-and-sync-in-one path.
@@ -2091,8 +2091,7 @@ mod tests {
 
             writer.write_at(0, b"abc").await.unwrap();
             // Cancel while sync is trying to write the buffered tip to the blob.
-            cancel_at_gate(writer.sync(), started).await;
-            drop(release);
+            gate.cancel(writer.sync()).await;
 
             // The tip should still be visible, and the blob should not have seen the write.
             assert_eq!(writer.size(), 3);

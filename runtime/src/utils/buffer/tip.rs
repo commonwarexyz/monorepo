@@ -93,33 +93,31 @@ impl Buffer {
         self.data.slice(start..end)
     }
 
-    /// Advances the tip past `len` leading bytes that are now in the blob.
-    ///
-    /// Callers should use [Self::slice] to hand bytes to storage before advancing. This keeps the
-    /// tip recoverable if the storage future is dropped before completion.
-    pub(super) fn advance(&mut self, len: usize) {
-        assert!(len <= self.len);
-        if len == 0 {
-            return;
+    /// Discards the first `n` bytes of the buffer and advances the offset by `n`.
+    /// Panics if `n` is greater than the length of the buffer.
+    pub(super) fn advance(&mut self, n: usize) {
+        assert!(n <= self.len);
+        match n {
+            0 => {}
+            n if n == self.len => {
+                self.data = IoBuf::default();
+                self.len = 0;
+            }
+            n => {
+                self.data = self.data.slice(n..self.len);
+                self.len -= n;
+            }
         }
-
-        if len == self.len {
-            self.len = 0;
-            self.data = IoBuf::default();
-        } else {
-            self.data = self.data.slice(len..self.len);
-            self.len -= len;
-        }
-        self.offset += len as u64;
+        self.offset += n as u64;
     }
 
-    /// Makes the tip agree with a blob resized to `len` bytes.
+    /// Sets the logical blob size to `len`, discarding any additional bytes.
     ///
     /// # Panics
     ///
-    /// Panics if the tip is non-empty and `len` does not shrink into it: callers must flush
-    /// buffered data before a grow-or-equal resize.
-    pub(super) fn set_size(&mut self, len: u64) {
+    /// Panics if the buffer is non-empty and `len >= self.size()`: flush buffered bytes before
+    /// a resize that grows or keeps the current size.
+    pub(super) fn resize(&mut self, len: u64) {
         if self.is_empty() {
             self.offset = len;
             return;
@@ -127,7 +125,7 @@ impl Buffer {
 
         assert!(
             len < self.size(),
-            "resize over buffered bytes must flush first"
+            "must flush buffered bytes before a grow-or-equal resize"
         );
         if len >= self.offset {
             self.len = (len - self.offset) as usize;
@@ -292,7 +290,7 @@ mod tests {
         let flushed = buffer.slice(..);
         assert_eq!(flushed.as_ref(), &[1, 2, 3]);
         buffer.advance(3);
-        buffer.set_size(60);
+        buffer.resize(60);
         assert_eq!(buffer.size(), 60);
         assert!(buffer.is_empty());
 
@@ -300,7 +298,7 @@ mod tests {
         assert_eq!(buffer.size(), 63);
 
         // Resize the buffer down to size 61.
-        buffer.set_size(61);
+        buffer.resize(61);
         assert_eq!(buffer.size(), 61);
         assert_eq!(buffer.as_ref(), &[4]);
         buffer.advance(1);
@@ -310,7 +308,7 @@ mod tests {
 
         // Resize the buffer prior to the current offset of 61. This should simply reset the buffer
         // at the new size.
-        buffer.set_size(59);
+        buffer.resize(59);
         assert_eq!(buffer.size(), 59);
         assert!(buffer.is_empty());
         assert_eq!(buffer.size(), 59);

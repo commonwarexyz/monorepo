@@ -4,6 +4,13 @@ use crate::{
 };
 use std::num::NonZeroUsize;
 
+/// Whether a flush must make its bytes durable before returning.
+enum Durability {
+    NonDurable,
+    Durable,
+}
+use Durability::{Durable, NonDurable};
+
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
 /// updating data.
 ///
@@ -180,7 +187,7 @@ impl<B: Blob> Write<B> {
             // if merge is possible after.
             let chunk_end = current_offset + chunk_len as u64;
             if self.buffer.offset < chunk_end {
-                self.flush_buffered(false).await?;
+                self.flush(NonDurable).await?;
                 if self.buffer.merge(chunk, current_offset) {
                     bufs.advance(chunk_len);
                     current_offset += chunk_len as u64;
@@ -212,11 +219,11 @@ impl<B: Blob> Write<B> {
     /// before resizing the underlying blob.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
         if len >= self.buffer.size() {
-            self.flush_buffered(false).await?;
+            self.flush(NonDurable).await?;
         }
 
         self.sync_state.resize(&self.blob, len).await?;
-        self.buffer.set_size(len);
+        self.buffer.resize(len);
 
         Ok(())
     }
@@ -225,7 +232,7 @@ impl<B: Blob> Write<B> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         // A durable flush leaves the state clean, so the trailing sync only acts when nothing
         // was buffered.
-        self.flush_buffered(true).await?;
+        self.flush(Durable).await?;
         self.sync_state.sync(&self.blob).await
     }
 
@@ -235,7 +242,7 @@ impl<B: Blob> Write<B> {
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
     /// mutate the blob wait before issuing blob operations.
     pub async fn start_sync(&mut self) -> Handle<()> {
-        if let Err(err) = self.flush_buffered(false).await {
+        if let Err(err) = self.flush(NonDurable).await {
             return Handle::ready(Err(err));
         }
 
@@ -244,9 +251,7 @@ impl<B: Blob> Write<B> {
 
     /// Flush all buffered bytes to the blob, detaching the flushed prefix only after the blob
     /// write succeeds. A dropped flush leaves the tip intact for retry.
-    ///
-    /// When `durable` is true, the flushed bytes are made durable before returning.
-    async fn flush_buffered(&mut self, durable: bool) -> Result<(), Error> {
+    async fn flush(&mut self, durability: Durability) -> Result<(), Error> {
         if self.buffer.is_empty() {
             return Ok(());
         }
@@ -254,12 +259,13 @@ impl<B: Blob> Write<B> {
         let offset = self.buffer.offset;
         let buffered = self.buffer.len();
         let buf = self.buffer.slice(..);
-        if durable {
-            self.sync_state
-                .write_at_sync(&self.blob, offset, buf)
-                .await?;
-        } else {
-            self.sync_state.write_at(&self.blob, offset, buf).await?;
+        match durability {
+            Durable => {
+                self.sync_state
+                    .write_at_sync(&self.blob, offset, buf)
+                    .await?
+            }
+            NonDurable => self.sync_state.write_at(&self.blob, offset, buf).await?,
         }
         self.buffer.advance(buffered);
 

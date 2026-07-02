@@ -197,15 +197,12 @@ impl crate::Storage for Storage {
         let path = self.cfg.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
-            // Only a missing blob may map to BlobMissing: callers treat it as already
-            // removed, so any other failure must surface.
-            fs::remove_file(blob_path).await.map_err(|err| {
-                if err.kind() == std::io::ErrorKind::NotFound {
-                    Error::BlobMissing(partition.into(), hex(name))
-                } else {
-                    err.into()
-                }
-            })?;
+            fs::remove_file(blob_path)
+                .await
+                .map_err(|err| match err.kind() {
+                    std::io::ErrorKind::NotFound => Error::BlobMissing(partition.into(), hex(name)),
+                    _ => err.into(),
+                })?;
 
             // Sync the partition directory to ensure the removal is durable.
             // Windows doesn't have a notion of syncing a directory entry to ensure that it's
@@ -213,13 +210,12 @@ impl crate::Storage for Storage {
             #[cfg(unix)]
             sync_dir(&path).await?;
         } else {
-            fs::remove_dir_all(&path).await.map_err(|err| {
-                if err.kind() == std::io::ErrorKind::NotFound {
-                    Error::PartitionMissing(partition.into())
-                } else {
-                    err.into()
-                }
-            })?;
+            fs::remove_dir_all(&path)
+                .await
+                .map_err(|err| match err.kind() {
+                    std::io::ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+                    _ => err.into(),
+                })?;
 
             // Sync the storage directory to ensure the removal is durable.
             // Windows doesn't have a notion of syncing a directory entry to ensure that it's
