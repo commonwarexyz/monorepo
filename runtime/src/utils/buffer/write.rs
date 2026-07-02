@@ -215,6 +215,9 @@ impl<B: Blob> Write<B> {
     ///
     /// If buffered data exists and the resize does not shrink below it, buffered data is flushed
     /// before resizing the underlying blob.
+    ///
+    /// A dropped resize may still be applied to the blob by a later operation. [Self::size]
+    /// reflects a grow only once it returns `Ok`, and a shrink as soon as it is issued.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
         if len >= self.buffer.size() {
             // Grow (or keep the size): flush buffered bytes, resize the blob, and move the

@@ -46,22 +46,23 @@ enum State {
     Pending(Completion),
 }
 
-/// Tracks whether blob mutations still need a sync and whether an issued resize is still owed.
+/// Tracks whether blob mutations still need a sync and whether a resize still needs to be
+/// applied.
 ///
 /// Callers rely on four properties:
-/// - Every operation that mutates the blob first waits for an in-flight sync, so a started
-///   sync's coverage is never disturbed by later writes.
-/// - [SyncState::start_sync] while a sync is in flight returns that sync's handle (completed
-///   syncs resolve immediately), so re-requesting a sync is a cheap way to observe outstanding
-///   work.
-/// - A failure is never lost: every handle cloned from the shared completion reports it, and
-///   an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
-///   which also marks the state dirty since the mutations still need durability.
-/// - A dropped [SyncState::resize] is never lost: the intended length is recorded before the
-///   resize is awaited, and every later operation re-issues it (see [SyncState::settle])
-///   before touching the blob. Callers may therefore adopt a resize in memory before awaiting
-///   it. A resize that returns an error keeps the intent recorded, but errors are fatal:
-///   callers must not keep using the writer after one.
+/// 1. Every operation that mutates the blob first waits for an in-flight sync, so a started
+///    sync's coverage is never disturbed by later writes.
+/// 2. [SyncState::start_sync] while a sync is in flight returns that sync's handle (completed
+///    syncs resolve immediately), so re-requesting a sync is a cheap way to observe
+///    outstanding work.
+/// 3. A failure is never lost: every handle cloned from the shared completion reports it, and
+///    an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
+///    which also marks the state dirty since the mutations still need durability.
+/// 4. A dropped [SyncState::resize] is never lost: the intended length is recorded before the
+///    resize is awaited, and every later operation re-issues it (see [SyncState::settle])
+///    before touching the blob. Callers may therefore adopt a resize in memory before awaiting
+///    it. A resize that returns an error keeps the intent recorded, but errors are fatal:
+///    callers must not keep using the writer after one.
 struct SyncState {
     /// Durability of already-issued mutations.
     state: State,
