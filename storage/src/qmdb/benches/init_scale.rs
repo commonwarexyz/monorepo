@@ -13,8 +13,8 @@
 //! elapsed build time. A folder names the database's on-disk location:
 //!
 //! ```text
-//! cargo bench -p commonware-storage --bench init_scale --features test-traits -- generate /tmp/db 50000000 250000000
-//! cargo bench -p commonware-storage --bench init_scale --features test-traits -- bench    /tmp/db
+//! cargo bench -p commonware-storage --bench init_scale --features test-traits -- generate /tmp/db 50000000 250000000 [zipf_exponent] [page_size]
+//! cargo bench -p commonware-storage --bench init_scale --features test-traits -- bench    /tmp/db [page_size]
 //! cargo bench -p commonware-storage --bench init_scale --features test-traits -- destroy  /tmp/db
 //! ```
 //!
@@ -26,12 +26,17 @@
 //! reporting the total build time. `bench` reopens it (read-only) at cache off / a quarter of the
 //! replay region / the whole replay region, reporting each init time plus the replay-region size `R`
 //! (what the cache must cover to avoid eviction).
+//!
+//! The optional `page_size` arg (logical bytes; default 16384) selects the page geometry; a
+//! database must be `bench`ed with the page size it was generated with. Pass a value whose
+//! physical page is a power of two (e.g. 16372 -> 16384 on disk) to measure storage-page-aligned
+//! layouts against unaligned ones (e.g. the 16384 default -> 16396 on disk).
 
 #[allow(dead_code, unused_imports, unused_macros)]
 #[path = "common.rs"]
 mod common;
 
-use common::{any_fix_cfg_with, gen_random_kv, make_fixed_value, AnyOFixDb};
+use common::{any_fix_cfg_with_page_size, gen_random_kv, make_fixed_value, AnyOFixDb, PAGE_SIZE};
 use commonware_runtime::{
     tokio::{Config, Runner},
     Runner as _, Supervisor as _,
@@ -40,7 +45,7 @@ use commonware_storage::{merkle::mmr::Family as Mmr, qmdb::any::traits::DbAny as
 use commonware_utils::{NZUsize, NZU64};
 use std::{
     io::Write as _,
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::{Duration, Instant},
 };
 
@@ -69,7 +74,7 @@ const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  bench    <folder>              reopen + time init at cache off / R/4 / R\n  destroy  <folder>              delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [page_size]   build a database (omit exponent => zipf 1.0; 0 => uniform; page_size = logical bytes, default 16384)\n  bench    <folder> [page_size]  reopen + time init at cache off / R/4 / R (page_size must match generate)\n  destroy  <folder>              delete the database"
     );
 }
 
@@ -93,12 +98,22 @@ fn main() {
                         return;
                     }
                 };
-                generate(folder, keyspace, num_updates, zipf_exponent)
+                let Some(page_size) = parse_page_size(argv.get(5)) else {
+                    usage();
+                    return;
+                };
+                generate(folder, keyspace, num_updates, zipf_exponent, page_size)
             }
             _ => usage(),
         },
         Some("bench") => match argv.get(1) {
-            Some(folder) => bench(folder),
+            Some(folder) => {
+                let Some(page_size) = parse_page_size(argv.get(2)) else {
+                    usage();
+                    return;
+                };
+                bench(folder, page_size)
+            }
             None => usage(),
         },
         Some("destroy") => match argv.get(1) {
@@ -115,7 +130,21 @@ fn main() {
 ///
 /// `zipf_exponent` sets the key distribution: `None` is uniform, `Some(e)` is Zipf with exponent `e`.
 /// The populated set fills organically as updates sample the keyspace (no separate seed phase).
-fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option<f64>) {
+/// Parse an optional logical page-size argument, defaulting to [PAGE_SIZE].
+fn parse_page_size(arg: Option<&String>) -> Option<NonZeroU16> {
+    match arg {
+        None => Some(PAGE_SIZE),
+        Some(a) => a.parse::<u16>().ok().and_then(NonZeroU16::new),
+    }
+}
+
+fn generate(
+    folder: &str,
+    keyspace: u64,
+    num_updates: u64,
+    zipf_exponent: Option<f64>,
+    page_size: NonZeroU16,
+) {
     if keyspace == 0 {
         eprintln!("keyspace must be > 0");
         return;
@@ -128,7 +157,7 @@ fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option
     let elapsed = Runner::new(cfg).start(|ctx| async move {
         let mut db = AnyOFixDb::<Mmr>::init(
             ctx.child("storage"),
-            any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
+            any_fix_cfg_with_page_size(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, page_size),
         )
         .await
         .unwrap();
@@ -155,7 +184,7 @@ fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option
 
 /// Reopen the database at `folder` (read-only) and time `init` at three cache regimes: off, a
 /// quarter of the replay region (fills + evicts), and the whole replay region (no eviction).
-fn bench(folder: &str) {
+fn bench(folder: &str, page_size: NonZeroU16) {
     if !db_dir_nonempty(folder) {
         eprintln!(
             "no database at {folder}; run `generate {folder} <keyspace> <num_updates>` first"
@@ -166,14 +195,14 @@ fn bench(folder: &str) {
 
     // No-cache baseline; also learn the replay region R (ops above the inactivity floor) -- what the
     // location cache must cover to avoid eviction (a key-cache would need only the key count).
-    let (baseline, region) = time_init(&cfg, None);
+    let (baseline, region) = time_init(&cfg, None, page_size);
     if region == 0 {
         eprintln!(
             "database at {folder} is empty; run `generate {folder} <keyspace> <num_updates>` first"
         );
         return;
     }
-    println!("init_scale: {folder}  (any::ordered::fixed::mmr)");
+    println!("init_scale: {folder}  (any::ordered::fixed::mmr, logical page size {page_size})");
     println!("  replay region R = {region} ops");
     println!("  cache=off          : {baseline:?}");
     let _ = std::io::stdout().flush();
@@ -182,7 +211,7 @@ fn bench(folder: &str) {
         NonZeroUsize::new((region / 4) as usize),
         NonZeroUsize::new(region as usize),
     ] {
-        let (elapsed, _) = time_init(&cfg, cache_size);
+        let (elapsed, _) = time_init(&cfg, cache_size, page_size);
         println!("  cache={cache_size:?}: {elapsed:?}");
         let _ = std::io::stdout().flush();
     }
@@ -198,9 +227,14 @@ fn destroy(folder: &str) {
 
 /// Time a single `init` of the database at `cfg`'s folder with the given cache size, returning the
 /// elapsed time and the replay-region size (`0` if the database is empty/absent).
-fn time_init(cfg: &Config, cache_size: Option<NonZeroUsize>) -> (Duration, u64) {
+fn time_init(
+    cfg: &Config,
+    cache_size: Option<NonZeroUsize>,
+    page_size: NonZeroU16,
+) -> (Duration, u64) {
     Runner::new(cfg.clone()).start(|ctx| async move {
-        let mut config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE);
+        let mut config =
+            any_fix_cfg_with_page_size(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, page_size);
         config.init_cache_size = cache_size;
         let start = Instant::now();
         let db = AnyOFixDb::<Mmr>::init(ctx.child("storage"), config)

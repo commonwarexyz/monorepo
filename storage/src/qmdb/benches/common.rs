@@ -147,7 +147,18 @@ pub fn any_fix_cfg_with(
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
 ) -> AnyFixedConfig<EightCap, Rayon> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, page_cache_size);
+    any_fix_cfg_with_page_size(ctx, items_per_blob, page_cache_size, PAGE_SIZE)
+}
+
+/// [any_fix_cfg_with], with an explicit logical page size (a database must be reopened with the
+/// page size it was written with).
+pub fn any_fix_cfg_with_page_size(
+    ctx: &(impl BufferPooler + ThreadPooler),
+    items_per_blob: NonZeroU64,
+    page_cache_size: NonZeroUsize,
+    page_size: NonZeroU16,
+) -> AnyFixedConfig<EightCap, Rayon> {
+    let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     AnyFixedConfig {
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
