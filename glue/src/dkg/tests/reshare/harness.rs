@@ -19,7 +19,8 @@ use crate::{
             Unmerkleized as _,
         },
         probe::{Config as ProbeConfig, Probe},
-        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor, SyncPlan,
+        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
+        SyncPlan,
     },
 };
 use commonware_broadcast::buffered;

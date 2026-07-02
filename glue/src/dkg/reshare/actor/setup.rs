@@ -235,10 +235,9 @@ where
         } else {
             None
         };
-        let player = participants
-            .players
-            .position(&public_key)
-            .and_then(|_| store.create_player::<C, N3f1>(epoch, self.signer.clone(), round.clone()));
+        let player = participants.players.position(&public_key).and_then(|_| {
+            store.create_player::<C, N3f1>(epoch, self.signer.clone(), round.clone())
+        });
 
         PreparedEpoch {
             epoch,

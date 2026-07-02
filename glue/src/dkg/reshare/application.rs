@@ -139,7 +139,10 @@ where
                     },
                 )
                 .await;
-        } else if matches!(self.phase(height), Some(EpochPhase::Midpoint | EpochPhase::Late)) {
+        } else if matches!(
+            self.phase(height),
+            Some(EpochPhase::Midpoint | EpochPhase::Late)
+        ) {
             self.reshare.next_log(height).await
         } else {
             None
@@ -166,7 +169,10 @@ where
         // rebuilt; the front of the buffer is the block under verification.
         let blocks: Vec<B> = ancestry.collect().await;
         let Some(tip) = blocks.first().cloned() else {
-            return self.inner.verify(context, ancestry::from_iter(blocks)).await;
+            return self
+                .inner
+                .verify(context, ancestry::from_iter(blocks))
+                .await;
         };
         let height = tip.height();
         if self.final_block(height) {
@@ -183,6 +189,8 @@ where
             // block must not carry a reshare payload.
             return false;
         }
-        self.inner.verify(context, ancestry::from_iter(blocks)).await
+        self.inner
+            .verify(context, ancestry::from_iter(blocks))
+            .await
     }
 }

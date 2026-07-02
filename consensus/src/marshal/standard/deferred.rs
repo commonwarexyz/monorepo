@@ -182,7 +182,13 @@ impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>, Input = ()>,
+    A: Application<
+        E,
+        Block = B,
+        SigningScheme = S,
+        Context = Context<B::Digest, S::PublicKey>,
+        Input = (),
+    >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
@@ -456,7 +462,13 @@ impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>, Input = ()>,
+    A: Application<
+        E,
+        Block = B,
+        SigningScheme = S,
+        Context = Context<B::Digest, S::PublicKey>,
+        Input = (),
+    >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
@@ -784,7 +796,13 @@ impl<E, S, A, B, ES> CertifiableAutomaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>, Input = ()>,
+    A: Application<
+        E,
+        Block = B,
+        SigningScheme = S,
+        Context = Context<B::Digest, S::PublicKey>,
+        Input = (),
+    >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {

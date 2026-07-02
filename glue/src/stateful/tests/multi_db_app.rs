@@ -10,8 +10,8 @@ use crate::{
             DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
         },
         probe::{Config as ProbeConfig, Probe},
-        Application, Config as StatefulConfig, Input, Proposed, PruneConfig, Stateful as StatefulActor,
-        SyncPlan,
+        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Stateful as StatefulActor, SyncPlan,
     },
 };
 use commonware_broadcast::buffered;

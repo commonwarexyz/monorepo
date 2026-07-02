@@ -755,7 +755,9 @@ mod tests {
             // candidate and resolves to the epoch-one boundary artifact.
             harness.send_target_finalization();
             context.sleep(Duration::from_millis(100)).await;
-            let artifact = subscription.try_recv().expect("newer finalization resolved");
+            let artifact = subscription
+                .try_recv()
+                .expect("newer finalization resolved");
             assert_artifact(
                 artifact,
                 &harness.boundary_finalization,

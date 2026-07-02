@@ -850,8 +850,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let secret_store = MemorySecretStore::default();
-            let mut store =
-                init_store(context.child("store"), "missing-dealing", secret_store.clone()).await;
+            let mut store = init_store(
+                context.child("store"),
+                "missing-dealing",
+                secret_store.clone(),
+            )
+            .await;
             let signers = signers();
             let players = players(&signers);
             let info = Info::new::<N3f1>(
@@ -895,7 +899,13 @@ mod tests {
                     .find(|(recipient, _, _)| *recipient == player_pk)
                     .expect("dealing for player");
                 let Verdict::Valid(ack) = player
-                    .handle(&mut store, Epoch::zero(), dealer_pk.clone(), public, private)
+                    .handle(
+                        &mut store,
+                        Epoch::zero(),
+                        dealer_pk.clone(),
+                        public,
+                        private,
+                    )
                     .await
                 else {
                     panic!("ack");
@@ -918,12 +928,19 @@ mod tests {
             // but the matching private dealing is gone. Resuming as that player
             // must degrade to an observer rather than panic.
             let empty_secret_store = MemorySecretStore::default();
-            let restarted =
-                init_store(context.child("restart"), "missing-dealing", empty_secret_store).await;
+            let restarted = init_store(
+                context.child("restart"),
+                "missing-dealing",
+                empty_secret_store,
+            )
+            .await;
             assert!(restarted.dealings(Epoch::zero()).is_empty());
             assert_eq!(restarted.logs(Epoch::zero()).len(), 1);
-            let player =
-                restarted.create_player::<PrivateKey, N3f1>(Epoch::zero(), signers[1].clone(), info);
+            let player = restarted.create_player::<PrivateKey, N3f1>(
+                Epoch::zero(),
+                signers[1].clone(),
+                info,
+            );
             assert!(
                 player.is_none(),
                 "a missing private dealing must degrade to observer, not panic"
