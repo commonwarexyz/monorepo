@@ -979,21 +979,23 @@ impl<B: Blob> Writer<B> {
             return Err(Error::InvalidChecksum);
         }
 
+        // Publish a reduced claim before any destructive step: the target page's full
+        // contents become the tip (so reads of it are served from memory) and the writer
+        // claims nothing above it. If the truncate below is dropped, the writer
+        // under-claims and never claims deleted pages. If a CRC slot write below is dropped,
+        // the cleared record makes the next flush rewrite the whole record from the tip,
+        // instead of trusting a stale record that no longer matches the disk.
+        self.partial_page_state = None;
+        self.current_page = full_pages;
+        self.buffer.offset = tail_offset;
+        self.buffer.clear();
+        let over_capacity = self.buffer.append(page_data.as_ref());
+        assert!(!over_capacity);
+
         // If the target stays within the current tip page, the physical page count is
-        // unchanged and no truncate is needed. Otherwise the truncate deletes every physical
-        // page above the target page, including full pages that cannot be rebuilt, so publish
-        // a reduced claim before awaiting it: the target page's contents become the tip (so
-        // reads of it are served from memory) and the writer claims nothing above it. A
-        // dropped truncate then leaves the writer under-claiming, never claiming deleted
-        // pages, and clearing the record means a stale record cannot make a later flush skip
-        // rewriting the tip.
+        // unchanged and no truncate is needed. Otherwise truncate every physical page above
+        // the target page.
         if new_physical_size != current_physical_size {
-            self.partial_page_state = None;
-            self.current_page = full_pages;
-            self.buffer.offset = tail_offset;
-            self.buffer.clear();
-            let over_capacity = self.buffer.append(page_data.as_ref());
-            assert!(!over_capacity);
             self.sync_state
                 .resize(&self.blob, new_physical_size)
                 .await?;
@@ -1883,7 +1885,7 @@ mod tests {
                 .open("test_partition", b"flush_cancel")
                 .await
                 .unwrap();
-            let (blob, gate) = GatedWriteBlob::new(inner);
+            let (blob, gate) = GatedWriteBlob::new(inner, GatePosition::Before);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
@@ -1922,7 +1924,7 @@ mod tests {
                 .open("test_partition", b"append_owned_cancel")
                 .await
                 .unwrap();
-            let (blob, gate) = GatedWriteBlob::new(inner);
+            let (blob, gate) = GatedWriteBlob::new(inner, GatePosition::Before);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -1978,7 +1980,7 @@ mod tests {
                 .open("test_partition", b"append_owned_fill_cancel")
                 .await
                 .unwrap();
-            let (blob, gate) = GatedWriteBlob::new(inner);
+            let (blob, gate) = GatedWriteBlob::new(inner, GatePosition::Before);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -2032,7 +2034,7 @@ mod tests {
                 .open("test_partition", b"sync_cancel")
                 .await
                 .unwrap();
-            let (blob, gate) = GatedWriteBlob::new(inner);
+            let (blob, gate) = GatedWriteBlob::new(inner, GatePosition::Before);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
@@ -2419,7 +2421,7 @@ mod tests {
                 .open("test_partition", b"shrink_crc_cancel")
                 .await
                 .unwrap();
-            let (blob, gate) = GatedWriteBlob::new(inner);
+            let (blob, gate) = GatedWriteBlob::new(inner, GatePosition::Before);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -2435,8 +2437,9 @@ mod tests {
             let target = (2 * page + 30) as u64;
             gate.cancel(writer.resize(target)).await;
 
-            // The canceled rewrite leaves the old tip authoritative and durable.
-            assert!(writer.partial_page_state.is_some());
+            // The canceled rewrite leaves the old tip bytes staged with the record cleared,
+            // so the next flush rewrites the whole record instead of trusting a stale one.
+            assert!(writer.partial_page_state.is_none());
             assert_eq!(writer.size(), data.len() as u64);
             let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data.as_slice());
@@ -2461,6 +2464,106 @@ mod tests {
                 .unwrap()
                 .coalesce();
             assert_eq!(read.as_ref(), &data[..target as usize]);
+        });
+    }
+
+    // A same-page shrink transfers CRC authority with three slot writes; the third (zeroing
+    // the old slot's length) is the commit point. If it lands but the future is dropped, the
+    // disk says the shorter length while memory claims the old one. The cleared record makes
+    // the next sync rewrite the whole record instead of skipping as a false no-op.
+    #[test_traced("DEBUG")]
+    fn test_shrink_cancel_after_authority_transfer_heals_on_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_authority_cancel")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedWriteBlob::new(inner, GatePosition::After);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..2 * page + 50).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Let the first two slot writes through; the third applies, then parks. Cancel.
+            gate.set_skip(2);
+            gate.cancel(writer.resize((2 * page + 30) as u64)).await;
+
+            // Memory still claims the old size and can read all of it (staged tip).
+            assert!(writer.partial_page_state.is_none());
+            assert_eq!(writer.size(), data.len() as u64);
+            let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+
+            // The sync must rewrite the record the transfer half-committed, so the size it
+            // acknowledges is the size a restart recovers.
+            writer.sync().await.unwrap();
+            drop(writer);
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_authority_cancel")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), data.len() as u64);
+            let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
+    }
+
+    // Same drop point, but shrinking an aligned blob into its last full page: the target page
+    // is staged as the tip before the transfer, so live reads of the claimed range survive
+    // the on-disk record temporarily validating to the shorter length.
+    #[test_traced("DEBUG")]
+    fn test_shrink_cancel_after_authority_transfer_aligned_keeps_reads() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_authority_aligned")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedWriteBlob::new(inner, GatePosition::After);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..3 * page).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Shrink into the last full page. Let the first two slot writes through; the
+            // third applies, then parks. Cancel.
+            gate.set_skip(2);
+            gate.cancel(writer.resize((2 * page + 30) as u64)).await;
+
+            // The whole claimed range stays readable: the last page is served from the tip
+            // even though its on-disk record now validates to the shorter length.
+            assert!(writer.partial_page_state.is_none());
+            assert_eq!(writer.size(), data.len() as u64);
+            let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+
+            // The sync rewrites the page's record; a restart recovers the acknowledged size.
+            writer.sync().await.unwrap();
+            drop(writer);
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_authority_aligned")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), data.len() as u64);
+            let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
         });
     }
 

@@ -373,6 +373,7 @@ mod tests {
     pub struct Gate {
         started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+        skip: Arc<Mutex<usize>>,
     }
 
     impl Gate {
@@ -386,8 +387,20 @@ mod tests {
             (started_rx, release_tx)
         }
 
+        /// Let the next `n` gated operations pass through an armed gate before it parks one.
+        pub fn set_skip(&self, n: usize) {
+            *self.skip.lock() = n;
+        }
+
         /// Signal and park on an armed gate, or pass through an unarmed one.
         pub async fn pass_once(&self) {
+            {
+                let mut skip = self.skip.lock();
+                if *skip > 0 {
+                    *skip -= 1;
+                    return;
+                }
+            }
             let started = self.started.lock().take();
             let release = self.release.lock().take();
             if let Some(started) = started {
@@ -411,20 +424,22 @@ mod tests {
         }
     }
 
-    /// Blob wrapper whose [Gate] parks the next write before it reaches the blob.
+    /// Blob wrapper whose [Gate] parks the next write at the given [GatePosition].
     #[derive(Clone)]
     pub struct GatedWriteBlob<B: crate::Blob> {
         inner: B,
         gate: Gate,
+        position: GatePosition,
     }
 
     impl<B: crate::Blob> GatedWriteBlob<B> {
-        pub fn new(inner: B) -> (Self, Gate) {
+        pub fn new(inner: B, position: GatePosition) -> (Self, Gate) {
             let gate = Gate::default();
             (
                 Self {
                     inner,
                     gate: gate.clone(),
+                    position,
                 },
                 gate,
             )
@@ -446,8 +461,14 @@ mod tests {
         }
 
         async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            self.gate.pass_once().await;
-            self.inner.write_at(offset, buf).await
+            if matches!(self.position, GatePosition::Before) {
+                self.gate.pass_once().await;
+            }
+            self.inner.write_at(offset, buf).await?;
+            if matches!(self.position, GatePosition::After) {
+                self.gate.pass_once().await;
+            }
+            Ok(())
         }
 
         async fn write_at_sync(
@@ -455,8 +476,14 @@ mod tests {
             offset: u64,
             buf: impl Into<IoBufs> + Send,
         ) -> Result<(), Error> {
-            self.gate.pass_once().await;
-            self.inner.write_at_sync(offset, buf).await
+            if matches!(self.position, GatePosition::Before) {
+                self.gate.pass_once().await;
+            }
+            self.inner.write_at_sync(offset, buf).await?;
+            if matches!(self.position, GatePosition::After) {
+                self.gate.pass_once().await;
+            }
+            Ok(())
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -472,12 +499,12 @@ mod tests {
         }
     }
 
-    /// Where [GatedResizeBlob]'s gate sits relative to the inner resize.
+    /// Where a gated blob's [Gate] sits relative to the gated inner operation.
     #[derive(Clone, Copy)]
     pub enum GatePosition {
-        /// Park before the inner resize runs: a canceled caller never did the work.
+        /// Park before the inner operation runs: a canceled caller never did the work.
         Before,
-        /// Park after the inner resize completes: a canceled caller did the work but never
+        /// Park after the inner operation completes: a canceled caller did the work but never
         /// observed it.
         After,
     }
@@ -1239,7 +1266,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, gate) = GatedWriteBlob::new(inner.clone());
+            let (blob, gate) = GatedWriteBlob::new(inner.clone(), GatePosition::Before);
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(10));
 
             writer.write_at(0, b"abcdefghij").await.unwrap();
@@ -1346,7 +1373,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, gate) = GatedWriteBlob::new(inner.clone());
+            let (blob, gate) = GatedWriteBlob::new(inner.clone(), GatePosition::Before);
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
             writer.write_at(0, b"hello").await.unwrap();
@@ -1527,7 +1554,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, gate) = GatedWriteBlob::new(inner.clone());
+            let (blob, gate) = GatedWriteBlob::new(inner.clone(), GatePosition::Before);
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
             writer.write_at(0, b"hello").await.unwrap();
@@ -2192,7 +2219,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, gate) = GatedWriteBlob::new(inner.clone());
+            let (blob, gate) = GatedWriteBlob::new(inner.clone(), GatePosition::Before);
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
             // Clear the constructor's dirty state so the canceled sync takes the
             // write-and-sync-in-one path.
