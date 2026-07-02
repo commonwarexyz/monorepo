@@ -2,7 +2,7 @@ use super::{
     acks::{PendingAck, PendingAcks},
     cache,
     delivery::PendingVerification,
-    durability::{await_durable, observe_sync, SyncResult},
+    durability::Durable as _,
     floor::Floor,
     mailbox::{CommitmentFallback, Mailbox, Message},
     stream::Stream,
@@ -366,7 +366,7 @@ where
         // path). A flush failure inside `start_sync` is reported only through the
         // returned handle, so every handle must be observed to apply the fatal
         // policy; this pool does so without blocking the actor on fsync.
-        let mut syncs = Pool::<SyncResult>::default();
+        let mut syncs = Pool::<bool>::default();
 
         // Anchor all startup work under a single root span. Tip recovery, floor
         // installation, gap repair, and the initial dispatch all run before any
@@ -421,10 +421,9 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
             },
-            // Observe durability syncs: panic (aborting the actor) if one failed.
-            result = syncs.next_completed() => {
-                let _ = observe_sync(result, "notarization");
-            },
+            // Drive durability syncs: a real sync failure panics inside the
+            // pooled future (the fatal policy), aborting the actor.
+            _ = syncs.next_completed() => {},
             // Handle waiter completions first
             Ok(completion) = waiters.next_completed() else continue => match completion {
                 Ok(block) => {
@@ -549,7 +548,7 @@ where
         message: Message<P::Scheme, V>,
         resolver: &mut R,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
-        syncs: &mut Pool<SyncResult>,
+        syncs: &mut Pool<bool>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
@@ -698,7 +697,7 @@ where
                     .cache
                     .put_notarization(round, digest, notarization)
                     .await;
-                syncs.push(handle);
+                syncs.push(handle.durable("notarization"));
 
                 // A notarization alone is not enough to fetch missing proposal
                 // data. If the block is not locally available, remember the
@@ -709,7 +708,7 @@ where
                         debug!(?round, "notarized block covered by verified write");
                     } else {
                         let handle = self.cache.put_notarized(round, digest, block.into()).await;
-                        syncs.push(handle);
+                        syncs.push(handle.durable("notarized"));
                     }
                 } else {
                     debug!(?round, "notarized block unavailable locally");
@@ -1583,8 +1582,8 @@ where
                     debug!(?round, ?digest, "received notarization");
 
                     // Cache the notarization and block, blocking until both are
-                    // durable so the repair bookkeeping below never runs ahead
-                    // of storage.
+                    // durable (or the runtime is shutting down) so the repair
+                    // bookkeeping below never runs ahead of storage.
                     let height = block.height();
                     let block_sync = self
                         .cache
@@ -1594,8 +1593,11 @@ where
                         .cache
                         .put_notarization(round, digest, notarization)
                         .await;
-                    let _ = await_durable(block_sync, "notarized").await;
-                    let _ = await_durable(notarization_sync, "notarization").await;
+                    join(
+                        block_sync.durable("notarized"),
+                        notarization_sync.durable("notarization"),
+                    )
+                    .await;
 
                     // A notarized delivery can carry the pending floor block
                     // after the finalization is cached.

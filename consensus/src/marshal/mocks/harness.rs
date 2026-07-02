@@ -901,9 +901,8 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: awaiting the sync handle delivered by `marshal.proposed(...)` (the
-/// returned receiver, then the handle) means the block survives an immediate
-/// crash and repeated recoveries.
+/// Contract: `marshal.proposed(...)=true` means the block survives an
+/// immediate crash and repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
@@ -988,7 +987,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                                 .await
                                 .unwrap_or_else(|| {
                                     panic!(
-                                        "awaiting marshal.proposed() must imply \
+                                        "marshal.proposed() returning true must imply \
                                      get_verified(round) recovers the block after restart \
                                      (seed={seed}, cycle={cycle})"
                                     )
@@ -1801,13 +1800,7 @@ impl TestHarness for StandardHarness {
     }
 
     async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        handle
-            .mailbox
-            .proposed(round, block.clone())
-            .await
-            .expect("sync handle delivered")
-            .await
-            .expect("proposed block durable");
+        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(
@@ -2656,13 +2649,7 @@ impl TestHarness for CodingHarness {
         round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
     ) {
-        handle
-            .mailbox
-            .proposed(round, block.clone())
-            .await
-            .expect("sync handle delivered")
-            .await
-            .expect("proposed block durable");
+        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(

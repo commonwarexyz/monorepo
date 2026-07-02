@@ -276,9 +276,7 @@ where
                 // provide candidate availability/recovery, not an app-validity decision.
                 // This task gates the finalize vote by resolving true only after both
                 // app verification succeeds and the store is durable.
-                let store_block = block.clone();
-                let store_marshal = marshal.clone();
-                let store = async move { stage.store(&store_marshal, round, store_block).await };
+                let store = stage.store(&marshal, round, block.clone());
                 let verify = run_app_verify(
                     runtime_context,
                     context,
@@ -461,7 +459,7 @@ where
     /// contain the proposed block's digest when ready. The block's persistence is enqueued
     /// before the digest is delivered, and the resulting sync handle is awaited only at
     /// certification so it overlaps consensus voting. The digest does not imply durability on
-    /// its own; [`CertifiableAutomaton::certify`] awaits the registered durability task before
+    /// its own; [`CertifiableAutomaton::certify`] awaits the registered certification gate before
     /// the finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
@@ -627,7 +625,7 @@ where
 
                 let digest = built_block.digest();
 
-                let persist = marshal.proposed(consensus_context.round, built_block);
+                let persist = marshal.proposed_deferred(consensus_context.round, built_block);
                 certification_gates
                     .persist_and_defer(
                         consensus_context.round,
@@ -650,7 +648,7 @@ where
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        let mut marshal = self.marshal.clone();
+        let marshal = self.marshal.clone();
         let mut marshaled = self.clone();
         let round = context.round;
 
@@ -701,7 +699,7 @@ where
                 // parent-child checks would fail by construction when parent == block.
                 let Some(decision) = precheck_epoch_and_reproposal(
                     &marshaled.epocher,
-                    &mut marshal,
+                    &marshal,
                     &context,
                     digest,
                     block,
@@ -1229,12 +1227,7 @@ mod tests {
             // block subscription is still pending.
             context.sleep(Duration::from_millis(10)).await;
 
-            marshal
-                .proposed(round, block)
-                .await
-                .expect("sync handle delivered")
-                .await
-                .expect("proposed block durable");
+            assert!(marshal.proposed(round, block).await);
             let certify_rx = marshaled.certify(round, digest).await;
             select! {
                 result = certify_rx => {
@@ -1254,7 +1247,7 @@ mod tests {
     /// gated application verification is still blocked, the block has already
     /// reached marshal and is locally queryable even though the sync handle may
     /// still be pending. Releasing verification then lets certification await
-    /// the registered durability task. Separate restart tests cover durable
+    /// the registered certification gate. Separate restart tests cover durable
     /// recovery after certification.
     #[test_traced("WARN")]
     fn test_deferred_store_overlaps_app_verify() {
@@ -1494,7 +1487,7 @@ mod tests {
         });
     }
 
-    /// Regression: in deferred mode `propose` registers a durability task that
+    /// Regression: in deferred mode `propose` registers a certification gate that
     /// `certify` awaits. After the leader certifies its own proposal, the block must be
     /// durably recoverable across an unclean restart. This is the >= f+1 guarantee
     /// for the leader's own block.

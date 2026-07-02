@@ -1,4 +1,4 @@
-use super::{durability::await_durable, Variant};
+use super::{durability::Durable as _, Variant};
 use crate::{
     marshal::{
         ancestry::{AncestorStream, Ancestry, BlockProvider},
@@ -175,7 +175,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         round: Round,
         /// The certified block.
         block: V::Block,
-        /// A channel sent once the block sync has started.
+        /// A channel sent once the block and notarization syncs have started; the
+        /// handle covers both.
         ack: Option<oneshot::Sender<Handle<()>>>,
     },
     /// Attempts to set the sync starting point from a finalized commitment.
@@ -849,8 +850,15 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// The message is enqueued synchronously (before this returns), so a subsequent
     /// [Self::forward] for the same block is ordered after it. This lets a leader
     /// broadcast the proposal digest immediately and await durability later (at
-    /// certification), overlapping the durable sync with consensus voting.
-    pub fn proposed(&self, round: Round, block: V::Block) -> oneshot::Receiver<Handle<()>> {
+    /// certification), overlapping the durable sync with consensus voting. Callers
+    /// that simply need durability before proceeding should use the blocking
+    /// [Self::proposed].
+    #[must_use = "the receiver delivers the durable-sync handle; dropping it forfeits sync-failure observation"]
+    pub fn proposed_deferred(
+        &self,
+        round: Round,
+        block: V::Block,
+    ) -> oneshot::Receiver<Handle<()>> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Proposed {
             span: info_span!("marshal.mailbox.proposed", round = %round),
@@ -861,15 +869,30 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver
     }
 
+    /// Notifies the actor that a block has been locally proposed.
+    ///
+    /// Returns after the block is durably persisted. The durable sync is awaited on
+    /// the caller's task (off the actor), so the actor never blocks on fsync. The
+    /// propose path should use [Self::proposed_deferred], which must enqueue before
+    /// broadcasting the digest and await durability only at certify.
+    #[must_use = "callers must consider block durability before proceeding"]
+    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
+        let Ok(handle) = self.proposed_deferred(round, block).await else {
+            return false;
+        };
+        handle.durable("proposed").await
+    }
+
     /// Notifies the actor that a block has been verified, returning a receiver for
     /// its durable-sync handle without awaiting it. Enqueued synchronously, as with
-    /// [Self::proposed].
+    /// [Self::proposed_deferred].
     ///
-    /// This is the deferred form for the leader's propose/re-proposal paths, which
+    /// This is the deferred form for the leader's boundary re-proposal path, which
     /// must enqueue before broadcasting the digest and await durability only at
     /// certification (overlapping the sync with consensus voting). Verify/certify
     /// consumers that simply need durability before proceeding should use the
     /// blocking [Self::verified].
+    #[must_use = "the receiver delivers the durable-sync handle; dropping it forfeits sync-failure observation"]
     pub fn verified_deferred(
         &self,
         round: Round,
@@ -889,14 +912,15 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// Returns after the block is durably persisted. Mirrors [Self::certified]: the
     /// durable sync is awaited on the caller's task (off the actor), so the actor
-    /// never blocks on fsync. Use [Self::verified_deferred] on the propose path,
-    /// which must enqueue before broadcasting and await durability only at certify.
+    /// never blocks on fsync. The boundary re-proposal path should use
+    /// [Self::verified_deferred], which must enqueue before broadcasting and await
+    /// durability only at certify.
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         let Ok(handle) = self.verified_deferred(round, block).await else {
             return false;
         };
-        await_durable(handle, "verified").await
+        handle.durable("verified").await
     }
 
     /// Notifies the actor that a block has been certified.
@@ -914,7 +938,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let Ok(handle) = receiver.await else {
             return false;
         };
-        await_durable(handle, "certified").await
+        handle.durable("certified").await
     }
 
     /// Attempts to set the sync starting point from a finalized commitment.
@@ -1266,7 +1290,7 @@ mod tests {
             let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender);
             drop(receiver);
 
-            assert!(mailbox.proposed(round(1), block(1)).await.is_err());
+            assert!(!mailbox.proposed(round(1), block(1)).await);
             assert!(!mailbox.verified(round(2), block(2)).await);
             assert!(!mailbox.certified(round(3), block(3)).await);
         });

@@ -70,7 +70,7 @@ pub(super) enum Decision<B> {
 #[inline]
 pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
     epocher: &ES,
-    marshal: &mut Mailbox<S, Standard<B>>,
+    marshal: &Mailbox<S, Standard<B>>,
     context: &Context<B::Digest, S::PublicKey>,
     digest: B::Digest,
     block: B,

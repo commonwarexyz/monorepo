@@ -232,7 +232,7 @@ where
     /// block's persistence is enqueued before the digest is delivered, and the resulting sync
     /// handle is awaited only at certification so it overlaps consensus voting. The digest does
     /// not imply durability on its own; [`CertifiableAutomaton::certify`] awaits the registered
-    /// durability task before the finalize vote.
+    /// certification gate before the finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn propose(
@@ -380,7 +380,7 @@ where
 
                 let digest = built_block.digest();
 
-                let persist = marshal.proposed(consensus_context.round, built_block);
+                let persist = marshal.proposed_deferred(consensus_context.round, built_block);
                 certification_gates
                     .persist_and_defer(
                         consensus_context.round,
@@ -415,7 +415,7 @@ where
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        // Register the durability task synchronously so `certify` always finds it, even
+        // Register the certification gate synchronously so `certify` always finds it, even
         // while the block subscription / durable sync is still in flight. A `true` result means
         // the block is durably persisted; a `false` result is a live local verdict; a dropped
         // sender means verification did not complete and certification should use recovery fetch.
@@ -423,7 +423,7 @@ where
         let (durable_tx, durable_rx) = oneshot::channel();
         self.certification_gates.insert(round, digest, durable_rx);
 
-        let mut marshal = self.marshal.clone();
+        let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
@@ -457,7 +457,7 @@ where
                 //   1) the block was already verified when originally proposed
                 //   2) parent-child checks would fail by construction when parent == block
                 let Some(decision) =
-                    precheck_epoch_and_reproposal(&epocher, &mut marshal, &context, digest, block)
+                    precheck_epoch_and_reproposal(&epocher, &marshal, &context, digest, block)
                         .await
                 else {
                     return;
@@ -491,9 +491,7 @@ where
                 // availability/recovery, not an app-validity decision. The notarize vote
                 // follows the app verdict, while certify awaits the registered gate that
                 // resolves true only after both app verification succeeds and the store is durable.
-                let store_block = block.clone();
-                let store_marshal = marshal.clone();
-                let store = async move { store_marshal.verified(round, store_block).await };
+                let store = marshal.verified(round, block.clone());
                 let verify_then_vote = async {
                     let valid = run_app_verify(
                         runtime_context,
@@ -522,7 +520,7 @@ where
     }
 }
 
-/// Inline certification consumes a registered durability task when present, and
+/// Inline certification consumes a registered certification gate when present, and
 /// falls back to a round-bound fetch/persist path after restart.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
@@ -535,7 +533,7 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        // `propose`/`verify` register an in-flight durability task whose result resolves
+        // `propose`/`verify` register an in-flight certification gate whose result resolves
         // once the block's sync handle completes. Awaiting it here is the durability barrier
         // for the finalize vote, and it lets the sync overlap consensus voting
         // instead of freezing certify with a fresh fsync.
@@ -1026,7 +1024,7 @@ mod tests {
         });
     }
 
-    /// Regression: in inline mode `propose` registers a durability task for the
+    /// Regression: in inline mode `propose` registers a certification gate for the
     /// built block that `certify` awaits. After the leader certifies its own proposal,
     /// the block must be durably recoverable. This is the >=f+1 guarantee: the leader
     /// certifies its own block through marshal so it awaits durability before the
@@ -1132,12 +1130,83 @@ mod tests {
         });
     }
 
+    /// Dropping the verify receiver before the block is available closes the
+    /// synchronously-registered certification gate. `certify` must recover through
+    /// the fetch/certified path instead of returning the closed gate to consensus.
+    #[test_traced("WARN")]
+    fn test_inline_certify_recovers_after_verify_receiver_drop() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mut inline = Inline::new(
+                context.child("inline"),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::zero(), genesis.digest()),
+            };
+            let block =
+                B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
+            let digest = block.digest();
+
+            let verify_rx = inline.verify(block_context, digest).await;
+            drop(verify_rx);
+
+            // Give the verify task a chance to observe the dropped receiver while its
+            // block subscription is still pending.
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(marshal.proposed(round, block).await);
+            let certify_rx = inline.certify(round, digest).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify should recover after verify receiver drop"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should recover promptly after verify drop");
+                },
+            }
+        });
+    }
+
     /// The store request runs concurrently with `app.verify`, not after the
     /// notarize vote: while gated application verification is still blocked, the
     /// block has already reached marshal and is locally queryable even though the
     /// sync handle may still be pending. Releasing verification then lets the
-    /// notarize vote resolve and certification await the registered durability
-    /// task. Separate restart tests cover durable recovery after certification.
+    /// notarize vote resolve and certification await the registered certification
+    /// gate. Separate restart tests cover durable recovery after certification.
     #[test_traced("WARN")]
     fn test_inline_store_overlaps_app_verify() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));

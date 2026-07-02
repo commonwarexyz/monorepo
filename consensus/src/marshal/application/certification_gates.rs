@@ -1,4 +1,4 @@
-use crate::{marshal::core::durability::await_durable, types::Round};
+use crate::{marshal::core::durability::Durable as _, types::Round};
 use commonware_macros::select;
 use commonware_runtime::Handle;
 use commonware_utils::{
@@ -82,7 +82,7 @@ where
     /// durability before the finalize vote. The gate is registered before `id` is published so
     /// `certify` always finds it.
     ///
-    /// `persist` is the sync-handle receiver returned by `marshal.proposed`/`verified_deferred`,
+    /// `persist` is the sync-handle receiver returned by `marshal.proposed_deferred`/`verified_deferred`,
     /// already enqueued by the caller so a later `forward` is ordered after it. A real sync failure
     /// panics here (the fatal policy, annotated with `name`); a dropped receiver or a runtime
     /// shutdown means the marshal actor is gone, so the gate is left unresolved and `certify`
@@ -99,11 +99,11 @@ where
     {
         let (durable_tx, durable_rx) = oneshot::channel();
         self.insert(round, id, durable_rx);
-        let _ = tx.send_lossy(id);
+        tx.send_lossy(id);
         let Ok(handle) = persist.await else {
             return;
         };
-        if !await_durable(handle, name).await {
+        if !handle.durable(name).await {
             return;
         }
         durable_tx.send_lossy(true);

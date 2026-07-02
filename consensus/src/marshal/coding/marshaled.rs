@@ -422,9 +422,7 @@ where
                 // provide candidate availability/recovery, not an app-validity decision.
                 // This task gates the finalize vote by resolving true only after both
                 // app verification succeeds and the store is durable.
-                let store_block = block.clone();
-                let store_marshal = marshal.clone();
-                let store = async move { stage.store(&store_marshal, round, store_block).await };
+                let store = stage.store(&marshal, round, block.clone());
 
                 let ancestry_stream = marshal.ancestor_stream(
                     Arc::new(runtime_context.child("ancestor_stream")),
@@ -663,7 +661,7 @@ where
     /// contain the proposed block's commitment when ready. The block's persistence is enqueued
     /// before the commitment is delivered, and the resulting sync handle is awaited only at
     /// certification so it overlaps consensus voting. The commitment does not imply durability
-    /// on its own; [`CertifiableAutomaton::certify`] awaits the registered durability task
+    /// on its own; [`CertifiableAutomaton::certify`] awaits the registered certification gate
     /// before the finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
@@ -853,7 +851,7 @@ where
                 let commitment = coded_block.commitment();
                 let round = consensus_context.round;
 
-                let persist = marshal.proposed(round, coded_block);
+                let persist = marshal.proposed_deferred(round, coded_block);
                 certification_gates
                     .persist_and_defer(round, commitment, tx, persist, "proposed block")
                     .await;

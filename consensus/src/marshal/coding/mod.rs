@@ -2737,7 +2737,7 @@ mod tests {
     }
 
     /// Regression: a leader must be able to recover its own block across an unclean restart.
-    /// `propose` registers a durability task, so the leader establishes durability by
+    /// `propose` registers a certification gate, so the leader establishes durability by
     /// certifying its own proposal. After certify, the block must survive restart even if
     /// `Relay::broadcast` never runs. This is the >= f+1 guarantee for the leader's own block.
     #[test_traced("WARN")]
