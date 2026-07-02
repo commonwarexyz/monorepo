@@ -116,38 +116,22 @@ impl Buffer {
         self.offset += n as u64;
     }
 
-    /// Adjust the buffer to correspond to resizing the logical blob to size `len`.
+    /// Shrinks the logical blob size ([Self::size]) to `len`. Buffered bytes below `len` are
+    /// kept; the rest are discarded.
     ///
-    /// If the new size is greater than the current size, the existing buffered bytes are returned
-    /// (to be flushed to the underlying blob), and the tip is reset to empty. (The returned data
-    /// is what would be returned by a call to [Self::take].)
+    /// # Panics
     ///
-    /// If the new size is less than the current size (but still greater than current offset), the
-    /// buffer is truncated to the new size.
-    ///
-    /// If the new size is less than the current offset, the buffer is reset to the empty state with
-    /// an updated offset positioned at the end of the logical blob.
-    pub(super) fn resize(&mut self, len: u64) -> Option<(IoBuf, u64)> {
-        // Handle case where the buffer is empty.
-        if self.is_empty() {
-            self.offset = len;
-            return None;
-        }
+    /// Panics if `len` does not shrink the blob.
+    pub(super) fn truncate(&mut self, len: u64) {
+        assert!(len < self.size(), "truncate must shrink the blob");
 
-        // Handle case where there is some data in the buffer.
-        if len >= self.size() {
-            let previous = self
-                .take()
-                .expect("take must succeed when resize observes buffered data");
-            self.offset = len;
-            Some(previous)
-        } else if len >= self.offset {
-            self.len = (len - self.offset) as usize;
-            None
-        } else {
+        if len <= self.offset {
+            // All buffered bytes are at or beyond `len`: drop them and restart at the new end.
             self.len = 0;
             self.offset = len;
-            None
+        } else {
+            // Keep only the buffered bytes below `len`.
+            self.len = (len - self.offset) as usize;
         }
     }
 
@@ -337,26 +321,14 @@ mod tests {
     }
 
     #[test]
-    fn test_tip_resize() {
+    fn test_tip_truncate() {
         let pool = test_pool();
-        let mut buffer = Buffer::new(50, 100, pool);
-        buffer.append(&[1, 2, 3]);
-        assert_eq!(buffer.size(), 53);
-
-        // Resize the buffer to correspond to a blob resized to size 60. The returned buffer should
-        // match exactly what we'd expect to be returned by `take` since 60 is greater than the
-        // current size of 53.
-        let resized = buffer.resize(60).unwrap();
-        assert_eq!(resized.0.as_ref(), &[1, 2, 3]);
-        assert_eq!(resized.1, 50);
-        assert_eq!(buffer.size(), 60);
-        assert!(buffer.take().is_none());
-
+        let mut buffer = Buffer::new(60, 100, pool);
         buffer.append(&[4, 5, 6]);
         assert_eq!(buffer.size(), 63);
 
-        // Resize the buffer down to size 61.
-        assert!(buffer.resize(61).is_none());
+        // Truncate into the buffered bytes: the prefix below the new size survives.
+        buffer.truncate(61);
         assert_eq!(buffer.size(), 61);
         let taken = buffer.take().unwrap();
         assert_eq!(taken.0.as_ref(), &[4]);
@@ -365,12 +337,21 @@ mod tests {
 
         buffer.append(&[7, 8, 9]);
 
-        // Resize the buffer prior to the current offset of 61. This should simply reset the buffer
-        // at the new size.
-        assert!(buffer.resize(59).is_none());
+        // Truncate below the buffer's offset of 61: all buffered bytes are dropped and the
+        // empty buffer restarts at the new size.
+        buffer.truncate(59);
         assert_eq!(buffer.size(), 59);
         assert!(buffer.take().is_none());
         assert_eq!(buffer.size(), 59);
+    }
+
+    #[test]
+    #[should_panic(expected = "truncate must shrink the blob")]
+    fn test_tip_truncate_rejects_grow() {
+        let pool = test_pool();
+        let mut buffer = Buffer::new(50, 100, pool);
+        buffer.append(&[1, 2, 3]);
+        buffer.truncate(60);
     }
 
     #[test]
