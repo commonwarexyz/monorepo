@@ -844,3 +844,135 @@ where
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+    };
+    use commonware_storage::{
+        journal::contiguous::fixed::Config as FixedJournalConfig,
+        merkle::{full::Config as MerkleConfig, mmr},
+        qmdb::any::unordered::fixed,
+        translator::TwoCap,
+    };
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::{NonZeroU16, NonZeroUsize};
+
+    type UnorderedFixedDb =
+        fixed::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+
+    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
+
+    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        FixedConfig {
+            merkle_config: MerkleConfig {
+                journal_partition: format!("stateful-any-journal-{suffix}"),
+                metadata_partition: format!("stateful-any-metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: FixedJournalConfig {
+                partition: format!("stateful-any-log-{suffix}"),
+                items_per_blob: NZU64!(7),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
+            translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
+        }
+    }
+
+    /// The glue staged wrapper (`AnyUnmerkleized::stage` -> `AnyStaged::expand` ->
+    /// `AnyStaged::merkleize`) must return the same values and root as an explicit `get_many` +
+    /// `write` + `merkleize`, including a staged delete, an upsert, and metadata flow (both set
+    /// on the staged handle via `with_metadata` and carried from before staging). This guards
+    /// metadata flow and db-handle pairing through the wrapper.
+    #[test]
+    fn unordered_fixed_staged_merkleize_matches_explicit_writes() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("unordered-fixed-glue-staged", &context);
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+                .await
+                .unwrap();
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+
+            let key = |i: u64| Sha256::hash(&i.to_be_bytes());
+            let val = |i: u64| Sha256::hash(&(i + 10_000).to_be_bytes());
+            let metadata = Sha256::hash(b"metadata");
+
+            // Seed keys 0..50 and finalize.
+            let mut seed = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            for i in 0..50u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
+                .await
+                .unwrap();
+            {
+                let mut guard = db.write().await;
+                <UnorderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
+                    .await
+                    .unwrap();
+            }
+
+            // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
+            let read_keys = [key(1), key(2), key(999)];
+            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let indexed_updates = vec![(0, Some(val(1_000))), (1, None), (2, Some(val(1_001)))];
+            let upserts = vec![(key(3), Some(val(1_002)))];
+
+            // Explicit path.
+            let mut explicit = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let explicit_values = explicit.get_many(&keys).await.unwrap();
+            for (slot, value) in &indexed_updates {
+                explicit = explicit.write(read_keys[*slot], *value);
+            }
+            for (k, v) in &upserts {
+                explicit = explicit.write(*k, *v);
+            }
+            let explicit_root =
+                crate::stateful::db::Unmerkleized::merkleize(explicit.with_metadata(metadata))
+                    .await
+                    .unwrap()
+                    .root();
+
+            // Staged path, with metadata set on the staged handle.
+            let staged_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let split = 2;
+            let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
+            let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
+            assert_eq!(range, split..keys.len());
+            staged_values.extend(suffix_values);
+            let staged_root = staged
+                .with_metadata(metadata)
+                .merkleize(indexed_updates.clone(), upserts.clone())
+                .await
+                .unwrap()
+                .root();
+
+            assert_eq!(explicit_values, staged_values);
+            assert_eq!(explicit_root, staged_root);
+
+            // Metadata set before staging must be carried through to staged merkleize.
+            let carried_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .with_metadata(metadata);
+            let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
+            let carried_root = staged
+                .merkleize(indexed_updates.clone(), upserts.clone())
+                .await
+                .unwrap()
+                .root();
+            assert_eq!(explicit_values, carried_values);
+            assert_eq!(explicit_root, carried_root);
+        });
+    }
+}
