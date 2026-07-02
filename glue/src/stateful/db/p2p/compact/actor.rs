@@ -14,6 +14,7 @@ use commonware_storage::{
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
+    futures::Pool as FuturesPool,
     sync::TracedAsyncRwLock,
 };
 use futures::future;
@@ -93,6 +94,7 @@ where
     mailbox_rx: actor_mailbox::Receiver<mailbox::Message<DB, F, DbOp<DB>, H::Digest>>,
     state: State<DB>,
     pending: PendingSubs<F, DbOp<DB>, H::Digest>,
+    tasks: FuturesPool<()>,
 }
 
 impl<E, P, D, B, F, DB, H> Actor<E, P, D, B, F, DB, H>
@@ -118,6 +120,7 @@ where
             mailbox_rx,
             state,
             pending: BTreeMap::new(),
+            tasks: FuturesPool::default(),
         };
         (actor, mailbox)
     }
@@ -170,11 +173,13 @@ where
                 };
             },
             on_stopped => {
+                self.tasks.cancel_all();
                 return;
             },
             _ = &mut resolver_task => {
                 return;
             },
+            _ = self.tasks.next_completed() => {},
             Some(message) = mailbox_message else continue => {
                 match self.handle_mailbox_message(message) {
                     MailboxAction::None => {}
@@ -194,10 +199,10 @@ where
                     value,
                     response,
                 } => {
-                    self.handle_deliver(key, value, response).await;
+                    self.handle_deliver(key, value, response);
                 }
                 handler::EngineMessage::Produce { key, response } => {
-                    self.handle_produce(key, response).await;
+                    self.handle_produce(key, response);
                 }
             },
         }
@@ -247,7 +252,7 @@ where
         true
     }
 
-    async fn handle_deliver(
+    fn handle_deliver(
         &mut self,
         key: handler::Request<F, H::Digest>,
         value: bytes::Bytes,
@@ -298,13 +303,19 @@ where
             return;
         }
 
-        let mut peer_valid = true;
-        for approval in approvals {
-            if let Ok(approved) = approval.await {
-                peer_valid &= approved;
+        self.tasks.push(async move {
+            let mut peer_valid = true;
+            for approval in approvals {
+                match approval.await {
+                    Ok(true) | Err(_) => {}
+                    Ok(false) => {
+                        peer_valid = false;
+                        break;
+                    }
+                }
             }
-        }
-        response.send_lossy(peer_valid);
+            response.send_lossy(peer_valid);
+        });
     }
 
     fn valid_state_response(
@@ -329,7 +340,7 @@ where
         )
     }
 
-    async fn handle_produce(
+    fn handle_produce(
         &mut self,
         key: handler::Request<F, H::Digest>,
         response: oneshot::Sender<bytes::Bytes>,
@@ -337,11 +348,15 @@ where
         let State::HasDb(database) = &self.state else {
             return;
         };
-        let Ok(fetch) = compact::Resolver::get_compact_state(database, key.to_target()).await
-        else {
-            return;
-        };
-        response.send_lossy(fetch.state.encode());
+        let database = database.clone();
+
+        self.tasks.push(async move {
+            let Ok(fetch) = compact::Resolver::get_compact_state(&database, key.to_target()).await
+            else {
+                return;
+            };
+            response.send_lossy(fetch.state.encode());
+        });
     }
 }
 
@@ -496,9 +511,7 @@ mod tests {
             };
 
             let (valid_tx, valid_rx) = oneshot::channel();
-            actor
-                .handle_deliver(request.clone(), bad_state.encode(), valid_tx)
-                .await;
+            actor.handle_deliver(request.clone(), bad_state.encode(), valid_tx);
 
             assert!(!valid_rx.await.expect("validation response should arrive"));
             assert!(actor.pending.contains_key(&request));
@@ -516,9 +529,7 @@ mod tests {
             fetch.state.pinned_nodes.push(sha256::Digest::from([9; 32]));
 
             let (valid_tx, valid_rx) = oneshot::channel();
-            actor
-                .handle_deliver(request.clone(), fetch.state.encode(), valid_tx)
-                .await;
+            actor.handle_deliver(request.clone(), fetch.state.encode(), valid_tx);
 
             assert!(!valid_rx.await.expect("validation response should arrive"));
             assert!(actor.pending.contains_key(&request));
@@ -542,18 +553,15 @@ mod tests {
             };
 
             let (bad_tx, bad_rx) = oneshot::channel();
-            actor
-                .handle_deliver(request.clone(), bad_state.encode(), bad_tx)
-                .await;
+            actor.handle_deliver(request.clone(), bad_state.encode(), bad_tx);
             assert!(!bad_rx.await.expect("invalid response should be rejected"));
             assert!(actor.pending.contains_key(&request));
 
             let (good_tx, good_rx) = oneshot::channel();
+            actor.handle_deliver(request.clone(), fetch.state.encode(), good_tx);
             futures::join!(
                 async {
-                    actor
-                        .handle_deliver(request.clone(), fetch.state.encode(), good_tx)
-                        .await;
+                    actor.tasks.next_completed().await;
                 },
                 async {
                     let fetch = subscriber_rx
@@ -583,7 +591,8 @@ mod tests {
             let request = handler::Request::from_target(target.clone());
             let (response_tx, response_rx) = oneshot::channel();
 
-            actor.handle_produce(request, response_tx).await;
+            actor.handle_produce(request, response_tx);
+            actor.tasks.next_completed().await;
 
             let encoded = response_rx.await.expect("response should be served");
             let cfg = (
@@ -609,11 +618,10 @@ mod tests {
             actor.pending.insert(request.clone(), vec![subscriber_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
+            actor.handle_deliver(request, fetch.state.encode(), ack_tx);
             futures::join!(
                 async {
-                    actor
-                        .handle_deliver(request, fetch.state.encode(), ack_tx)
-                        .await;
+                    actor.tasks.next_completed().await;
                 },
                 async {
                     let fetch = subscriber_rx.await.unwrap().unwrap();
@@ -640,11 +648,10 @@ mod tests {
             actor.pending.insert(request.clone(), vec![subscriber_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
+            actor.handle_deliver(request, fetch.state.encode(), ack_tx);
             futures::join!(
                 async {
-                    actor
-                        .handle_deliver(request, fetch.state.encode(), ack_tx)
-                        .await;
+                    actor.tasks.next_completed().await;
                 },
                 async {
                     let fetch = subscriber_rx.await.unwrap().unwrap();
