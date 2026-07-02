@@ -1363,11 +1363,11 @@ where
     }
 
     /// Read unresolved slots from the committed DB and merge them back into `results`.
-    async fn fill_committed_reads<E, C, I, T, const N: usize>(
+    async fn fill_committed_reads<E, C, I, T: Send, const N: usize>(
         unresolved: Vec<PendingRead<'_, U::Key>>,
         db: &Db<F, E, C, I, H, U, N, S>,
         results: &mut [Option<U::Value>],
-        map: impl Fn(&U, Location<F>) -> T,
+        map: impl Fn(&U, Location<F>) -> T + Send + Sync,
         mut apply: impl FnMut(usize, T) -> U::Value,
     ) -> Result<(), crate::qmdb::Error<F>>
     where

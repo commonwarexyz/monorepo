@@ -787,6 +787,10 @@ where
         self.journal.try_read_sync(position)
     }
 
+    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<C::Item>> {
+        self.journal.read_many_sync(positions)
+    }
+
     async fn replay(
         &self,
         start_pos: u64,
