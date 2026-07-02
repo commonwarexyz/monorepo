@@ -876,6 +876,65 @@ mod tests {
         });
     }
 
+    // Removal paths tolerate a section whose blob is already gone from storage, as happens
+    // when a previous removal was dropped after the storage delete completed.
+    #[test_traced]
+    fn test_journal_remove_missing_blob() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+            for index in 1u64..=3u64 {
+                journal
+                    .append(index, &index)
+                    .await
+                    .expect("Failed to append data");
+                journal.sync(index).await.expect("Failed to sync blob");
+            }
+
+            // Delete section 1's blob out from under the journal, then prune past it.
+            context
+                .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
+                .await
+                .expect("Failed to remove blob");
+            journal.prune(2).await.expect("Failed to prune blobs");
+            let buffer = context.encode();
+            assert!(buffer.contains("first_pruned_total 1"));
+            assert!(buffer.contains("first_tracked 2"));
+
+            // Delete section 2's blob as well, then clear the journal.
+            context
+                .remove(&cfg.partition, Some(&2u64.to_be_bytes()))
+                .await
+                .expect("Failed to remove blob");
+            journal.clear().await.expect("Failed to clear journal");
+            let buffer = context.encode();
+            assert!(buffer.contains("first_tracked 0"));
+
+            // The journal remains usable.
+            journal
+                .append(4u64, &4u64)
+                .await
+                .expect("Failed to append data");
+            journal.sync(4u64).await.expect("Failed to sync blob");
+
+            // Destroy also tolerates a section whose blob is already gone.
+            context
+                .remove(&cfg.partition, Some(&4u64.to_be_bytes()))
+                .await
+                .expect("Failed to remove blob");
+            journal.destroy().await.expect("Failed to destroy journal");
+        });
+    }
+
     #[test_traced]
     fn test_journal_prune_guard() {
         let executor = deterministic::Runner::default();

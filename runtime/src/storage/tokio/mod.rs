@@ -199,7 +199,10 @@ impl crate::Storage for Storage {
             let blob_path = path.join(hex(name));
             fs::remove_file(blob_path)
                 .await
-                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+                .map_err(|err| match err.kind() {
+                    std::io::ErrorKind::NotFound => Error::BlobMissing(partition.into(), hex(name)),
+                    _ => err.into(),
+                })?;
 
             // Sync the partition directory to ensure the removal is durable.
             // Windows doesn't have a notion of syncing a directory entry to ensure that it's
@@ -209,7 +212,10 @@ impl crate::Storage for Storage {
         } else {
             fs::remove_dir_all(&path)
                 .await
-                .map_err(|_| Error::PartitionMissing(partition.into()))?;
+                .map_err(|err| match err.kind() {
+                    std::io::ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+                    _ => err.into(),
+                })?;
 
             // Sync the storage directory to ensure the removal is durable.
             // Windows doesn't have a notion of syncing a directory entry to ensure that it's
