@@ -35,7 +35,7 @@
 //!
 //! [ZIP215]: https://github.com/zcash/zips/blob/master/zip-0215.rst
 
-use super::{Error, Signature, VerificationKey};
+use super::{Error, Signature, VerificationKey, VerificationKeyBytes};
 use crate::transcript::{Summary, Transcript};
 use ahash::RandomState;
 #[cfg(not(feature = "std"))]
@@ -159,7 +159,7 @@ impl Verifier {
                 // single verification key, this is nearly twice as fast.
 
                 let n = shard.len();
-                let mut key_indices: HashMap<&[u8; 32], usize, RandomState> =
+                let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
                     HashMap::with_capacity_and_hasher(n, RandomState::default());
                 let mut A_coeffs: Vec<Scalar> = Vec::with_capacity(n);
                 let mut As = Vec::with_capacity(n);
@@ -184,7 +184,7 @@ impl Verifier {
                     B_coeff -= z * s;
                     Rs.push(R);
                     R_coeffs.push(z);
-                    let index = *key_indices.entry(vk.as_bytes()).or_insert_with(|| {
+                    let index = *key_indices.entry(&vk.A_bytes).or_insert_with(|| {
                         As.push(-vk.minus_A);
                         A_coeffs.push(Scalar::ZERO);
                         As.len() - 1
