@@ -358,6 +358,17 @@ pub trait FieldNTT: Field {
     fn div_2(&self) -> Self {
         (Self::one() + &Self::one()).inv() * self
     }
+
+    /// In-place NTT (inverse NTT when `FORWARD` is false) over a dense, row-major
+    /// `rows x cols` slice, treating each column as an independent lane.
+    ///
+    /// This is the kernel used for [`crate::ntt::Matrix`] NTTs. The default is a
+    /// scalar implementation equivalent to a row-major matrix NTT; fields may
+    /// override it with a vectorized version. `data.len()` must equal `rows * cols`,
+    /// and `rows` must be a power of two.
+    fn ntt_dense<const FORWARD: bool>(rows: usize, cols: usize, data: &mut [Self]) {
+        crate::ntt::ntt_dense_scalar::<FORWARD, Self>(rows, cols, data)
+    }
 }
 
 /// A group suitable for use in cryptography.
