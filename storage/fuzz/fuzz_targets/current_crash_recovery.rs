@@ -17,10 +17,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
-    qmdb::{
-        self,
-        current::{unordered::variable::Db as Current, VariableConfig},
-    },
+    qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -303,8 +300,6 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             .await
             .expect("recovery must succeed");
 
-            let hasher = qmdb::hasher::<Sha256>();
-
             // Verify all committed KV pairs survived the crash and are provable.
             let root = db.root();
             for (key, value) in &committed {
@@ -319,11 +314,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 );
 
                 let proof = db
-                    .key_value_proof(&hasher, k.clone())
+                    .key_value_proof(k.clone())
                     .await
                     .expect("proof generation should not fail for committed key");
                 assert!(
-                    Db::<F>::verify_key_value_proof(&hasher, k, v, &proof, &root),
+                    Db::<F>::verify_key_value_proof(k, v, &proof, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
@@ -334,11 +329,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             for i in floor..size {
                 let loc = Location::<F>::new(i);
                 let (proof, ops, chunks) = db
-                    .range_proof(&hasher, loc, NZU64!(4))
+                    .range_proof(loc, NZU64!(4))
                     .await
                     .expect("range proof should not fail after recovery");
                 assert!(
-                    Db::<F>::verify_range_proof(&hasher, &proof, loc, &ops, &chunks, &root),
+                    Db::<F>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }

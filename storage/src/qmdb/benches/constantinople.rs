@@ -20,7 +20,7 @@
 //! - updates: keys written per batch (default 32,768)
 //! - threads: strategy pool threads (default 8)
 
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
     buffer::paged::CacheRef,
@@ -41,7 +41,7 @@ use std::{
     time::Instant,
 };
 
-type Digest = <Sha256 as Hasher>::Digest;
+type Digest = DigestOf<Sha256>;
 const CHUNK_SIZE: usize = 32;
 type AnyDb = commonware_storage::qmdb::any::unordered::fixed::Db<
     mmb::Family,

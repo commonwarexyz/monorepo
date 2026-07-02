@@ -22,7 +22,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
 };
-use commonware_codec::DecodeExt;
+use commonware_codec::{DecodeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
@@ -57,6 +57,17 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     pub fn add_leaf_digest(self, digest: D) -> Self {
         Self {
             inner: self.inner.add_leaf_digest(digest),
+        }
+    }
+
+    /// Encode and hash `items` across the strategy, adding their leaf digests in order.
+    pub(crate) fn add_many<Item: Write + Send + Sync>(
+        self,
+        hasher: &impl Hasher<F, Digest = D>,
+        items: &[Item],
+    ) -> Self {
+        Self {
+            inner: self.inner.add_many(hasher, items),
         }
     }
 

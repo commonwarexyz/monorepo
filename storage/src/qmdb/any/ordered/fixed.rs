@@ -132,7 +132,6 @@ pub(crate) mod test {
             Location as GenericLocation,
         },
         qmdb::{
-            self,
             any::{
                 ordered::{
                     test::{
@@ -147,7 +146,7 @@ pub(crate) mod test {
         },
         translator::{OneCap, TwoCap},
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
@@ -591,7 +590,6 @@ pub(crate) mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
             let mut db = open_db(context.child("first")).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -672,7 +670,7 @@ pub(crate) mod test {
             for i in start_loc.as_u64()..end_loc.as_u64() {
                 let loc = Location::from(i);
                 let (proof, log) = db.proof(loc, max_ops).await.unwrap();
-                assert!(verify_proof(&hasher, &proof, loc, &log, &root));
+                assert!(verify_proof::<Sha256, _, _>(&proof, loc, &log, &root));
             }
 
             db.destroy().await.unwrap();
@@ -900,7 +898,6 @@ pub(crate) mod test {
             let mut db = create_test_db(context.child("storage")).await;
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
-            let hasher = qmdb::hasher::<Sha256>();
             let root_hash = db.root();
             let original_op_count = db.bounds().end;
 
@@ -915,8 +912,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &historical_proof,
                 Location::new(5),
                 &historical_ops,
@@ -938,8 +934,7 @@ pub(crate) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &historical_proof,
                 Location::new(5),
                 &historical_ops,
@@ -954,8 +949,6 @@ pub(crate) mod test {
     fn test_ordered_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
-
             let mut db = create_test_db(context.child("first")).await;
             // Apply ops in multiple batches; each apply_ops ends in a commit, so the size
             // after each batch is a commit-boundary historical size.
@@ -972,12 +965,12 @@ pub(crate) mod test {
             // Verify a single-op proof at the full commit size.
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(1),
                 &proof_ops,
-                &root));
+                &root
+            ));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
@@ -1024,8 +1017,6 @@ pub(crate) mod test {
             let mut db = create_test_db(context.child("storage")).await;
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
-
-            let hasher = qmdb::hasher::<Sha256>();
             let root = db.root();
 
             let start_loc = Location::new(20);
@@ -1049,8 +1040,7 @@ pub(crate) mod test {
                 assert_eq!(proof.digests, historical_proof.digests);
 
                 // Verify proof against reference root
-                assert!(verify_proof(
-                    &hasher,
+                assert!(verify_proof::<Sha256, _, _>(
                     &historical_proof,
                     start_loc,
                     &historical_ops,

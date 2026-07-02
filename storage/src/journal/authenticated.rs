@@ -11,11 +11,8 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self, batch,
-        full::Merkle,
-        hasher::{Hasher as _, Standard as StandardHasher},
-        mem::Mem,
-        Bagging, Family, Location, Position, Proof, Readable,
+        self, batch, full::Merkle, hasher::Standard as StandardHasher, mem::Mem, Bagging, Family,
+        Location, Position, Proof, Readable,
     },
     Context,
 };
@@ -130,20 +127,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
             "add_many expects no items added via add"
         );
 
-        let first = self.inner.leaves();
-        let hasher = &self.hasher;
-        let digests = self.inner.strategy().map_init_collect_vec(
-            items.iter().enumerate(),
-            Vec::new,
-            |buf, (i, item)| {
-                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                buf.clear();
-                item.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
-            },
-        );
-
-        self.inner = self.inner.add_leaf_digests(digests);
+        self.inner = self.inner.add_many(&self.hasher, &items);
         self.items = items;
         self
     }
@@ -390,8 +374,9 @@ where
 
     /// Align the Merkle structure to be consistent with the journal. Any items in the structure
     /// that are not in the journal are popped, and any items in the journal that are not in the
-    /// structure are added. Items are added in batches of size `apply_batch_size` to avoid memory
-    /// bloat.
+    /// structure are added. Items are added in batches of size `apply_batch_size` to bound peak
+    /// memory use: each batch's items are buffered in memory so their leaves can be hashed
+    /// across the strategy.
     async fn align(
         merkle: &mut Merkle<F, E, H::Digest, S>,
         journal: &C,
@@ -421,17 +406,14 @@ where
             );
 
             while merkle_leaves < journal_size {
-                let batch = {
-                    let mut batch = merkle.new_batch();
-                    let mut count = 0u64;
-                    while count < apply_batch_size && merkle_leaves < journal_size {
-                        let op = journal.read(*merkle_leaves).await?;
-                        batch = batch.add(hasher, &op.encode());
-                        merkle_leaves += 1;
-                        count += 1;
-                    }
-                    batch
-                };
+                let count = apply_batch_size.min(journal_size - *merkle_leaves);
+                let mut items = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    items.push(journal.read(*merkle_leaves).await?);
+                    merkle_leaves += 1;
+                }
+
+                let batch = merkle.new_batch().add_many(hasher, &items);
                 let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
                 merkle.apply_batch(&batch)?;
             }
@@ -846,7 +828,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
@@ -893,16 +875,25 @@ mod tests {
         batch.add_many(items).merkleize(base)
     }
 
-    /// Create Merkle configuration for tests.
-    fn merkle_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
+    /// Create Merkle configuration for tests with the given strategy.
+    fn merkle_config_with<S: Strategy>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+        strategy: S,
+    ) -> MerkleConfig<S> {
         MerkleConfig {
             journal_partition: format!("mmr-journal-{suffix}"),
             metadata_partition: format!("mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
-            strategy: Sequential,
+            strategy,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
+    }
+
+    /// Create Merkle configuration for tests.
+    fn merkle_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
+        merkle_config_with(suffix, pooler, Sequential)
     }
 
     /// Create journal configuration for tests.
@@ -1156,6 +1147,86 @@ mod tests {
     fn test_align_when_journal_ahead_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_align_when_journal_ahead_inner::<mmb::Family>);
+    }
+
+    /// Verify that align()'s parallel replay produces the same Merkle state as the serial path.
+    async fn test_align_replay_parallel_matches_serial_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        type ParallelJournal<F> = Journal<
+            F,
+            deterministic::Context,
+            ContiguousJournal<deterministic::Context, TestOp<F>>,
+            Sha256,
+            Manual<Rayon>,
+        >;
+
+        // Build a journal that is ahead of both Merkle structures.
+        let mut journal = ContiguousJournal::init(
+            context.child("journal"),
+            journal_config("replay-strategies", &context),
+        )
+        .await
+        .unwrap();
+        for i in 0..20 {
+            journal
+                .append(&create_operation::<F>(i as u8))
+                .await
+                .unwrap();
+        }
+        let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
+        journal.append(&commit_op).await.unwrap();
+        journal.sync().await.unwrap();
+
+        // Replay with a batch size that forces multiple batches on each side. `Sequential`
+        // hashes each batch serially, and a `Manual`-wrapped strategy runs the batch hashing
+        // across its pool without any adaptive policy, so the two replays deterministically
+        // exercise both the serial and parallel hashing paths.
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut serial = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("mmr_serial"),
+            &hasher,
+            merkle_config("replay-serial", &context),
+        )
+        .await
+        .unwrap();
+        TestJournal::<F>::align(&mut serial, &journal, &hasher, 7)
+            .await
+            .unwrap();
+
+        let mut parallel = Merkle::<F, _, Digest, Manual<Rayon>>::init(
+            context.child("mmr_parallel"),
+            &hasher,
+            merkle_config_with(
+                "replay-parallel",
+                &context,
+                Rayon::new(NZUsize!(2)).unwrap().manual(),
+            ),
+        )
+        .await
+        .unwrap();
+        ParallelJournal::<F>::align(&mut parallel, &journal, &hasher, 7)
+            .await
+            .unwrap();
+
+        assert_eq!(serial.leaves(), Location::<F>::new(21));
+        assert_eq!(parallel.leaves(), Location::<F>::new(21));
+        assert_eq!(
+            serial.root(&hasher, 0).unwrap(),
+            parallel.root(&hasher, 0).unwrap()
+        );
+    }
+
+    #[test_traced("WARN")]
+    fn test_align_replay_parallel_matches_serial_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_align_replay_parallel_matches_serial_inner::<mmr::Family>);
+    }
+
+    #[test_traced("WARN")]
+    fn test_align_replay_parallel_matches_serial_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_align_replay_parallel_matches_serial_inner::<mmb::Family>);
     }
 
     /// Verify that align() discards uncommitted operations.
