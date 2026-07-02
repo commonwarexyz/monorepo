@@ -40,7 +40,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::sync::{Arc, Weak};
@@ -65,7 +65,7 @@ where
     F: Family,
     E: Context,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, V>: EncodeShared,
     Operation<F, V>: Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
@@ -87,7 +87,7 @@ pub struct UnmerkleizedBatch<F, H, V, S: Strategy>
 where
     F: Family,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, V>: EncodeShared,
 {
     merkle_batch: compact_merkle::UnmerkleizedBatch<F, H::Digest, S>,
@@ -131,7 +131,7 @@ where
     /// Create a new speculative batch with this one as its parent.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
     {
         UnmerkleizedBatch {
             merkle_batch: compact_merkle::UnmerkleizedBatch::wrap(self.merkle_batch.new_batch()),
@@ -147,7 +147,7 @@ impl<F, H, V, S> UnmerkleizedBatch<F, H, V, S>
 where
     F: Family,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
@@ -247,7 +247,7 @@ where
     F: Family,
     E: Context,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
     Operation<F, V>: Read<Cfg = C>,

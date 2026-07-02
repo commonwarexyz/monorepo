@@ -2,7 +2,7 @@
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db] variants
 //! (ordered/unordered, fixed/variable).
 //!
-//! Callers verifying `any` sync proofs directly should use `qmdb::hasher`.
+//! Callers verifying `any` sync proofs directly should use [`crate::qmdb::verify_proof`].
 
 use crate::{
     index::Factory as IndexFactory,
@@ -43,7 +43,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_utils::{range::NonEmptyRange, Array};
 use core::num::NonZeroUsize;
@@ -68,7 +68,7 @@ where
     E: Context,
     U: Update + Send + Sync + 'static,
     I: IndexFactory<T, Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     T: Translator,
     C: Mutable<Item = Operation<F, U>>,
     S: Strategy,
@@ -112,7 +112,7 @@ macro_rules! impl_sync_database {
             E: Context,
             K: $key_bound,
             V: $value_bound + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator,
             S: Strategy,
             $($($where_extra)+)?

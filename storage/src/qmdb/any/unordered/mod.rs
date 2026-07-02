@@ -9,7 +9,7 @@ use crate::{
     Context,
 };
 use commonware_codec::Codec;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 
 pub mod fixed;
@@ -24,7 +24,7 @@ impl<
         V: ValueEncoding,
         C: Contiguous<Item = Operation<F, K, V>>,
         I: Index<Value = Location<F>>,
-        H: Hasher,
+        H: CodecHasher,
         const N: usize,
         S: Strategy,
     > Db<F, E, C, I, H, Update<K, V>, N, S>
@@ -65,7 +65,7 @@ crate::qmdb::any::traits::impl_db_any! {
         V: ValueEncoding + 'static,
         C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + Send + Sync + 'static,
-        H: Hasher,
+        H: CodecHasher,
         S: Strategy,
         Operation<F, K, V>: Codec,
         V::Value: Send + Sync,
@@ -83,7 +83,7 @@ crate::qmdb::any::traits::impl_provable! {
         V: ValueEncoding + 'static,
         C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + Send + Sync + 'static,
-        H: Hasher,
+        H: CodecHasher,
         S: Strategy,
         Operation<F, K, V>: Codec,
         V::Value: Send + Sync,

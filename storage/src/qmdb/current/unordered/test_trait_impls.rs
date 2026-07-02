@@ -16,7 +16,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
@@ -31,7 +31,7 @@ crate::qmdb::any::traits::impl_db_any! {
         E: Context,
         K: Array,
         V: FixedValue + 'static,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         S: Strategy,
         FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
@@ -50,7 +50,7 @@ crate::qmdb::any::traits::impl_db_any! {
         E: Context,
         K: Array,
         V: VariableValue + 'static,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         S: Strategy,
         VariableOperation<F, K, V>: Codec,
@@ -67,7 +67,7 @@ impl<
         E: Context,
         K: Array,
         V: FixedValue,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         const N: usize,
         S: Strategy,
@@ -91,7 +91,7 @@ impl<
         E: Context,
         K: Array,
         V: VariableValue,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         const N: usize,
         S: Strategy,
@@ -123,7 +123,7 @@ crate::qmdb::any::traits::impl_db_any! {
         E: Context,
         K: Array,
         V: FixedValue + 'static,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         S: Strategy,
         FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
@@ -136,7 +136,7 @@ impl<
         E: Context,
         K: Array,
         V: FixedValue,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         const P: usize,
         const N: usize,
@@ -168,7 +168,7 @@ crate::qmdb::any::traits::impl_db_any! {
         E: Context,
         K: Array,
         V: VariableValue + 'static,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         S: Strategy,
         VariableOperation<F, K, V>: Codec,
@@ -181,7 +181,7 @@ impl<
         E: Context,
         K: Array,
         V: VariableValue,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         const P: usize,
         const N: usize,

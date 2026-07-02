@@ -20,7 +20,7 @@ use crate::{
     translator::Translator,
     Context,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
@@ -41,7 +41,7 @@ impl<
         E: Context,
         K: Array,
         V: FixedValue,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         const N: usize,
         S: Strategy,
@@ -84,7 +84,7 @@ pub mod partitioned {
             E: Context,
             K: Array,
             V: FixedValue,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator,
             const P: usize,
             const N: usize,
@@ -110,7 +110,7 @@ pub mod test {
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::{
@@ -153,7 +153,6 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "range-proofs-pruned".to_string();
-            let hasher = crate::qmdb::hasher::<Sha256>();
             let mut db = open_db(context.child("db"), partition).await;
 
             let chunk_bits = BitMap::<32>::CHUNK_SIZE_BITS;
@@ -182,7 +181,7 @@ pub mod test {
 
             // Requesting a range proof at location 0 (in the pruned range) should return
             // OperationPruned, not panic.
-            let result = db.range_proof(&hasher, Location::new(0), NZU64!(1)).await;
+            let result = db.range_proof(Location::new(0), NZU64!(1)).await;
             assert!(
                 matches!(result, Err(Error::OperationPruned(_))),
                 "expected OperationPruned, got {result:?}"

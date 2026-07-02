@@ -1916,7 +1916,7 @@ impl<E: Context, V: CodecShared> authenticated::Inner<E> for Journal<E, V> {
 
     async fn init<
         F: merkle::Family,
-        H: commonware_cryptography::Hasher,
+        H: commonware_cryptography::CodecHasher,
         S: commonware_parallel::Strategy,
     >(
         context: E,

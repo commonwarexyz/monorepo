@@ -19,7 +19,7 @@ use crate::{
     translator::Translator,
     Context,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
@@ -41,7 +41,7 @@ impl<
         E: Context,
         K: Array,
         V: FixedValue,
-        H: Hasher,
+        H: CodecHasher,
         T: Translator,
         const N: usize,
         S: Strategy,
@@ -87,7 +87,7 @@ pub mod partitioned {
             E: Context,
             K: Array,
             V: FixedValue,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator,
             const P: usize,
             const N: usize,
@@ -110,7 +110,7 @@ pub mod test {
         qmdb::current::{tests::fixed_config, unordered::tests as shared},
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics, Runner as _, Supervisor as _};
     use commonware_utils::test_rng_seeded;

@@ -9,7 +9,7 @@ use crate::stateful::db::{
     Unmerkleized as UnmerkleizedTrait, MAX_CHANNEL_DRAIN_PER_TICK,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{reschedule, Clock, Metrics, Storage};
@@ -58,7 +58,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, K, V>: EncodeShared,
     Operation<F, K, V>: CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
@@ -76,7 +76,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, K, V>: EncodeShared,
     Operation<F, K, V>: CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
@@ -95,7 +95,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, K, V>: EncodeShared,
     Operation<F, K, V>: CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
@@ -127,7 +127,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, K, V>: EncodeShared,
     Operation<F, K, V>: CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
@@ -143,7 +143,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, K, V>: EncodeShared,
     Operation<F, K, V>: CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
@@ -163,7 +163,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, K, V>: EncodeShared,
     Operation<F, K, V>: CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
@@ -192,7 +192,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, K, V>: EncodeShared,
     Operation<F, K, V>: CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
@@ -221,7 +221,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: FixedValue + 'static,
-    H: Hasher + 'static,
+    H: CodecHasher + 'static,
     S: Strategy,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
 {
@@ -280,7 +280,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: VariableValue + 'static,
-    H: Hasher + 'static,
+    H: CodecHasher + 'static,
     Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
@@ -340,7 +340,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: FixedValue + 'static,
-    H: Hasher + 'static,
+    H: CodecHasher + 'static,
     S: Strategy,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
     R: sync::compact::Resolver<
@@ -431,7 +431,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: VariableValue + 'static,
-    H: Hasher + 'static,
+    H: CodecHasher + 'static,
     Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
@@ -520,7 +520,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Spawner as _,

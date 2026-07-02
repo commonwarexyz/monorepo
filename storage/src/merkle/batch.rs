@@ -80,6 +80,8 @@
 //! mmr.apply_batch(&a1).unwrap();
 //! ```
 
+#[cfg(feature = "std")]
+use crate::merkle::hasher::StandardState;
 use crate::merkle::{
     hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
 };
@@ -88,12 +90,16 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+#[cfg(feature = "std")]
+use commonware_cryptography::CodecHasher;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
 use core::ops::Range;
 
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
+
+const SEQUENTIAL_BUCKET_THRESHOLD: usize = 128;
 
 /// Push a dirty node position into its height bucket, growing the outer Vec as needed.
 fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
@@ -333,6 +339,49 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<MerkleizedBatch<F, D, S>> {
+        let buckets = self.prepare_dirty_buckets();
+        for (height, positions) in buckets.iter().enumerate() {
+            if positions.is_empty() {
+                continue;
+            }
+            self.merkleize_bucket(base, hasher, positions, height as u32);
+        }
+
+        self.finish_merkleize()
+    }
+
+    /// Consume this batch and produce an immutable [`MerkleizedBatch`] using reusable hash state.
+    #[cfg(feature = "std")]
+    pub(crate) fn merkleize_reusing<H: CodecHasher<Digest = D>>(
+        self,
+        base: &Mem<F, D>,
+    ) -> Arc<MerkleizedBatch<F, D, S>> {
+        self.merkleize_reusing_with::<H, _>(base, |pos| pos)
+    }
+
+    /// Consume this batch using reusable hash state and a hash-position mapper.
+    #[cfg(feature = "std")]
+    pub(crate) fn merkleize_reusing_with<H, M>(
+        mut self,
+        base: &Mem<F, D>,
+        map_pos: M,
+    ) -> Arc<MerkleizedBatch<F, D, S>>
+    where
+        H: CodecHasher<Digest = D>,
+        M: Fn(Position<F>) -> Position<F> + Copy + Send + Sync,
+    {
+        let buckets = self.prepare_dirty_buckets();
+        for (height, positions) in buckets.iter().enumerate() {
+            if positions.is_empty() {
+                continue;
+            }
+            self.merkleize_bucket_reusing::<H, M>(base, positions, height as u32, map_pos);
+        }
+
+        self.finish_merkleize()
+    }
+
+    fn prepare_dirty_buckets(&mut self) -> Vec<Vec<Position<F>>> {
         // Each bucket accumulates positions in push order, which for `add_leaf_digest` is
         // already ascending; the stable `sort` is cheap on such near-sorted input. The dedup
         // then collapses any duplicates that slipped past `mark_dirty`'s last-entry check.
@@ -341,13 +390,10 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             bucket.sort();
             bucket.dedup();
         }
-        for (height, positions) in buckets.iter().enumerate() {
-            if positions.is_empty() {
-                continue;
-            }
-            self.merkleize_bucket(base, hasher, positions, height as u32);
-        }
+        buckets
+    }
 
+    fn finish_merkleize(self) -> Arc<MerkleizedBatch<F, D, S>> {
         // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
         let (ancestor_appended, ancestor_overwrites) = collect_ancestor_batches(&self.parent);
 
@@ -373,14 +419,64 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         positions: &[Position<F>],
         height: u32,
     ) {
-        let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
-            positions,
-            || hasher.clone(),
-            |hasher, &pos| {
+        if positions.len() < SEQUENTIAL_BUCKET_THRESHOLD {
+            for &pos in positions {
                 let (left, right) = F::children(pos, height);
                 let left_d = self.get_node(base, left).expect("left child missing");
                 let right_d = self.get_node(base, right).expect("right child missing");
                 let digest = hasher.node_digest(pos, &left_d, &right_d);
+                self.store_node(pos, digest);
+            }
+            return;
+        }
+
+        let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
+            positions,
+            || (),
+            |_, &pos| {
+                let (left, right) = F::children(pos, height);
+                let left_d = self.get_node(base, left).expect("left child missing");
+                let right_d = self.get_node(base, right).expect("right child missing");
+                let digest = hasher.node_digest(pos, &left_d, &right_d);
+                (pos, digest)
+            },
+        );
+        for (pos, digest) in computed {
+            self.store_node(pos, digest);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn merkleize_bucket_reusing<H, M>(
+        &mut self,
+        base: &Mem<F, D>,
+        positions: &[Position<F>],
+        height: u32,
+        map_pos: M,
+    ) where
+        H: CodecHasher<Digest = D>,
+        M: Fn(Position<F>) -> Position<F> + Copy + Send + Sync,
+    {
+        if positions.len() < SEQUENTIAL_BUCKET_THRESHOLD {
+            let mut state = StandardState::<H>::new();
+            for &pos in positions {
+                let (left, right) = F::children(pos, height);
+                let left_d = self.get_node(base, left).expect("left child missing");
+                let right_d = self.get_node(base, right).expect("right child missing");
+                let digest = state.node_digest(map_pos(pos), &left_d, &right_d);
+                self.store_node(pos, digest);
+            }
+            return;
+        }
+
+        let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
+            positions,
+            || StandardState::<H>::new(),
+            |state, &pos| {
+                let (left, right) = F::children(pos, height);
+                let left_d = self.get_node(base, left).expect("left child missing");
+                let right_d = self.get_node(base, right).expect("right child missing");
+                let digest = state.node_digest(map_pos(pos), &left_d, &right_d);
                 (pos, digest)
             },
         );

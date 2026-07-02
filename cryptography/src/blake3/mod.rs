@@ -9,18 +9,14 @@
 //! // Create a new BLAKE3 hasher
 //! let mut hasher = Blake3::new();
 //!
-//! // Update the hasher with some messages
-//! hasher.update(b"hello,");
-//! hasher.update(b"world!");
-//!
-//! // Finalize the hasher to get the digest
-//! let digest = hasher.finalize();
+//! // Hash messages by chaining updates
+//! let digest = hasher.begin().update(b"hello,").update(b"world!").finalize();
 //!
 //! // Print the digest
 //! println!("digest: {:?}", digest);
 //! ```
 
-use crate::Hasher;
+use crate::{CodecHasher, Hasher};
 use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
@@ -59,7 +55,7 @@ impl Clone for Blake3 {
 impl Hasher for Blake3 {
     type Digest = Digest;
 
-    fn update(&mut self, message: &[u8]) -> &mut Self {
+    fn update_inner(&mut self, message: &[u8]) {
         #[cfg(not(feature = "blake3-parallel"))]
         self.hasher.update(message);
 
@@ -75,11 +71,9 @@ impl Hasher for Blake3 {
                 self.hasher.update(message);
             }
         }
-
-        self
     }
 
-    fn finalize(&mut self) -> Self::Digest {
+    fn finalize_inner(&mut self) -> Self::Digest {
         let finalized = self.hasher.finalize();
         self.hasher.reset();
         let array: [u8; DIGEST_LENGTH] = finalized.into();
@@ -91,6 +85,8 @@ impl Hasher for Blake3 {
         self
     }
 }
+
+impl CodecHasher for Blake3 {}
 
 /// Digest of a BLAKE3 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
@@ -195,14 +191,12 @@ mod tests {
 
         // Generate initial hash
         let mut hasher = Blake3::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.begin().update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Reuse hasher
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.begin().update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
@@ -220,8 +214,7 @@ mod tests {
     fn test_codec() {
         let msg = b"hello world";
         let mut hasher = Blake3::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.begin().update(msg).finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), DIGEST_LENGTH);

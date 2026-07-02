@@ -10,7 +10,6 @@ use crate::{
         storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
     },
     qmdb::{
-        self,
         any::{
             self,
             batch::{DiffCursors, DiffEntry},
@@ -30,7 +29,7 @@ use crate::{
 };
 use ahash::AHasher;
 use commonware_codec::Codec;
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap::{self, Readable as _};
 use std::{
@@ -260,7 +259,7 @@ pub struct UnmerkleizedBatch<F, H, U, const N: usize, S: Strategy>
 where
     F: Graftable,
     U: update::Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, U>: Codec,
 {
     /// The inner any-layer batch that handles mutations, journal, and floor raise.
@@ -336,7 +335,7 @@ impl<F, H, U, const N: usize, S: Strategy> UnmerkleizedBatch<F, H, U, N, S>
 where
     F: Graftable,
     U: update::Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, U>: Codec,
 {
     pub(super) const fn new(
@@ -367,7 +366,7 @@ where
     F: Graftable,
     K: Key,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Read through: mutations -> ancestor diffs -> committed DB.
@@ -440,7 +439,7 @@ where
     F: Graftable,
     K: Key,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Read through: mutations -> ancestor diffs -> committed DB.
@@ -587,7 +586,7 @@ where
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -650,9 +649,7 @@ where
         (idx, chunk)
     });
 
-    let hasher = qmdb::hasher::<H>();
     let new_leaves = compute_grafted_leaves::<F, H, S, N>(
-        &hasher,
         &ops_tree_adapter,
         chunks_to_update,
         &current_db.strategy,
@@ -672,8 +669,9 @@ where
                 grafted_batch = grafted_batch.add_leaf_digest(digest);
             }
         }
-        let gh = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-        grafted_batch.merkleize(&current_db.grafted_tree, &gh)
+        grafted_batch.merkleize_reusing_with::<H, _>(&current_db.grafted_tree, |pos| {
+            grafting::grafted_to_ops_pos::<F>(pos, grafting_height)
+        })
     };
 
     // Build the layered bitmap (parent + overlay) before computing the canonical root, so that
@@ -693,7 +691,7 @@ where
         mem: &current_db.grafted_tree,
     };
     let grafted_storage =
-        grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, hasher.clone());
+        grafting::Storage::<F, H, _, _>::new(&layered, grafting_height, &ops_tree_adapter);
     // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
     // index `new_complete_chunks` (the chunk currently being filled with bits) -- distinct
     // from `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can
@@ -710,7 +708,6 @@ where
         }
     };
     let canonical_root = compute_db_root::<F, H, _, _, N>(
-        &hasher,
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,
@@ -889,7 +886,7 @@ where
     /// extended.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, N, S>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
     {
         UnmerkleizedBatch::new(
             self.inner.new_batch::<H>(),
@@ -911,7 +908,7 @@ where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
     {
         self.inner.get(key, &db.any).await
     }
@@ -928,7 +925,7 @@ where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
     {
         self.inner.get_many(keys, &db.any).await
     }
@@ -941,7 +938,7 @@ where
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -983,7 +980,7 @@ mod trait_impls {
         F: Graftable,
         K: Key,
         V: ValueEncoding + 'static,
-        H: Hasher,
+        H: CodecHasher,
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
@@ -1016,7 +1013,7 @@ mod trait_impls {
         F: Graftable,
         K: Key,
         V: ValueEncoding + 'static,
-        H: Hasher,
+        H: CodecHasher,
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
@@ -1068,7 +1065,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
-        H: Hasher,
+        H: CodecHasher,
         S: Strategy,
         Operation<F, update::Unordered<K, V>>: Codec,
     {
@@ -1100,7 +1097,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
-        H: Hasher,
+        H: CodecHasher,
         S: Strategy,
         Operation<F, update::Ordered<K, V>>: Codec,
     {

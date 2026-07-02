@@ -808,12 +808,13 @@ mod tests {
                 assert!(mb1.broadcast(Recipients::All, m3.clone()).accepted());
 
                 let mut hasher = Sha256::default();
+                let mut pending = hasher.begin();
                 for msg in [&m1, &m2, &m3] {
                     if let Some(value) = mb1.get(msg.digest()).await {
-                        hasher.update(&value.content);
+                        pending = pending.update(&value.content);
                     }
                 }
-                hasher.finalize()
+                pending.finalize()
             })
         };
 

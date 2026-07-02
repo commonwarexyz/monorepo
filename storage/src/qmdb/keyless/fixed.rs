@@ -15,7 +15,7 @@ use crate::{
         Error, ROOT_BAGGING,
     },
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 
@@ -38,7 +38,7 @@ pub type Config<S> = super::Config<JournalConfig, S>;
 /// Configuration for a fixed-size [keyless](super) compact db.
 pub type CompactConfig<S> = super::CompactConfig<(), S>;
 
-impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strategy>
+impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: CodecHasher, S: Strategy>
     Db<F, E, V, H, S>
 {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
@@ -56,7 +56,7 @@ impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strat
     }
 }
 
-impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strategy>
+impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: CodecHasher, S: Strategy>
     CompactDb<F, E, V, H, S>
 {
     /// Returns a [CompactDb] initialized from `cfg`.

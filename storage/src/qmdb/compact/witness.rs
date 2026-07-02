@@ -16,13 +16,14 @@
 use crate::{
     journal::contiguous::{variable, Contiguous},
     merkle::{
-        self, compact, Family, Location, Proof, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT,
+        self, compact, Family, Location, Position, Proof, MAX_PINNED_NODES,
+        MAX_PROOF_DIGESTS_PER_ELEMENT,
     },
     qmdb::{self, sync::compact::Target, Error},
     Context,
 };
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -183,7 +184,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
     ) -> Result<(), Error<F>>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         S: Strategy,
     {
         self.persist::<H, S>(
@@ -208,7 +209,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
     ) -> Result<(), Error<F>>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         S: Strategy,
     {
         self.persist::<H, S>(
@@ -233,7 +234,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         durability: Durability,
     ) -> Result<(), Error<F>>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         S: Strategy,
     {
         let Some(verified) = self
@@ -264,7 +265,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
     ) -> Result<Option<VerifiedWitness<F, D>>, Error<F>>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         S: Strategy,
     {
         // An equal leaf count means no commit has been applied since the cache was set.
@@ -304,7 +305,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         last_commit_floor: impl FnOnce(&Op) -> Option<Location<F>>,
     ) -> Result<Op, Error<F>>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         S: Strategy,
         Op: Read,
     {
@@ -422,7 +423,7 @@ fn build_witness<F, H, S>(
 ) -> Result<VerifiedWitness<F, H::Digest>, Error<F>>
 where
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     let hasher = qmdb::hasher::<H>();
@@ -472,7 +473,7 @@ async fn load_tip<E, F, H, S, Op>(
 where
     E: Context,
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Op: Read,
 {
@@ -502,7 +503,7 @@ fn rebuild_and_verify<F, D, H, S, Op>(
 where
     F: Family,
     D: Digest,
-    H: Hasher<Digest = D>,
+    H: CodecHasher<Digest = D>,
     S: Strategy,
     Op: Read,
 {
@@ -556,7 +557,7 @@ pub(crate) async fn init<E, F, H, S, Op>(
 where
     E: Context,
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Op: Read,
 {
@@ -579,13 +580,17 @@ async fn bootstrap_initial_commit<E, F, H, S>(
 where
     E: Context,
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
 {
     let hasher = qmdb::hasher::<H>();
     let batch = {
-        let batch = merkle.new_batch().add(&hasher, &last_commit_op_bytes);
-        merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
+        let batch = merkle.new_batch();
+        let pos = Position::try_from(batch.leaves()).expect("valid leaf location");
+        let mut state = hasher.state();
+        let digest = state.leaf_digest(pos, &last_commit_op_bytes);
+        let batch = batch.add_leaf_digests([digest]);
+        merkle.with_mem(|mem| batch.merkleize_reusing::<H>(mem))
     };
     merkle.apply_batch(&batch)?;
 

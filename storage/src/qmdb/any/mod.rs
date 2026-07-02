@@ -80,7 +80,7 @@ use crate::{
     Context,
 };
 use commonware_codec::CodecShared;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use core::num::NonZeroUsize;
@@ -132,7 +132,7 @@ where
     F: Family,
     E: Context,
     U: Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     T: Translator,
     I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
@@ -154,7 +154,7 @@ where
     F: Family,
     E: Context,
     U: Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     T: Translator,
     I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
@@ -188,14 +188,11 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-        qmdb::{
-            self,
-            any::{FixedConfig, MerkleConfig, VariableConfig},
-        },
+        qmdb::any::{FixedConfig, MerkleConfig, VariableConfig},
         translator::OneCap,
     };
     use commonware_codec::{Codec, CodecShared};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, CodecHasher, Hasher as _, Sha256};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic::Context, BufferPooler, Supervisor as _,
     };
@@ -296,7 +293,7 @@ pub(crate) mod test {
         U: UpdateTrait,
         C: Mutable<Item = AnyOperation<mmr::Family, U>>,
         I: UnorderedIndex<Value = Location>,
-        H: Hasher,
+        H: CodecHasher,
         AnyOperation<mmr::Family, U>: Codec,
         S: Strategy,
     {
@@ -752,14 +749,12 @@ pub(crate) mod test {
                 assert!(db.get(&k).await.unwrap().is_none());
             }
         }
-
-        let hasher = qmdb::hasher::<Sha256>();
         let bounds = db.bounds();
         let inactivity_floor = db.inactivity_floor_loc().await;
         for loc in *inactivity_floor..*bounds.end {
             let loc = Location::new(loc);
             let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
-            assert!(verify_proof(&hasher, &proof, loc, &ops, &root));
+            assert!(verify_proof::<Sha256, _, _>(&proof, loc, &ops, &root));
         }
 
         db.destroy().await.unwrap();
@@ -843,9 +838,7 @@ pub(crate) mod test {
         assert_eq!(historical_proof.leaves, regular_proof.leaves);
         assert_eq!(historical_proof.digests, regular_proof.digests);
         assert_eq!(historical_ops, regular_ops);
-        let hasher = qmdb::hasher::<Sha256>();
-        assert!(verify_proof(
-            &hasher,
+        assert!(verify_proof::<Sha256, _, _>(
             &historical_proof,
             start_loc,
             &historical_ops,
@@ -872,8 +865,7 @@ pub(crate) mod test {
         assert_eq!(historical_proof2.leaves, original_op_count);
         assert_eq!(historical_proof2.digests, regular_proof.digests);
         assert_eq!(historical_ops2, regular_ops);
-        assert!(verify_proof(
-            &hasher,
+        assert!(verify_proof::<Sha256, _, _>(
             &historical_proof2,
             start_loc,
             &historical_ops2,
@@ -922,15 +914,12 @@ pub(crate) mod test {
         assert_eq!(proof.leaves, historical_op_count);
         assert_eq!(ops.len(), expected_ops_len);
 
-        let hasher = qmdb::hasher::<Sha256>();
-
         // Changing the proof digests should cause verification to fail
         {
             let mut tampered_proof = proof.clone();
             tampered_proof.digests[0] = Sha256::hash(b"invalid");
             let root_hash = db.root();
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &tampered_proof,
                 Location::new(1),
                 &ops,
@@ -943,8 +932,7 @@ pub(crate) mod test {
             let mut tampered_proof = proof.clone();
             tampered_proof.digests.push(Sha256::hash(b"invalid"));
             let root_hash = db.root();
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &tampered_proof,
                 Location::new(1),
                 &ops,
@@ -959,8 +947,7 @@ pub(crate) mod test {
             // Swap first two ops if we have at least 2
             if tampered_ops.len() >= 2 {
                 tampered_ops.swap(0, 1);
-                assert!(!verify_proof(
-                    &hasher,
+                assert!(!verify_proof::<Sha256, _, _>(
                     &proof,
                     Location::new(1),
                     &tampered_ops,
@@ -974,8 +961,7 @@ pub(crate) mod test {
             let root_hash = db.root();
             let mut tampered_ops = ops.clone();
             tampered_ops.push(tampered_ops[0].clone());
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(1),
                 &tampered_ops,
@@ -986,8 +972,7 @@ pub(crate) mod test {
         // Changing the start location should cause verification to fail
         {
             let root_hash = db.root();
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(2),
                 &ops,
@@ -998,8 +983,7 @@ pub(crate) mod test {
         // Changing the root digest should cause verification to fail
         {
             let invalid_root = Sha256::hash(b"invalid");
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(1),
                 &ops,
@@ -1012,8 +996,7 @@ pub(crate) mod test {
             let mut tampered_proof = proof.clone();
             tampered_proof.leaves = Location::new(100);
             let root_hash = db.root();
-            assert!(!verify_proof(
-                &hasher,
+            assert!(!verify_proof::<Sha256, _, _>(
                 &tampered_proof,
                 Location::new(1),
                 &ops,
@@ -2626,7 +2609,7 @@ mod bitmap_tests {
         merkle::Location,
         qmdb::any::unordered::variable::test::{create_test_config, AnyTest},
     };
-    use commonware_cryptography::{Hasher, Sha256};
+    use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_macros::{boxed, test_traced};
     use commonware_runtime::{
         deterministic::{self, Context},

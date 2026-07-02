@@ -8,9 +8,9 @@
 //! the module documentation). The sync engine operates on the **ops root**, not the canonical root:
 //! it downloads operations and verifies each batch against the ops root using ops-tree range proofs
 //! (identical to `any` sync). Callers that verify current ops proofs directly should use
-//! `qmdb::hasher`. [crate::qmdb::current::proof::OpsRootWitness] can be used by callers that need
-//! to authenticate the synced ops root against a trusted canonical root; the sync engine does not
-//! perform this check itself.
+//! [crate::qmdb::verify_proof]. [crate::qmdb::current::proof::OpsRootWitness] can be used by
+//! callers that need to authenticate the synced ops root against a trusted canonical root; the sync
+//! engine does not perform this check itself.
 //!
 //! After all operations are synced, the bitmap and grafted tree are reconstructed deterministically
 //! from the operations. The canonical root is then computed from the ops root, the reconstructed
@@ -68,7 +68,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::{CodecHasher, DigestOf};
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
 use core::num::NonZeroUsize;
@@ -110,7 +110,7 @@ where
     E: Context,
     U: Update + Send + Sync + 'static,
     I: IndexFactory<T, Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     T: Translator,
     J: Mutable<Item = Operation<F, U>>,
     S: Strategy,
@@ -131,7 +131,7 @@ where
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         merkle,
         log,
-        hasher,
+        hasher.clone(),
         apply_batch_size as u64,
     )
     .await?;
@@ -178,11 +178,9 @@ where
     };
 
     // Build grafted tree.
-    let hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
-        &hasher,
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
@@ -194,15 +192,13 @@ where
     // Compute the canonical root. The grafted root is deterministic from the ops
     // (which are authenticated by the engine) and the bitmap (which is deterministic
     // from the ops).
-    let storage = grafting::Storage::new(
+    let storage = grafting::Storage::<F, H, _, _>::new(
         &grafted_tree,
         grafting::height::<N>(),
         &any.log.merkle,
-        hasher.clone(),
     );
     let partial = db::partial_chunk(any.bitmap.as_ref());
-    let grafted_root = db::compute_grafted_root(
-        &hasher,
+    let grafted_root = db::compute_grafted_root::<F, H, _, _, N>(
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
@@ -210,15 +206,15 @@ where
     )
     .await?;
     let ops_root = any.root();
+    let mut scratch = H::new();
     let partial_digest = partial.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(&chunk);
+        let digest = scratch.hash_parts([chunk.as_slice()]);
         (next_bit, digest)
     });
     let pending_digest =
         db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
-            .map(|chunk| hasher.digest(&chunk));
-    let root = db::combine_roots(
-        &hasher,
+            .map(|chunk| scratch.hash_parts([chunk.as_slice()]));
+    let root = db::combine_roots::<H>(
         &ops_root,
         &grafted_root,
         pending_digest.as_ref(),
@@ -260,7 +256,7 @@ macro_rules! impl_current_sync_database {
             E: Context,
             K: $key_bound,
             V: $value_bound + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator,
             S: Strategy,
             $($($where_extra)+)?
@@ -403,7 +399,7 @@ macro_rules! impl_current_resolver {
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -451,7 +447,7 @@ macro_rules! impl_current_resolver {
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,
@@ -496,7 +492,7 @@ macro_rules! impl_current_resolver {
             E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
             S: Strategy,

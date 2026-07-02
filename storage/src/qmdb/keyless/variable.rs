@@ -16,7 +16,7 @@ use crate::{
     },
 };
 use commonware_codec::Read;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 
@@ -39,7 +39,7 @@ pub type Config<C, S> = super::Config<JournalConfig<C>, S>;
 /// Configuration for a variable-size [keyless](super) compact db.
 pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
 
-impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
+impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: CodecHasher, S: Strategy>
     Db<F, E, V, H, S>
 {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
@@ -64,7 +64,7 @@ impl<
         F: Family,
         E: Storage + Clock + Metrics,
         V: VariableValue,
-        H: Hasher,
+        H: CodecHasher,
         C: Clone + Send + Sync + 'static,
         S: Strategy,
     > CompactDb<F, E, V, H, C, S>

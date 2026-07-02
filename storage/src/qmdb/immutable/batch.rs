@@ -15,7 +15,7 @@ use crate::{
     Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_parallel::Strategy;
 use std::{
     collections::BTreeMap,
@@ -42,7 +42,7 @@ where
     F: Family,
     K: Key,
     V: ValueEncoding,
-    H: CHasher,
+    H: CodecHasher,
 {
     /// Authenticated journal batch for computing the speculative Merkle root.
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, K, V>, S>,
@@ -95,7 +95,7 @@ where
     F: Family,
     K: Key,
     V: ValueEncoding,
-    H: CHasher,
+    H: CodecHasher,
     Operation<F, K, V>: EncodeShared,
 {
     /// Create a batch from a committed DB (no parent chain).
@@ -334,7 +334,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
-        H: CHasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         T: Translator,
     {
         if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
@@ -360,7 +360,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
-        H: CHasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
         T: Translator,
     {
         if keys.is_empty() {
@@ -415,7 +415,7 @@ where
     /// loss detected at `apply_batch` time.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V, S>
     where
-        H: CHasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
     {
         UnmerkleizedBatch {
             journal_batch: self.journal_batch.new_batch::<H>(),
@@ -435,7 +435,7 @@ where
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
     C::Item: EncodeShared,
-    H: CHasher,
+    H: CodecHasher,
     T: Translator,
     S: Strategy,
 {

@@ -2,7 +2,9 @@
 
 use crate::merkle::{Bagging, Error, Family, Location, Position};
 use alloc::vec::Vec;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+#[cfg(any(feature = "std", test))]
+use commonware_codec::Encode;
+use commonware_cryptography::{CodecHasher, Digest};
 use core::marker::PhantomData;
 
 /// A trait for computing the various digests of a Merkle-family structure.
@@ -141,24 +143,25 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     }
 }
 
-/// The standard hasher for Merkle-family structures. Leverages no external data.
+/// The standard hasher for Merkle-family structures.
+///
+/// `Standard<H>` carries no hash state: it is a configuration value holding only a peak-bagging
+/// policy. Constructing and cloning are cheap.
 ///
 /// A single `Standard<H>` implements `Hasher<F>` for every Merkle family `F`, so
 /// one instance can be used with MMR, MMB, or any future family.
-///
-/// The `bagging` field selects how peaks are folded into the root.
 #[derive(Clone)]
-pub struct Standard<H: CHasher> {
-    _hasher: PhantomData<H>,
+pub struct Standard<H: CodecHasher> {
     bagging: Bagging,
+    marker: PhantomData<H>,
 }
 
-impl<H: CHasher> Standard<H> {
+impl<H: CodecHasher> Standard<H> {
     /// Creates a new [Standard] hasher with the given bagging policy.
     pub const fn new(bagging: Bagging) -> Self {
         Self {
-            _hasher: PhantomData,
             bagging,
+            marker: PhantomData,
         }
     }
 
@@ -169,20 +172,63 @@ impl<H: CHasher> Standard<H> {
 
     /// Hash an arbitrary sequence of byte slices into a single digest.
     pub fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        let mut h = H::new();
-        for part in parts {
-            h.update(part);
-        }
-        h.finalize()
+        let mut hasher = H::new();
+        hasher.hash_parts(parts)
     }
 
     /// Compute the digest of a byte slice.
     pub fn digest(&self, data: &[u8]) -> H::Digest {
         self.hash(core::iter::once(data))
     }
+
+    /// Create reusable hashing state for a local batch of Merkle operations.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn state(&self) -> StandardState<H> {
+        StandardState::new()
+    }
 }
 
-impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
+/// Reusable hashing state for a local run of Merkle operations.
+#[cfg(any(feature = "std", test))]
+pub(crate) struct StandardState<H: CodecHasher> {
+    hasher: H,
+}
+
+#[cfg(any(feature = "std", test))]
+impl<H: CodecHasher> StandardState<H> {
+    /// Create reusable hashing state.
+    pub(crate) fn new() -> Self {
+        Self { hasher: H::new() }
+    }
+
+    /// Hash a fixed-position Merkle node.
+    pub(crate) fn node_digest<F: Family>(
+        &mut self,
+        pos: Position<F>,
+        left: &H::Digest,
+        right: &H::Digest,
+    ) -> H::Digest {
+        self.hasher.hash_u64_digest_pair(*pos, left, right)
+    }
+
+    /// Hash a fixed-position leaf from bytes.
+    pub(crate) fn leaf_digest<F: Family>(&mut self, pos: Position<F>, element: &[u8]) -> H::Digest {
+        let pos = (*pos).to_be_bytes();
+        self.hasher.hash_parts([pos.as_slice(), element])
+    }
+
+    /// Hash a fixed-position leaf from an encoded value.
+    pub(crate) fn leaf_encoded<F: Family, E: Encode>(
+        &mut self,
+        pos: Position<F>,
+        value: &E,
+    ) -> H::Digest {
+        let pos = (*pos).to_be_bytes();
+        self.hasher.hash_prefixed(pos.as_slice(), value)
+    }
+}
+
+impl<F: Family, H: CodecHasher> Hasher<F> for Standard<H> {
     type Digest = H::Digest;
 
     fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
@@ -191,6 +237,21 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
 
     fn root_bagging(&self) -> Bagging {
         Self::root_bagging(self)
+    }
+
+    fn node_digest(
+        &self,
+        pos: Position<F>,
+        left: &Self::Digest,
+        right: &Self::Digest,
+    ) -> Self::Digest {
+        let mut hasher = H::new();
+        hasher.hash_u64_digest_pair(*pos, left, right)
+    }
+
+    fn fold(&self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
+        let mut hasher = H::new();
+        hasher.hash_digest_pair(acc, peak)
     }
 }
 
@@ -214,7 +275,7 @@ mod tests {
         Bagging::{BackwardFold, ForwardFold},
     };
     use alloc::vec::Vec;
-    use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{sha256, CodecHasher, Hasher as CryptoHasher, Sha256};
 
     #[test]
     fn test_leaf_digest_sha256() {
@@ -274,11 +335,11 @@ mod tests {
         ));
     }
 
-    fn test_digest<H: CHasher>(value: u8) -> H::Digest {
+    fn test_digest<H: CryptoHasher>(value: u8) -> H::Digest {
         H::hash(&[value])
     }
 
-    fn test_leaf_digest<H: CHasher>() {
+    fn test_leaf_digest<H: CodecHasher>() {
         let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
         let digest1 = test_digest::<H>(1);
         let digest2 = test_digest::<H>(2);
@@ -296,7 +357,7 @@ mod tests {
         assert_ne!(out, out2, "hash should change with different input digest");
     }
 
-    fn test_node_digest<H: CHasher>() {
+    fn test_node_digest<H: CodecHasher>() {
         let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
 
         let d1 = test_digest::<H>(1);
@@ -331,7 +392,7 @@ mod tests {
         );
     }
 
-    fn test_root<H: CHasher>() {
+    fn test_root<H: CodecHasher>() {
         let mmr_hasher: Standard<H> = Standard::new(ForwardFold);
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);

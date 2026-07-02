@@ -3,7 +3,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
-    Digest, Hasher,
+    CodecHasher, Digest,
 };
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
@@ -75,20 +75,18 @@ impl<D: Digest> Chunk<D> {
     }
 
     /// Verify a [`Chunk`] against the given root.
-    fn verify<H: Hasher<Digest = D>>(&self, index: u16, root: &D) -> Option<CheckedChunk<D>> {
+    fn verify<H: CodecHasher<Digest = D>>(&self, index: u16, root: &D) -> Option<CheckedChunk<D>> {
         // Ensure the index matches
         if index != self.index {
             return None;
         }
 
         // Compute shard digest
-        let mut hasher = H::new();
-        hasher.update(&self.shard);
-        let shard_digest = hasher.finalize();
+        let shard_digest = H::hash(&self.shard);
 
         // Verify proof
         self.proof
-            .verify_element_inclusion(&mut hasher, &shard_digest, self.index as u32, root)
+            .verify_element_inclusion::<H>(&shard_digest, self.index as u32, root)
             .ok()?;
 
         Some(CheckedChunk::new(
@@ -312,7 +310,7 @@ type Encoding<D> = (D, Vec<Chunk<D>>);
 ///
 /// - `root`: The root of the [`bmt`].
 /// - `chunks`: [`Chunk`]s of encoded data (that can be proven against `root`).
-fn encode<H: Hasher, S: Strategy>(
+fn encode<H: CodecHasher, S: Strategy>(
     total: u16,
     min: u16,
     data: impl Buf,
@@ -382,10 +380,7 @@ fn encode<H: Hasher, S: Strategy>(
         &shard_slices,
         shard_len,
         H::new,
-        |hasher, shard| {
-            hasher.update(shard);
-            hasher.finalize()
-        },
+        |hasher, shard| hasher.begin().update(shard).finalize(),
     );
     for hash in &shard_hashes {
         builder.add(hash);
@@ -404,7 +399,7 @@ fn encode<H: Hasher, S: Strategy>(
 }
 
 /// Inputs shared by the decode helpers.
-struct DecodeCtx<'a, H: Hasher, S: Strategy> {
+struct DecodeCtx<'a, H: CodecHasher, S: Strategy> {
     /// Total number of shards (`k + m`).
     n: usize,
     /// Minimum shards required to decode (the number of original shards).
@@ -601,7 +596,7 @@ mod striped {
     /// Decode when all `k` originals are present: re-encode the recovery shards (recovery with
     /// missing originals uses [`decode_reveal`]), confirm any provided recovery shards
     /// match the canonical re-encode, and verify the rebuilt commitment against `ctx.root`.
-    pub(super) fn decode<'a, H: Hasher, S: Strategy>(
+    pub(super) fn decode<'a, H: CodecHasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
         ranges: Vec<Range<usize>>,
         shard_digests: Vec<Option<H::Digest>>,
@@ -646,7 +641,7 @@ mod striped {
     /// here and bound by the commitment root check like any other missing shard. No
     /// provided-recovery comparison is needed: every reconstructed shard is the unique RS
     /// output for the `k` inputs, and the root check alone binds it to the commitment.
-    pub(super) fn decode_reveal<'a, H: Hasher, S: Strategy>(
+    pub(super) fn decode_reveal<'a, H: CodecHasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
         ranges: Vec<Range<usize>>,
         shard_digests: Vec<Option<H::Digest>>,
@@ -730,7 +725,7 @@ mod striped {
 /// from `originals`, hash every missing shard (original or recovery), rebuild the Merkle tree, and
 /// confirm its root matches the commitment. Shared by both strategies and both decode paths once the
 /// full codeword is available (by re-encode with all originals present, or by decode-reveal).
-fn verify_root<H: Hasher, S: Strategy>(
+fn verify_root<H: CodecHasher, S: Strategy>(
     ctx: &DecodeCtx<'_, H, S>,
     mut shard_digests: Vec<Option<H::Digest>>,
     originals: &[&[u8]],
@@ -766,10 +761,7 @@ fn verify_root<H: Hasher, S: Strategy>(
         missing_shards,
         shard_len,
         H::new,
-        |hasher, (i, shard)| {
-            hasher.update(shard);
-            (i, hasher.finalize())
-        },
+        |hasher, (i, shard)| (i, hasher.begin().update(shard).finalize()),
     ) {
         shard_digests[i] = Some(digest);
     }
@@ -793,7 +785,7 @@ fn verify_root<H: Hasher, S: Strategy>(
 /// `recoveries` before their digests are trusted, then verify the commitment via [`verify_root`].
 /// This compare is what rejects a malicious encoder's non-canonical recovery shard when every
 /// original is present; with an original missing, the decode binds the recoveries instead.
-fn verify_reencoded<H: Hasher, S: Strategy>(
+fn verify_reencoded<H: CodecHasher, S: Strategy>(
     ctx: &DecodeCtx<'_, H, S>,
     shard_digests: Vec<Option<H::Digest>>,
     originals: &[&[u8]],
@@ -817,7 +809,7 @@ mod sequential {
 
     /// Decode the codeword as a single Reed-Solomon instance, reconstructing the
     /// original data and verifying the rebuilt commitment against `ctx.root`.
-    pub(super) fn decode<'a, H: Hasher, S: Strategy>(
+    pub(super) fn decode<'a, H: CodecHasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
         shard_digests: Vec<Option<H::Digest>>,
         provided_originals: Vec<(usize, &'a [u8])>,
@@ -882,7 +874,7 @@ mod sequential {
 
     /// Re-encode the recovery shards from the originals, then verify the commitment via
     /// [`verify_reencoded`].
-    fn verify_codeword<H: Hasher, S: Strategy>(
+    fn verify_codeword<H: CodecHasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
         shard_digests: Vec<Option<H::Digest>>,
         provided_recoveries: &[(usize, &[u8])],
@@ -935,7 +927,7 @@ mod sequential {
 /// # Returns
 ///
 /// - `data`: The decoded data.
-fn decode<'a, H: Hasher, S: Strategy>(
+fn decode<'a, H: CodecHasher, S: Strategy>(
     total: u16,
     min: u16,
     root: &H::Digest,
@@ -1148,7 +1140,7 @@ impl<H> std::fmt::Debug for ReedSolomon<H> {
     }
 }
 
-impl<H: Hasher> Scheme for ReedSolomon<H> {
+impl<H: CodecHasher> Scheme for ReedSolomon<H> {
     type Commitment = H::Digest;
     type Shard = Chunk<H::Digest>;
     type CheckedShard = CheckedChunk<H::Digest>;
@@ -1208,7 +1200,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 mod tests {
     use super::*;
     use commonware_codec::Encode;
-    use commonware_cryptography::Sha256;
+    use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
     use commonware_invariants::minifuzz;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
@@ -1222,25 +1214,18 @@ mod tests {
     const FUZZ_MAX_EXTRA_SHARD_WIDTH: usize = 16;
 
     fn checked(
-        root: <Sha256 as Hasher>::Digest,
-        chunk: Chunk<<Sha256 as Hasher>::Digest>,
-    ) -> CheckedChunk<<Sha256 as Hasher>::Digest> {
+        root: DigestOf<Sha256>,
+        chunk: Chunk<DigestOf<Sha256>>,
+    ) -> CheckedChunk<DigestOf<Sha256>> {
         let Chunk { shard, index, .. } = chunk;
         let digest = Sha256::hash(&shard);
         CheckedChunk::new(root, shard, index, digest)
     }
 
-    fn build_chunks(
-        shards: &[Vec<u8>],
-    ) -> (
-        <Sha256 as Hasher>::Digest,
-        Vec<Chunk<<Sha256 as Hasher>::Digest>>,
-    ) {
+    fn build_chunks(shards: &[Vec<u8>]) -> (DigestOf<Sha256>, Vec<Chunk<DigestOf<Sha256>>>) {
         let mut builder = Builder::<Sha256>::new(shards.len());
         for shard in shards {
-            let mut hasher = Sha256::new();
-            hasher.update(shard);
-            builder.add(&hasher.finalize());
+            builder.add(&Sha256::hash(shard));
         }
         let tree = builder.build();
         let root = tree.root();
@@ -1275,8 +1260,8 @@ mod tests {
     fn assert_decode_unique_commitment(
         total: u16,
         min: u16,
-        root: <Sha256 as Hasher>::Digest,
-        chunks: &[Chunk<<Sha256 as Hasher>::Digest>],
+        root: DigestOf<Sha256>,
+        chunks: &[Chunk<DigestOf<Sha256>>],
         selected: &[u16],
     ) {
         let pieces = selected
@@ -1790,10 +1775,11 @@ mod tests {
         let encoding = encoder.encode().unwrap();
 
         let mut hasher = Sha256::new();
+        let mut pending = hasher.begin();
         for shard in encoding.recovery_iter() {
-            hasher.update(shard);
+            pending = pending.update(shard);
         }
-        let digest = hasher.finalize();
+        let digest = pending.finalize();
         assert_eq!(
             format!("{digest}"),
             "e38bb9dbba4a102c4bd8447e212957742dab0af0c4148d4660c671f2f33d3df2",
@@ -1818,9 +1804,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            let mut hasher = Sha256::new();
-            hasher.update(shard);
-            builder.add(&hasher.finalize());
+            builder.add(&Sha256::hash(shard));
         }
         let tree = builder.build();
         let root = tree.root();
@@ -1852,8 +1836,10 @@ mod tests {
 
         // Create a malicious/fake root (simulating a malicious encoder)
         let mut hasher = Sha256::new();
-        hasher.update(b"malicious_data_that_wasnt_actually_encoded");
-        let malicious_root = hasher.finalize();
+        let malicious_root = hasher
+            .begin()
+            .update(b"malicious_data_that_wasnt_actually_encoded")
+            .finalize();
 
         // Verify all proofs at incorrect root
         for i in 0..total {
@@ -1953,9 +1939,7 @@ mod tests {
         // Build malicious tree
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &malicious_shards {
-            let mut hasher = Sha256::new();
-            hasher.update(shard);
-            builder.add(&hasher.finalize());
+            builder.add(&Sha256::hash(shard));
         }
         let malicious_tree = builder.build();
         let malicious_root = malicious_tree.root();
@@ -2010,9 +1994,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            let mut hasher = Sha256::new();
-            hasher.update(shard);
-            builder.add(&hasher.finalize());
+            builder.add(&Sha256::hash(shard));
         }
         let tree = builder.build();
         let non_canonical_root = tree.root();
@@ -2068,9 +2050,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &oversized_shards {
-            let mut hasher = Sha256::new();
-            hasher.update(shard);
-            builder.add(&hasher.finalize());
+            builder.add(&Sha256::hash(shard));
         }
         let oversized_tree = builder.build();
         let oversized_root = oversized_tree.root();
@@ -2109,9 +2089,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            let mut hasher = Sha256::new();
-            hasher.update(shard);
-            builder.add(&hasher.finalize());
+            builder.add(&Sha256::hash(shard));
         }
         let tree = builder.build();
         let root = tree.root();
@@ -2145,9 +2123,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            let mut hasher = Sha256::new();
-            hasher.update(shard);
-            builder.add(&hasher.finalize());
+            builder.add(&Sha256::hash(shard));
         }
         let tree = builder.build();
         let root = tree.root();

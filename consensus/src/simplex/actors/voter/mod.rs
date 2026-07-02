@@ -8139,8 +8139,10 @@ mod tests {
 
             // Build a valid first-view proposal (parent is genesis at view 0).
             let mut hasher = Sha256::default();
-            hasher.update(&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode());
-            let genesis = hasher.finalize();
+            let genesis = hasher
+                .begin()
+                .update(&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode())
+                .finalize();
             let proposal = Proposal::new(
                 first_round,
                 View::zero(),

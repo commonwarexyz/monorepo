@@ -18,15 +18,13 @@
 //!
 //! // Using the Hasher trait
 //! let mut hasher = Crc32::new();
-//! hasher.update(b"hello ");
-//! hasher.update(b"world");
-//! let digest = hasher.finalize();
+//! let digest = hasher.begin().update(b"hello ").update(b"world").finalize();
 //!
 //! // Convert digest to u32
 //! assert_eq!(digest.as_u32(), checksum);
 //! ```
 
-use crate::Hasher;
+use crate::{CodecHasher, Hasher};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
@@ -80,12 +78,11 @@ impl Crc32 {
 impl Hasher for Crc32 {
     type Digest = Digest;
 
-    fn update(&mut self, message: &[u8]) -> &mut Self {
+    fn update_inner(&mut self, message: &[u8]) {
         self.inner.update(message);
-        self
     }
 
-    fn finalize(&mut self) -> Self::Digest {
+    fn finalize_inner(&mut self) -> Self::Digest {
         Self::Digest::from(self.inner.finalize_reset() as u32)
     }
 
@@ -94,6 +91,8 @@ impl Hasher for Crc32 {
         self
     }
 }
+
+impl CodecHasher for Crc32 {}
 
 /// Digest of a CRC32 hashing operation (4 bytes).
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
@@ -335,10 +334,11 @@ mod tests {
         // Test chunk sizes from 1 to 64 bytes
         for chunk_size in 1..=64 {
             let mut hasher = Crc32::new();
+            let mut pending = hasher.begin();
             for chunk in data.chunks(chunk_size) {
-                hasher.update(chunk);
+                pending = pending.update(chunk);
             }
-            assert_eq!(hasher.finalize().as_u32(), expected);
+            assert_eq!(pending.finalize().as_u32(), expected);
         }
     }
 
@@ -370,8 +370,7 @@ mod tests {
 
         // Generate initial hash using Hasher trait
         let mut hasher = Crc32::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.begin().update(msg).finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
 
         // Verify against reference
@@ -379,8 +378,7 @@ mod tests {
         assert_eq!(digest.as_u32(), expected);
 
         // Reuse hasher (should auto-reset after finalize)
-        hasher.update(msg);
-        let digest2 = hasher.finalize();
+        let digest2 = hasher.begin().update(msg).finalize();
         assert_eq!(digest, digest2);
 
         // Test Hasher::hash convenience method
@@ -398,8 +396,7 @@ mod tests {
     fn test_codec() {
         let msg = b"hello world";
         let mut hasher = Crc32::new();
-        hasher.update(msg);
-        let digest = hasher.finalize();
+        let digest = hasher.begin().update(msg).finalize();
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), SIZE);

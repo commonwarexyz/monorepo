@@ -119,7 +119,7 @@ use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     transcript::{Summary, Transcript},
-    Digest, Hasher,
+    CodecHasher, Digest,
 };
 use commonware_math::{
     fields::goldilocks::F,
@@ -180,12 +180,13 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
     out
 }
 
-fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
+fn row_digest<H: CodecHasher>(row: &[F]) -> H::Digest {
     let mut h = H::new();
+    let mut pending = h.begin();
     for x in row {
-        h.update(&x.to_le_bytes());
+        pending = pending.update(&x.to_le_bytes());
     }
-    h.finalize()
+    pending.finalize()
 }
 
 mod topology;
@@ -429,7 +430,7 @@ impl<D: Digest> CheckingData<D> {
         })
     }
 
-    fn check<H: Hasher<Digest = D>>(
+    fn check<H: CodecHasher<Digest = D>>(
         &self,
         commitment: &Summary,
         index: u16,
@@ -457,10 +458,9 @@ impl<D: Digest> CheckingData<D> {
             .collect();
 
         // Verify the multi-proof
-        let mut hasher = H::new();
         if weak_shard
             .inclusion_proof
-            .verify_multi_inclusion(&mut hasher, &proof_elements, &self.root)
+            .verify_multi_inclusion::<H>(&proof_elements, &self.root)
             .is_err()
         {
             return Err(Error::InvalidWeakShard);
@@ -510,7 +510,7 @@ impl<H> std::fmt::Debug for Zoda<H> {
     }
 }
 
-impl<H: Hasher> PhasedScheme for Zoda<H> {
+impl<H: CodecHasher> PhasedScheme for Zoda<H> {
     type Commitment = Summary;
     type StrongShard = StrongShard<H::Digest>;
     type WeakShard = WeakShard<H::Digest>;
@@ -682,7 +682,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
     }
 }
 
-impl<H: Hasher> ValidatingScheme for Zoda<H> {}
+impl<H: CodecHasher> ValidatingScheme for Zoda<H> {}
 
 #[cfg(test)]
 mod tests {

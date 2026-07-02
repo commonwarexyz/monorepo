@@ -64,7 +64,7 @@ use crate::merkle::{
     self, hasher::Hasher as HasherTrait, storage::Storage as StorageTrait, Family, Graftable,
     Location, Position, Readable,
 };
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::CodecHasher;
 use commonware_utils::bitmap::BitMap;
 use core::{cmp::Ordering, marker::PhantomData};
 use tracing::debug;
@@ -233,7 +233,7 @@ impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
 /// - **At**: the children form an ops subtree root, which is combined with a bitmap chunk element
 ///   to reconstruct the grafted leaf digest.
 #[derive(Clone)]
-pub struct Verifier<'a, F: Graftable, H: CHasher> {
+pub struct Verifier<'a, F: Graftable, H: CodecHasher> {
     hasher: merkle::hasher::Standard<H>,
     grafting_height: u32,
 
@@ -249,7 +249,7 @@ pub struct Verifier<'a, F: Graftable, H: CHasher> {
     _ops_family: PhantomData<F>,
 }
 
-impl<'a, F: Graftable, H: CHasher> Verifier<'a, F, H> {
+impl<'a, F: Graftable, H: CodecHasher> Verifier<'a, F, H> {
     /// Create a new Verifier whose internal hasher uses the supplied bagging policy.
     ///
     /// `start_chunk_index` is the chunk index corresponding to `chunks[0]`.
@@ -274,7 +274,7 @@ impl<'a, F: Graftable, H: CHasher> Verifier<'a, F, H> {
     }
 }
 
-impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
+impl<F: Graftable, H: CodecHasher> HasherTrait<F> for Verifier<'_, F, H> {
     type Digest = H::Digest;
 
     fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
@@ -345,39 +345,35 @@ impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
 pub(super) struct Storage<
     'a,
     F: Graftable,
-    D: Digest,
-    G: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
-    S: StorageTrait<F, Digest = D>,
-    H: HasherTrait<F, Digest = D> + Clone,
+    H: CodecHasher,
+    G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
+    S: StorageTrait<F, Digest = H::Digest>,
 > {
     grafted_tree: &'a G,
     grafting_height: u32,
     ops_tree: &'a S,
-    grafted_hasher: GraftedHasher<F, H>,
-    _phantom: PhantomData<(F, D)>,
+    grafted_hasher: GraftedHasher<F, merkle::hasher::Standard<H>>,
+    _phantom: PhantomData<F>,
 }
 
 impl<
         'a,
         F: Graftable,
-        D: Digest,
-        G: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
-        S: StorageTrait<F, Digest = D>,
-        H: HasherTrait<F, Digest = D> + Clone,
-    > Storage<'a, F, D, G, S, H>
+        H: CodecHasher,
+        G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
+        S: StorageTrait<F, Digest = H::Digest>,
+    > Storage<'a, F, H, G, S>
 {
     /// Creates a new [Storage] instance.
-    pub(super) const fn new(
-        grafted_tree: &'a G,
-        grafting_height: u32,
-        ops_tree: &'a S,
-        hasher: H,
-    ) -> Self {
+    pub(super) const fn new(grafted_tree: &'a G, grafting_height: u32, ops_tree: &'a S) -> Self {
         Self {
             grafted_tree,
             grafting_height,
             ops_tree,
-            grafted_hasher: GraftedHasher::new(hasher, grafting_height),
+            grafted_hasher: GraftedHasher::new(
+                merkle::hasher::Standard::new(merkle::Bagging::ForwardFold),
+                grafting_height,
+            ),
             _phantom: PhantomData,
         }
     }
@@ -398,7 +394,7 @@ impl<
     /// Returns `None` at height 0 (a grafted leaf), since leaves encode bitmap data and
     /// cannot be recomputed from the tree structure alone. The settlement guard in
     /// [`super::db::Db::sync_boundary`] ensures this case is unreachable for pruned chunks.
-    fn reconstruct_grafted_node(&self, pos: Position<F>) -> Option<D> {
+    fn reconstruct_grafted_node(&self, pos: Position<F>) -> Option<H::Digest> {
         if let Some(node) = self.grafted_tree.get_node(pos) {
             return Some(node);
         }
@@ -419,19 +415,18 @@ impl<
 
 impl<
         F: Graftable,
-        D: Digest,
-        G: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
-        S: StorageTrait<F, Digest = D>,
-        H: HasherTrait<F, Digest = D> + Clone + Send + Sync,
-    > StorageTrait<F> for Storage<'_, F, D, G, S, H>
+        H: CodecHasher,
+        G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
+        S: StorageTrait<F, Digest = H::Digest>,
+    > StorageTrait<F> for Storage<'_, F, H, G, S>
 {
-    type Digest = D;
+    type Digest = H::Digest;
 
     async fn size(&self) -> Position<F> {
         self.ops_tree.size().await
     }
 
-    async fn get_node(&self, pos: Position<F>) -> Result<Option<D>, merkle::Error<F>> {
+    async fn get_node(&self, pos: Position<F>) -> Result<Option<H::Digest>, merkle::Error<F>> {
         let ops_height = F::pos_to_height(pos);
         if ops_height < self.grafting_height {
             return self.ops_tree.get_node(pos).await;
@@ -865,7 +860,8 @@ mod tests {
             let ops_root = ops_mmr.root(&hasher, 0).unwrap();
 
             {
-                let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr, hasher.clone());
+                let combined =
+                    Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
                 assert_eq!(combined.size().await, ops_mmr.size());
 
                 // Compute the grafted root by iterating ops peaks.
@@ -1032,7 +1028,8 @@ mod tests {
 
             ops_mmr.apply_batch(&batch).unwrap();
 
-            let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr, hasher.clone());
+            let combined =
+                Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
             assert_eq!(combined.size().await, ops_mmr.size());
 
             // Compute the grafted root.

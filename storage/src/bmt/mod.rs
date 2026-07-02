@@ -1,15 +1,15 @@
 //! Stateless Binary Merkle Tree (BMT).
 //!
 //! The Binary Merkle Tree is constructed level-by-level. The first level consists of position-hashed leaf digests.
-//! On each additional level, pairs of nodes are hashed from the previous level (if a level contains an odd
-//! number of nodes, the last node is duplicated). The finalized root of the tree incorporates the leaf count
-//! to prevent proof malleability: `root = hash(leaf_count || tree_root)`.
+//! On each additional level, pairs of nodes from the previous level are hashed as `hash(left || right)`
+//! (if a level contains an odd number of nodes, the last node is duplicated). The finalized root of the tree
+//! incorporates the leaf count to prevent proof malleability: `root = hash(leaf_count || tree_root)`.
 //!
 //! For example, given three leaves A, B, and C, the tree is constructed as follows:
 //!
 //! ```text
-//!     Level 2 (tree_root):  [hash(hash(hash(0,A),hash(1,B)),hash(hash(2,C),hash(2,C)))]
-//!     Level 1:              [hash(hash(0,A),hash(1,B)),hash(hash(2,C),hash(2,C))]
+//!     Level 2 (tree_root):  [hash(hash(hash(0,A) || hash(1,B)) || hash(hash(2,C) || hash(2,C)))]
+//!     Level 1:              [hash(hash(0,A) || hash(1,B)),hash(hash(2,C) || hash(2,C))]
 //!     Level 0 (leaves):     [hash(0,A),hash(1,B),hash(2,C)]
 //!     Finalized root:       hash(3 || tree_root)
 //! ```
@@ -37,20 +37,18 @@
 //! let root = tree.root();
 //!
 //! // Generate a proof for leaf at index 1
-//! let mut hasher = Sha256::default();
 //! let proof = tree.proof(1).unwrap();
-//! assert!(proof.verify_element_inclusion(&mut hasher, &digests[1], 1, &root).is_ok());
+//! assert!(proof.verify_element_inclusion::<Sha256>(&digests[1], 1, &root).is_ok());
 //! ```
 
 use alloc::{
     collections::btree_set::BTreeSet,
     string::{String, ToString},
-    vec,
     vec::Vec,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
@@ -74,12 +72,12 @@ pub enum Error {
 }
 
 /// Constructor for a Binary Merkle Tree (BMT).
-pub struct Builder<H: Hasher> {
+pub struct Builder<H: CodecHasher> {
     hasher: H,
     leaves: Vec<H::Digest>,
 }
 
-impl<H: Hasher> Builder<H> {
+impl<H: CodecHasher> Builder<H> {
     /// Creates a new Binary Merkle Tree builder.
     pub fn new(leaves: usize) -> Self {
         Self {
@@ -93,9 +91,8 @@ impl<H: Hasher> Builder<H> {
     /// When added, the leaf is hashed with its position.
     pub fn add(&mut self, leaf: &H::Digest) -> u32 {
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
-        self.hasher.update(&position.to_be_bytes());
-        self.hasher.update(leaf);
-        self.leaves.push(self.hasher.finalize());
+        self.leaves
+            .push(self.hasher.hash_u32_digest(position, leaf));
         position
     }
 
@@ -127,7 +124,7 @@ pub struct Tree<D: Digest> {
 
 impl<D: Digest> Tree<D> {
     /// Builds a Merkle Tree from a slice of position-hashed leaf digests.
-    fn new<H: Hasher<Digest = D>>(mut hasher: H, mut leaves: Vec<D>) -> Self {
+    fn new<H: CodecHasher<Digest = D>>(mut hasher: H, mut leaves: Vec<D>) -> Self {
         // If no leaves, add an empty node.
         //
         // Because this node only includes a position, there is no way a valid proof
@@ -135,31 +132,30 @@ impl<D: Digest> Tree<D> {
         let mut empty = false;
         let leaf_count = leaves.len() as u32;
         if leaves.is_empty() {
-            leaves.push(hasher.finalize());
+            leaves.push(hasher.hash_empty());
             empty = true;
         }
 
         // Create the first level
-        let mut levels = non_empty_vec![non_empty_vec![@leaves]];
+        let level_count = if leaves.len() == 1 {
+            1
+        } else {
+            usize::BITS as usize - (leaves.len() - 1).leading_zeros() as usize + 1
+        };
+        let mut levels = Vec::with_capacity(level_count);
+        levels.push(non_empty_vec![@leaves]);
+        let mut levels = non_empty_vec![@levels];
 
         // Construct the tree level-by-level
         let mut current_level = levels.last();
         while !current_level.is_singleton() {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
-            for chunk in current_level.chunks(2) {
-                // Hash the left child
-                hasher.update(&chunk[0]);
-
-                // Hash the right child
-                if chunk.len() == 2 {
-                    hasher.update(&chunk[1]);
-                } else {
-                    // If no right child exists, duplicate left child.
-                    hasher.update(&chunk[0]);
-                };
-
-                // Compute the parent digest
-                next_level.push(hasher.finalize());
+            let mut chunks = current_level.chunks_exact(2);
+            for chunk in &mut chunks {
+                next_level.push(hasher.hash_digest_pair(&chunk[0], &chunk[1]));
+            }
+            if let [last] = chunks.remainder() {
+                next_level.push(hasher.hash_digest_pair(last, last));
             }
 
             // Add the computed level to the tree
@@ -170,9 +166,7 @@ impl<D: Digest> Tree<D> {
         // Compute the finalized root: H(leaf_count || tree_root)
         // This binds the root to the tree size, preventing malleability attacks.
         let tree_root = levels.last().first();
-        hasher.update(&leaf_count.to_be_bytes());
-        hasher.update(tree_root);
-        let root = hasher.finalize();
+        let root = hasher.hash_u32_digest(leaf_count, tree_root);
 
         Self {
             empty,
@@ -462,7 +456,7 @@ fn siblings_required_for_range_proof(
 
 impl<D: Digest> Proof<D> {
     /// Verifies that a given `leaf` at `position` is included in a Binary Merkle Tree
-    /// with `root` using the provided `hasher`.
+    /// with `root`.
     ///
     /// The proof consists of sibling hashes stored from the leaf up to the root. At each
     /// level, if the current node is a left child (even index), the sibling is combined
@@ -471,22 +465,21 @@ impl<D: Digest> Proof<D> {
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
-    pub fn verify_element_inclusion<H: Hasher<Digest = D>>(
+    pub fn verify_element_inclusion<H: CodecHasher<Digest = D>>(
         &self,
-        hasher: &mut H,
         leaf: &D,
         mut position: u32,
         root: &D,
     ) -> Result<(), Error> {
+        let mut hasher = H::new();
+
         // Validate position
         if position >= self.leaf_count {
             return Err(Error::InvalidPosition(position));
         }
 
         // Compute the position-hashed leaf
-        hasher.update(&position.to_be_bytes());
-        hasher.update(leaf);
-        let mut computed = hasher.finalize();
+        let mut computed = hasher.hash_u32_digest(position, leaf);
 
         // Track level size to handle odd-sized levels
         let mut level_size = self.leaf_count as usize;
@@ -511,9 +504,7 @@ impl<D: Digest> Proof<D> {
             };
 
             // Compute the parent digest
-            hasher.update(left_node);
-            hasher.update(right_node);
-            computed = hasher.finalize();
+            computed = hasher.hash_digest_pair(left_node, right_node);
 
             // Move up the tree
             position /= 2;
@@ -527,9 +518,7 @@ impl<D: Digest> Proof<D> {
 
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
-        hasher.update(&self.leaf_count.to_be_bytes());
-        hasher.update(&computed);
-        let finalized = hasher.finalize();
+        let finalized = hasher.hash_u32_digest(self.leaf_count, &computed);
 
         if finalized == *root {
             Ok(())
@@ -546,20 +535,19 @@ impl<D: Digest> Proof<D> {
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
-    pub fn verify_multi_inclusion<H: Hasher<Digest = D>>(
+    pub fn verify_multi_inclusion<H: CodecHasher<Digest = D>>(
         &self,
-        hasher: &mut H,
         elements: &[(D, u32)],
         root: &D,
     ) -> Result<(), Error> {
+        let mut hasher = H::new();
+
         // Handle empty case
         if elements.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
-                let empty_tree_root = hasher.finalize();
-                hasher.update(&0u32.to_be_bytes());
-                hasher.update(&empty_tree_root);
-                let finalized = hasher.finalize();
+                let empty_tree_root = hasher.hash_empty();
+                let finalized = hasher.hash_u32_digest(0, &empty_tree_root);
                 if finalized == *root {
                     return Ok(());
                 } else {
@@ -575,9 +563,7 @@ impl<D: Digest> Proof<D> {
             if *position >= self.leaf_count {
                 return Err(Error::InvalidPosition(*position));
             }
-            hasher.update(&position.to_be_bytes());
-            hasher.update(leaf);
-            sorted.push((*position, hasher.finalize()));
+            sorted.push((*position, hasher.hash_u32_digest(*position, leaf)));
         }
         sorted.sort_unstable_by_key(|(pos, _)| *pos);
 
@@ -628,9 +614,7 @@ impl<D: Digest> Proof<D> {
                 };
 
                 // Hash parent
-                hasher.update(&left);
-                hasher.update(&right);
-                next_level.push((parent_pos, hasher.finalize()));
+                next_level.push((parent_pos, hasher.hash_digest_pair(&left, &right)));
 
                 idx += 1;
             }
@@ -653,9 +637,7 @@ impl<D: Digest> Proof<D> {
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
         let tree_root = current[0].1;
-        hasher.update(&self.leaf_count.to_be_bytes());
-        hasher.update(&tree_root);
-        let finalized = hasher.finalize();
+        let finalized = hasher.hash_u32_digest(self.leaf_count, &tree_root);
 
         if finalized == *root {
             Ok(())
@@ -672,9 +654,8 @@ impl<D: Digest> Proof<D> {
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
-    pub fn verify_range_inclusion<H: Hasher<Digest = D>>(
+    pub fn verify_range_inclusion<H: CodecHasher<Digest = D>>(
         &self,
-        hasher: &mut H,
         position: u32,
         leaves: &[D],
         root: &D,
@@ -700,7 +681,7 @@ impl<D: Digest> Proof<D> {
             .enumerate()
             .map(|(i, leaf)| (*leaf, position + i as u32))
             .collect();
-        self.verify_multi_inclusion(hasher, &elements, root)
+        self.verify_multi_inclusion::<H>(&elements, root)
     }
 }
 
@@ -708,7 +689,10 @@ impl<D: Digest> Proof<D> {
 mod tests {
     use super::*;
     use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::sha256::{Digest, Sha256};
+    use commonware_cryptography::{
+        sha256::{Digest, Sha256},
+        Hasher as _,
+    };
     use rstest::rstest;
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2837
@@ -735,10 +719,9 @@ mod tests {
         assert_eq!(original_proof.leaf_count, 255);
 
         // Original proof should verify
-        let mut hasher = Sha256::default();
         assert!(
             original_proof
-                .verify_element_inclusion(&mut hasher, &digests[0], 0, &root)
+                .verify_element_inclusion::<Sha256>(&digests[0], 0, &root)
                 .is_ok(),
             "Original proof should verify"
         );
@@ -747,12 +730,12 @@ mod tests {
         // (This is the exact attack from issue #2837)
         let malleated_proof = Proof {
             leaf_count: 254,
-            siblings: original_proof.siblings.clone(),
+            siblings: original_proof.siblings,
         };
 
         // Malleated proof should NOT verify because the root now incorporates
         // the leaf_count: root = H(leaf_count || tree_root)
-        let result = malleated_proof.verify_element_inclusion(&mut hasher, &digests[0], 0, &root);
+        let result = malleated_proof.verify_element_inclusion::<Sha256>(&digests[0], 0, &root);
         assert!(
             result.is_err(),
             "Malleated proof with wrong leaf_count must fail verification"
@@ -781,9 +764,8 @@ mod tests {
         proof.siblings = Vec::new();
 
         // Fail verification with an empty proof.
-        let mut hasher = Sha256::default();
         assert!(proof
-            .verify_element_inclusion(&mut hasher, element, 0, &root)
+            .verify_element_inclusion::<Sha256>(element, 0, &root)
             .is_err());
     }
 
@@ -809,9 +791,8 @@ mod tests {
         proof.siblings.push(*element);
 
         // Fail verification with extra sibling
-        let mut hasher = Sha256::default();
         assert!(proof
-            .verify_element_inclusion(&mut hasher, element, 0, &root)
+            .verify_element_inclusion::<Sha256>(element, 0, &root)
             .is_err());
     }
 
@@ -833,10 +814,9 @@ mod tests {
         let proof = tree.proof(2).unwrap();
 
         // Use a wrong element (e.g. hash of a different transaction).
-        let mut hasher = Sha256::default();
         let wrong_leaf = Sha256::hash(b"wrong_tx");
         assert!(proof
-            .verify_element_inclusion(&mut hasher, &wrong_leaf, 2, &root)
+            .verify_element_inclusion::<Sha256>(&wrong_leaf, 2, &root)
             .is_err());
     }
 
@@ -858,9 +838,8 @@ mod tests {
         let proof = tree.proof(1).unwrap();
 
         // Use an incorrect index (e.g. 2 instead of 1).
-        let mut hasher = Sha256::default();
         assert!(proof
-            .verify_element_inclusion(&mut hasher, &digests[1], 2, &root)
+            .verify_element_inclusion::<Sha256>(&digests[1], 2, &root)
             .is_err());
     }
 
@@ -881,10 +860,9 @@ mod tests {
         let proof = tree.proof(0).unwrap();
 
         // Use a wrong root (hash of a different input).
-        let mut hasher = Sha256::default();
         let wrong_root = Sha256::hash(b"wrong_root");
         assert!(proof
-            .verify_element_inclusion(&mut hasher, &digests[0], 0, &wrong_root)
+            .verify_element_inclusion::<Sha256>(&digests[0], 0, &wrong_root)
             .is_err());
     }
 
@@ -950,10 +928,9 @@ mod tests {
         let mut proof = tree.proof(2).unwrap();
 
         // Modify the first hash in the proof.
-        let mut hasher = Sha256::default();
         proof.siblings[0] = Sha256::hash(b"modified");
         assert!(proof
-            .verify_element_inclusion(&mut hasher, &digests[2], 2, &root)
+            .verify_element_inclusion::<Sha256>(&digests[2], 2, &root)
             .is_err());
     }
 
@@ -975,9 +952,8 @@ mod tests {
         let proof = tree.proof(2).unwrap();
 
         // Verification should succeed for the proper index 2.
-        let mut hasher = Sha256::default();
         assert!(proof
-            .verify_element_inclusion(&mut hasher, &digests[2], 2, &root)
+            .verify_element_inclusion::<Sha256>(&digests[2], 2, &root)
             .is_ok());
 
         // Should not be able to generate a proof for an out-of-range index (e.g. 3).
@@ -986,7 +962,7 @@ mod tests {
         // Attempting to verify using an out-of-range index (e.g. 3, which would correspond
         // to a duplicate leaf that doesn't actually exist) should fail.
         assert!(proof
-            .verify_element_inclusion(&mut hasher, &digests[2], 3, &root)
+            .verify_element_inclusion::<Sha256>(&digests[2], 3, &root)
             .is_err());
     }
 
@@ -1005,18 +981,17 @@ mod tests {
 
         // Test range proof for elements 2-5
         let range_proof = tree.range_proof(2, 5).unwrap();
-        let mut hasher = Sha256::default();
         let range_leaves = &digests[2..6];
 
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 2, range_leaves, &root)
+            .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
             .is_ok());
 
         // Serialize and deserialize
         let mut serialized = range_proof.encode();
         let deserialized = Proof::<Digest>::decode_cfg(&mut serialized, &4).unwrap();
         assert!(deserialized
-            .verify_range_inclusion(&mut hasher, 2, range_leaves, &root)
+            .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
             .is_ok());
     }
 
@@ -1036,10 +1011,8 @@ mod tests {
         // Test single element range proof
         for (i, digest) in digests.iter().enumerate() {
             let range_proof = tree.range_proof(i as u32, i as u32).unwrap();
-            let mut hasher = Sha256::default();
 
-            let result =
-                range_proof.verify_range_inclusion(&mut hasher, i as u32, &[*digest], &root);
+            let result = range_proof.verify_range_inclusion::<Sha256>(i as u32, &[*digest], &root);
             assert!(result.is_ok());
         }
     }
@@ -1059,9 +1032,8 @@ mod tests {
 
         // Test full tree range proof
         let range_proof = tree.range_proof(0, (digests.len() - 1) as u32).unwrap();
-        let mut hasher = Sha256::default();
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 0, &digests, &root)
+            .verify_range_inclusion::<Sha256>(0, &digests, &root)
             .is_ok());
     }
 
@@ -1077,24 +1049,23 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Test first half
         let range_proof = tree.range_proof(0, 7).unwrap();
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 0, &digests[0..8], &root)
+            .verify_range_inclusion::<Sha256>(0, &digests[0..8], &root)
             .is_ok());
 
         // Test second half
         let range_proof = tree.range_proof(8, 14).unwrap();
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 8, &digests[8..15], &root)
+            .verify_range_inclusion::<Sha256>(8, &digests[8..15], &root)
             .is_ok());
 
         // Test last elements
         let range_proof = tree.range_proof(13, 14).unwrap();
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 13, &digests[13..15], &root)
+            .verify_range_inclusion::<Sha256>(13, &digests[13..15], &root)
             .is_ok());
     }
 
@@ -1132,7 +1103,6 @@ mod tests {
 
         // Get valid range proof
         let range_proof = tree.range_proof(2, 4).unwrap();
-        let mut hasher = Sha256::default();
         let range_leaves = &digests[2..5];
 
         // Test with wrong leaves
@@ -1142,12 +1112,12 @@ mod tests {
             Sha256::hash(b"wrong3"),
         ];
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 2, &wrong_leaves, &root)
+            .verify_range_inclusion::<Sha256>(2, &wrong_leaves, &root)
             .is_err());
 
         // Test with wrong number of leaves
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 2, &digests[2..4], &root)
+            .verify_range_inclusion::<Sha256>(2, &digests[2..4], &root)
             .is_err());
 
         // Test with tampered proof
@@ -1156,13 +1126,13 @@ mod tests {
         // Tamper with the first sibling
         tampered_proof.siblings[0] = Sha256::hash(b"tampered");
         assert!(tampered_proof
-            .verify_range_inclusion(&mut hasher, 2, range_leaves, &root)
+            .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
             .is_err());
 
         // Test with wrong root
         let wrong_root = Sha256::hash(b"wrong_root");
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 2, range_leaves, &wrong_root)
+            .verify_range_inclusion::<Sha256>(2, range_leaves, &wrong_root)
             .is_err());
     }
 
@@ -1181,7 +1151,6 @@ mod tests {
             }
             let tree = builder.build();
             let root = tree.root();
-            let mut hasher = Sha256::default();
 
             // Test various range sizes
             for range_size in 1..=tree_size.min(8) {
@@ -1192,8 +1161,7 @@ mod tests {
                     let end = start + range_size;
                     assert!(
                         range_proof
-                            .verify_range_inclusion(
-                                &mut hasher,
+                            .verify_range_inclusion::<Sha256>(
                                 start as u32,
                                 &digests[start..end],
                                 &root
@@ -1221,15 +1189,14 @@ mod tests {
 
         // Get valid range proof for position 2 to 4
         let range_proof = tree.range_proof(2, 4).unwrap();
-        let mut hasher = Sha256::default();
         let range_leaves = &digests[2..5];
 
         // Try to verify with wrong position
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 3, range_leaves, &root)
+            .verify_range_inclusion::<Sha256>(3, range_leaves, &root)
             .is_err());
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 1, range_leaves, &root)
+            .verify_range_inclusion::<Sha256>(1, range_leaves, &root)
             .is_err());
     }
 
@@ -1248,12 +1215,11 @@ mod tests {
 
         // Get valid range proof for position 2 to 4
         let range_proof = tree.range_proof(2, 4).unwrap();
-        let mut hasher = Sha256::default();
 
         // Try to verify with reordered leaves
         let reordered_leaves = vec![digests[3], digests[2], digests[4]];
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 2, &reordered_leaves, &root)
+            .verify_range_inclusion::<Sha256>(2, &reordered_leaves, &root)
             .is_err());
     }
 
@@ -1272,13 +1238,12 @@ mod tests {
 
         // Get valid range proof
         let mut range_proof = tree.range_proof(2, 3).unwrap();
-        let mut hasher = Sha256::default();
         let range_leaves = &digests[2..4];
 
         // Tamper by adding extra siblings
         range_proof.siblings.push(Sha256::hash(b"extra"));
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 2, range_leaves, &root)
+            .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
             .is_err());
     }
 
@@ -1297,7 +1262,6 @@ mod tests {
 
         // Get valid range proof for a single element (which needs siblings)
         let mut range_proof = tree.range_proof(2, 2).unwrap();
-        let mut hasher = Sha256::default();
         let range_leaves = &digests[2..3];
 
         // The proof should have siblings
@@ -1306,7 +1270,7 @@ mod tests {
         // Remove a sibling
         range_proof.siblings.pop();
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 2, range_leaves, &root)
+            .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
             .is_err());
     }
 
@@ -1343,13 +1307,12 @@ mod tests {
 
         // Get valid range proof
         let mut range_proof = tree.range_proof(2, 3).unwrap();
-        let mut hasher = Sha256::default();
         let range_leaves = &digests[2..4];
 
         // Add extra sibling (simulating proof from different tree structure)
         range_proof.siblings.push(Sha256::hash(b"fake_level"));
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 2, range_leaves, &root)
+            .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
             .is_err());
 
         // Remove a sibling
@@ -1358,7 +1321,7 @@ mod tests {
         assert!(!range_proof.siblings.is_empty());
         range_proof.siblings.pop();
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 2, range_leaves, &root)
+            .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
             .is_err());
     }
 
@@ -1377,21 +1340,19 @@ mod tests {
             }
             let tree = builder.build();
             let root = tree.root();
-            let mut hasher = Sha256::default();
 
             // Test edge cases
             // First element only
             let proof = tree.range_proof(0, 0).unwrap();
             assert!(proof
-                .verify_range_inclusion(&mut hasher, 0, &digests[0..1], &root)
+                .verify_range_inclusion::<Sha256>(0, &digests[0..1], &root)
                 .is_ok());
 
             // Last element only
             let last_idx = tree_size - 1;
             let proof = tree.range_proof(last_idx as u32, last_idx as u32).unwrap();
             assert!(proof
-                .verify_range_inclusion(
-                    &mut hasher,
+                .verify_range_inclusion::<Sha256>(
                     last_idx as u32,
                     &digests[last_idx..tree_size],
                     &root
@@ -1401,7 +1362,7 @@ mod tests {
             // Full tree
             let proof = tree.range_proof(0, (tree_size - 1) as u32).unwrap();
             assert!(proof
-                .verify_range_inclusion(&mut hasher, 0, &digests, &root)
+                .verify_range_inclusion::<Sha256>(0, &digests, &root)
                 .is_ok());
         }
     }
@@ -1446,27 +1407,26 @@ mod tests {
         }
 
         // Verify empty range proof against empty tree root
-        let mut hasher = Sha256::default();
         let empty_leaves: &[Digest] = &[];
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 0, empty_leaves, &root)
+            .verify_range_inclusion::<Sha256>(0, empty_leaves, &root)
             .is_ok());
 
         // Should fail with non-empty leaves
         let non_empty_leaves = vec![Sha256::hash(b"leaf")];
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 0, &non_empty_leaves, &root)
+            .verify_range_inclusion::<Sha256>(0, &non_empty_leaves, &root)
             .is_err());
 
         // Should fail with wrong root
         let wrong_root = Sha256::hash(b"wrong");
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 0, empty_leaves, &wrong_root)
+            .verify_range_inclusion::<Sha256>(0, empty_leaves, &wrong_root)
             .is_err());
 
         // Should fail with wrong position
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, 1, empty_leaves, &root)
+            .verify_range_inclusion::<Sha256>(1, empty_leaves, &root)
             .is_err());
     }
 
@@ -1493,11 +1453,11 @@ mod tests {
             assert_eq!(roots[0], roots[i]);
         }
 
-        // The root should be the hash of empty data
-        let mut hasher = Sha256::default();
-        hasher.update(0u32.to_be_bytes().as_slice());
-        hasher.update(Sha256::hash(b"").as_ref());
-        let expected_root = hasher.finalize();
+        // The root should commit to the empty leaf set
+        let leaf_count = 0u32.to_be_bytes();
+        let empty_tree_root = Sha256::hash(b"");
+        let mut state = Sha256::new();
+        let expected_root = state.hash_parts([leaf_count.as_slice(), empty_tree_root.as_ref()]);
         assert_eq!(roots[0], expected_root);
     }
 
@@ -1516,14 +1476,13 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         let range_proof = tree.range_proof(start, start + count - 1).unwrap();
         let end = start as usize + count as usize;
 
         // Verify the proof works
         assert!(range_proof
-            .verify_range_inclusion(&mut hasher, start, &digests[start as usize..end], &root)
+            .verify_range_inclusion::<Sha256>(start, &digests[start as usize..end], &root)
             .is_ok());
 
         // For each sibling, try tampering with it and verify the proof fails
@@ -1531,7 +1490,7 @@ mod tests {
             let mut tampered_proof = range_proof.clone();
             tampered_proof.siblings[sibling_idx] = Sha256::hash(b"tampered");
             assert!(tampered_proof
-                .verify_range_inclusion(&mut hasher, start, &digests[start as usize..end], &root)
+                .verify_range_inclusion::<Sha256>(start, &digests[start as usize..end], &root)
                 .is_err());
         }
     }
@@ -1552,7 +1511,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Test range including the last element (which may require duplicate handling)
         let start = tree_size - 2;
@@ -1560,7 +1518,7 @@ mod tests {
             .range_proof(start as u32, (tree_size - 1) as u32)
             .unwrap();
         assert!(proof
-            .verify_range_inclusion(&mut hasher, start as u32, &digests[start..tree_size], &root)
+            .verify_range_inclusion::<Sha256>(start as u32, &digests[start..tree_size], &root)
             .is_ok());
     }
 
@@ -1580,14 +1538,13 @@ mod tests {
         // Test multi-proof for non-contiguous positions [0, 3, 5]
         let positions = [0, 3, 5];
         let multi_proof = tree.multi_proof(positions).unwrap();
-        let mut hasher = Sha256::default();
 
         let elements: Vec<(Digest, u32)> = positions
             .iter()
             .map(|&p| (digests[p as usize], p))
             .collect();
         assert!(multi_proof
-            .verify_multi_inclusion(&mut hasher, &elements, &root)
+            .verify_multi_inclusion::<Sha256>(&elements, &root)
             .is_ok());
     }
 
@@ -1603,7 +1560,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Test single element multi-proof for each position
         for (i, digest) in digests.iter().enumerate() {
@@ -1611,7 +1567,7 @@ mod tests {
             let elements = [(*digest, i as u32)];
             assert!(
                 multi_proof
-                    .verify_multi_inclusion(&mut hasher, &elements, &root)
+                    .verify_multi_inclusion::<Sha256>(&elements, &root)
                     .is_ok(),
                 "Failed for position {i}"
             );
@@ -1630,7 +1586,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Test multi-proof for all elements
         let positions: Vec<u32> = (0..digests.len() as u32).collect();
@@ -1641,7 +1596,7 @@ mod tests {
             .map(|&p| (digests[p as usize], p))
             .collect();
         assert!(multi_proof
-            .verify_multi_inclusion(&mut hasher, &elements, &root)
+            .verify_multi_inclusion::<Sha256>(&elements, &root)
             .is_ok());
 
         // When proving all elements, we shouldn't need any siblings (all can be computed)
@@ -1660,7 +1615,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Test adjacent positions (should deduplicate shared siblings)
         let positions = [2, 3];
@@ -1671,7 +1625,7 @@ mod tests {
             .map(|&p| (digests[p as usize], p))
             .collect();
         assert!(multi_proof
-            .verify_multi_inclusion(&mut hasher, &elements, &root)
+            .verify_multi_inclusion::<Sha256>(&elements, &root)
             .is_ok());
     }
 
@@ -1687,7 +1641,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Test widely separated positions
         let positions = [0, 7, 8, 15];
@@ -1698,7 +1651,7 @@ mod tests {
             .map(|&p| (digests[p as usize], p))
             .collect();
         assert!(multi_proof
-            .verify_multi_inclusion(&mut hasher, &elements, &root)
+            .verify_multi_inclusion::<Sha256>(&elements, &root)
             .is_ok());
     }
 
@@ -1776,7 +1729,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Test with unsorted positions (should work - internal sorting)
         let positions = [5, 0, 3];
@@ -1785,7 +1737,7 @@ mod tests {
         // Verify with unsorted elements (should work - internal sorting)
         let unsorted_elements = [(digests[5], 5), (digests[0], 0), (digests[3], 3)];
         assert!(multi_proof
-            .verify_multi_inclusion(&mut hasher, &unsorted_elements, &root)
+            .verify_multi_inclusion::<Sha256>(&unsorted_elements, &root)
             .is_ok());
     }
 
@@ -1804,7 +1756,6 @@ mod tests {
             }
             let tree = builder.build();
             let root = tree.root();
-            let mut hasher = Sha256::default();
 
             // Test various position combinations
             // First and last
@@ -1817,7 +1768,7 @@ mod tests {
                     .collect();
                 assert!(
                     multi_proof
-                        .verify_multi_inclusion(&mut hasher, &elements, &root)
+                        .verify_multi_inclusion::<Sha256>(&elements, &root)
                         .is_ok(),
                     "Failed for tree_size={tree_size}, positions=[0, {}]",
                     tree_size - 1
@@ -1834,7 +1785,7 @@ mod tests {
                     .collect();
                 assert!(
                     multi_proof
-                        .verify_multi_inclusion(&mut hasher, &elements, &root)
+                        .verify_multi_inclusion::<Sha256>(&elements, &root)
                         .is_ok(),
                     "Failed for tree_size={tree_size}, every other element"
                 );
@@ -1854,7 +1805,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate valid proof
         let positions = [0, 3, 5];
@@ -1867,7 +1817,7 @@ mod tests {
             (digests[5], 5),
         ];
         assert!(multi_proof
-            .verify_multi_inclusion(&mut hasher, &wrong_elements, &root)
+            .verify_multi_inclusion::<Sha256>(&wrong_elements, &root)
             .is_err());
     }
 
@@ -1883,7 +1833,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate valid proof
         let positions = [0, 3, 5];
@@ -1896,7 +1845,7 @@ mod tests {
             (digests[5], 5),
         ];
         assert!(multi_proof
-            .verify_multi_inclusion(&mut hasher, &wrong_positions, &root)
+            .verify_multi_inclusion::<Sha256>(&wrong_positions, &root)
             .is_err());
     }
 
@@ -1911,7 +1860,6 @@ mod tests {
             builder.add(digest);
         }
         let tree = builder.build();
-        let mut hasher = Sha256::default();
 
         // Generate valid proof
         let positions = [0, 3, 5];
@@ -1925,7 +1873,7 @@ mod tests {
         // Verify with wrong root
         let wrong_root = Sha256::hash(b"wrong_root");
         assert!(multi_proof
-            .verify_multi_inclusion(&mut hasher, &elements, &wrong_root)
+            .verify_multi_inclusion::<Sha256>(&elements, &wrong_root)
             .is_err());
     }
 
@@ -1941,7 +1889,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate valid proof
         let positions = [0, 5];
@@ -1957,21 +1904,21 @@ mod tests {
         let mut modified = multi_proof.clone();
         modified.siblings[0] = Sha256::hash(b"tampered");
         assert!(modified
-            .verify_multi_inclusion(&mut hasher, &elements, &root)
+            .verify_multi_inclusion::<Sha256>(&elements, &root)
             .is_err());
 
         // Add extra sibling
         let mut extra = multi_proof.clone();
         extra.siblings.push(Sha256::hash(b"extra"));
         assert!(extra
-            .verify_multi_inclusion(&mut hasher, &elements, &root)
+            .verify_multi_inclusion::<Sha256>(&elements, &root)
             .is_err());
 
         // Remove a sibling
         let mut missing = multi_proof;
         missing.siblings.pop();
         assert!(missing
-            .verify_multi_inclusion(&mut hasher, &elements, &root)
+            .verify_multi_inclusion::<Sha256>(&elements, &root)
             .is_err());
     }
 
@@ -2017,7 +1964,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate proof
         let positions = [0, 3, 5];
@@ -2035,7 +1981,7 @@ mod tests {
             .map(|&p| (digests[p as usize], p))
             .collect();
         assert!(deserialized
-            .verify_multi_inclusion(&mut hasher, &elements, &root)
+            .verify_multi_inclusion::<Sha256>(&elements, &root)
             .is_ok());
     }
 
@@ -2133,7 +2079,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate valid proof
         let positions = [0, 3];
@@ -2142,7 +2087,7 @@ mod tests {
         // Try to verify with out of bounds position
         let invalid_elements = [(digests[0], 0), (digests[3], 100)];
         assert!(multi_proof
-            .verify_multi_inclusion(&mut hasher, &invalid_elements, &root)
+            .verify_multi_inclusion::<Sha256>(&invalid_elements, &root)
             .is_err());
     }
 
@@ -2161,7 +2106,6 @@ mod tests {
             }
             let tree = builder.build();
             let root = tree.root();
-            let mut hasher = Sha256::default();
 
             // Test with positions including the last element
             let positions = [0, (tree_size - 1) as u32];
@@ -2173,7 +2117,7 @@ mod tests {
                 .collect();
             assert!(
                 multi_proof
-                    .verify_multi_inclusion(&mut hasher, &elements, &root)
+                    .verify_multi_inclusion::<Sha256>(&elements, &root)
                     .is_ok(),
                 "Failed for tree_size={tree_size}"
             );
@@ -2191,7 +2135,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate valid proof
         let positions = [0, 3];
@@ -2200,14 +2143,13 @@ mod tests {
         // Try to verify with empty elements
         let empty_elements: &[(Digest, u32)] = &[];
         assert!(multi_proof
-            .verify_multi_inclusion(&mut hasher, empty_elements, &root)
+            .verify_multi_inclusion::<Sha256>(empty_elements, &root)
             .is_err());
     }
 
     #[test]
     fn test_multi_proof_default_verify() {
         // Default (empty) proof should only verify against empty tree
-        let mut hasher = Sha256::default();
         let default_proof = Proof::<Digest>::default();
 
         // Empty elements against default proof
@@ -2219,13 +2161,13 @@ mod tests {
         let empty_root = empty_tree.root();
 
         assert!(default_proof
-            .verify_multi_inclusion(&mut hasher, empty_elements, &empty_root)
+            .verify_multi_inclusion::<Sha256>(empty_elements, &empty_root)
             .is_ok());
 
         // Should fail with wrong root
         let wrong_root = Sha256::hash(b"not_empty");
         assert!(default_proof
-            .verify_multi_inclusion(&mut hasher, empty_elements, &wrong_root)
+            .verify_multi_inclusion::<Sha256>(empty_elements, &wrong_root)
             .is_err());
     }
 
@@ -2239,7 +2181,6 @@ mod tests {
         builder.add(&digest);
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate multi-proof for the only leaf
         let multi_proof = tree.multi_proof([0]).unwrap();
@@ -2257,7 +2198,7 @@ mod tests {
         let elements = [(digest, 0u32)];
         assert!(
             multi_proof
-                .verify_multi_inclusion(&mut hasher, &elements, &root)
+                .verify_multi_inclusion::<Sha256>(&elements, &root)
                 .is_ok(),
             "Single leaf multi-proof verification failed"
         );
@@ -2267,7 +2208,7 @@ mod tests {
         let wrong_elements = [(wrong_digest, 0u32)];
         assert!(
             multi_proof
-                .verify_multi_inclusion(&mut hasher, &wrong_elements, &root)
+                .verify_multi_inclusion::<Sha256>(&wrong_elements, &root)
                 .is_err(),
             "Should fail with wrong digest"
         );
@@ -2276,7 +2217,7 @@ mod tests {
         let wrong_position_elements = [(digest, 1u32)];
         assert!(
             multi_proof
-                .verify_multi_inclusion(&mut hasher, &wrong_position_elements, &root)
+                .verify_multi_inclusion::<Sha256>(&wrong_position_elements, &root)
                 .is_err(),
             "Should fail with invalid position"
         );
@@ -2293,7 +2234,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate valid proof and tamper with leaf_count
         let positions = [0, 3];
@@ -2307,7 +2247,7 @@ mod tests {
 
         // Should fail - leaf_count=0 but we have elements
         assert!(multi_proof
-            .verify_multi_inclusion(&mut hasher, &elements, &root)
+            .verify_multi_inclusion::<Sha256>(&elements, &root)
             .is_err());
     }
 
@@ -2322,7 +2262,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate valid proof and inflate leaf_count
         let positions = [0, 3];
@@ -2338,7 +2277,7 @@ mod tests {
         // Should fail - inflated leaf_count changes required siblings
         assert!(
             multi_proof
-                .verify_multi_inclusion(&mut hasher, &elements, &root)
+                .verify_multi_inclusion::<Sha256>(&elements, &root)
                 .is_err(),
             "Should reject proof with inflated leaf_count ({} -> {})",
             original_leaf_count,
@@ -2357,7 +2296,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate valid proof and deflate leaf_count
         let positions = [0, 3];
@@ -2372,7 +2310,7 @@ mod tests {
         // Should fail - deflated leaf_count changes tree structure
         assert!(
             multi_proof
-                .verify_multi_inclusion(&mut hasher, &elements, &root)
+                .verify_multi_inclusion::<Sha256>(&elements, &root)
                 .is_err(),
             "Should reject proof with deflated leaf_count"
         );
@@ -2389,7 +2327,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate proof for 2 positions
         let positions = [0, 3];
@@ -2399,7 +2336,7 @@ mod tests {
         let too_few = [(digests[0], 0u32)];
         assert!(
             multi_proof
-                .verify_multi_inclusion(&mut hasher, &too_few, &root)
+                .verify_multi_inclusion::<Sha256>(&too_few, &root)
                 .is_err(),
             "Should reject when fewer elements provided than proof was generated for"
         );
@@ -2408,7 +2345,7 @@ mod tests {
         let too_many = [(digests[0], 0u32), (digests[3], 3), (digests[5], 5)];
         assert!(
             multi_proof
-                .verify_multi_inclusion(&mut hasher, &too_many, &root)
+                .verify_multi_inclusion::<Sha256>(&too_many, &root)
                 .is_err(),
             "Should reject when more elements provided than proof was generated for"
         );
@@ -2425,7 +2362,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate valid proof with multiple siblings
         let positions = [0, 5];
@@ -2443,7 +2379,7 @@ mod tests {
 
             assert!(
                 multi_proof
-                    .verify_multi_inclusion(&mut hasher, &elements, &root)
+                    .verify_multi_inclusion::<Sha256>(&elements, &root)
                     .is_err(),
                 "Should reject proof with swapped siblings"
             );
@@ -2462,7 +2398,6 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut hasher = Sha256::default();
 
         // Generate valid proof
         let positions = [0, 2];
@@ -2478,7 +2413,7 @@ mod tests {
 
         // This should fail quickly without allocating massive memory
         // The function is O(elements * levels), not O(leaf_count)
-        let result = multi_proof.verify_multi_inclusion(&mut hasher, &elements, &root);
+        let result = multi_proof.verify_multi_inclusion::<Sha256>(&elements, &root);
         assert!(result.is_err(), "Should reject malicious large leaf_count");
     }
 
@@ -2502,13 +2437,12 @@ mod tests {
             let root = tree.root();
 
             // For each leaf, generate and verify its proof
-            let mut hasher = Sha256::default();
             for (i, leaf) in digests.iter().enumerate() {
                 // Generate proof
                 let proof = tree.proof(i as u32).unwrap();
                 assert!(
                     proof
-                        .verify_element_inclusion(&mut hasher, leaf, i as u32, &root)
+                        .verify_element_inclusion::<Sha256>(leaf, i as u32, &root)
                         .is_ok(),
                     "correct fail for size={n} leaf={i}"
                 );
@@ -2518,7 +2452,7 @@ mod tests {
                 let deserialized = Proof::<Digest>::decode_cfg(serialized, &1).unwrap();
                 assert!(
                     deserialized
-                        .verify_element_inclusion(&mut hasher, leaf, i as u32, &root)
+                        .verify_element_inclusion::<Sha256>(leaf, i as u32, &root)
                         .is_ok(),
                     "deserialize fail for size={n} leaf={i}"
                 );
@@ -2529,7 +2463,7 @@ mod tests {
                     update_tamper.siblings[0] = Sha256::hash(b"tampered");
                     assert!(
                         update_tamper
-                            .verify_element_inclusion(&mut hasher, leaf, i as u32, &root)
+                            .verify_element_inclusion::<Sha256>(leaf, i as u32, &root)
                             .is_err(),
                         "modify fail for size={n} leaf={i}"
                     );
@@ -2540,7 +2474,7 @@ mod tests {
                 add_tamper.siblings.push(Sha256::hash(b"tampered"));
                 assert!(
                     add_tamper
-                        .verify_element_inclusion(&mut hasher, leaf, i as u32, &root)
+                        .verify_element_inclusion::<Sha256>(leaf, i as u32, &root)
                         .is_err(),
                     "add fail for size={n} leaf={i}"
                 );
@@ -2551,7 +2485,7 @@ mod tests {
                     remove_tamper.siblings.pop();
                     assert!(
                         remove_tamper
-                            .verify_element_inclusion(&mut hasher, leaf, i as u32, &root)
+                            .verify_element_inclusion::<Sha256>(leaf, i as u32, &root)
                             .is_err(),
                         "remove fail for size={n} leaf={i}"
                     );

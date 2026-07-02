@@ -20,13 +20,14 @@ pub struct FuzzInput {
 fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurBlake3::new();
     let mut ref_hasher = RefBlake3::new();
+    let mut pending = our_hasher.begin();
 
     for chunk in chunks {
-        our_hasher.update(chunk);
+        pending = pending.update(chunk);
         ref_hasher.update(chunk);
     }
 
-    let our_result = our_hasher.finalize();
+    let our_result = pending.finalize();
     let ref_result = ref_hasher.finalize();
     assert_eq!(our_result.as_ref(), ref_result.as_bytes());
 }
@@ -34,26 +35,28 @@ fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
 fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurBlake3::new();
     let mut ref_hasher = RefBlake3::new();
+    let mut pending = our_hasher.begin();
 
     // First round
     for chunk in chunks {
-        our_hasher.update(chunk);
+        pending = pending.update(chunk);
         ref_hasher.update(chunk);
     }
-    let our_result = our_hasher.finalize();
+    let our_result = pending.finalize();
     let ref_result = ref_hasher.finalize();
     assert_eq!(our_result.as_ref(), ref_result.as_bytes());
 
     // Reset and second round
     our_hasher.reset();
     let mut ref_hasher = RefBlake3::new();
+    let mut pending = our_hasher.begin();
 
     for chunk in chunks {
-        our_hasher.update(chunk);
+        pending = pending.update(chunk);
         ref_hasher.update(chunk);
     }
 
-    let our_result_after_reset = our_hasher.finalize();
+    let our_result_after_reset = pending.finalize();
     let ref_result_after_reset = ref_hasher.finalize();
     assert_eq!(our_result, our_result_after_reset);
     assert_eq!(
@@ -66,13 +69,14 @@ fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurBlake3::new();
     let mut ref_hasher = RefBlake3::new();
     let mut all_data = Vec::new();
+    let mut pending = our_hasher.begin();
 
     for chunk in chunks {
         all_data.extend_from_slice(chunk);
-        our_hasher.update(chunk);
+        pending = pending.update(chunk);
     }
 
-    let our_final = our_hasher.finalize();
+    let our_final = pending.finalize();
 
     let ref_final = ref_hasher.update(&all_data).finalize();
     assert_eq!(our_final.as_ref(), ref_final.as_bytes());
@@ -101,8 +105,7 @@ fn fuzz_digest_operations(data: &[u8]) {
 
 fn fuzz_encode_decode(data: &[u8]) {
     let mut hasher = OurBlake3::new();
-    hasher.update(data);
-    let digest = hasher.finalize();
+    let digest = hasher.begin().update(data).finalize();
 
     let encoded = digest.encode();
     assert_eq!(encoded.len(), 32); // DIGEST_LENGTH = 32
@@ -114,17 +117,19 @@ fn fuzz_encode_decode(data: &[u8]) {
 
 fn fuzz_clone_and_format(chunks: &[Vec<u8>]) {
     let mut original_hasher = OurBlake3::new();
-    for chunk in chunks {
-        original_hasher.update(chunk);
-    }
-
     let mut cloned_hasher = original_hasher.clone();
+    let mut original_pending = original_hasher.begin();
+    let mut cloned_pending = cloned_hasher.begin();
     for chunk in chunks {
-        cloned_hasher.update(chunk);
+        original_pending = original_pending.update(chunk);
     }
 
-    let original_digest = original_hasher.finalize();
-    let cloned_digest = cloned_hasher.finalize();
+    for chunk in chunks {
+        cloned_pending = cloned_pending.update(chunk);
+    }
+
+    let original_digest = original_pending.finalize();
+    let cloned_digest = cloned_pending.finalize();
 
     let debug_str = format!("{original_digest:?}");
     let display_str = format!("{cloned_digest}");

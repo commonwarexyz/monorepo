@@ -17,7 +17,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
@@ -36,8 +36,15 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
+impl<
+        F: Family,
+        E: Context,
+        K: Key,
+        V: VariableValue,
+        H: CodecHasher,
+        T: Translator,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -71,7 +78,7 @@ pub mod partitioned {
         Context,
     };
     use commonware_codec::{Codec, Read};
-    use commonware_cryptography::Hasher;
+    use commonware_cryptography::CodecHasher;
     use commonware_parallel::Strategy;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
@@ -99,7 +106,7 @@ pub mod partitioned {
             E: Context,
             K: Key,
             V: VariableValue,
-            H: Hasher,
+            H: CodecHasher,
             T: Translator,
             const P: usize,
             S: Strategy,
@@ -134,7 +141,7 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{index::Unordered as _, mmr, translator::TwoCap};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;

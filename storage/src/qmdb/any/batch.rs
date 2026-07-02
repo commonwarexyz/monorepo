@@ -24,7 +24,7 @@ use crate::{
 };
 use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{CodecHasher, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap, sync::Mutex};
 use core::{cmp::Ordering, ops::Range};
@@ -176,7 +176,7 @@ where
 pub struct UnmerkleizedBatch<F: Family, H, U, S: Strategy>
 where
     U: update::Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, U>: Codec,
 {
     /// Authenticated journal batch for computing the speculative Merkle root.
@@ -269,7 +269,7 @@ type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
 struct Merkleizer<F: Family, H, U, S: Strategy>
 where
     U: update::Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, U>: Codec,
 {
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, U>, S>,
@@ -539,7 +539,7 @@ where
 impl<F: Family, H, U, S: Strategy> Merkleizer<F, H, U, S>
 where
     U: update::Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, U>: Codec,
 {
     /// Returns `Some(op)` if `loc` falls in the batch or ancestor regions, and `None` when `loc` is
@@ -914,7 +914,7 @@ where
 impl<F: Family, H, U, S: Strategy> UnmerkleizedBatch<F, H, U, S>
 where
     U: update::Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, U>: Codec,
 {
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
@@ -963,7 +963,7 @@ where
 impl<F: Family, H, U, S: Strategy> UnmerkleizedBatch<F, H, U, S>
 where
     U: update::Update + Send + Sync,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, U>: Codec,
 {
     /// Read through: mutations -> ancestor diffs -> committed DB.
@@ -1064,7 +1064,7 @@ impl<F: Family, K, V, H, S: Strategy> UnmerkleizedBatch<F, H, update::Unordered<
 where
     K: Key,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
@@ -1273,7 +1273,7 @@ impl<F: Family, K, V, H, S: Strategy> UnmerkleizedBatch<F, H, update::Ordered<K,
 where
     K: Key,
     V: ValueEncoding,
-    H: Hasher,
+    H: CodecHasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
@@ -1746,7 +1746,7 @@ where
     )]
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, S>
     where
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
     {
         UnmerkleizedBatch {
             journal_batch: self.journal_batch.new_batch::<H>(),
@@ -1766,7 +1766,7 @@ where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
     {
         if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
             return Ok(entry.value().cloned());
@@ -1793,7 +1793,7 @@ where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
-        H: Hasher<Digest = D>,
+        H: CodecHasher<Digest = D>,
     {
         if keys.is_empty() {
             return Ok(Vec::new());
@@ -1848,7 +1848,7 @@ where
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -1886,7 +1886,7 @@ where
     U: update::Update + Send + Sync + 'static,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -1997,7 +1997,7 @@ where
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -2059,7 +2059,7 @@ mod trait_impls {
         F: Family,
         K: Key,
         V: ValueEncoding + 'static,
-        H: Hasher,
+        H: CodecHasher,
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
@@ -2093,7 +2093,7 @@ mod trait_impls {
         F: Family,
         K: Key,
         V: ValueEncoding + 'static,
-        H: Hasher,
+        H: CodecHasher,
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
@@ -2141,7 +2141,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
-        H: Hasher,
+        H: CodecHasher,
         S: Strategy,
         Operation<F, update::Unordered<K, V>>: Codec,
     {
@@ -2172,7 +2172,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
-        H: Hasher,
+        H: CodecHasher,
         S: Strategy,
         Operation<F, update::Ordered<K, V>>: Codec,
     {
@@ -2208,7 +2208,7 @@ mod tests {
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{sha256, Hasher as _, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::test_rng;

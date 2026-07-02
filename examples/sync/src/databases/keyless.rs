@@ -64,11 +64,11 @@ pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec
     let floor = Location::new(starting_loc);
 
     for i in 0..count {
-        let value = {
-            hasher.update(&i.to_be_bytes());
-            hasher.update(&seed.to_be_bytes());
-            hasher.finalize()
-        };
+        let value = hasher
+            .begin()
+            .update(&i.to_be_bytes())
+            .update(&seed.to_be_bytes())
+            .finalize();
 
         operations.push(Operation::Append(value));
 

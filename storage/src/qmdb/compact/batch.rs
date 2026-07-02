@@ -1,11 +1,8 @@
 //! Shared helpers for compact QMDB batches.
 
-use crate::{
-    merkle::{batch, compact, hasher::Hasher as _, Family},
-    qmdb,
-};
+use crate::merkle::{batch, compact, Family};
 use commonware_codec::EncodeShared;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_parallel::Strategy;
 use std::sync::Arc;
 
@@ -17,25 +14,24 @@ pub(crate) fn merkleize_ops<F, H, S, Op>(
 ) -> Arc<batch::MerkleizedBatch<F, H::Digest, S>>
 where
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Op: EncodeShared,
 {
-    let hasher = qmdb::hasher::<H>();
+    let hasher = crate::qmdb::hasher::<H>();
     let first_leaf = batch.leaves();
 
     // Hash before `with_mem` borrows committed Merkle state under its read lock.
-    let leaf_digests =
-        merkle
-            .strategy()
-            .map_init_collect_vec(ops.iter().enumerate(), Vec::new, |buf, (i, op)| {
-                let offset = u64::try_from(i).expect("operation offset exceeds u64");
-                let pos = F::location_to_position(first_leaf + offset);
-                buf.clear();
-                op.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
-            });
+    let leaf_digests = merkle.strategy().map_init_collect_vec(
+        ops.iter().enumerate(),
+        || hasher.state(),
+        |state, (i, op)| {
+            let offset = u64::try_from(i).expect("operation offset exceeds u64");
+            let pos = F::location_to_position(first_leaf + offset);
+            state.leaf_encoded(pos, op)
+        },
+    );
 
     let batch = batch.add_leaf_digests(leaf_digests);
-    merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
+    merkle.with_mem(|mem| batch.merkleize_reusing::<H>(mem))
 }

@@ -3,7 +3,7 @@
 use super::{handler, mailbox, Mailbox};
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
-use commonware_cryptography::{Hasher, PublicKey};
+use commonware_cryptography::{CodecHasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{p2p, Resolver as _};
@@ -84,7 +84,7 @@ where
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     DbResolver<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
     DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
@@ -102,7 +102,7 @@ where
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    H: Hasher,
+    H: CodecHasher,
     DbResolver<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
     DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
@@ -319,9 +319,7 @@ where
             return false;
         }
 
-        let hasher = qmdb::hasher::<H>();
-        qmdb::verify_proof(
-            &hasher,
+        qmdb::verify_proof::<H, _, _>(
             &state.last_commit_proof,
             Location::new(*state.leaf_count - 1),
             std::slice::from_ref(&state.last_commit_op),

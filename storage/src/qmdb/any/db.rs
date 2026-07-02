@@ -21,7 +21,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::CodecHasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
@@ -84,7 +84,7 @@ pub struct Db<
     E: Context,
     C: Contiguous<Item: CodecShared>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     U: Send + Sync,
     const N: usize,
     S: Strategy,
@@ -148,7 +148,7 @@ where
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -357,7 +357,7 @@ where
     U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -653,7 +653,7 @@ where
     U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
+    H: CodecHasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
