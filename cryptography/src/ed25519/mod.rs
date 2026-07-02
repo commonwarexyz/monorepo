@@ -29,5 +29,9 @@
 pub mod certificate;
 pub(in crate::ed25519) mod core;
 mod scheme;
+#[cfg(test)]
+mod wycheproof;
+#[cfg(test)]
+mod wycheproof_vectors;
 
 pub use scheme::{Batch, PrivateKey, PublicKey, Signature};
