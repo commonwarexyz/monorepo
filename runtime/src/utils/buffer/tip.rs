@@ -123,21 +123,18 @@ impl Buffer {
     /// Panics if the buffer is non-empty and `len >= self.size()`: flush buffered bytes before
     /// a resize that grows or keeps the current size.
     pub(super) fn resize(&mut self, len: u64) {
-        if self.is_empty() {
-            self.offset = len;
-            return;
-        }
-
         assert!(
-            len < self.size(),
+            self.is_empty() || len < self.size(),
             "must flush buffered bytes before a grow-or-equal resize"
         );
-        if len >= self.offset {
-            self.len = (len - self.offset) as usize;
-        } else {
-            self.len = 0;
-            self.data = IoBuf::default();
-            self.offset = len;
+        match len {
+            len if self.is_empty() => self.offset = len,
+            len if len >= self.offset => self.len = (len - self.offset) as usize,
+            len => {
+                self.len = 0;
+                self.data = IoBuf::default();
+                self.offset = len;
+            }
         }
     }
 
