@@ -249,6 +249,11 @@ impl<B: Blob> Write<B> {
         self.sync_state.start_sync(&self.blob).await
     }
 
+    /// Wait for any started sync to complete without starting a new sync.
+    pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
+        self.sync_state.wait_for_pending().await
+    }
+
     /// Flush all buffered bytes to the blob, detaching the flushed prefix only after the blob
     /// write succeeds. A dropped flush leaves the tip intact for retry.
     async fn flush(&mut self, durability: Durability) -> Result<(), Error> {

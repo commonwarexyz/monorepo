@@ -11,6 +11,10 @@ pub use read::Read;
 pub use write::Write;
 
 /// A shared sync result.
+///
+/// Handles returned by [Completion::handle] are detached observers of the same shared result:
+/// dropping one neither cancels the underlying sync nor consumes its result, and every
+/// observer sees the same outcome.
 #[derive(Clone)]
 struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
 
@@ -33,6 +37,16 @@ impl From<crate::Handle<()>> for Completion {
 }
 
 /// Tracks whether blob mutations still need a sync.
+///
+/// Callers rely on three properties:
+/// - Every operation that mutates the blob first waits for an in-flight sync, so a started
+///   sync's coverage is never disturbed by later writes.
+/// - [SyncState::start_sync] on a [SyncState::Pending] state returns the in-flight sync's
+///   handle (completed syncs resolve immediately), so re-requesting a sync is a cheap way to
+///   observe outstanding work.
+/// - A failure is never lost: every handle cloned from the shared completion reports it, and
+///   an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
+///   which also marks the state [SyncState::Dirty] since the mutations still need durability.
 enum SyncState {
     // No unsynced mutations.
     Clean,
@@ -149,8 +163,9 @@ impl SyncState {
 mod tests {
     use super::*;
     use crate::{
-        deterministic, Blob as _, BufMut, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner,
-        Storage,
+        deterministic,
+        mocks::{next_pending_sync, DelayedSyncBlob},
+        Blob as _, BufMut, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner, Storage,
     };
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
@@ -449,107 +464,6 @@ mod tests {
 
         async fn start_sync(&self) -> Handle<()> {
             self.inner.start_sync().await
-        }
-    }
-
-    type StartedSyncSender = Arc<Mutex<Option<oneshot::Sender<()>>>>;
-    type BlockedSyncSender = Arc<Mutex<Option<oneshot::Sender<()>>>>;
-    type ReleaseSyncReceiver = Arc<Mutex<Option<oneshot::Receiver<Result<(), Error>>>>>;
-
-    /// Blob wrapper that lets tests hold one started sync open until explicitly released.
-    #[derive(Clone)]
-    pub struct DelayedStartSyncBlob<B> {
-        inner: B,
-        /// Signals when `start_sync` has been issued.
-        started: StartedSyncSender,
-        /// Signals when the returned sync handle begins waiting on release.
-        blocked: BlockedSyncSender,
-        /// Releases the started sync with success or failure.
-        release: ReleaseSyncReceiver,
-    }
-
-    impl<B: crate::Blob> DelayedStartSyncBlob<B> {
-        #[allow(clippy::type_complexity)]
-        pub fn new(
-            inner: B,
-        ) -> (
-            Self,
-            oneshot::Receiver<()>,
-            oneshot::Receiver<()>,
-            oneshot::Sender<Result<(), Error>>,
-        ) {
-            let (started_tx, started_rx) = oneshot::channel();
-            let (blocked_tx, blocked_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
-            (
-                Self {
-                    inner,
-                    started: Arc::new(Mutex::new(Some(started_tx))),
-                    blocked: Arc::new(Mutex::new(Some(blocked_tx))),
-                    release: Arc::new(Mutex::new(Some(release_rx))),
-                },
-                started_rx,
-                blocked_rx,
-                release_tx,
-            )
-        }
-    }
-
-    impl<B: crate::Blob> crate::Blob for DelayedStartSyncBlob<B> {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.inner.read_at(offset, len).await
-        }
-
-        async fn read_at_buf(
-            &self,
-            offset: u64,
-            len: usize,
-            buf: impl Into<IoBufsMut> + Send,
-        ) -> Result<IoBufsMut, Error> {
-            self.inner.read_at_buf(offset, len, buf).await
-        }
-
-        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            self.inner.write_at(offset, bufs).await
-        }
-
-        async fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            self.inner.write_at_sync(offset, bufs).await
-        }
-
-        async fn resize(&self, len: u64) -> Result<(), Error> {
-            self.inner.resize(len).await
-        }
-
-        async fn sync(&self) -> Result<(), Error> {
-            self.inner.sync().await
-        }
-
-        async fn start_sync(&self) -> Handle<()> {
-            let release = self.release.lock().take();
-            let blocked = self.blocked.lock().take();
-            if let Some(started) = self.started.lock().take() {
-                let _ = started.send(());
-            }
-
-            let inner = self.inner.clone();
-            Handle::from_future(async move {
-                if let Some(blocked) = blocked {
-                    let _ = blocked.send(());
-                }
-                let Some(release) = release else {
-                    return inner.sync().await;
-                };
-                match release.await {
-                    Ok(Ok(())) => inner.sync().await,
-                    Ok(Err(err)) => Err(err),
-                    Err(_) => Err(Error::Closed),
-                }
-            })
         }
     }
 
@@ -1889,13 +1803,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started_rx, blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
             // Hold the started sync open so a later sync cannot finish right away.
             let handle = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
 
             // The attempted sync reaches the pending handle and cannot complete yet.
             let mut sync = Box::pin(writer.sync());
@@ -1903,14 +1816,17 @@ mod tests {
                 sync.as_mut().now_or_never().is_none(),
                 "sync must wait for the outstanding start_sync handle"
             );
-            blocked_rx.await.expect("sync never waited on start_sync");
+            deferred
+                .blocked
+                .await
+                .expect("sync never waited on start_sync");
 
             let (_, _, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
             // Releasing the original handle lets sync observe the completed disk sync.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             sync.await.unwrap();
             handle.await.unwrap();
             let (_, _, full_syncs, range_syncs) = inner.snapshot();
@@ -1925,13 +1841,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started_rx, blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
             // Begin syncing the initial dirty state and keep that sync blocked.
             let handle = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
 
             // The tip must not reach the blob while the earlier sync is pending.
             writer.write_at(0, b"abc").await.unwrap();
@@ -1940,7 +1855,10 @@ mod tests {
                 sync.as_mut().now_or_never().is_none(),
                 "sync must wait for the outstanding start_sync before flushing the small write"
             );
-            blocked_rx.await.expect("sync never waited on start_sync");
+            deferred
+                .blocked
+                .await
+                .expect("sync never waited on start_sync");
 
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 0);
@@ -1948,7 +1866,7 @@ mod tests {
             assert_eq!(range_syncs, 0);
 
             // After the earlier sync completes, the buffered write can be persisted.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             sync.await.unwrap();
             handle.await.unwrap();
 
@@ -1968,12 +1886,11 @@ mod tests {
             let inner = SyncTrackingBlob::new();
             inner.write_at(0, b"xxx").await.unwrap();
 
-            let (blob, started_rx, blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, inner.size(), NZUsize!(8));
 
             let handle = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
 
             // This append is local while the earlier sync is pending.
             writer.write_at(3, b"abc").await.unwrap();
@@ -1984,7 +1901,10 @@ mod tests {
                 write.as_mut().now_or_never().is_none(),
                 "overlapping write must wait for the outstanding start_sync before flushing"
             );
-            blocked_rx.await.expect("write never waited on start_sync");
+            deferred
+                .blocked
+                .await
+                .expect("write never waited on start_sync");
 
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 1);
@@ -1992,7 +1912,7 @@ mod tests {
             assert_eq!(range_syncs, 0);
 
             // Releasing the sync lets the parked write reach the blob.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             write.await.unwrap();
             handle.await.unwrap();
 
@@ -2011,12 +1931,11 @@ mod tests {
             let inner = SyncTrackingBlob::new();
             inner.write_at(0, b"abcdef").await.unwrap();
 
-            let (blob, started_rx, blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let mut writer = Write::from_pooler(&context, blob, inner.size(), NZUsize!(8));
 
             let handle = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
             let original_size = inner.size();
 
             // Resize must not reach the blob while the earlier sync is pending.
@@ -2025,7 +1944,10 @@ mod tests {
                 resize.as_mut().now_or_never().is_none(),
                 "resize must wait for the outstanding start_sync handle"
             );
-            blocked_rx.await.expect("resize never waited on start_sync");
+            deferred
+                .blocked
+                .await
+                .expect("resize never waited on start_sync");
             assert_eq!(
                 inner.size(),
                 original_size,
@@ -2033,7 +1955,7 @@ mod tests {
             );
 
             // Releasing the sync lets the resize apply.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             resize.await.unwrap();
             handle.await.unwrap();
             assert_eq!(writer.size(), 3);

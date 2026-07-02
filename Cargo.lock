@@ -1809,7 +1809,6 @@ dependencies = [
  "criterion",
  "futures",
  "futures-util",
- "governor",
  "hashbrown 0.16.1",
  "paste",
  "rand 0.8.5",

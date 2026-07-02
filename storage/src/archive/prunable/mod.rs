@@ -223,11 +223,24 @@ mod tests {
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::has_metric_value, Metrics as _, Runner, Supervisor as _,
+        deterministic,
+        mocks::{
+            fail_pending_syncs, release_next_pending_syncs, release_pending_syncs,
+            DelayedSyncContext,
+        },
+        telemetry::metrics::has_metric_value,
+        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, sync::Mutex, NZUsize, NZU16, NZU64};
     use rand::Rng;
-    use std::{collections::BTreeMap, num::NonZeroU16};
+    use std::{
+        collections::BTreeMap,
+        num::{NonZeroU16, NonZeroU64},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -242,6 +255,570 @@ mod tests {
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    fn test_config<E: BufferPooler>(
+        context: &E,
+        items_per_section: NonZeroU64,
+    ) -> Config<FourCap, ()> {
+        Config {
+            translator: FourCap,
+            key_partition: "test-index".into(),
+            key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            value_partition: "test-value".into(),
+            codec_config: (),
+            compression: None,
+            key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+            value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+            replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            items_per_section,
+        }
+    }
+
+    #[test_traced]
+    fn test_put_after_start_sync_is_accepted_before_handle_completes() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let handle = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            let pending_after_start = pending.lock().len();
+            assert!(
+                pending_after_start > 0,
+                "put_start_sync should return while the sync handle is still pending"
+            );
+
+            archive
+                .put(2, test_key("bbb"), 20)
+                .await
+                .expect("archive should remain usable before sync completion");
+            assert_eq!(
+                pending.lock().len(),
+                pending_after_start,
+                "put should not issue a new storage sync while accepting later data"
+            );
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+
+            release_pending_syncs(&pending);
+            handle.await.expect("sync handle should complete");
+
+            let follow_up = archive
+                .start_sync()
+                .await
+                .expect("Failed to start next sync");
+            assert!(
+                !pending.lock().is_empty(),
+                "the later put must remain pending for a future sync"
+            );
+            release_pending_syncs(&pending);
+            follow_up.await.expect("follow-up sync should complete");
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .expect("Failed to reopen archive");
+
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_put_start_sync_observes_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert_eq!(pending.lock().len(), 2);
+
+            let second = archive
+                .put_start_sync(1, test_key("duplicate"), 99)
+                .await
+                .expect("Failed to start duplicate sync");
+            assert_eq!(
+                pending.lock().len(),
+                2,
+                "duplicate put_start_sync must not issue a new storage sync"
+            );
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("duplicate").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                second.await.expect("duplicate sync handle should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "duplicate put_start_sync must observe the original in-flight sync"
+            );
+
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            waiter.await.expect("duplicate waiter failed");
+
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+        });
+    }
+
+    #[test_traced]
+    fn test_overlapping_put_start_sync_waits_for_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            let pending_after_first = pending.lock().len();
+            assert!(pending_after_first > 0);
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("second").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                let second = archive
+                    .put_start_sync(2, test_key("bbb"), 20)
+                    .await
+                    .expect("Failed to start second sync");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                (archive, second)
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(completed.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                pending.lock().len(),
+                pending_after_first,
+                "second put_start_sync must not start new syncs before the first completes"
+            );
+
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let (archive, second) = waiter.await.expect("second put task failed");
+            assert!(!pending.lock().is_empty());
+            release_pending_syncs(&pending);
+            second.await.expect("second sync handle should complete");
+
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
+        });
+    }
+
+    #[test_traced]
+    fn test_sync_after_put_start_sync_waits_for_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("sync").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                archive.sync().await.expect("sync should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                archive
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "shutdown sync must wait for the in-flight put_start_sync handle"
+            );
+
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let archive = waiter.await.expect("sync task failed");
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+        });
+    }
+
+    #[test_traced]
+    fn test_destroy_after_put_start_sync_waits_for_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("destroy").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                archive.destroy().await.expect("destroy should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "destroy must wait for the in-flight put_start_sync handle"
+            );
+
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            waiter.await.expect("destroy task failed");
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_after_put_start_sync_waits_for_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("prune").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                archive.prune(2).await.expect("prune should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                archive
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "prune must wait for in-flight syncs on pruned sections"
+            );
+
+            release_pending_syncs(&pending);
+            first
+                .await
+                .expect("sync handle should complete despite pruning");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let archive = waiter.await.expect("prune task failed");
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_surfaces_failed_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            fail_pending_syncs(&pending);
+
+            let err = archive
+                .prune(2)
+                .await
+                .expect_err("prune must surface a failed in-flight sync");
+            assert!(matches!(
+                err,
+                Error::Journal(JournalError::Runtime(RError::Io(_)))
+            ));
+
+            let err = first.await.expect_err("first sync handle should fail");
+            assert!(matches!(err, RError::Io(_)));
+        });
+    }
+
+    #[test_traced]
+    fn test_put_start_sync_after_prune_drops_pruned_sync_requests() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+
+            archive.prune(2).await.expect("Failed to prune");
+
+            // If pruning left section 1 in the retained sync-request set, these calls would trip
+            // the journal's prune guard.
+            let second = archive
+                .put_start_sync(2, test_key("bbb"), 20)
+                .await
+                .expect("put_start_sync after prune should succeed");
+            release_pending_syncs(&pending);
+            second.await.expect("second sync handle should complete");
+            archive
+                .sync()
+                .await
+                .expect("sync after prune should succeed");
+
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
+        });
+    }
+
+    #[test_traced]
+    fn test_overlapping_put_start_sync_restarts_after_all_handles_complete() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start first sync");
+            assert_eq!(pending.lock().len(), 2);
+
+            let second = archive
+                .put_start_sync(2, test_key("bbb"), 20)
+                .await
+                .expect("Failed to start second sync");
+            assert_eq!(
+                pending.lock().len(),
+                4,
+                "different sections should be able to have independent in-flight syncs"
+            );
+
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+            second.await.expect("second sync handle should complete");
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_config(&context, NZU64!(1));
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .expect("Failed to reopen archive");
+
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
+        });
+    }
+
+    #[test_traced]
+    fn test_overlapping_put_start_sync_restarts_only_completed_handles() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start first sync");
+            let second = archive
+                .put_start_sync(2, test_key("bbb"), 20)
+                .await
+                .expect("Failed to start second sync");
+            assert_eq!(pending.lock().len(), 4);
+
+            release_next_pending_syncs(&pending, 2);
+            first.await.expect("first sync handle should complete");
+
+            drop(second);
+            drop(archive);
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_config(&context, NZU64!(1));
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .expect("Failed to reopen archive");
+
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_failed_start_sync_is_returned_by_next_start_sync_handle() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert_eq!(pending.lock().len(), 2);
+            fail_pending_syncs(&pending);
+
+            archive
+                .put(2, test_key("bbb"), 20)
+                .await
+                .expect("write should be accepted before observing the failed sync");
+
+            let second = archive
+                .start_sync()
+                .await
+                .expect("start_sync should return a handle for the failed sync");
+            let err = second
+                .await
+                .expect_err("next start_sync handle should observe failed in-flight sync");
+            assert!(matches!(err, RError::Io(_)));
+
+            let err = first.await.expect_err("first sync handle should fail");
+            assert!(matches!(err, RError::Io(_)));
+        });
+    }
 
     #[test_traced]
     fn test_archive_compression_then_none() {
