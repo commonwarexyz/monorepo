@@ -1095,6 +1095,60 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
 
+    // Appends after a canceled shrink continue from the published reduced claim, and the
+    // next sync settles the dropped truncate before flushing them.
+    #[test_traced("DEBUG")]
+    fn test_shrink_cancel_before_truncate_appends_continue() {
+        use crate::buffer::tests::{GatePosition, GatedResizeBlob};
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_append")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedResizeBlob::new(inner, GatePosition::Before);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..3 * page + 50).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Cancel a shrink parked before the truncate reaches the blob. The writer
+            // published the reduced claim: the target page and below.
+            gate.cancel(writer.resize(page as u64 + 30)).await;
+            assert_eq!(writer.size(), 2 * page as u64);
+
+            // Appends continue from the claim; the sync settles the truncate, then flushes.
+            writer.append(&data[..10]).await.unwrap();
+            writer.sync().await.unwrap();
+            let expected_size = (2 * page + 10) as u64;
+            assert_eq!(writer.size(), expected_size);
+            drop(writer);
+
+            // The acknowledged state survives a restart.
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_append")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), expected_size);
+            let read = reopened
+                .read_at(0, expected_size as usize)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(&read.as_ref()[..2 * page], &data[..2 * page]);
+            assert_eq!(&read.as_ref()[2 * page..], &data[..10]);
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_read_many_into_empty() {
         let executor = deterministic::Runner::default();
