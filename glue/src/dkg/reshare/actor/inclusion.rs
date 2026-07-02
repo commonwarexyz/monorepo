@@ -384,7 +384,7 @@ where
             .as_ref()
             .map(|current| current.players.clone())
             .or(dkg_participants.clone())?;
-        let player = players.position(&public_key).map(|_| {
+        let player = players.position(&public_key).and_then(|_| {
             store.create_player_with_logs::<C, N3f1>(
                 epoch,
                 self.signer.clone(),

@@ -238,7 +238,7 @@ where
         let player = participants
             .players
             .position(&public_key)
-            .map(|_| store.create_player::<C, N3f1>(epoch, self.signer.clone(), round.clone()));
+            .and_then(|_| store.create_player::<C, N3f1>(epoch, self.signer.clone(), round.clone()));
 
         PreparedEpoch {
             epoch,

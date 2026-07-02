@@ -45,7 +45,7 @@ use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12); // 4 KiB
 const PAGE_CACHE_CAPACITY: NonZeroUsize = NZUsize!(1 << 13); // 8 KiB
@@ -459,32 +459,73 @@ where
     }
 
     /// Replays player state for `epoch`.
-    pub fn create_player<C, M>(&self, epoch: Epoch, signer: C, info: Info<V, P>) -> Player<V, C>
+    ///
+    /// Returns `None` when this node observes an on-chain dealer log carrying its
+    /// own acknowledgement but has lost the matching private dealing; see
+    /// [`resume_player`](Self::resume_player).
+    pub fn create_player<C, M>(
+        &self,
+        epoch: Epoch,
+        signer: C,
+        info: Info<V, P>,
+    ) -> Option<Player<V, C>>
     where
         C: Signer<PublicKey = P>,
         M: Faults,
     {
-        let (player, acks) =
-            CryptoPlayer::resume::<M>(info, signer, &self.logs(epoch), self.dealings(epoch))
-                .expect("failed to resume reshare player");
-        Player { player, acks }
+        self.resume_player::<C, M>(epoch, signer, info, &self.logs(epoch))
     }
 
     /// Replays player state using a supplied, non-durable log view.
+    ///
+    /// Returns `None` under the same missing-dealing condition as
+    /// [`create_player`](Self::create_player).
     pub fn create_player_with_logs<C, M>(
         &self,
         epoch: Epoch,
         signer: C,
         info: Info<V, P>,
         logs: &BTreeMap<P, DealerLog<V, P>>,
-    ) -> Player<V, C>
+    ) -> Option<Player<V, C>>
     where
         C: Signer<PublicKey = P>,
         M: Faults,
     {
-        let (player, acks) = CryptoPlayer::resume::<M>(info, signer, logs, self.dealings(epoch))
-            .expect("failed to resume reshare player");
-        Player { player, acks }
+        self.resume_player::<C, M>(epoch, signer, info, logs)
+    }
+
+    /// Resumes player state for `epoch` from `logs`.
+    ///
+    /// Degrades to observer mode (returns `None`) when [`CryptoPlayer::resume`]
+    /// reports [`MissingPlayerDealing`](DkgError::MissingPlayerDealing): a
+    /// finalized dealer log carries this node's valid acknowledgement, but the
+    /// matching private dealing is absent from the secret store (for example, a
+    /// secret store restored from a backup taken before the ack was emitted).
+    /// The ceremony has otherwise succeeded, so the node commits the epoch as a
+    /// share-less verifier rather than crash-looping. Any other error signals
+    /// genuine corruption and stays fatal.
+    fn resume_player<C, M>(
+        &self,
+        epoch: Epoch,
+        signer: C,
+        info: Info<V, P>,
+        logs: &BTreeMap<P, DealerLog<V, P>>,
+    ) -> Option<Player<V, C>>
+    where
+        C: Signer<PublicKey = P>,
+        M: Faults,
+    {
+        match CryptoPlayer::resume::<M>(info, signer, logs, self.dealings(epoch)) {
+            Ok((player, acks)) => Some(Player { player, acks }),
+            Err(DkgError::MissingPlayerDealing) => {
+                warn!(
+                    ?epoch,
+                    "missing private dealing on resume; entering epoch as observer"
+                );
+                None
+            }
+            Err(error) => panic!("failed to resume reshare player: {error:?}"),
+        }
     }
 }
 
@@ -758,11 +799,9 @@ mod tests {
                     summary(2),
                 )
                 .expect("dealer");
-            let mut player = store.create_player::<PrivateKey, N3f1>(
-                Epoch::zero(),
-                signers[1].clone(),
-                info.clone(),
-            );
+            let mut player = store
+                .create_player::<PrivateKey, N3f1>(Epoch::zero(), signers[1].clone(), info.clone())
+                .expect("player");
             let (_, public, private) = dealer
                 .shares_to_distribute()
                 .find(|(recipient, _, _)| *recipient == player_pk)
@@ -799,9 +838,96 @@ mod tests {
             assert_eq!(store.dealings(Epoch::zero()).len(), 1);
             assert_eq!(store.acks(Epoch::zero()).len(), 1);
             assert_eq!(store.logs(Epoch::zero()).len(), 1);
-            let replayed_player =
-                store.create_player::<PrivateKey, N3f1>(Epoch::zero(), signers[1].clone(), info);
+            let replayed_player = store
+                .create_player::<PrivateKey, N3f1>(Epoch::zero(), signers[1].clone(), info)
+                .expect("player");
             assert_eq!(replayed_player.acks.len(), 1);
+        });
+    }
+
+    #[test]
+    fn resume_with_missing_dealing_degrades_to_observer() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let secret_store = MemorySecretStore::default();
+            let mut store =
+                init_store(context.child("store"), "missing-dealing", secret_store.clone()).await;
+            let signers = signers();
+            let players = players(&signers);
+            let info = Info::new::<N3f1>(
+                b"_COMMONWARE_GLUE_DKG_RESHARE_STORE_TEST",
+                0,
+                None,
+                Mode::NonZeroCounter,
+                players.clone(),
+                players.clone(),
+            )
+            .expect("valid info");
+            store
+                .commit_epoch(epoch_info(Epoch::zero(), output(1)), summary(1), None)
+                .await;
+
+            let dealer_pk = signers[0].public_key();
+            let mut dealer = store
+                .create_dealer::<PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    signers[0].clone(),
+                    info.clone(),
+                    None,
+                    summary(2),
+                )
+                .expect("dealer");
+
+            // Collect enough acknowledgements (quorum) that the dealer log records
+            // an Ack for each acking player rather than degrading to reveals. With
+            // n=4, f=1 the log tolerates at most one reveal, so three players ack.
+            for idx in [1usize, 2, 3] {
+                let player_pk = signers[idx].public_key();
+                let mut player = store
+                    .create_player::<PrivateKey, N3f1>(
+                        Epoch::zero(),
+                        signers[idx].clone(),
+                        info.clone(),
+                    )
+                    .expect("player");
+                let (_, public, private) = dealer
+                    .shares_to_distribute()
+                    .find(|(recipient, _, _)| *recipient == player_pk)
+                    .expect("dealing for player");
+                let Verdict::Valid(ack) = player
+                    .handle(&mut store, Epoch::zero(), dealer_pk.clone(), public, private)
+                    .await
+                else {
+                    panic!("ack");
+                };
+                assert!(matches!(
+                    dealer
+                        .handle(&mut store, Epoch::zero(), player_pk, ack)
+                        .await,
+                    Verdict::Valid(())
+                ));
+            }
+            assert!(dealer.finalize::<N3f1>());
+            let signed = dealer.finalized().expect("signed log");
+            let (dealer, log) = signed.check(&info).expect("valid log");
+            store.append_log(Epoch::zero(), dealer, log).await;
+            drop(store);
+
+            // Restart with an empty secret store: the finalized dealer log (which
+            // records this player's acknowledgement) replays from public storage,
+            // but the matching private dealing is gone. Resuming as that player
+            // must degrade to an observer rather than panic.
+            let empty_secret_store = MemorySecretStore::default();
+            let restarted =
+                init_store(context.child("restart"), "missing-dealing", empty_secret_store).await;
+            assert!(restarted.dealings(Epoch::zero()).is_empty());
+            assert_eq!(restarted.logs(Epoch::zero()).len(), 1);
+            let player =
+                restarted.create_player::<PrivateKey, N3f1>(Epoch::zero(), signers[1].clone(), info);
+            assert!(
+                player.is_none(),
+                "a missing private dealing must degrade to observer, not panic"
+            );
         });
     }
 
@@ -842,11 +968,9 @@ mod tests {
                     summary(2),
                 )
                 .expect("dealer");
-            let mut player = store.create_player::<PrivateKey, N3f1>(
-                Epoch::zero(),
-                signers[1].clone(),
-                info.clone(),
-            );
+            let mut player = store
+                .create_player::<PrivateKey, N3f1>(Epoch::zero(), signers[1].clone(), info.clone())
+                .expect("player");
             let (_, public, private) = dealer
                 .shares_to_distribute()
                 .find(|(recipient, _, _)| *recipient == player_pk)
@@ -868,11 +992,9 @@ mod tests {
             )
             .await;
             assert!(restarted.dealings(Epoch::zero()).is_empty());
-            let replayed_player = restarted.create_player::<PrivateKey, N3f1>(
-                Epoch::zero(),
-                signers[1].clone(),
-                info,
-            );
+            let replayed_player = restarted
+                .create_player::<PrivateKey, N3f1>(Epoch::zero(), signers[1].clone(), info)
+                .expect("player");
             assert!(replayed_player.acks.is_empty());
         });
     }
