@@ -853,12 +853,12 @@ mod tests {
         Fut: Future<Output = A> + Send,
     {
         let executor = deterministic::Runner::default();
-        let state1 = executor.start(|context| async move {
+        let state1 = executor.start(move |context| async move {
             test_many_keys_impl(context.child("storage"), creator, compression, num).await;
             context.auditor().state()
         });
         let executor = deterministic::Runner::default();
-        let state2 = executor.start(|context| async move {
+        let state2 = executor.start(move |context| async move {
             test_many_keys_impl(context.child("storage"), creator, compression, num).await;
             context.auditor().state()
         });

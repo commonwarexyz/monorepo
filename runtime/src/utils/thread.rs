@@ -1,6 +1,8 @@
 //! Helpers for resolving the configured thread stack size.
 
-use std::{env, sync::OnceLock, thread};
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread;
+use std::{env, sync::OnceLock};
 
 /// Cached configured thread stack size.
 static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
@@ -40,7 +42,7 @@ pub(crate) fn system_thread_stack_size() -> usize {
     })
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "macos", miri))))]
 fn system_thread_stack_size_impl() -> Option<usize> {
     let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
 
@@ -66,7 +68,7 @@ fn system_thread_stack_size_impl() -> Option<usize> {
     Some(stack_size)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(miri)))]
 fn system_thread_stack_size_impl() -> Option<usize> {
     // macOS uses different defaults for the main thread and spawned threads:
     // the main thread stack is 8 MB, while secondary threads default to
@@ -95,12 +97,13 @@ fn system_thread_stack_size_impl() -> Option<usize> {
     Some(limit)
 }
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), miri))]
 const fn system_thread_stack_size_impl() -> Option<usize> {
     None
 }
 
 /// Spawns a thread with an explicit stack size.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn spawn<F, T>(stack_size: usize, f: F) -> thread::JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,

@@ -747,18 +747,19 @@ impl<D: EngineDefinition> Plan<D> {
     ///
     /// Creates a deterministic runner with the plan's seed and timeout,
     /// then executes the simulation.
-    pub fn run(&self) -> Result<PlanResult<D>, String> {
-        self.run_with_seed(self.seed)
+    pub fn run(self) -> Result<PlanResult<D>, String> {
+        let seed = self.seed;
+        self.run_with_seed(seed)
     }
 
     /// Run the simulation synchronously with an explicit seed.
-    pub fn run_with_seed(&self, seed: u64) -> Result<PlanResult<D>, String> {
+    pub fn run_with_seed(self, seed: u64) -> Result<PlanResult<D>, String> {
         let cfg = deterministic::Config::new()
             .with_seed(seed)
             .with_catch_panics(self.uses_storage_faults())
             .with_timeout(self.timeout);
         let runner = deterministic::Runner::new(cfg);
-        runner.start(|ctx| self.run_inner(ctx))
+        runner.start(|ctx| async move { self.run_inner(ctx).await })
     }
 }
 

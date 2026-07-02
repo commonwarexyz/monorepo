@@ -332,7 +332,7 @@ mod tests {
         allowed_handshake_rate_per_subnet: Quota,
         check_metrics: CheckMetrics,
     ) where
-        CheckMetrics: FnOnce(&str),
+        CheckMetrics: FnOnce(&str) + Send,
     {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {

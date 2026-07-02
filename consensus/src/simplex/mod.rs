@@ -790,7 +790,7 @@ mod tests {
     fn all_online<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -1024,7 +1024,7 @@ mod tests {
     fn non_genesis_floor_joiner_catches_tip<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // First let a quorum finalize beyond genesis so the joiner has a real
@@ -1269,7 +1269,7 @@ mod tests {
     fn dishonest_leader_certification_rejected<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         RoundRobin: Elector<S>,
     {
         let n = 5;
@@ -1410,7 +1410,7 @@ mod tests {
     fn observer<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -1750,7 +1750,7 @@ mod tests {
     fn backfill<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -1999,7 +1999,7 @@ mod tests {
     fn one_offline<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -2227,7 +2227,7 @@ mod tests {
     fn slow_validator<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -2399,7 +2399,7 @@ mod tests {
     fn all_recovery<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -2592,7 +2592,7 @@ mod tests {
     fn partition<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -2771,7 +2771,7 @@ mod tests {
     fn slow_and_lossy_links_seeded<S, F, L>(seed: u64, mut fixture: F) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -2912,7 +2912,7 @@ mod tests {
     fn slow_and_lossy_links<S, F, L>(fixture: F) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         slow_and_lossy_links_seeded::<_, _, L>(6, fixture)
@@ -2923,7 +2923,7 @@ mod tests {
     fn determinism<S, F, L>(seed: u64, fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy + Send,
         L: Elector<S>,
     {
         // We use slow and lossy links as the deterministic test
@@ -2962,7 +2962,7 @@ mod tests {
     fn conflicter<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -3128,7 +3128,7 @@ mod tests {
     fn invalid<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -3294,7 +3294,7 @@ mod tests {
     fn received_certificates_are_reported<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         let n = 4;
@@ -3461,7 +3461,7 @@ mod tests {
     fn survives_burst<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         let n = 4;
@@ -3602,7 +3602,7 @@ mod tests {
     fn impersonator<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -3752,7 +3752,7 @@ mod tests {
     fn equivocator_seeded<S, F, L>(seed: u64, mut fixture: F) -> bool
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -3989,7 +3989,7 @@ mod tests {
     fn equivocator<S, F, L>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy + Send,
         L: Elector<S>,
     {
         let detected = (0..5).any(|seed| equivocator_seeded::<_, _, L>(seed, fixture));
@@ -4004,7 +4004,7 @@ mod tests {
     fn reconfigurer<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -4153,7 +4153,7 @@ mod tests {
     fn nuller<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -4315,7 +4315,7 @@ mod tests {
     fn outdated<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -4457,7 +4457,7 @@ mod tests {
     fn run_1k<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -4594,7 +4594,7 @@ mod tests {
     fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, graceful: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         let n = 1;
@@ -4726,7 +4726,7 @@ mod tests {
     fn children_shutdown_on_engine_abort<S, F, L>(seed: u64, fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         engine_shutdown::<S, F, L>(seed, fixture, false);
@@ -4737,7 +4737,7 @@ mod tests {
     fn graceful_shutdown<S, F, L>(seed: u64, fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         engine_shutdown::<S, F, L>(seed, fixture, true);
@@ -4748,7 +4748,7 @@ mod tests {
     fn attributable_reporter_filtering<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         let n = 3;
@@ -4932,7 +4932,7 @@ mod tests {
     fn split_views_no_lockup<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Scenario:
@@ -5446,7 +5446,7 @@ mod tests {
     ) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         // Create context
@@ -5756,7 +5756,7 @@ mod tests {
     fn hailstorm<S, F, L>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy + Send,
         L: Elector<S>,
     {
         assert_eq!(
@@ -5819,7 +5819,7 @@ mod tests {
         mut fixture: F,
     ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         let n = campaign.n;
@@ -6323,7 +6323,7 @@ mod tests {
     fn twins<S, F, L>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: Elector<S>,
     {
         twins_campaign::<_, _, L>(&mut test_rng(), TWINS_CAMPAIGN, TWINS_LINK, fixture);

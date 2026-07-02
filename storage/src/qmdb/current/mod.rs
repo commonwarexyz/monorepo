@@ -727,7 +727,7 @@ pub mod tests {
         C: DbAny<M> + 'static,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
-        F: FnMut(Context, String) -> Fut + Clone,
+        F: FnMut(Context, String) -> Fut + Clone + Send,
         Fut: Future<Output = C>,
     {
         // Run on the provided runner.

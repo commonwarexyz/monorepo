@@ -806,7 +806,7 @@ mod tests {
     fn stale_backfill<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1037,7 +1037,7 @@ mod tests {
     fn append_old_interesting_view<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1313,7 +1313,7 @@ mod tests {
     fn finalization_without_notarization_certificate<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1433,7 +1433,7 @@ mod tests {
     fn certificate_conflicts_proposal<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1567,7 +1567,7 @@ mod tests {
     fn proposal_conflicts_certificate<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1689,7 +1689,7 @@ mod tests {
     fn certificate_verifies_proposal<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -1861,7 +1861,7 @@ mod tests {
     fn drop_our_proposal_on_conflict<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -2067,7 +2067,7 @@ mod tests {
     fn populate_resolver_on_restart<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -2300,7 +2300,7 @@ mod tests {
     fn startup_update_timeout_hint_nullifies_recovered_view<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -2487,7 +2487,7 @@ mod tests {
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         // This is a regression test as the resolver didn't use to send
@@ -2585,7 +2585,7 @@ mod tests {
     fn no_resolver_boomerang<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -2688,7 +2688,7 @@ mod tests {
     fn verification_failure_emits_nullify_immediately<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -2904,7 +2904,7 @@ mod tests {
     fn leader_nullify_fast_paths_timeout<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -3103,7 +3103,7 @@ mod tests {
     fn dropped_propose_emits_nullify_immediately<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -3268,7 +3268,7 @@ mod tests {
     fn dropped_verify_emits_nullify_immediately<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -3474,7 +3474,7 @@ mod tests {
     fn invalid_ancestry_emits_nullify_immediately<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S> + Default,
     {
         let n = 5;
@@ -3611,7 +3611,7 @@ mod tests {
     fn dropped_verify_still_votes_after_prior_participation<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -3890,7 +3890,7 @@ mod tests {
     fn no_recertification_after_replay<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -4150,7 +4150,7 @@ mod tests {
     fn no_self_verify_when_proposing<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -4319,7 +4319,7 @@ mod tests {
     fn no_self_propose_or_verify_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -4574,7 +4574,7 @@ mod tests {
     fn nullify_after_crash_in_propose_window<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -4866,7 +4866,7 @@ mod tests {
     fn no_self_verify_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -5143,7 +5143,7 @@ mod tests {
     fn no_self_certify_when_proposing<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -5323,7 +5323,7 @@ mod tests {
     fn no_self_certify_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -5585,7 +5585,7 @@ mod tests {
     fn certify_observer_fires_for_external_leader_proposal<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -5787,7 +5787,7 @@ mod tests {
     fn certification_cancelled_on_finalization<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -5974,7 +5974,7 @@ mod tests {
     fn certification_still_reports_to_resolver_after_nullification<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -6140,7 +6140,7 @@ mod tests {
     fn late_notarization_after_nullification_still_certifies<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -6244,7 +6244,7 @@ mod tests {
     fn certification_after_timeout<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -6360,7 +6360,7 @@ mod tests {
     fn certification_after_notarize_timeout_as_follower<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -6509,7 +6509,7 @@ mod tests {
     fn certification_after_notarize_timeout_as_leader<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -6649,7 +6649,7 @@ mod tests {
     fn cancelled_certification_does_not_hang<S, F>(mut fixture: F, traces: TraceStorage)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -6914,7 +6914,7 @@ mod tests {
     fn cancelled_certification_recertifies_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -7197,7 +7197,7 @@ mod tests {
     fn only_finalization_rescues_validator<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 4;
         let quorum = quorum(n);
@@ -7386,7 +7386,7 @@ mod tests {
     fn certification_failure_allows_nullify_after_notarize<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -7522,7 +7522,7 @@ mod tests {
     fn pending_certification_nullifies_on_timeout<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -7672,7 +7672,7 @@ mod tests {
     fn proposal_clears_leader_timeout_before_certification_timeout<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -7814,7 +7814,7 @@ mod tests {
     fn recovered_proposal_clears_leader_timeout_before_certification_timeout<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -7944,7 +7944,7 @@ mod tests {
     fn next_view_gets_fresh_timeout_after_prior_view_nullifies<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -8086,7 +8086,7 @@ mod tests {
     fn first_view_progress_without_timeout<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         L: ElectorConfig<S>,
     {
         let n = 5;
@@ -8260,7 +8260,7 @@ mod tests {
     fn successful_certification_replayed_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -8531,7 +8531,7 @@ mod tests {
     fn failed_certification_replayed_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -8787,7 +8787,7 @@ mod tests {
     fn nullify_and_nullification_replayed_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -9045,7 +9045,7 @@ mod tests {
     fn batcher_update_triggers_timeout<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n);
