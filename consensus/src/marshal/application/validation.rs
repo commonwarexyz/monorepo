@@ -9,22 +9,31 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 
-/// Which stage of verification a block has reached.
+/// Which marshal cache should hold a structurally valid candidate.
 ///
-/// This is used to determine which marshal cache a block should be stored in.
+/// This selects where candidate bytes are stored; it is not, by itself, an
+/// application-validity claim. Some callers start this store after structural
+/// checks and before application verification completes so the sync can overlap
+/// app work. Their certification gate must still combine the app verdict with
+/// store durability before allowing a finalize vote.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Stage {
-    /// The block has been verified (store in `verified_blocks`).
+    /// Store in `verified_blocks`.
     Verified,
-    /// The block has been certified (store in `notarized_blocks`).
+    /// Store in `notarized_blocks`.
     Certified,
 }
 
 impl Stage {
-    /// Store `block` in the marshal cache for the provided stage.
+    /// Store `block` in the marshal cache for the provided stage, returning once it
+    /// is durably persisted (`false` if marshal could not accept it).
+    ///
+    /// Callers that run this concurrently with application verification must
+    /// separately gate consensus progress on both the application verdict and this
+    /// result.
     pub(crate) async fn store<S: Scheme, V: Variant>(
         self,
-        marshal: &mut Mailbox<S, V>,
+        marshal: &Mailbox<S, V>,
         round: Round,
         block: V::Block,
     ) -> bool {

@@ -683,7 +683,12 @@ mod test {
         ) {
             let mut marshal = self.nodes[index].marshal.clone();
             let round = finalization.proposal.round;
-            assert!(marshal.proposed(round, block).await);
+            marshal
+                .proposed(round, block)
+                .await
+                .expect("sync handle delivered")
+                .await
+                .expect("proposed block durable");
             let _ = marshal.report(Activity::Finalization(finalization));
         }
 
