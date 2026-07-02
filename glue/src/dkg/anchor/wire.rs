@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
     marshal::core::Variant,
     simplex::{scheme::Scheme, types::Finalization},
@@ -125,7 +125,7 @@ pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Epoch>, Error>
     if tag != Tag::Request {
         return Ok(None);
     }
-    Ok(Some(Epoch::read(&mut reader)?))
+    Ok(Some(Epoch::decode(reader)?))
 }
 
 /// Decode a boundary response.
@@ -145,7 +145,7 @@ where
 
     let finalization = Finalization::read_cfg(&mut reader, certificate_cfg)?;
     let block_cfg = V::block_cfg(block_codec_config, finalization.proposal.payload);
-    let block = V::Block::read_cfg(&mut reader, &block_cfg)?;
+    let block = V::Block::decode_cfg(reader, &block_cfg)?;
 
     Ok(Some(Response {
         finalization,

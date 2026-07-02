@@ -6,7 +6,7 @@ use crate::dkg::{
 };
 use bytes::Buf;
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Encode as _, Read};
+use commonware_codec::{Decode as _, Encode as _, Read};
 use commonware_consensus::{
     marshal::core::Variant,
     simplex::{scheme::Scheme, types::Certificate},
@@ -162,15 +162,15 @@ where
     fn handle_certificate(
         &mut self,
         peer: S::PublicKey,
-        mut message: impl Buf,
+        message: impl Buf,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
     ) -> bool {
         if self.artifact.is_some() || self.subscribers.is_empty() {
             return false;
         }
 
-        let certificate = match Certificate::<S, V::Commitment>::read_cfg(
-            &mut message,
+        let certificate = match Certificate::<S, V::Commitment>::decode_cfg(
+            message,
             &self.verifier.certificate_codec_config(),
         ) {
             Ok(certificate) => certificate,

@@ -7,7 +7,7 @@ use crate::dkg::{
     types::Message,
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
 };
-use commonware_codec::{Encode, Read};
+use commonware_codec::{Decode, Encode};
 use commonware_consensus::{
     marshal::core::Variant as MarshalVariant,
     types::{Epoch, EpochPhase, Epocher},
@@ -165,9 +165,8 @@ where
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
     {
-        let mut reader = bytes.as_ref();
         let message =
-            match Message::<V, C::PublicKey>::read_cfg(&mut reader, &self.max_participants) {
+            match Message::<V, C::PublicKey>::decode_cfg(bytes.as_ref(), &self.max_participants) {
                 Ok(message) => message,
                 Err(error) => {
                     commonware_p2p::block!(
