@@ -95,6 +95,31 @@ impl Buffer {
         self.data.slice(start..end)
     }
 
+    /// Discards the first `n` bytes of the buffer and advances the offset by `n`.
+    ///
+    /// To flush, callers write a [Self::slice] view of the buffered bytes to the blob and call
+    /// this only after the write succeeds. The buffer keeps the bytes until then, so a dropped
+    /// or failed write loses nothing and a retry re-flushes them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is greater than the length of the buffer.
+    pub(super) fn advance(&mut self, n: usize) {
+        assert!(n <= self.len);
+        match n {
+            0 => {}
+            n if n == self.len => {
+                self.data = IoBuf::default();
+                self.len = 0;
+            }
+            n => {
+                self.data = self.data.slice(n..self.len);
+                self.len -= n;
+            }
+        }
+        self.offset += n as u64;
+    }
+
     /// Adjust the buffer to correspond to resizing the logical blob to size `len`.
     ///
     /// If the new size is greater than the current size, the existing buffered bytes are returned
