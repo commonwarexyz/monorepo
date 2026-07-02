@@ -72,27 +72,14 @@ fn adjusted_capacity(capacity: usize, page_size: u64) -> usize {
     rounded.max(floor)
 }
 
-/// Returns whether appending `append_len` bytes should bypass the write buffer and write whole
-/// pages directly: the append would overflow capacity, and at least one whole page remains to
-/// write after filling the current page up to a boundary.
-///
-/// Larger appends bypass the buffer, so a buffered append exceeds `capacity` by less than one
-/// page (given `capacity` is a whole number of pages; see [adjusted_capacity]). The write
-/// buffer's peak size therefore stays under `capacity + logical_page_size`.
-const fn too_big_for_buffer(
-    buffer_len: usize,
-    buffer_capacity: usize,
-    append_len: usize,
-    logical_page_size: usize,
-) -> bool {
-    let fill = buffer_len.next_multiple_of(logical_page_size) - buffer_len;
-    let overflows_capacity = buffer_len + append_len > buffer_capacity;
-    let has_full_page_after_fill = append_len >= fill + logical_page_size;
-
-    overflows_capacity && has_full_page_after_fill
-}
-
 /// Unique writer to a cache-wrapped [Blob].
+///
+/// # Cancellation
+///
+/// Dropping an in-flight operation leaves the writer in a consistent, retryable state (a
+/// dropped resize may have already taken effect in memory). The blob range touched by the
+/// dropped operation is indeterminate until it is rewritten and synced: on some runtimes the
+/// dropped write may still reach storage.
 pub struct Writer<B: Blob> {
     /// The underlying blob being wrapped.
     blob: B,
@@ -272,18 +259,28 @@ impl<B: Blob> Writer<B> {
         Ok((None, 0, invalid_data_found))
     }
 
+    /// Returns whether appending `append_len` bytes should bypass the write buffer and write
+    /// whole pages directly: the append would overflow capacity, and at least one whole page
+    /// remains to write after filling the current page up to a boundary.
+    ///
+    /// Larger appends bypass the buffer, so a buffered append exceeds capacity by less than one
+    /// page (given capacity is a whole number of pages; see [adjusted_capacity]). The write
+    /// buffer's peak size therefore stays under capacity plus one page.
+    const fn too_big_for_buffer(&self, append_len: usize) -> bool {
+        let page_size = self.cache_ref.page_size() as usize;
+        let len = self.buffer.len();
+        let fill = len.next_multiple_of(page_size) - len;
+        let overflows_capacity = len + append_len > self.buffer.capacity;
+        let has_full_page_after_fill = append_len >= fill + page_size;
+
+        overflows_capacity && has_full_page_after_fill
+    }
+
     /// Append all bytes in `buf` to the tip of the blob, returning the logical offset at which
     /// the first byte was written.
     pub async fn append(&mut self, buf: &[u8]) -> Result<u64, Error> {
-        let logical_page_size = self.cache_ref.page_size() as usize;
-
         // Bypass the write buffer and write whole pages directly when `buf` is large.
-        if too_big_for_buffer(
-            self.buffer.len(),
-            self.buffer.capacity,
-            buf.len(),
-            logical_page_size,
-        ) {
+        if self.too_big_for_buffer(buf.len()) {
             return self.append_owned(IoBuf::copy_from_slice(buf)).await;
         }
 
@@ -294,77 +291,63 @@ impl<B: Blob> Writer<B> {
         Ok(offset)
     }
 
-    /// Append owned bytes to the tip of the blob.
-    ///
-    /// Large appends fill the current tip to a page boundary, write complete pages directly to the
-    /// blob, and leave only a sub-page suffix in the write buffer. This avoids copying full-page
-    /// payloads while preserving the invariant that the buffer starts at `current_page`.
+    /// Append owned bytes to the tip of the blob, returning the logical offset at which the
+    /// first byte was written.
     pub async fn append_owned(&mut self, buf: IoBuf) -> Result<u64, Error> {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let offset = self.buffer.size();
 
         // Buffer the append unless `buf` is too big for the buffer.
-        if !too_big_for_buffer(
-            self.buffer.len(),
-            self.buffer.capacity,
-            buf.len(),
-            logical_page_size,
-        ) {
+        if !self.too_big_for_buffer(buf.len()) {
             if self.buffer.append(buf.as_ref()) {
                 self.flush_internal(false, false).await?;
             }
             return Ok(offset);
         }
 
-        // Bytes needed to fill current page to a page boundary (0 if already aligned).
-        let fill = self.buffer.len().next_multiple_of(logical_page_size) - self.buffer.len();
+        // `buf` is too big to buffer, so its whole pages are written directly to the blob.
+        // `buf` splits three ways: `fill` completes the tip's partial page, `bulk` is whole
+        // pages, and the sub-page `suffix` becomes the new tip. All three are prepared without
+        // modifying writer state, which is published only after the blob write succeeds: a
+        // dropped append changes nothing.
 
-        // Top up the tip to a page boundary so its contents flush as full pages, leaving any
-        // partial-page CRC handling to the regular flush path.
-        if fill > 0 {
-            self.buffer.append(&buf.as_ref()[..fill]);
-        }
-        let boundary = self.buffer.size();
-        if !self.buffer.is_empty() {
+        // Flush any full pages already in the tip, leaving at most a partial page.
+        if self.buffer.len() >= logical_page_size {
             self.flush_internal(false, false).await?;
+        }
+
+        // Complete the tip's partial page (if any) into one full page, copying the tip's bytes
+        // and the first `fill` bytes of `buf`.
+        let tip_len = self.buffer.len();
+        if tip_len == 0 {
+            // The bulk pages below are built without a prior CRC record, which is only correct
+            // when no committed partial page exists.
             assert!(
-                self.buffer.size() == boundary && self.buffer.is_empty(),
-                "flush left unexpected buffered bytes before a direct-path append"
+                self.partial_page_state.is_none(),
+                "an empty tip implies no partial page state"
             );
         }
-
-        // Prepare physical pages for the whole pages remaining in `buf` without copying logical
-        // payload bytes.
-        let bulk_len = (buf.len() - fill) / logical_page_size * logical_page_size;
-        let bulk = buf.slice(fill..fill + bulk_len);
+        // Bytes needed to fill the current page to a page boundary (0 if already aligned).
+        let fill = tip_len.next_multiple_of(logical_page_size) - tip_len;
         let mut physical_pages = IoBufs::default();
-        self.append_full_pages(&bulk, None, &mut physical_pages);
-
-        assert!(
-            self.partial_page_state.is_none(),
-            "an empty tip implies no partial page state"
-        );
-
-        // Direct blob writes must not overtake an earlier started sync barrier.
-        self.sync_state.wait_for_pending().await?;
-
-        // Cache the pages before `replace` publishes the new size, so reads of the bulk range are
-        // served from the cache while the blob write is still in flight. Insert in
-        // write-buffer-sized chunks. The capacity is a whole number of pages (see
-        // [adjusted_capacity]), so each chunk is page-aligned.
-        let chunk_len = self.buffer.capacity;
-        let mut cache_offset = boundary;
-        for chunk in bulk.as_ref().chunks(chunk_len) {
-            let remaining = self.cache_ref.cache(self.id, chunk, cache_offset);
-            assert_eq!(remaining, 0, "cached bulk pages must be page-aligned");
-            cache_offset += chunk.len() as u64;
+        let mut completed_page = None;
+        if fill > 0 {
+            let mut page = self.cache_ref.pool().alloc(logical_page_size);
+            page.put_slice(self.buffer.as_ref());
+            page.put_slice(&buf.as_ref()[..fill]);
+            let page = page.freeze();
+            self.append_full_pages(&page, self.partial_page_state.as_ref(), &mut physical_pages);
+            completed_page = Some(page);
         }
 
-        // Update state before writing, seeding the tip with the partial-page suffix of `buf`.
-        // The suffix (less than one page) is copied: a sub-page tip is never drained by flush,
-        // so seeding it with a view of `buf` would pin the entire backing allocation until the
-        // next append to this blob (or forever, if there is none).
-        self.current_page += (bulk_len / logical_page_size) as u64;
+        // Prepare the `bulk` pages as views of `buf`, copying no payload bytes.
+        let bulk_len = (buf.len() - fill) / logical_page_size * logical_page_size;
+        let bulk = buf.slice(fill..fill + bulk_len);
+        self.append_full_pages(&bulk, None, &mut physical_pages);
+
+        // Copy the `suffix` for the new tip. A view of `buf` would work, but a sub-page tip is
+        // never drained by flush, so the view would pin `buf`'s entire backing allocation until
+        // the next append (or forever, if there is none).
         let suffix = buf.slice(fill + bulk_len..);
         let suffix = if suffix.is_empty() {
             suffix
@@ -373,7 +356,32 @@ impl<B: Blob> Writer<B> {
             copied.put_slice(suffix.as_ref());
             copied.freeze()
         };
-        self.buffer.replace(boundary + bulk_len as u64, suffix);
+
+        self.write_physical_pages(physical_pages, false).await?;
+
+        // The write succeeded, so publish the new state. Cache the completed page (clearing
+        // the partial-page record it replaces), then cache the `bulk` pages in
+        // write-buffer-sized chunks (the capacity is a whole number of pages, see
+        // [adjusted_capacity]).
+        let mut cache_offset = self.buffer.offset;
+        if let Some(completed_page) = completed_page {
+            let remaining = self
+                .cache_ref
+                .cache(self.id, completed_page.as_ref(), cache_offset);
+            assert_eq!(remaining, 0, "cached completed page must be page-aligned");
+            cache_offset += logical_page_size as u64;
+            self.current_page += 1;
+            self.partial_page_state = None;
+        }
+        for chunk in bulk.as_ref().chunks(self.buffer.capacity) {
+            let remaining = self.cache_ref.cache(self.id, chunk, cache_offset);
+            assert_eq!(remaining, 0, "cached bulk pages must be page-aligned");
+            cache_offset += chunk.len() as u64;
+        }
+        self.current_page += (bulk_len / logical_page_size) as u64;
+
+        // The `suffix` becomes the new tip, starting after the last written page.
+        self.buffer.replace(cache_offset, suffix);
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
         assert_eq!(
@@ -381,11 +389,75 @@ impl<B: Blob> Writer<B> {
             self.buffer.offset
         );
 
-        let physical_page_size = logical_page_size as u64 + CHECKSUM_SIZE;
-        let write_at_offset = boundary / logical_page_size as u64 * physical_page_size;
-        self.write_at(write_at_offset, physical_pages).await?;
-
         Ok(offset)
+    }
+
+    /// Write prepared physical pages starting at the tip page, skipping any CRC slot that
+    /// protects the committed partial page.
+    ///
+    /// Must be called before publishing new tip state: `current_page` and `partial_page_state`
+    /// must still describe the on-disk layout.
+    ///
+    /// Returns `true` if the emitted writes were made durable, so no additional sync is needed.
+    async fn write_physical_pages(
+        &mut self,
+        mut physical_pages: IoBufs,
+        sync: bool,
+    ) -> Result<bool, Error> {
+        let logical_page_size = self.cache_ref.page_size() as usize;
+        let write_at_offset = self.current_page * (logical_page_size as u64 + CHECKSUM_SIZE);
+
+        // If no CRC slot is protected, everything goes out in one write.
+        let Some((prefix_len, slot)) =
+            Self::identify_protected_regions(self.partial_page_state.as_ref())
+        else {
+            self.write_at_maybe_sync(write_at_offset, physical_pages, sync)
+                .await?;
+            return Ok(sync);
+        };
+
+        // The protected slot splits the output in two: the new first-page bytes before the
+        // slot (including the page's first CRC when the second slot is protected), and
+        // everything after it. If only one write is needed, it can be made durable here; if
+        // both are, keep them plain so one later sync covers both.
+        let protected_start = match slot {
+            Slot::First => logical_page_size,
+            Slot::Second => logical_page_size + CHECKSUM_SLOT_SIZE,
+        };
+        let protected_end = protected_start + CHECKSUM_SLOT_SIZE;
+
+        // Write 1: new bytes before the protected slot [prefix_len..protected_start], if any.
+        let has_first_write = prefix_len < protected_start;
+        let first_payload = if has_first_write {
+            let _ = physical_pages.split_to(prefix_len);
+            Some(physical_pages.split_to(protected_start - prefix_len))
+        } else {
+            let _ = physical_pages.split_to(protected_start);
+            None
+        };
+        let has_second_write = physical_pages.len() > protected_end - protected_start;
+        if let Some(first_payload) = first_payload {
+            self.write_at_maybe_sync(
+                write_at_offset + prefix_len as u64,
+                first_payload,
+                sync && !has_second_write,
+            )
+            .await?;
+        }
+
+        // Write 2: everything after the protected slot [protected_end..end], if any.
+        if has_second_write {
+            let _ = physical_pages.split_to(protected_end - protected_start);
+            self.write_at_maybe_sync(
+                write_at_offset + protected_end as u64,
+                physical_pages,
+                sync && !has_first_write,
+            )
+            .await?;
+        }
+
+        let single_write = has_first_write != has_second_write;
+        Ok(sync && single_write)
     }
 
     /// Flush all full pages from the buffer to disk, resetting the buffer to contain only the bytes
@@ -407,7 +479,7 @@ impl<B: Blob> Writer<B> {
     ) -> Result<bool, Error> {
         // Prepare the *physical* pages corresponding to the data in the buffer.
         // Pass the old partial page state so the CRC record is constructed correctly.
-        let (mut physical_pages, partial_page_state) = self.to_physical_pages(
+        let (physical_pages, partial_page_state) = self.to_physical_pages(
             &self.buffer,
             write_partial_page,
             self.partial_page_state.as_ref(),
@@ -418,153 +490,32 @@ impl<B: Blob> Writer<B> {
             return Ok(false);
         }
 
-        // A flush mutates the blob, so first resolve any outstanding start_sync barrier.
-        self.sync_state.wait_for_pending().await?;
+        let synced = self.write_physical_pages(physical_pages, sync).await?;
 
-        // Split buffered bytes into full logical pages to hand off now, leaving any trailing
-        // partial page in tip for continued buffering.
+        // The writes succeeded, so publish the new state: move the flushed full pages from the
+        // tip into the page cache and record the new partial-page state.
         let logical_page_size = self.cache_ref.page_size() as usize;
-        let pages_to_cache = self.buffer.len() / logical_page_size;
-        let bytes_to_drain = pages_to_cache * logical_page_size;
-
-        // Remember the logical start offset and page bytes for caching of flushed full pages.
-        let cache_pages = if pages_to_cache > 0 {
-            Some((self.buffer.offset, self.buffer.slice(..bytes_to_drain)))
-        } else {
-            None
-        };
-
-        // Drain full pages from the buffered logical data. If the tip is fully drained, detach its
-        // backing so empty append buffers don't retain pooled storage.
-        if bytes_to_drain == self.buffer.len() && bytes_to_drain != 0 {
-            let _ = self
-                .buffer
-                .take()
-                .expect("take must succeed when flush drains all buffered bytes");
-        } else if bytes_to_drain != 0 {
-            self.buffer.drop_prefix(bytes_to_drain);
-            self.buffer.offset += bytes_to_drain as u64;
-        }
-        let new_offset = self.buffer.offset;
-
-        // Cache full pages before publishing the new blob state so reads don't observe stale
-        // persisted bytes during the handoff from tip to cache.
-        if let Some((cache_offset, pages)) = cache_pages {
-            let remaining = self.cache_ref.cache(self.id, pages.as_ref(), cache_offset);
+        let full_pages = self.buffer.len() / logical_page_size;
+        let full_bytes = full_pages * logical_page_size;
+        if full_bytes > 0 {
+            let remaining = self.cache_ref.cache(
+                self.id,
+                &self.buffer.as_ref()[..full_bytes],
+                self.buffer.offset,
+            );
             assert_eq!(remaining, 0, "cached full-page prefix must be page-aligned");
         }
-
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
-        let write_at_offset = self.current_page * physical_page_size as u64;
-
-        // Identify protected regions based on the OLD partial page state.
-        let protected_regions = Self::identify_protected_regions(self.partial_page_state.as_ref());
-
-        // Update state before writing. This may appear to risk data loss if writes fail,
-        // but write failures are fatal per this codebase's design: callers must not use
-        // the blob after any mutable method returns an error.
-        self.current_page += pages_to_cache as u64;
+        self.buffer.advance(full_bytes);
+        self.current_page += full_pages as u64;
         self.partial_page_state = partial_page_state;
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
-        assert_eq!(self.current_page * self.cache_ref.page_size(), new_offset);
+        assert_eq!(
+            self.current_page * self.cache_ref.page_size(),
+            self.buffer.offset
+        );
 
-        // Write the physical pages to the blob.
-        // If there are protected regions in the first page, we need to write around them.
-        match protected_regions {
-            Some((prefix_len, Slot::First)) => {
-                // Protected CRC is first: [page_size..page_size+6].
-                //
-                // If only one of these writes is emitted, it can be made durable here. If
-                // both are emitted, keep them plain so one later sync covers both.
-                //
-                // Write 1: new data in first page [prefix_len..page_size].
-                let has_first_write = prefix_len < logical_page_size;
-                if has_first_write {
-                    let _ = physical_pages.split_to(prefix_len);
-                    let first_payload = physical_pages.split_to(logical_page_size - prefix_len);
-                    let has_second_write = physical_pages.len() > CHECKSUM_SLOT_SIZE;
-                    self.write_at_maybe_sync(
-                        write_at_offset + prefix_len as u64,
-                        first_payload,
-                        sync && !has_second_write,
-                    )
-                    .await?;
-                    if !has_second_write {
-                        return Ok(sync);
-                    }
-                } else {
-                    // Skip the protected first page bytes when they are fully covered.
-                    let _ = physical_pages.split_to(logical_page_size);
-                }
-
-                // Write 2: second CRC of first page + all remaining pages [page_size+6..end].
-                if physical_pages.len() > CHECKSUM_SLOT_SIZE {
-                    let _ = physical_pages.split_to(CHECKSUM_SLOT_SIZE);
-                    self.write_at_maybe_sync(
-                        write_at_offset + (logical_page_size + CHECKSUM_SLOT_SIZE) as u64,
-                        physical_pages,
-                        sync && !has_first_write,
-                    )
-                    .await?;
-                    if !has_first_write {
-                        return Ok(sync);
-                    }
-                }
-
-                Ok(false)
-            }
-            Some((prefix_len, Slot::Second)) => {
-                // Protected CRC is second: [page_size+6..page_size+12].
-                //
-                // If only one of these writes is emitted, it can be made durable here. If
-                // both are emitted, keep them plain so one later sync covers both.
-                //
-                // Write 1: new data + first CRC of first page [prefix_len..page_size+6].
-                let first_crc_end = logical_page_size + CHECKSUM_SLOT_SIZE;
-                let skip = physical_page_size - first_crc_end;
-                let has_first_write = prefix_len < first_crc_end;
-                if has_first_write {
-                    let _ = physical_pages.split_to(prefix_len);
-                    let first_payload = physical_pages.split_to(first_crc_end - prefix_len);
-                    let has_second_write = physical_pages.len() > skip;
-                    self.write_at_maybe_sync(
-                        write_at_offset + prefix_len as u64,
-                        first_payload,
-                        sync && !has_second_write,
-                    )
-                    .await?;
-                    if !has_second_write {
-                        return Ok(sync);
-                    }
-                } else {
-                    // Skip the fully protected first segment when no bytes from it need update.
-                    let _ = physical_pages.split_to(first_crc_end);
-                }
-
-                // Write 2: all remaining pages (if any) [physical_page_size..end].
-                if physical_pages.len() > skip {
-                    let _ = physical_pages.split_to(skip);
-                    self.write_at_maybe_sync(
-                        write_at_offset + physical_page_size as u64,
-                        physical_pages,
-                        sync && !has_first_write,
-                    )
-                    .await?;
-                    if !has_first_write {
-                        return Ok(sync);
-                    }
-                }
-
-                Ok(false)
-            }
-            None => {
-                // No protected regions, write everything in one operation
-                self.write_at_maybe_sync(write_at_offset, physical_pages, sync)
-                    .await?;
-                Ok(sync)
-            }
-        }
+        Ok(synced)
     }
 
     /// Returns the size of the blob.
@@ -721,8 +672,8 @@ impl<B: Blob> Writer<B> {
         padded.put_slice(&crc_record.to_bytes());
         write_buffer.append(padded.freeze());
 
-        // Return the CRC record that matches what we wrote to disk, so that future flushes
-        // correctly identify which slot is protected.
+        // Return the CRC record matching the prepared partial page, so a later flush
+        // identifies the protected slot.
         (write_buffer, Some(crc_record))
     }
 
@@ -1014,14 +965,6 @@ impl<B: Blob> Writer<B> {
                 .ok_or(Error::OffsetOverflow)?
         };
 
-        // A logical shrink can leave the physical page count unchanged. Only real physical
-        // resizes need to create a pending sync.
-        if new_physical_size != current_physical_size {
-            self.sync_state
-                .resize(&self.blob, new_physical_size)
-                .await?;
-        }
-
         // Evict cached pages at or beyond the new full-page boundary. The page at
         // `full_pages` (if partial) is now owned by the tip buffer, and anything above is
         // beyond the new size. Leaving their pre-resize contents in the cache
@@ -1029,19 +972,34 @@ impl<B: Blob> Writer<B> {
         // the tip is repopulated.
         self.cache_ref.invalidate_from(self.id, full_pages);
 
-        if partial_bytes > 0 {
-            return self
-                .shrink_to_partial(full_pages, partial_bytes, logical_page_size, tail_offset)
-                .await;
+        // Shrink to a page boundary, which requires no CRC-slot rewrite. The state update must
+        // come before the truncate: truncated full pages cannot be rebuilt from the tip, so
+        // updating after would leave the writer claiming pages the blob no longer holds if the
+        // truncate is dropped. Updating first is safe: a dropped truncate then leaves the
+        // writer claiming less than the blob holds, and later appends overwrite the excess.
+        // The sync above wrote out any partial tip, so a boundary shrink always reduces the
+        // physical page count and the truncate is never a no-op.
+        if partial_bytes == 0 {
+            self.partial_page_state = None;
+            self.current_page = full_pages;
+            self.buffer.offset = tail_offset;
+            self.buffer.clear();
+            return self.sync_state.resize(&self.blob, new_physical_size).await;
         }
 
-        // Shrink the blob to a page boundary, which requires no CRC-slot rewrite.
-        self.partial_page_state = None;
-        self.current_page = full_pages;
-        self.buffer.offset = tail_offset;
-        self.buffer.clear();
-
-        Ok(())
+        // Shrink into a partial page. If the target stays within the current tip page, the
+        // physical page count is unchanged and no truncate is needed. Otherwise the truncate
+        // deletes the page described by the current partial-page record, so clear the record
+        // before awaiting the truncate: a dropped truncate then cannot leave a stale record
+        // that would make a later flush skip rewriting the tip.
+        if new_physical_size != current_physical_size {
+            self.partial_page_state = None;
+            self.sync_state
+                .resize(&self.blob, new_physical_size)
+                .await?;
+        }
+        self.shrink_to_partial(full_pages, partial_bytes, logical_page_size, tail_offset)
+            .await
     }
 
     /// Perform a shrink to a partial page tip and make the shorter CRC slot authoritative.
@@ -1052,11 +1010,6 @@ impl<B: Blob> Writer<B> {
         logical_page_size: u64,
         tail_offset: u64,
     ) -> Result<(), Error> {
-        // Update blob state and buffer based on the desired size. The page data is
-        // read with CRC validation, then durably rewritten below with a shorter CRC.
-        self.current_page = full_pages;
-        self.buffer.offset = tail_offset;
-
         let (page_data, old_crc) =
             super::get_page_with_checksum_from_blob(&self.blob, full_pages, logical_page_size)
                 .await?;
@@ -1066,11 +1019,7 @@ impl<B: Blob> Writer<B> {
             return Err(Error::InvalidChecksum);
         }
 
-        self.buffer.clear();
         let new_data = &page_data.as_ref()[..partial_bytes as usize];
-        let over_capacity = self.buffer.append(new_data);
-        assert!(!over_capacity);
-
         let final_record = self
             .sync_partial_page_shrink(
                 full_pages,
@@ -1080,6 +1029,14 @@ impl<B: Blob> Writer<B> {
                 &old_crc,
             )
             .await?;
+
+        // The rewrite succeeded, so publish the shrunken state: the retained bytes become the
+        // new tip and the rewritten CRC record becomes authoritative.
+        self.current_page = full_pages;
+        self.buffer.offset = tail_offset;
+        self.buffer.clear();
+        let over_capacity = self.buffer.append(new_data);
+        assert!(!over_capacity);
         self.partial_page_state = Some(final_record);
 
         Ok(())
@@ -1121,6 +1078,7 @@ impl<B: Blob> Writer<B> {
     /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
     /// [`super::Sealed::sync`].
     pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
+        // Join any in-flight sync so its failure is surfaced before the writer is consumed.
         self.sync_state.wait_for_pending().await?;
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.id))
@@ -1131,7 +1089,10 @@ impl<B: Blob> Writer<B> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
+        buffer::{
+            paged::CHECKSUM_SLOT_LEN_SIZE,
+            tests::{GatedResizeBlob, GatedWriteBlob, SyncTrackingBlob},
+        },
         deterministic,
         mocks::{next_pending_sync, DelayedSyncBlob},
         telemetry::metrics::Registry,
@@ -1931,6 +1892,346 @@ mod tests {
             assert_eq!(append.size(), 430);
             let read_buf = append.read_at(0, 430).await.unwrap().coalesce();
             assert_eq!(read_buf, &all[..]);
+        });
+    }
+
+    // If a page flush is canceled during the blob write, keep the data in the tip.
+    #[test_traced("DEBUG")]
+    fn test_flush_cancel_preserves_paged_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"flush_cancel")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedWriteBlob::new(inner);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let mut expected = vec![7u8; BUFFER_SIZE];
+            writer.append(&expected).await.unwrap();
+            expected.push(9);
+
+            // This append overflows the buffer and starts a full-page flush. Cancel during it.
+            gate.cancel(writer.append(&[9])).await;
+
+            // Nothing should have moved from the tip into page/cache state yet.
+            assert_eq!(writer.current_page, 0);
+            assert!(writer.partial_page_state.is_none());
+            assert_eq!(writer.size(), expected.len() as u64);
+            assert_eq!(writer.buffer.as_ref(), expected.as_slice());
+            let read = writer.read_at(0, expected.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), expected.as_slice());
+
+            // Retrying sync should flush the same bytes and publish the page state.
+            writer.sync().await.unwrap();
+            assert_eq!(writer.current_page, 2);
+            assert!(writer.partial_page_state.is_some());
+            let read = writer.read_at(0, expected.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), expected.as_slice());
+        });
+    }
+
+    // If a large direct append is canceled during the blob write, publish nothing.
+    #[test_traced("DEBUG")]
+    fn test_append_owned_cancel_preserves_state() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"append_owned_cancel")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedWriteBlob::new(inner);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+            // This takes the direct path: full pages go straight to the blob.
+            // Cancel before those pages are allowed to publish into writer state.
+            gate.cancel(writer.append_owned(IoBuf::from(data.clone())))
+                .await;
+
+            // The direct append was canceled, so it should not change size, cache, or page count.
+            assert_eq!(writer.current_page, 0);
+            assert!(writer.partial_page_state.is_none());
+            assert_eq!(writer.size(), 0);
+
+            let mut probe = vec![0u8; PAGE_SIZE.get() as usize];
+            assert_eq!(writer.cache_ref.read_cached(writer.id, &mut probe, 0), 0);
+
+            // Retrying should write and publish the full append normally.
+            writer
+                .append_owned(IoBuf::from(data.clone()))
+                .await
+                .unwrap();
+            assert_eq!(writer.size(), data.len() as u64);
+            let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            // The retried append must survive reopening.
+            let (blob, blob_size) = context
+                .open("test_partition", b"append_owned_cancel")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), data.len() as u64);
+            let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
+    }
+
+    // If a large direct append from a non-aligned tip is canceled during the blob write, the
+    // tip keeps only the pre-append bytes: not even a page-completing prefix is published.
+    #[test_traced("DEBUG")]
+    fn test_append_owned_fill_cancel_publishes_nothing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"append_owned_fill_cancel")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedWriteBlob::new(inner);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // Leave a committed partial page in the tip so the direct path must complete it.
+            let pre: Vec<u8> = (0..50).map(|i| i as u8).collect();
+            writer.append(&pre).await.unwrap();
+            writer.sync().await.unwrap();
+
+            let data: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+            gate.cancel(writer.append_owned(IoBuf::from(data.clone())))
+                .await;
+
+            // The canceled append published nothing: the tip holds only the pre-append bytes.
+            assert_eq!(writer.current_page, 0);
+            assert!(writer.partial_page_state.is_some());
+            assert_eq!(writer.size(), pre.len() as u64);
+            assert_eq!(writer.buffer.as_ref(), pre.as_slice());
+
+            // Retrying appends the full input exactly once.
+            writer
+                .append_owned(IoBuf::from(data.clone()))
+                .await
+                .unwrap();
+            let total = pre.len() + data.len();
+            assert_eq!(writer.size(), total as u64);
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"append_owned_fill_cancel")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), total as u64);
+            let read = reopened.read_at(0, total).await.unwrap().coalesce();
+            assert_eq!(&read.as_ref()[..pre.len()], pre.as_slice());
+            assert_eq!(&read.as_ref()[pre.len()..], data.as_slice());
+        });
+    }
+
+    // If sync is canceled during a partial-page write, keep that partial page in the tip.
+    #[test_traced("DEBUG")]
+    fn test_sync_cancel_preserves_paged_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"sync_cancel")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedWriteBlob::new(inner);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0..50).map(|i| i as u8).collect();
+            writer.append(&data).await.unwrap();
+
+            // Sync writes the partial page and its checksum. Cancel during that write.
+            gate.cancel(writer.sync()).await;
+
+            // The canceled sync must not publish a partial-page checksum state.
+            assert_eq!(writer.current_page, 0);
+            assert!(writer.partial_page_state.is_none());
+            assert_eq!(writer.size(), data.len() as u64);
+            assert_eq!(writer.buffer.as_ref(), data.as_slice());
+            let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+
+            // Retrying sync should write the partial page and publish its checksum.
+            writer.sync().await.unwrap();
+            assert_eq!(writer.current_page, 0);
+            assert!(writer.partial_page_state.is_some());
+            let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
+    }
+
+    // If a shrink is canceled after the physical truncate completes, a later sync restores the
+    // tip page the truncate deleted instead of silently forgetting it.
+    #[test_traced("DEBUG")]
+    fn test_shrink_cancel_after_truncate_restores_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_cancel")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedResizeBlob::new(inner);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..2 * page + 50).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Shrinking into page 1 truncates the blob to two physical pages, deleting the tip
+            // page. Cancel while that completed truncate is held open.
+            gate.cancel(writer.resize(page as u64 + 30)).await;
+
+            // The canceled shrink dropped the stale record, so the writer still claims (and can
+            // still read) the old size.
+            assert!(writer.partial_page_state.is_none());
+            assert_eq!(writer.size(), data.len() as u64);
+            let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+
+            // Sync rewrites the tip page the truncate deleted, restoring the old size durably.
+            writer.sync().await.unwrap();
+            drop(writer);
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_cancel")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), data.len() as u64);
+            let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
+    }
+
+    // If a page-boundary shrink is canceled after the truncate completes, the writer already
+    // published the shrunken size and remains consistent.
+    #[test_traced("DEBUG")]
+    fn test_shrink_to_boundary_cancel_publishes_shrunken_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_boundary_cancel")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedResizeBlob::new(inner);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..3 * page).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // A boundary shrink publishes the shrunken size before truncating. Cancel while
+            // the completed truncate is held open.
+            gate.cancel(writer.resize(2 * page as u64)).await;
+
+            // The writer claims the shrunken size and the surviving pages remain readable.
+            assert_eq!(writer.size(), 2 * page as u64);
+            assert_eq!(writer.current_page, 2);
+            assert!(writer.partial_page_state.is_none());
+            let read = writer.read_at(0, 2 * page).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[..2 * page]);
+
+            // Appends and sync continue normally from the new size.
+            writer.append(&data[..10]).await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_boundary_cancel")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), (2 * page + 10) as u64);
+            let read = reopened.read_at(0, 2 * page + 10).await.unwrap().coalesce();
+            assert_eq!(&read.as_ref()[..2 * page], &data[..2 * page]);
+            assert_eq!(&read.as_ref()[2 * page..], &data[..10]);
+        });
+    }
+
+    // If a shrink is canceled during the CRC slot rewrite, the writer keeps the old size and a
+    // retried shrink completes.
+    #[test_traced("DEBUG")]
+    fn test_shrink_cancel_during_crc_rewrite_keeps_old_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_crc_cancel")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedWriteBlob::new(inner);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..2 * page + 50).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Shrinking within the tip page rewrites only its CRC record. Cancel during the
+            // first rewrite write.
+            let target = (2 * page + 30) as u64;
+            gate.cancel(writer.resize(target)).await;
+
+            // The canceled rewrite leaves the old tip authoritative and durable.
+            assert!(writer.partial_page_state.is_some());
+            assert_eq!(writer.size(), data.len() as u64);
+            let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+            writer.sync().await.unwrap();
+
+            // Retrying the shrink completes normally.
+            writer.resize(target).await.unwrap();
+            assert_eq!(writer.size(), target);
+            writer.sync().await.unwrap();
+            drop(writer);
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_crc_cancel")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), target);
+            let read = reopened
+                .read_at(0, target as usize)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), &data[..target as usize]);
         });
     }
 

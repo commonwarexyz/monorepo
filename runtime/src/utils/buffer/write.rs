@@ -221,7 +221,7 @@ impl<B: Blob> Write<B> {
         }
 
         self.sync_state.resize(&self.blob, len).await?;
-        let _ = self.buffer.resize(len);
+        self.buffer.resize(len);
 
         Ok(())
     }
