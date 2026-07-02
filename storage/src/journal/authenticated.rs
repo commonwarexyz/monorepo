@@ -876,7 +876,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
@@ -1201,12 +1201,12 @@ mod tests {
     async fn test_align_replay_parallel_matches_serial_inner<F: Family + PartialEq>(
         context: Context,
     ) {
-        type RayonJournal<F> = Journal<
+        type ParallelJournal<F> = Journal<
             F,
             deterministic::Context,
             ContiguousJournal<deterministic::Context, TestOp<F>>,
             Sha256,
-            Rayon,
+            Manual<Rayon>,
         >;
 
         // Build a journal that is ahead of both Merkle structures.
@@ -1226,9 +1226,10 @@ mod tests {
         journal.append(&commit_op).await.unwrap();
         journal.sync().await.unwrap();
 
-        // Replay with a batch size that forces multiple batches. A fresh Rayon strategy runs
-        // its first batch on the parallel path (the policy seeds parallel timing before
-        // serial), so both replay paths are exercised.
+        // Replay with a batch size that forces multiple batches on each side. `Sequential`
+        // always takes `run()`'s serial arm, and a `Manual`-wrapped strategy with more than one
+        // thread always takes the parallel arm (no adaptive policy), so the two replays are
+        // guaranteed to exercise both paths deterministically.
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut serial = Merkle::<F, _, Digest, Sequential>::init(
             context.child("mmr_serial"),
@@ -1241,18 +1242,18 @@ mod tests {
             .await
             .unwrap();
 
-        let mut parallel = Merkle::<F, _, Digest, Rayon>::init(
+        let mut parallel = Merkle::<F, _, Digest, Manual<Rayon>>::init(
             context.child("mmr_parallel"),
             &hasher,
             merkle_config_with(
                 "replay-parallel",
                 &context,
-                Rayon::new(NZUsize!(2)).unwrap(),
+                Rayon::new(NZUsize!(2)).unwrap().manual(),
             ),
         )
         .await
         .unwrap();
-        RayonJournal::<F>::align(&mut parallel, &journal, &hasher, 7)
+        ParallelJournal::<F>::align(&mut parallel, &journal, &hasher, 7)
             .await
             .unwrap();
 
