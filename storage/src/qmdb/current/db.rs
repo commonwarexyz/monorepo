@@ -1068,22 +1068,7 @@ pub(super) async fn compute_grafted_leaves<
     }))
     .await?;
 
-    // Compute the grafted leaf digest for each chunk. For all-zero chunks, the
-    // grafted leaf equals the chunk_ops_digest directly (zero-chunk identity).
-    Ok(strategy.map_init_collect_vec(
-        inputs,
-        || hasher.clone(),
-        |h, (chunk_idx, chunk_ops_digest, chunk)| {
-            if chunk == bitmap::BitMap::<N>::EMPTY_CHUNK {
-                (chunk_idx, chunk_ops_digest)
-            } else {
-                (
-                    chunk_idx,
-                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
-                )
-            }
-        },
-    ))
+    Ok(grafting::graft_chunk_digests(hasher, strategy, inputs))
 }
 
 /// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree.

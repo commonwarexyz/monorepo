@@ -159,23 +159,15 @@ where
         inputs[input_idx].1 = Some(digest);
     }
 
-    // Compute grafted leaf digests. All-zero chunks do not change the h=G ops digest, so preserve
-    // it directly instead of hashing an empty bitmap chunk into it.
-    Ok(strategy.map_init_collect_vec(
-        inputs,
-        || hasher.clone(),
-        |h, (chunk_idx, chunk_ops_digest, chunk)| {
+    // Every input now carries its resolved h=G ops digest.
+    let inputs = inputs
+        .into_iter()
+        .map(|(chunk_idx, chunk_ops_digest, chunk)| {
             let chunk_ops_digest = chunk_ops_digest.expect("all grafted leaves should be resolved");
-            if chunk == bitmap::BitMap::<N>::EMPTY_CHUNK {
-                (chunk_idx, chunk_ops_digest)
-            } else {
-                (
-                    chunk_idx,
-                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
-                )
-            }
-        },
-    ))
+            (chunk_idx, chunk_ops_digest, chunk)
+        })
+        .collect();
+    Ok(grafting::graft_chunk_digests(hasher, strategy, inputs))
 }
 
 /// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Skips locations where the
