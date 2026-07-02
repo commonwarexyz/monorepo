@@ -60,14 +60,6 @@ impl Default for Crc32 {
     }
 }
 
-impl Clone for Crc32 {
-    fn clone(&self) -> Self {
-        // Per the `Hasher` contract, `Clone` resets: we never duplicate in-progress
-        // hasher state.
-        Self::default()
-    }
-}
-
 impl Crc32 {
     /// Compute a CRC32 checksum of the given data (one-shot).
     ///

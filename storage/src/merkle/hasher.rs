@@ -157,10 +157,18 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
 /// one instance can be used with MMR, MMB, or any future family.
 ///
 /// The `bagging` field selects how peaks are folded into the root.
-#[derive(Clone)]
 pub struct Standard<H: CHasher> {
     _hasher: PhantomData<H>,
     bagging: Bagging,
+}
+
+impl<H: CHasher> Clone for Standard<H> {
+    fn clone(&self) -> Self {
+        Self {
+            _hasher: PhantomData,
+            bagging: self.bagging,
+        }
+    }
 }
 
 impl<H: CHasher> Standard<H> {

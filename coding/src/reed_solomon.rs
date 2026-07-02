@@ -1141,10 +1141,17 @@ fn decode<'a, H: Hasher, S: Strategy>(
 ///    where an adversary provides a valid set of chunks that decode to different data, and
 ///    binds any surplus chunks (which are rebuilt from the reconstruction, not trusted).
 /// 4. If the roots match, the original data is extracted from the reconstructed data shards.
-#[derive(Clone, Copy)]
 pub struct ReedSolomon<H> {
     _marker: PhantomData<H>,
 }
+
+impl<H> Clone for ReedSolomon<H> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<H> Copy for ReedSolomon<H> {}
 
 impl<H> std::fmt::Debug for ReedSolomon<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
