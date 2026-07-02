@@ -15,7 +15,7 @@ use crate::{
             self,
             traits::{DbAny, UnmerkleizedBatch as _},
         },
-        current, immutable, keyless,
+        current, immutable, keyless, InitParallelism,
     },
     translator::{OneCap, TwoCap},
 };
@@ -184,6 +184,7 @@ fn any_fixed_config(
 ) -> any::FixedConfig<OneCap, Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
+        init_parallelism: InitParallelism::Serial,
         merkle_config: merkle_config(suffix, &pc),
         journal_config: fixed_log_config(suffix, pc),
         translator: OneCap,
@@ -197,6 +198,7 @@ fn any_variable_config(
 ) -> any::VariableConfig<OneCap, ((), ()), Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
+        init_parallelism: InitParallelism::Serial,
         merkle_config: merkle_config(suffix, &pc),
         journal_config: variable_log_config(suffix, pc, ((), ())),
         translator: OneCap,
@@ -210,6 +212,7 @@ fn current_fixed_config(
 ) -> current::FixedConfig<OneCap, Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
+        init_parallelism: InitParallelism::Serial,
         merkle_config: merkle_config(suffix, &pc),
         journal_config: fixed_log_config(suffix, pc),
         grafted_metadata_partition: format!("{suffix}-graft"),
@@ -224,6 +227,7 @@ fn current_variable_config(
 ) -> current::VariableConfig<OneCap, ((), ()), Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
+        init_parallelism: InitParallelism::Serial,
         merkle_config: merkle_config(suffix, &pc),
         journal_config: variable_log_config(suffix, pc, ((), ())),
         grafted_metadata_partition: format!("{suffix}-graft"),

@@ -83,6 +83,7 @@ use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::warn;
@@ -115,6 +116,10 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
+
+    /// How the ordered-partitioned snapshot build parallelizes during init. Note that only certain
+    /// index types (such as the ordered-partitioned index) support parallel construction.
+    pub init_parallelism: super::InitParallelism,
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
@@ -130,14 +135,15 @@ pub async fn init<F, E, U, H, T, I, J, S>(
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner + 'static,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
-    I: IndexFactory<T, Value = Location<F>>,
+    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: Inner<E, Item = Operation<F, U>>,
     S: Strategy,
     Operation<F, U>: Committable + CodecShared,
+    crate::journal::authenticated::Journal<F, E, J, H, S>: Send + Sync + 'static,
 {
     init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
 }
@@ -152,14 +158,15 @@ pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner + 'static,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
-    I: IndexFactory<T, Value = Location<F>>,
+    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: Inner<E, Item = Operation<F, U>>,
     S: Strategy,
     Operation<F, U>: Committable + CodecShared,
+    crate::journal::authenticated::Journal<F, E, J, H, S>: Send + Sync + 'static,
 {
     let mut log = J::init::<F, H, S>(
         context.child("log"),
@@ -178,8 +185,18 @@ where
     }
 
     let index = I::new(context.child("index"), cfg.translator);
+    let snapshot_context = context.child("snapshot");
     let metrics = db::Metrics::new(context);
-    db::Db::init_from_log(index, log, bitmap, cfg.init_cache_size, metrics).await
+    db::Db::init_from_log(
+        snapshot_context,
+        index,
+        log,
+        bitmap,
+        cfg.init_cache_size,
+        cfg.init_parallelism,
+        metrics,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -191,6 +208,7 @@ pub(crate) mod test {
         qmdb::{
             self,
             any::{FixedConfig, MerkleConfig, VariableConfig},
+            InitParallelism,
         },
         translator::OneCap,
     };
@@ -223,6 +241,7 @@ pub(crate) mod test {
     ) -> FixedConfig<T, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
+            init_parallelism: InitParallelism::Serial,
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
@@ -248,6 +267,7 @@ pub(crate) mod test {
     ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
+            init_parallelism: InitParallelism::Serial,
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),

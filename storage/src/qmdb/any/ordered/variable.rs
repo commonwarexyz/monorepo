@@ -20,6 +20,7 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
 pub type Operation<F, K, V> = ordered::Operation<F, K, VariableEncoding<V>>;
@@ -37,8 +38,15 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
+impl<
+        F: Family,
+        E: Context + Spawner + 'static,
+        K: Key,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -78,6 +86,7 @@ pub mod partitioned {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
+    use commonware_runtime::Spawner;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -110,6 +119,7 @@ pub mod partitioned {
             S: Strategy,
         > Db<F, E, K, V, H, T, P, S>
     where
+        E: Spawner + 'static,
         Operation<F, K, V>: Codec,
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
@@ -140,12 +150,15 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::any::{
-            ordered::test::{
-                test_ordered_any_db_basic, test_ordered_any_db_empty,
-                test_ordered_any_update_collision_edge_case,
+        qmdb::{
+            any::{
+                ordered::test::{
+                    test_ordered_any_db_basic, test_ordered_any_db_empty,
+                    test_ordered_any_update_collision_edge_case,
+                },
+                test::variable_db_config,
             },
-            test::variable_db_config,
+            InitParallelism,
         },
         translator::TwoCap,
     };
@@ -175,6 +188,7 @@ pub(crate) mod test {
         let page_cache =
             CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         VariableConfig {
+            init_parallelism: InitParallelism::Serial,
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
                 metadata_partition: format!("mmr-metadata-{seed}"),

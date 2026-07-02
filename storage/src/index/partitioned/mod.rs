@@ -35,7 +35,7 @@ const INDEX_INT_SIZE: usize = 4;
 ///
 /// Partition order tracks lexicographic key order, which the [`ordered`] variant relies on to
 /// traverse keys in order.
-fn partition_index_and_sub_key<const P: usize>(key: &[u8]) -> (usize, &[u8]) {
+pub(crate) fn partition_index_and_sub_key<const P: usize>(key: &[u8]) -> (usize, &[u8]) {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
         assert!(P > 0, "P must be greater than 0");

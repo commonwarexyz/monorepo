@@ -13,7 +13,7 @@ use crate::stateful::db::{
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     index::{
         ordered::Index as OrderedIdx, unordered::Index as UnorderedIdx, Ordered as OrderedIndex,
@@ -51,7 +51,7 @@ type CurrentDbHandle<F, E, C, I, H, U, const N: usize, S> =
 pub struct CurrentUnmerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -69,7 +69,7 @@ impl<F, E, C, I, H, K, V, const N: usize, S>
     CurrentUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
@@ -112,7 +112,7 @@ where
 pub struct CurrentMerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -127,7 +127,7 @@ where
 impl<F, E, C, I, H, U, const N: usize, S> Deref for CurrentUnmerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -145,7 +145,7 @@ where
 impl<F, E, C, I, H, U, const N: usize, S> Deref for CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -165,7 +165,7 @@ impl<F, E, C, I, H, K, V, const N: usize, S>
     CurrentUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
@@ -206,7 +206,7 @@ where
 impl<F, E, C, I, H, U, const N: usize, S> CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
@@ -234,7 +234,7 @@ impl<F, E, C, I, H, K, V, const N: usize, S> UnmerkleizedTrait
     for CurrentUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
@@ -261,7 +261,7 @@ impl<F, E, C, I, H, K, V, const N: usize, S> UnmerkleizedTrait
     for CurrentUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Key,
     V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
@@ -288,7 +288,7 @@ impl<F, E, C, I, H, U, const N: usize, S> MerkleizedTrait
     for CurrentMerkleized<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
@@ -327,7 +327,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -421,7 +421,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -513,7 +513,7 @@ mod open {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
-    use commonware_runtime::{Clock, Metrics, Storage};
+    use commonware_runtime::{Clock, Metrics, Spawner, Storage};
     use commonware_storage::{
         merkle::Graftable,
         qmdb::{
@@ -544,7 +544,7 @@ mod open {
     ) -> Result<Db<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
-        E: Storage + Clock + Metrics,
+        E: Storage + Clock + Metrics + Spawner + 'static,
         K: Array,
         V: VariableValue + 'static,
         H: Hasher,
@@ -561,7 +561,7 @@ mod open {
     ) -> Result<OrderedVariableDb<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
-        E: Storage + Clock + Metrics,
+        E: Storage + Clock + Metrics + Spawner + 'static,
         K: commonware_storage::qmdb::operation::Key,
         V: VariableValue + 'static,
         H: Hasher,
@@ -587,7 +587,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Key + Array,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -686,7 +686,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -785,7 +785,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -840,7 +840,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -895,7 +895,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Key + Array,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -951,7 +951,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics + Spawner + 'static,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -1006,9 +1006,12 @@ mod tests {
             fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
         },
         merkle::{full::Config as MerkleConfig, mmr},
-        qmdb::current::{
-            ordered::{fixed as ordered_fixed, variable as ordered_variable},
-            unordered::fixed,
+        qmdb::{
+            current::{
+                ordered::{fixed as ordered_fixed, variable as ordered_variable},
+                unordered::fixed,
+            },
+            InitParallelism,
         },
         translator::TwoCap,
     };
@@ -1052,6 +1055,7 @@ mod tests {
     fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
+            init_parallelism: InitParallelism::Serial,
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
@@ -1078,6 +1082,7 @@ mod tests {
     ) -> VariableConfig<TwoCap, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
+            init_parallelism: InitParallelism::Serial,
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),

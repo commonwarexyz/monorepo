@@ -68,6 +68,13 @@ impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<F, K, 
         self.key()
     }
 
+    fn into_key(self) -> Option<Self::Key> {
+        match self {
+            Self::Set(key, _) => Some(key),
+            Self::Commit(_, _) => None,
+        }
+    }
+
     fn is_delete(&self) -> bool {
         // Immutable databases don't support deletion
         false

@@ -939,7 +939,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, full::Config as MmrJournalConfig, Location},
-        qmdb::{any, sync::Target},
+        qmdb::{any, sync::Target, InitParallelism},
         translator::TwoCap,
     };
     use commonware_utils::{
@@ -1552,6 +1552,7 @@ mod tests {
     ) -> any::FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
         any::FixedConfig {
+            init_parallelism: InitParallelism::Serial,
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{prefix}_mmr_journal"),
                 metadata_partition: format!("{prefix}_mmr_metadata"),

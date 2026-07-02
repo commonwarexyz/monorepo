@@ -121,6 +121,7 @@ fn make_config(
         grafted_metadata_partition: format!("crash-grafted-merkle-metadata-{suffix}"),
         translator: TwoCap,
         init_cache_size: Some(NZUsize!(3)),
+        init_parallelism: commonware_storage::qmdb::InitParallelism::Serial,
     }
 }
 
