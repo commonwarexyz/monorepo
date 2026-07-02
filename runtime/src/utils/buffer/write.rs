@@ -217,11 +217,16 @@ impl<B: Blob> Write<B> {
     /// before resizing the underlying blob.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
         if len >= self.buffer.size() {
+            // Grow or keep size: flush buffered bytes, resize the blob, and move the
+            // now-empty tip to the new end.
             self.flush(NonDurable).await?;
+            self.sync_state.resize(&self.blob, len).await?;
+            self.buffer.offset = len;
+        } else {
+            // Shrink the blob, then the buffer.
+            self.sync_state.resize(&self.blob, len).await?;
+            self.buffer.truncate(len);
         }
-
-        self.sync_state.resize(&self.blob, len).await?;
-        self.buffer.resize(len);
 
         Ok(())
     }
