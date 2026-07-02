@@ -15,6 +15,7 @@
 //! ```text
 //! cargo bench -p commonware-storage --bench init_scale --features test-traits -- generate /tmp/db 50000000 250000000 [zipf_exponent] [page_size]
 //! cargo bench -p commonware-storage --bench init_scale --features test-traits -- bench    /tmp/db [page_size]
+//! cargo bench -p commonware-storage --bench init_scale --features test-traits -- get      /tmp/db 50000000 100000 1,8,32 [page_size]
 //! cargo bench -p commonware-storage --bench init_scale --features test-traits -- destroy  /tmp/db
 //! ```
 //!
@@ -28,24 +29,35 @@
 //! (what the cache must cover to avoid eviction).
 //!
 //! The optional `page_size` arg (logical bytes; default 16384) selects the page geometry; a
-//! database must be `bench`ed with the page size it was generated with. Pass a value whose
-//! physical page is a power of two (e.g. 16372 -> 16384 on disk) to measure storage-page-aligned
-//! layouts against unaligned ones (e.g. the 16384 default -> 16396 on disk).
+//! database must be `bench`ed with the page size it was generated with. Physical pages are 12
+//! bytes larger than logical ones (the per-page CRC record), so e.g. logical 16372 produces
+//! 16384-byte physical pages.
+//!
+//! `get` times random point reads through the full stack (index lookup, page cache, blob read):
+//! it opens the database (untimed), then for each entry in the comma-separated concurrency list
+//! drops the OS page cache in-process (init's replay warms it) and runs a cold pass of `num_gets`
+//! uniform-random gets across that many spawned reader tasks, followed by a warm pass over the
+//! same keys as a control. Keys are sampled the same way `generate` derives them (`Sha256(index)`
+//! over the keyspace), so nearly all gets hit a live key. The in-process page cache is
+//! deliberately tiny in this mode so reads reach the storage layer.
 
 #[allow(dead_code, unused_imports, unused_macros)]
 #[path = "common.rs"]
 mod common;
 
 use common::{any_fix_cfg_with_page_size, gen_random_kv, make_fixed_value, AnyOFixDb, PAGE_SIZE};
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
-    tokio::{Config, Runner},
-    Runner as _, Supervisor as _,
+    tokio::{Config, Context, Runner},
+    Runner as _, Spawner as _, Supervisor as _,
 };
 use commonware_storage::{merkle::mmr::Family as Mmr, qmdb::any::traits::DbAny as _};
 use commonware_utils::{NZUsize, NZU64};
+use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
 use std::{
     io::Write as _,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -74,12 +86,17 @@ const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [page_size]   build a database (omit exponent => zipf 1.0; 0 => uniform; page_size = logical bytes, default 16384)\n  bench    <folder> [page_size]  reopen + time init at cache off / R/4 / R (page_size must match generate)\n  destroy  <folder>              delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [page_size]   build a database (omit exponent => zipf 1.0; 0 => uniform; page_size = logical bytes, default 16384)\n  bench    <folder> [page_size]  reopen + time init at cache off / R/4 / R (page_size must match generate)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,<concurrency>...] [page_size]   time random point reads (per concurrency: cold after an in-process cache drop, then warm)\n  destroy  <folder>              delete the database"
     );
 }
 
 fn main() {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // `cargo bench` appends a trailing `--bench` arg even for harness=false binaries; drop it so
+    // trailing optional args (zipf_exponent, page_size) parse.
+    let argv: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| a != "--bench")
+        .collect();
     match argv.first().map(String::as_str) {
         Some("generate") => match (
             argv.get(1),
@@ -116,6 +133,25 @@ fn main() {
             }
             None => usage(),
         },
+        Some("get") => match (
+            argv.get(1),
+            argv.get(2).and_then(|a| a.parse().ok()),
+            argv.get(3).and_then(|a| a.parse().ok()),
+            argv.get(4).map(|a| {
+                a.split(',')
+                    .map(|c| c.parse::<u64>().ok().filter(|c| *c > 0))
+                    .collect::<Option<Vec<u64>>>()
+            }),
+        ) {
+            (Some(folder), Some(keyspace), Some(num_gets), Some(Some(concurrencies))) => {
+                let Some(page_size) = parse_page_size(argv.get(5)) else {
+                    usage();
+                    return;
+                };
+                get_bench(folder, keyspace, num_gets, concurrencies, page_size)
+            }
+            _ => usage(),
+        },
         Some("destroy") => match argv.get(1) {
             Some(folder) => destroy(folder),
             None => usage(),
@@ -124,20 +160,19 @@ fn main() {
     }
 }
 
+/// Parse an optional logical page-size argument, defaulting to [PAGE_SIZE].
+fn parse_page_size(arg: Option<&String>) -> Option<NonZeroU16> {
+    arg.map_or(Some(PAGE_SIZE), |a| {
+        a.parse::<u16>().ok().and_then(NonZeroU16::new)
+    })
+}
+
 /// Build a database at `folder` by applying `num_updates` random updates over a `keyspace`-key index
 /// space, leaving it on disk for later `bench` runs. Reports the elapsed build time -- a large-scale
 /// churn/commit benchmark in its own right, not just setup for the reopen measurement.
 ///
 /// `zipf_exponent` sets the key distribution: `None` is uniform, `Some(e)` is Zipf with exponent `e`.
 /// The populated set fills organically as updates sample the keyspace (no separate seed phase).
-/// Parse an optional logical page-size argument, defaulting to [PAGE_SIZE].
-fn parse_page_size(arg: Option<&String>) -> Option<NonZeroU16> {
-    match arg {
-        None => Some(PAGE_SIZE),
-        Some(a) => a.parse::<u16>().ok().and_then(NonZeroU16::new),
-    }
-}
-
 fn generate(
     folder: &str,
     keyspace: u64,
@@ -215,6 +250,126 @@ fn bench(folder: &str, page_size: NonZeroU16) {
         println!("  cache={cache_size:?}: {elapsed:?}");
         let _ = std::io::stdout().flush();
     }
+}
+
+/// Page cache size for `get`: deliberately tiny (512 * 16 KiB = 8 MiB) so uniform-random point
+/// reads miss the in-process cache and reach the storage layer, which is what the cold-read
+/// measurement is about. `generate` and `bench` keep the realistic 1 GiB cache.
+const GET_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
+
+/// Time random point reads against the database at `folder`: open it (untimed), drop the OS page
+/// cache, then run a cold pass of `num_gets` gets with `concurrency` readers in flight, followed
+/// by a warm pass over the same keys as a control.
+fn get_bench(
+    folder: &str,
+    keyspace: u64,
+    num_gets: u64,
+    concurrencies: Vec<u64>,
+    page_size: NonZeroU16,
+) {
+    if keyspace == 0 || num_gets == 0 {
+        usage();
+        return;
+    }
+    if !db_dir_nonempty(folder) {
+        eprintln!(
+            "no database at {folder}; run `generate {folder} <keyspace> <num_updates>` first"
+        );
+        return;
+    }
+    let cfg = Config::default().with_storage_directory(folder);
+    Runner::new(cfg).start(|ctx| async move {
+        let config =
+            any_fix_cfg_with_page_size(&ctx, ITEMS_PER_BLOB, GET_PAGE_CACHE_SIZE, page_size);
+        let open_start = Instant::now();
+        let db = AnyOFixDb::<Mmr>::init(ctx.child("storage"), config)
+            .await
+            .unwrap();
+        let opened = open_start.elapsed();
+        println!("get_scale: {folder}  (logical page size {page_size}, keyspace {keyspace})");
+        println!("  open (untimed phase): {opened:?}");
+        let _ = std::io::stdout().flush();
+
+        let db = Arc::new(db);
+        for concurrency in concurrencies {
+            if concurrency > num_gets {
+                eprintln!("  skipping readers={concurrency}: more readers than gets");
+                continue;
+            }
+            if !drop_os_caches() {
+                eprintln!(
+                    "  warning: OS cache drop failed (needs passwordless sudo); cold pass is not cold"
+                );
+            }
+            for pass in ["cold", "warm"] {
+                let (elapsed, total, found) =
+                    run_gets(&ctx, db.clone(), keyspace, num_gets, concurrency).await;
+                let us = elapsed.as_secs_f64() * 1e6 / total as f64;
+                let rate = total as f64 / elapsed.as_secs_f64();
+                println!(
+                    "  {pass}[readers={concurrency}]: {total} gets ({found} found) in {elapsed:?}  ({us:.1} us/get, {rate:.0} gets/s)"
+                );
+                let _ = std::io::stdout().flush();
+            }
+        }
+    });
+}
+
+/// Run one pass of uniform-random gets: `concurrency` spawned reader tasks, each issuing
+/// `num_gets / concurrency` gets from its own deterministic key stream (so a repeat pass replays
+/// the same keys). Returns the elapsed time, the number of gets issued, and how many found a
+/// value.
+async fn run_gets(
+    ctx: &Context,
+    db: Arc<AnyOFixDb<Mmr>>,
+    keyspace: u64,
+    num_gets: u64,
+    concurrency: u64,
+) -> (Duration, u64, u64) {
+    let per_reader = num_gets / concurrency;
+    let start = Instant::now();
+    let readers: Vec<_> = (0..concurrency)
+        .map(|reader| {
+            let db = db.clone();
+            ctx.child("reader").spawn(move |_| async move {
+                let mut rng = StdRng::seed_from_u64(reader);
+                let mut found = 0u64;
+                for _ in 0..per_reader {
+                    let index = rng.next_u64() % keyspace;
+                    let key = Sha256::hash(&index.to_be_bytes());
+                    if db.get(&key).await.unwrap().is_some() {
+                        found += 1;
+                    }
+                }
+                found
+            })
+        })
+        .collect();
+    let mut found = 0u64;
+    for reader in readers {
+        found += reader.await.unwrap();
+    }
+    (start.elapsed(), per_reader * concurrency, found)
+}
+
+/// Drop the OS page cache (requires passwordless sudo), returning whether it succeeded.
+fn drop_os_caches() -> bool {
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "sync && echo 3 | sudo -n tee /proc/sys/vm/drop_caches > /dev/null",
+        ])
+        .status();
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("sudo")
+        .args(["-n", "purge"])
+        .status();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let status = std::io::Result::<std::process::ExitStatus>::Err(std::io::Error::other(
+        "unsupported platform",
+    ));
+    matches!(status, Ok(s) if s.success())
 }
 
 /// Delete the database at `folder`.
