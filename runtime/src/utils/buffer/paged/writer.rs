@@ -358,10 +358,7 @@ impl<B: Blob> Writer<B> {
 
         self.write_physical_pages(physical_pages, false).await?;
 
-        // The write succeeded, so publish the new state. Cache the completed page (clearing
-        // the partial-page record it replaces), then cache the `bulk` pages in
-        // write-buffer-sized chunks (the capacity is a whole number of pages, see
-        // [adjusted_capacity]).
+        // Update state only after the write succeeds, for cancellation safety.
         let mut cache_offset = self.buffer.offset;
         if let Some(completed_page) = completed_page {
             let remaining = self
