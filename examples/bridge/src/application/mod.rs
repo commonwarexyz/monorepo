@@ -20,7 +20,8 @@ pub fn genesis<H: Hasher>() -> H::Digest {
     // Use the digest of the genesis message as the initial payload.
     let mut hasher = H::default();
     hasher.update(GENESIS);
-    hasher.finalize()
+    let (_, digest) = hasher.finalize();
+    digest
 }
 
 /// Configuration for the application.

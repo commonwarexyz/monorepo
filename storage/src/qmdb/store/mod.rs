@@ -19,7 +19,7 @@ pub(crate) mod tests {
 
     impl TestKey for sha256::Digest {
         fn from_seed(seed: u64) -> Self {
-            commonware_cryptography::Sha256::hash(&seed.to_be_bytes())
+            commonware_cryptography::Sha256::hash(&[&seed.to_be_bytes()])
         }
     }
 
