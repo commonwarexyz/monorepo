@@ -176,6 +176,92 @@ mod tests {
         });
     }
 
+    // A rewrite must truncate trailing bytes a dropped earlier sync may have left in the target
+    // blob: recovery requires the checksum at the physical end of the blob.
+    #[test_traced]
+    fn test_sync_rewrite_truncates_stale_blob_bytes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Sync once so the next sync targets the other ("left") blob.
+            metadata.put(U64::new(1), b"one".to_vec());
+            metadata.sync().await.unwrap();
+
+            // Simulate a dropped rewrite whose write still landed: leave bytes in the next
+            // target blob beyond the length the in-memory mirror knows about.
+            let (blob, _) = context.open("test", b"left").await.unwrap();
+            blob.write_at_sync(0, vec![0xAB; 4096]).await.unwrap();
+            drop(blob);
+
+            // The next sync rewrites "left" (a new key changed the key order), truncating the
+            // stale bytes.
+            metadata.put(U64::new(2), b"two".to_vec());
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"));
+
+            // The synced state must survive a restart despite the stale trailing bytes.
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)), Some(&b"one".to_vec()));
+            assert_eq!(metadata.get(&U64::new(2)), Some(&b"two".to_vec()));
+        });
+    }
+
+    // A length-changing update forces rewrites until one succeeds: an interrupted rewrite may
+    // leave stale bytes at unmodified offsets that only a full rewrite repairs, so the sync
+    // after a length-change rewrite must not take the overwrite path.
+    #[test_traced]
+    fn test_sync_rewrites_forced_after_length_change() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Rewrite both blobs, then reach the overwrite steady state.
+            metadata.put(U64::new(1), b"aaaa".to_vec());
+            metadata.sync().await.unwrap();
+            metadata.sync().await.unwrap();
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"));
+            assert!(buffer.contains("first_sync_overwrites_total 1"));
+
+            // A longer value forces a rewrite, and the next sync must rewrite as well even
+            // though the value fits its slot again.
+            metadata.put(U64::new(1), b"aaaaaaaa".to_vec());
+            metadata.sync().await.unwrap();
+            metadata.put(U64::new(1), b"bbbb".to_vec());
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 4"));
+            assert!(buffer.contains("first_sync_overwrites_total 1"));
+
+            // The synced state must survive a restart.
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)), Some(&b"bbbb".to_vec()));
+        });
+    }
+
     #[test_traced]
     fn test_put_returns_previous_value() {
         let executor = deterministic::Runner::default();

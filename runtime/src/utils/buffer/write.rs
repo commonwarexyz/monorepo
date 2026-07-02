@@ -4,6 +4,13 @@ use crate::{
 };
 use std::num::NonZeroUsize;
 
+/// Whether a flush must make its bytes durable before returning.
+enum Durability {
+    NonDurable,
+    Durable,
+}
+use Durability::{Durable, NonDurable};
+
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
 /// updating data.
 ///
@@ -13,8 +20,12 @@ use std::num::NonZeroUsize;
 /// - Subsequent writes reuse that backing, copy-on-write allocation only occurs when buffered data
 ///   is shared (for example, after handing out immutable views) or a merge needs more capacity.
 /// - Sparse writes merged into tip extend logical length and zero-fill any gap in-buffer.
-/// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) hand drained
-///   bytes to the blob and leave the tip detached until the next buffered write.
+///
+/// # Cancellation
+///
+/// Dropping an in-flight operation leaves the writer in a consistent, retryable state. The
+/// blob range touched by the dropped operation is indeterminate until it is rewritten and
+/// synced: on some runtimes the dropped write may still reach storage.
 ///
 /// # Access
 ///
@@ -176,15 +187,11 @@ impl<B: Blob> Write<B> {
             // if merge is possible after.
             let chunk_end = current_offset + chunk_len as u64;
             if self.buffer.offset < chunk_end {
-                if let Some((old_buf, old_offset)) = self.buffer.take() {
-                    self.sync_state
-                        .write_at(&self.blob, old_offset, old_buf)
-                        .await?;
-                    if self.buffer.merge(chunk, current_offset) {
-                        bufs.advance(chunk_len);
-                        current_offset += chunk_len as u64;
-                        continue;
-                    }
+                self.flush(NonDurable).await?;
+                if self.buffer.merge(chunk, current_offset) {
+                    bufs.advance(chunk_len);
+                    current_offset += chunk_len as u64;
+                    continue;
                 }
             }
 
@@ -208,28 +215,25 @@ impl<B: Blob> Write<B> {
 
     /// Resize the logical blob to `len`.
     ///
-    /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
+    /// If buffered data exists and the resize does not shrink below it, buffered data is flushed
     /// before resizing the underlying blob.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
-        // Flush buffered data to the underlying blob.
-        //
-        // This can only happen if the new size is greater than the current size.
-        if let Some((buf, offset)) = self.buffer.resize(len) {
-            self.sync_state.write_at(&self.blob, offset, buf).await?;
+        if len >= self.buffer.size() {
+            self.flush(NonDurable).await?;
         }
 
         self.sync_state.resize(&self.blob, len).await?;
+        self.buffer.resize(len);
 
         Ok(())
     }
 
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        if let Some((buf, offset)) = self.buffer.take() {
-            return self.write_blob_sync(offset, buf).await;
-        }
-
-        self.sync_blob().await
+        // A durable flush leaves the state clean, so the trailing sync only acts when nothing
+        // was buffered.
+        self.flush(Durable).await?;
+        self.sync_state.sync(&self.blob).await
     }
 
     /// Flush buffered bytes and begin durably syncing mutations tracked by this writer.
@@ -238,10 +242,8 @@ impl<B: Blob> Write<B> {
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
     /// mutate the blob wait before issuing blob operations.
     pub async fn start_sync(&mut self) -> Handle<()> {
-        if let Some((buf, offset)) = self.buffer.take() {
-            if let Err(err) = self.sync_state.write_at(&self.blob, offset, buf).await {
-                return Handle::ready(Err(err));
-            }
+        if let Err(err) = self.flush(NonDurable).await {
+            return Handle::ready(Err(err));
         }
 
         self.sync_state.start_sync(&self.blob).await
@@ -252,22 +254,26 @@ impl<B: Blob> Write<B> {
         self.sync_state.wait_for_pending().await
     }
 
-    /// Write bytes to the underlying blob and make them durable.
-    ///
-    /// Uses [`Blob::write_at_sync`] when there are no earlier unsynced mutations. Otherwise, writes
-    /// the bytes and then syncs the blob.
-    async fn write_blob_sync(
-        &mut self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.sync_state
-            .write_at_sync(&self.blob, offset, bufs)
-            .await
-    }
+    /// Flush all buffered bytes to the blob, detaching the flushed prefix only after the blob
+    /// write succeeds. A dropped flush leaves the tip intact for retry.
+    async fn flush(&mut self, durability: Durability) -> Result<(), Error> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
 
-    /// Sync the underlying blob if there are unsynced mutations.
-    async fn sync_blob(&mut self) -> Result<(), Error> {
-        self.sync_state.sync(&self.blob).await
+        let offset = self.buffer.offset;
+        let buffered = self.buffer.len();
+        let buf = self.buffer.slice(..);
+        match durability {
+            Durable => {
+                self.sync_state
+                    .write_at_sync(&self.blob, offset, buf)
+                    .await?
+            }
+            NonDurable => self.sync_state.write_at(&self.blob, offset, buf).await?,
+        }
+        self.buffer.advance(buffered);
+
+        Ok(())
     }
 }

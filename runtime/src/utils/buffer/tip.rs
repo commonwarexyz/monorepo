@@ -11,12 +11,10 @@ use std::ops::{Bound, RangeBounds};
 ///
 /// - Backing storage starts detached in [Self::new] and is allocated on first write.
 /// - Logical data length is tracked separately from backing view length.
-/// - Draining paths ([Self::take] and grow-resize in [Self::resize]) hand buffered bytes to the
-///   caller and reset the tip to a detached empty state.
+/// - Draining paths hand buffered bytes to the blob using [Self::slice], then [Self::advance]
+///   past the drained prefix only after the blob operation succeeds.
 /// - Subsequent writes are copy-on-write: [Self::writable] recovers mutable ownership when
 ///   backing is unique, otherwise allocates from the pool and copies existing bytes.
-/// - Prefix drains in [Self::drop_prefix] update the logical view and preserve backing whenever
-///   possible.
 pub(super) struct Buffer {
     /// The data to be written to the blob.
     ///
@@ -95,61 +93,47 @@ impl Buffer {
         self.data.slice(start..end)
     }
 
-    /// Adjust the buffer to correspond to resizing the logical blob to size `len`.
-    ///
-    /// If the new size is greater than the current size, the existing buffered bytes are returned
-    /// (to be flushed to the underlying blob), and the tip is reset to empty. (The returned data
-    /// is what would be returned by a call to [Self::take].)
-    ///
-    /// If the new size is less than the current size (but still greater than current offset), the
-    /// buffer is truncated to the new size.
-    ///
-    /// If the new size is less than the current offset, the buffer is reset to the empty state with
-    /// an updated offset positioned at the end of the logical blob.
-    pub(super) fn resize(&mut self, len: u64) -> Option<(IoBuf, u64)> {
-        // Handle case where the buffer is empty.
-        if self.is_empty() {
-            self.offset = len;
-            return None;
+    /// Discards the first `n` bytes of the buffer and advances the offset by `n`.
+    /// Panics if `n` is greater than the length of the buffer.
+    pub(super) fn advance(&mut self, n: usize) {
+        assert!(n <= self.len);
+        match n {
+            0 => {}
+            n if n == self.len => {
+                self.data = IoBuf::default();
+                self.len = 0;
+            }
+            n => {
+                self.data = self.data.slice(n..self.len);
+                self.len -= n;
+            }
         }
-
-        // Handle case where there is some data in the buffer.
-        if len >= self.size() {
-            let previous = self
-                .take()
-                .expect("take must succeed when resize observes buffered data");
-            self.offset = len;
-            Some(previous)
-        } else if len >= self.offset {
-            self.len = (len - self.offset) as usize;
-            None
-        } else {
-            self.len = 0;
-            self.offset = len;
-            None
-        }
+        self.offset += n as u64;
     }
 
-    /// Returns the buffered data and its blob offset, or returns `None` if the buffer is already
-    /// empty.
+    /// Sets the logical blob size to `len`, discarding any additional bytes.
     ///
-    /// This hands ownership of the buffered bytes to the caller, resets the tip to empty, and
-    /// advances offset to the end of the drained range.
-    pub(super) fn take(&mut self) -> Option<(IoBuf, u64)> {
+    /// # Panics
+    ///
+    /// Panics if the buffer is non-empty and `len >= self.size()`: flush buffered bytes before
+    /// a resize that grows or keeps the current size.
+    pub(super) fn resize(&mut self, len: u64) {
         if self.is_empty() {
-            return None;
+            self.offset = len;
+            return;
         }
 
-        // Clear the logical length up front so the tip is empty even if the returned buffer
-        // still aliases the old backing.
-        let len = std::mem::take(&mut self.len);
-        let offset = self.offset;
-        self.offset += len as u64;
-
-        // Hand the buffered prefix to the caller without copying. If `data` retained extra
-        // capacity or trailing bytes, `split_to` leaves them behind in the discarded remainder.
-        let mut data = std::mem::take(&mut self.data);
-        Some((data.split_to(len), offset))
+        assert!(
+            len < self.size(),
+            "must flush buffered bytes before a grow-or-equal resize"
+        );
+        if len >= self.offset {
+            self.len = (len - self.offset) as usize;
+        } else {
+            self.len = 0;
+            self.data = IoBuf::default();
+            self.offset = len;
+        }
     }
 
     /// Returns a mutable tip buffer with capacity for at least `needed` bytes.
@@ -224,8 +208,8 @@ impl Buffer {
     /// Appends the provided `data` to the buffer, and returns `true` if the buffer is over capacity
     /// after the append.
     ///
-    /// If the buffer is above capacity, the caller is responsible for using `take` to bring it back
-    /// under. Further appends are safe, but will continue growing the buffer beyond its capacity.
+    /// If the buffer is above capacity, the caller is responsible for flushing a prefix. Further
+    /// appends are safe, but will continue growing the buffer beyond its capacity.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
         let end = self.len + data.len();
         let mut writable = self.writable(end);
@@ -234,27 +218,6 @@ impl Buffer {
         self.len = writable.len();
         self.data = writable.freeze();
         over_capacity
-    }
-
-    /// Removes `len` leading bytes from the buffered data while preserving the remaining suffix.
-    ///
-    /// The remaining suffix stays as a logical prefix in the updated view.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `len` exceeds current buffer length.
-    pub(super) fn drop_prefix(&mut self, len: usize) {
-        assert!(len <= self.len);
-        if len == 0 {
-            return;
-        }
-        let current_len = self.len;
-        if len == current_len {
-            self.len = 0;
-            return;
-        }
-        self.data = self.data.slice(len..current_len);
-        self.len = current_len - len;
     }
 
     /// Clears buffered data while preserving offset.
@@ -287,19 +250,18 @@ mod tests {
         let mut buffer = Buffer::new(50, 100, pool);
         assert_eq!(buffer.size(), 50);
         assert!(buffer.is_empty());
-        assert!(buffer.take().is_none());
 
         // Add some data to the buffer.
         assert!(!buffer.append(&[1, 2, 3]));
         assert_eq!(buffer.size(), 53);
         assert!(!buffer.is_empty());
 
-        // Confirm `take()` works as intended.
-        let taken = buffer.take().unwrap();
-        assert_eq!(taken.0.as_ref(), &[1, 2, 3]);
-        assert_eq!(taken.1, 50);
+        // Confirm advancing past flushed bytes detaches them.
+        let flushed = buffer.slice(..);
+        assert_eq!(flushed.as_ref(), &[1, 2, 3]);
+        buffer.advance(3);
         assert_eq!(buffer.size(), 53);
-        assert!(buffer.take().is_none());
+        assert!(buffer.is_empty());
 
         // Fill the buffer to capacity.
         let mut buf = vec![42; 100];
@@ -310,9 +272,11 @@ mod tests {
         assert!(buffer.append(&[43]));
         assert_eq!(buffer.size(), 154);
         buf.push(43);
-        let taken = buffer.take().unwrap();
-        assert_eq!(taken.0.as_ref(), buf.as_slice());
-        assert_eq!(taken.1, 53);
+        let flushed = buffer.slice(..);
+        assert_eq!(flushed.as_ref(), buf.as_slice());
+        buffer.advance(buf.len());
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.size(), 154);
     }
 
     #[test]
@@ -322,33 +286,31 @@ mod tests {
         buffer.append(&[1, 2, 3]);
         assert_eq!(buffer.size(), 53);
 
-        // Resize the buffer to correspond to a blob resized to size 60. The returned buffer should
-        // match exactly what we'd expect to be returned by `take` since 60 is greater than the
-        // current size of 53.
-        let resized = buffer.resize(60).unwrap();
-        assert_eq!(resized.0.as_ref(), &[1, 2, 3]);
-        assert_eq!(resized.1, 50);
+        // A grow resize first flushes buffered data and advances past it, then sets the new size.
+        let flushed = buffer.slice(..);
+        assert_eq!(flushed.as_ref(), &[1, 2, 3]);
+        buffer.advance(3);
+        buffer.resize(60);
         assert_eq!(buffer.size(), 60);
-        assert!(buffer.take().is_none());
+        assert!(buffer.is_empty());
 
         buffer.append(&[4, 5, 6]);
         assert_eq!(buffer.size(), 63);
 
         // Resize the buffer down to size 61.
-        assert!(buffer.resize(61).is_none());
+        buffer.resize(61);
         assert_eq!(buffer.size(), 61);
-        let taken = buffer.take().unwrap();
-        assert_eq!(taken.0.as_ref(), &[4]);
-        assert_eq!(taken.1, 60);
+        assert_eq!(buffer.as_ref(), &[4]);
+        buffer.advance(1);
         assert_eq!(buffer.size(), 61);
 
         buffer.append(&[7, 8, 9]);
 
         // Resize the buffer prior to the current offset of 61. This should simply reset the buffer
         // at the new size.
-        assert!(buffer.resize(59).is_none());
+        buffer.resize(59);
         assert_eq!(buffer.size(), 59);
-        assert!(buffer.take().is_none());
+        assert!(buffer.is_empty());
         assert_eq!(buffer.size(), 59);
     }
 
@@ -368,7 +330,8 @@ mod tests {
         let mut buffer = Buffer::new(0, 16, pool);
 
         buffer.append(b"stale");
-        let _ = buffer.take().expect("buffer should contain data");
+        // `clear` keeps the backing bytes, so slices must resolve against the logical length.
+        buffer.clear();
 
         assert!(buffer.slice(..).is_empty());
         assert!(buffer.slice(0..).is_empty());

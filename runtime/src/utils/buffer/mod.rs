@@ -92,8 +92,8 @@ impl SyncState {
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
-        blob.write_at(offset, bufs).await?;
         self.mark_dirty();
+        blob.write_at(offset, bufs).await?;
         Ok(())
     }
 
@@ -114,7 +114,7 @@ impl SyncState {
                 Ok(())
             }
             Self::Clean => {
-                // If this fails, a later sync must still cover the attempted write.
+                // If this fails or is dropped, a later sync must still cover the attempted write.
                 self.mark_dirty();
                 blob.write_at_sync(offset, bufs).await?;
                 *self = Self::Clean;
@@ -127,8 +127,8 @@ impl SyncState {
     /// Resize the blob and require a later sync.
     async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
-        blob.resize(len).await?;
         self.mark_dirty();
+        blob.resize(len).await?;
         Ok(())
     }
 
@@ -168,7 +168,7 @@ mod tests {
         Blob as _, BufMut, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner, Storage,
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{sync::Mutex, NZUsize};
+    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
     use std::sync::Arc;
 
     #[derive(Default)]
@@ -295,6 +295,175 @@ mod tests {
 
         async fn start_sync(&self) -> Handle<()> {
             Handle::ready(self.sync().await)
+        }
+    }
+
+    /// One-shot gate a blob wrapper can park on, so tests can cancel an operation mid-flight.
+    ///
+    /// Starts unarmed, so gated operations pass through until [Self::cancel] arms the gate for
+    /// a single operation.
+    #[derive(Clone, Default)]
+    pub struct Gate {
+        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    }
+
+    impl Gate {
+        /// Arm the gate: the next gated operation signals the returned `started` receiver,
+        /// then parks until the returned `release` sender is used or dropped.
+        fn arm(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            *self.started.lock() = Some(started_tx);
+            *self.release.lock() = Some(release_rx);
+            (started_rx, release_tx)
+        }
+
+        /// Signal and park on an armed gate, or pass through an unarmed one.
+        pub async fn pass_once(&self) {
+            let started = self.started.lock().take();
+            let release = self.release.lock().take();
+            if let Some(started) = started {
+                let _ = started.send(());
+            }
+            if let Some(release) = release {
+                let _ = release.await;
+            }
+        }
+
+        /// Arm the gate, drive `fut` until it parks at the gate, then drop it to simulate
+        /// cancellation.
+        ///
+        /// Polls once, so every await before the gate must complete within that poll (true on
+        /// the deterministic runtime).
+        pub async fn cancel<F: futures::Future>(&self, fut: F) {
+            let (started, _release) = self.arm();
+            futures::pin_mut!(fut);
+            assert!(fut.as_mut().now_or_never().is_none());
+            started.await.unwrap();
+        }
+    }
+
+    /// Blob wrapper whose [Gate] parks the next write before it reaches the blob.
+    #[derive(Clone)]
+    pub struct GatedWriteBlob<B: crate::Blob> {
+        inner: B,
+        gate: Gate,
+    }
+
+    impl<B: crate::Blob> GatedWriteBlob<B> {
+        pub fn new(inner: B) -> (Self, Gate) {
+            let gate = Gate::default();
+            (
+                Self {
+                    inner,
+                    gate: gate.clone(),
+                },
+                gate,
+            )
+        }
+    }
+
+    impl<B: crate::Blob> crate::Blob for GatedWriteBlob<B> {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            buf: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, buf).await
+        }
+
+        async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.gate.pass_once().await;
+            self.inner.write_at(offset, buf).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.gate.pass_once().await;
+            self.inner.write_at_sync(offset, buf).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
+        }
+    }
+
+    /// Blob wrapper whose [Gate] parks the next resize after the inner resize completes: a
+    /// canceled caller did the work but never observed it.
+    #[derive(Clone)]
+    pub struct GatedResizeBlob<B: crate::Blob> {
+        inner: B,
+        gate: Gate,
+    }
+
+    impl<B: crate::Blob> GatedResizeBlob<B> {
+        pub fn new(inner: B) -> (Self, Gate) {
+            let gate = Gate::default();
+            (
+                Self {
+                    inner,
+                    gate: gate.clone(),
+                },
+                gate,
+            )
+        }
+    }
+
+    impl<B: crate::Blob> crate::Blob for GatedResizeBlob<B> {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            buf: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, buf).await
+        }
+
+        async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.inner.write_at(offset, buf).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.inner.write_at_sync(offset, buf).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await?;
+            self.gate.pass_once().await;
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
         }
     }
 
@@ -981,6 +1150,38 @@ mod tests {
         });
     }
 
+    // If an overlapping write is canceled while flushing the old tip, keep the old tip.
+    #[test_traced]
+    fn test_write_overlap_flush_cancel_preserves_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, gate) = GatedWriteBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(10));
+
+            writer.write_at(0, b"abcdefghij").await.unwrap();
+            assert_eq!(writer.size(), 10);
+
+            // The overlapping write must flush the old tip before it can continue.
+            // Drop that future while the flush write is blocked.
+            gate.cancel(writer.write_at(5, b"0123456789")).await;
+
+            // The canceled flush must not have drained the tip or touched the blob.
+            assert_eq!(writer.size(), 10);
+            let read = writer.read_at(0, 10).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"abcdefghij");
+            let (durable, writes, _, _) = inner.snapshot();
+            assert!(durable.is_empty());
+            assert_eq!(writes, 0);
+
+            // Retrying the write should flush the same tip bytes and finish normally.
+            writer.write_at(5, b"0123456789").await.unwrap();
+            writer.sync().await.unwrap();
+            let read = writer.read_at(0, 15).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"abcde0123456789");
+        });
+    }
+
     #[test_traced]
     fn test_write_resize() {
         let executor = deterministic::Runner::default();
@@ -1053,6 +1254,111 @@ mod tests {
             // Ensure the blob is empty
             let (_, size_z) = context.open("partition", b"resize_zero").await.unwrap();
             assert_eq!(size_z, 0);
+        });
+    }
+
+    // If a grow resize is canceled while flushing the tip, keep the old size and bytes.
+    #[test_traced]
+    fn test_write_resize_grow_flush_cancel_preserves_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, gate) = GatedWriteBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            writer.write_at(0, b"hello").await.unwrap();
+            // Growing past buffered data must flush that data first. Cancel during that flush.
+            gate.cancel(writer.resize(10)).await;
+
+            // The resize was canceled, so the writer should still look like it did before.
+            assert_eq!(writer.size(), 5);
+            let read = writer.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+            assert_eq!(inner.size(), 0);
+
+            // Retrying the resize should persist the buffered prefix and grow with zeros.
+            writer.resize(10).await.unwrap();
+            assert_eq!(writer.size(), 10);
+            writer.sync().await.unwrap();
+            let read = writer.read_at(0, 10).await.unwrap().coalesce();
+            assert_eq!(&read.as_ref()[..5], b"hello");
+            assert_eq!(&read.as_ref()[5..], &[0; 5]);
+        });
+    }
+
+    // A resize to exactly the current size must flush buffered bytes at their true offset.
+    #[test_traced]
+    fn test_write_resize_to_current_size_flushes_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context.open("partition", b"resize_equal").await.unwrap();
+            let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
+
+            writer.write_at(0, b"hello").await.unwrap();
+            writer.resize(5).await.unwrap();
+            assert_eq!(writer.size(), 5);
+            let read = writer.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+
+            writer.sync().await.unwrap();
+            let (blob, size) = context.open("partition", b"resize_equal").await.unwrap();
+            assert_eq!(size, 5);
+            let read = blob.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+        });
+    }
+
+    // If a resize is canceled during the blob resize itself, the writer keeps its old size and
+    // a retry completes.
+    #[test_traced]
+    fn test_write_resize_cancel_preserves_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, gate) = GatedResizeBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            writer.write_at(0, b"hello").await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Cancel while the completed blob resize is held open.
+            gate.cancel(writer.resize(3)).await;
+
+            // The tip was never adjusted, so the writer still claims the old size; the blob
+            // range past the new size is indeterminate until the resize is retried.
+            assert_eq!(writer.size(), 5);
+            writer.resize(3).await.unwrap();
+            assert_eq!(writer.size(), 3);
+            writer.sync().await.unwrap();
+            assert_eq!(inner.size(), 3);
+        });
+    }
+
+    // If an equal-size resize is canceled while flushing the tip, keep the old size and bytes.
+    #[test_traced]
+    fn test_write_resize_to_current_size_cancel_preserves_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, gate) = GatedWriteBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            writer.write_at(0, b"hello").await.unwrap();
+            // An equal-size resize must flush buffered data first. Cancel during that flush.
+            gate.cancel(writer.resize(5)).await;
+
+            // The resize was canceled, so the writer should still look like it did before.
+            assert_eq!(writer.size(), 5);
+            let read = writer.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+            assert_eq!(inner.size(), 0);
+
+            // Retrying the resize should persist the buffered bytes at their true offset.
+            writer.resize(5).await.unwrap();
+            writer.sync().await.unwrap();
+            assert_eq!(writer.size(), 5);
+            let (durable, _, _, _) = inner.snapshot();
+            assert_eq!(durable.as_slice(), b"hello");
         });
     }
 
@@ -1690,6 +1996,42 @@ mod tests {
             assert_eq!(writes, 1);
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 1);
+        });
+    }
+
+    // If sync is canceled during the tip write, keep the tip for the next sync.
+    #[test_traced]
+    fn test_write_sync_cancel_preserves_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, gate) = GatedWriteBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+            // Clear the constructor's dirty state so the canceled sync takes the
+            // write-and-sync-in-one path.
+            writer.sync().await.unwrap();
+
+            writer.write_at(0, b"abc").await.unwrap();
+            // Cancel while sync is trying to write the buffered tip to the blob.
+            gate.cancel(writer.sync()).await;
+
+            // The tip should still be visible, and the blob should not have seen the write.
+            assert_eq!(writer.size(), 3);
+            let read = writer.read_at(0, 3).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"abc");
+            let (durable, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert!(durable.is_empty());
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            // A later sync can still persist the buffered bytes.
+            writer.sync().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 2);
+            assert_eq!(range_syncs, 0);
         });
     }
 

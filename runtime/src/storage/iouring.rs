@@ -195,13 +195,18 @@ impl crate::Storage for Storage {
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
-            fs::remove_file(blob_path)
-                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+            fs::remove_file(blob_path).map_err(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => Error::BlobMissing(partition.into(), hex(name)),
+                _ => err.into(),
+            })?;
 
             // Sync the partition directory to ensure the removal is durable.
             sync_dir(&path)?;
         } else {
-            fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+            fs::remove_dir_all(&path).map_err(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+                _ => err.into(),
+            })?;
 
             // Sync the storage directory to ensure the removal is durable.
             sync_dir(&self.storage_directory)?;
