@@ -25,11 +25,11 @@
 use crate::stateful::{
     actor::metrics::Metrics as StatefulMetrics,
     db::{Anchor, DatabaseSet},
-    Application, Proposed, PruneConfig,
+    Application, Input, Proposed, PruneConfig,
 };
 use commonware_consensus::{
     marshal::{
-        ancestry::BlockProvider,
+        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
         Identifier,
     },
@@ -43,7 +43,7 @@ use commonware_runtime::{
     Clock, Metrics, Spawner,
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
-use futures::{stream, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
@@ -247,8 +247,8 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: impl Stream<Item = A::Block> + Send + 'static,
-        input_provider: &mut A::InputProvider,
+        mut ancestry: impl Ancestry<A::Block>,
+        input: Input<A::Input, A::Provider>,
         mut response: oneshot::Sender<Option<A::Block>>,
     ) where
         S: Scheme,
@@ -257,7 +257,6 @@ where
     {
         let timer = self.metrics.propose_duration.timer(context);
 
-        let mut ancestry = Box::pin(ancestry);
         let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(parent)) => parent,
             Some(None) => {
@@ -270,7 +269,7 @@ where
             }
         };
         let parent_digest = parent.digest();
-        let ancestry = stream::once(std::future::ready(parent.clone())).chain(ancestry);
+        let ancestry = marshal_ancestry::with_prefix([parent.clone()], ancestry);
 
         let round = consensus_context.round();
         let batches = match self
@@ -305,7 +304,7 @@ where
                 (runtime_context, consensus_context),
                 ancestry,
                 batches,
-                input_provider,
+                input,
             ),
         )
         .await
@@ -339,7 +338,7 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: impl Stream<Item = A::Block> + Send + 'static,
+        mut ancestry: impl Ancestry<A::Block>,
         mut response: oneshot::Sender<bool>,
     ) where
         S: Scheme,
@@ -348,7 +347,6 @@ where
     {
         let timer = self.metrics.verify_duration.timer(context);
 
-        let mut ancestry = Box::pin(ancestry);
         let block = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(block)) => block,
             Some(None) => {
@@ -468,7 +466,7 @@ where
             }
         };
 
-        let ancestry = stream::iter([block.clone(), parent]).chain(ancestry);
+        let ancestry = marshal_ancestry::with_prefix([block.clone(), parent], ancestry);
         let verified = match await_or_cancel(
             &mut response,
             self.app
@@ -920,11 +918,11 @@ mod tests {
     use crate::stateful::{
         actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
-        Application, Proposed, PruneConfig,
+        Application, Input, Proposed, PruneConfig,
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
-        marshal::ancestry::BlockProvider,
+        marshal::ancestry::{Ancestry, BlockProvider},
         simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
         Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
@@ -949,7 +947,7 @@ mod tests {
         sync::{Mutex, TracedAsyncRwLock},
         NZUsize, NZU16, NZU64,
     };
-    use futures::{Stream, StreamExt};
+    use futures::StreamExt;
     use std::{
         collections::{BTreeMap, VecDeque},
         future::Future,
@@ -1153,7 +1151,8 @@ mod tests {
         type Context = TestContext;
         type Block = Block;
         type Databases = DbSet<deterministic::Context>;
-        type InputProvider = ();
+        type Provider = ();
+        type Input = ();
 
         async fn genesis(&mut self) -> Self::Block {
             self.genesis.clone()
@@ -1162,9 +1161,9 @@ mod tests {
         async fn propose(
             &mut self,
             context: (deterministic::Context, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Ancestry<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-            _input: &mut Self::InputProvider,
+            _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             let mut ancestry = Box::pin(ancestry);
             let parent = ancestry.next().await?;
@@ -1188,7 +1187,7 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Ancestry<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
             let mut ancestry = Box::pin(ancestry);

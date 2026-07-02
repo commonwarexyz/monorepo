@@ -94,8 +94,8 @@ where
     /// Configuration used to construct the database set.
     pub db_config: <A::Databases as DatabaseSet<E>>::Config,
 
-    /// Source of input (e.g. transactions) passed to the application on propose.
-    pub input_provider: A::InputProvider,
+    /// Provider cloned into each proposal.
+    pub provider: A::Provider,
 
     /// Marshal mailbox used for startup anchoring and lazy recovery.
     pub marshal: MarshalMailbox<S, V>,
@@ -141,8 +141,8 @@ where
     /// The inner application that drives state transitions.
     application: A,
 
-    /// Source of input (e.g. transactions) passed to the application on propose.
-    input_provider: A::InputProvider,
+    /// Provider cloned into each proposal.
+    provider: A::Provider,
 
     /// Marshal mailbox used for startup anchoring and lazy recovery.
     marshal: MarshalMailbox<S, V>,
@@ -188,7 +188,7 @@ where
                 context: ContextCell::new(context),
                 mailbox,
                 application: config.application,
-                input_provider: config.input_provider,
+                provider: config.provider,
                 marshal: config.marshal,
                 db_config: config.db_config,
                 plan: config.plan,
@@ -234,7 +234,7 @@ where
             context: self.context,
             mailbox: self.mailbox,
             application: self.application,
-            input_provider: self.input_provider,
+            provider: self.provider,
             marshal: self.marshal,
             sync_metadata,
             syncer: syncer_mailbox,
@@ -280,7 +280,7 @@ where
         Processing {
             context: self.context,
             mailbox: self.mailbox,
-            input_provider: self.input_provider,
+            provider: self.provider,
             marshal: self.marshal,
             processor,
             skip_finalized_until,
@@ -438,7 +438,7 @@ mod tests {
                 Config {
                     application: TestApp,
                     db_config: (),
-                    input_provider: (),
+                    provider: (),
                     marshal,
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
@@ -459,6 +459,7 @@ mod tests {
                 result = mailbox.propose(
                     (context.child("proposal"), TestBlock::new(1, 1).context()),
                     ancestry::from_iter([]),
+                    (),
                 ) => {
                     assert!(result.is_none());
                 },

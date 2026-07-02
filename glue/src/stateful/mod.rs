@@ -89,11 +89,10 @@
 //! [`Inline`]: commonware_consensus::marshal::standard::Inline
 //! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
-use commonware_consensus::{CertifiableBlock, Epochable, Viewable};
+use commonware_consensus::{marshal::ancestry::Ancestry, CertifiableBlock, Epochable, Viewable};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;
-use futures::Stream;
 use rand::Rng;
 use std::future::Future;
 
@@ -113,6 +112,23 @@ pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
 
     /// The merkleized database batches produced during execution.
     pub merkleized: <A::Databases as DatabaseSet<E>>::Merkleized,
+}
+
+/// Aggregated per-proposal input a [`Stateful`] application hands its inner
+/// application.
+///
+/// `parent` is the input [`Stateful`] received as a
+/// [`commonware_consensus::Application`] (from whatever wraps it);
+/// `provider` is the stateful-owned handle from [`Config::provider`]. Being
+/// generic over the parent input, it lets an outer application (for example a
+/// reshare wrapper) stack its own input on top of the stateful-owned provider
+/// without either layer knowing the other.
+pub struct Input<Parent, Provider> {
+    /// Input forwarded from the application wrapping [`Stateful`].
+    pub parent: Parent,
+
+    /// Provider owned by the stateful actor, from its [`Config::provider`].
+    pub provider: Provider,
 }
 
 /// A stateful application whose storage is managed by a [`DatabaseSet`].
@@ -147,12 +163,20 @@ where
     /// The set of databases managed on behalf of this application.
     type Databases: DatabaseSet<E>;
 
-    /// A provider of input to the application.
+    /// The stateful-owned provider, supplied through
+    /// [`Config::provider`](crate::stateful::Config::provider).
     ///
     /// This may be a mempool that serves transactions, a stream of
-    /// certificates, or any other source of input that drives state
-    /// transitions.
-    type InputProvider: Send;
+    /// certificates, or any other handle to data that drives state
+    /// transitions. The stateful actor owns it and clones it for each proposal,
+    /// so it must be cheap to clone (e.g. `()` or a handle).
+    type Provider: Send + Clone;
+
+    /// Per-proposal input forwarded from the application wrapping
+    /// [`Stateful`], aggregated with [`Provider`](Self::Provider) into the
+    /// [`Input`] handed to [`propose`](Self::propose). Set this to `()`
+    /// when nothing wraps the stateful actor with its own input.
+    type Input: Send;
 
     /// Extract per-database sync targets from a finalized block.
     ///
@@ -185,9 +209,9 @@ where
     fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-        input: &mut Self::InputProvider,
+        input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
 
     /// Verify a block received from a peer, relative to its ancestry.
@@ -224,7 +248,7 @@ where
     fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
