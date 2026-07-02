@@ -454,6 +454,11 @@ impl<B: Blob> Writer<B> {
     ///
     /// Returns `true` if the flush made its writes durable, so no additional sync is needed.
     async fn flush(&mut self, write_partial_page: bool, sync: bool) -> Result<bool, Error> {
+        // Re-issue any dropped resize before deriving writes from writer state. Writes and
+        // syncs settle on their own; this covers paths that may emit no writes at all
+        // (sync, seal, snapshot, replay) and would otherwise leave the resize owed.
+        self.sync_state.settle(&self.blob).await?;
+
         // Prepare the *physical* pages corresponding to the data in the buffer.
         // Pass the old partial page state so the CRC record is constructed correctly.
         let (physical_pages, partial_page_state) = self.to_physical_pages(
@@ -2215,6 +2220,192 @@ mod tests {
             let read = reopened.read_at(0, 2 * page + 10).await.unwrap().coalesce();
             assert_eq!(&read.as_ref()[..2 * page], &data[..2 * page]);
             assert_eq!(&read.as_ref()[2 * page..], &data[..10]);
+        });
+    }
+
+    // If a boundary shrink is canceled before the truncate reaches the blob, the recorded
+    // resize is re-issued by the next sync even though the retried resize is a no-op.
+    #[test_traced("DEBUG")]
+    fn test_shrink_to_boundary_cancel_before_truncate_settles_on_retry() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_boundary_settle_retry")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedResizeBlob::new(inner, GatePosition::Before);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..3 * page + 50).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Cancel while the truncate is parked before reaching the blob.
+            let target = 2 * page as u64;
+            gate.cancel(writer.resize(target)).await;
+            assert_eq!(writer.size(), target);
+
+            // The retry observes the already-published size and does nothing; the sync
+            // re-issues the dropped truncate and makes it durable.
+            writer.resize(target).await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_boundary_settle_retry")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), target);
+            let read = reopened
+                .read_at(0, target as usize)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), &data[..target as usize]);
+        });
+    }
+
+    // If a multi-page partial shrink is canceled before the truncate reaches the blob, the
+    // retried shrink settles the truncate before rewriting the CRC record: the durable result
+    // is the shrunken blob, not a resurrected old size with an unreadable page.
+    #[test_traced("DEBUG")]
+    fn test_shrink_partial_cancel_before_truncate_settles_on_retry() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_partial_settle_retry")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedResizeBlob::new(inner, GatePosition::Before);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..4 * page + 50).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Cancel while the truncate is parked before reaching the blob.
+            let target = page as u64 + 30;
+            gate.cancel(writer.resize(target)).await;
+            assert_eq!(writer.size(), 2 * page as u64);
+
+            // Retrying the shrink completes it, and the result survives a restart.
+            writer.resize(target).await.unwrap();
+            assert_eq!(writer.size(), target);
+            writer.sync().await.unwrap();
+            drop(writer);
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_partial_settle_retry")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), target);
+            let read = reopened
+                .read_at(0, target as usize)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), &data[..target as usize]);
+        });
+    }
+
+    // A shrink canceled before the truncate reaches the blob is settled by a plain sync, with
+    // no retry of the resize itself.
+    #[test_traced("DEBUG")]
+    fn test_shrink_cancel_before_truncate_settles_on_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_settle_sync")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedResizeBlob::new(inner, GatePosition::Before);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..3 * page).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            let target = 2 * page as u64;
+            gate.cancel(writer.resize(target)).await;
+            assert_eq!(writer.size(), target);
+
+            writer.sync().await.unwrap();
+            drop(writer);
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_settle_sync")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), target);
+            let read = reopened
+                .read_at(0, target as usize)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), &data[..target as usize]);
+        });
+    }
+
+    // Sealing after a canceled shrink settles the dropped truncate before the writer (and its
+    // recorded resize) is consumed, so the sealed handle's durability claim is honest.
+    #[test_traced("DEBUG")]
+    fn test_shrink_cancel_before_truncate_settles_on_seal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_settle_seal")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedResizeBlob::new(inner, GatePosition::Before);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..3 * page).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            let target = 2 * page as u64;
+            gate.cancel(writer.resize(target)).await;
+            assert_eq!(writer.size(), target);
+
+            let sealed = writer.seal().await.unwrap();
+            sealed.sync().await.unwrap();
+            drop(sealed);
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_settle_seal")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), target);
+            let read = reopened
+                .read_at(0, target as usize)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), &data[..target as usize]);
         });
     }
 
