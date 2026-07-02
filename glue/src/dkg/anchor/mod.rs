@@ -708,6 +708,64 @@ mod tests {
     }
 
     #[test]
+    fn genesis_resolves_after_retry_grace() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start(&mut context).await;
+            let mut subscription = harness.joiner.subscribe();
+
+            // A lone epoch-zero finalization is only provisional: it must not
+            // resolve until the retry grace elapses, so a newer finalization has
+            // a window to supersede it.
+            harness.send_target_finalization_for(Epoch::zero(), mocks::TestDigest::EMPTY);
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(matches!(
+                subscription.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+
+            // With nothing newer arriving, the grace elapses and genesis resolves
+            // from the locally known artifact.
+            context.sleep(Duration::from_secs(1)).await;
+            let artifact = subscription.try_recv().expect("genesis resolved");
+            assert_eq!(artifact.epoch, Epoch::zero());
+            assert!(artifact.finalization.is_none());
+            assert_eq!(artifact.info, genesis_info(&harness.participants));
+        });
+    }
+
+    #[test]
+    fn newer_finalization_supersedes_genesis() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // The source can serve the epoch-one boundary.
+            let mut harness = Harness::start(&mut context).await;
+            let mut subscription = harness.joiner.subscribe();
+
+            // A replayed epoch-zero finalization arrives first, but must not
+            // permanently pin the joiner to genesis.
+            harness.send_target_finalization_for(Epoch::zero(), mocks::TestDigest::EMPTY);
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(matches!(
+                subscription.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+
+            // A strictly-newer epoch-one finalization supersedes the genesis
+            // candidate and resolves to the epoch-one boundary artifact.
+            harness.send_target_finalization();
+            context.sleep(Duration::from_millis(100)).await;
+            let artifact = subscription.try_recv().expect("newer finalization resolved");
+            assert_artifact(
+                artifact,
+                &harness.boundary_finalization,
+                &harness.boundary_sharing,
+                &harness.participants,
+            );
+        });
+    }
+
+    #[test]
     fn late_response_for_superseded_boundary_does_not_block_peer() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

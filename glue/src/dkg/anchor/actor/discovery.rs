@@ -129,10 +129,22 @@ where
                 self.handle_boundary_response(peer, message);
             },
             _ = retry => {
-                if let Some(pending) = self.pending.as_ref() {
-                    debug!(epoch = %pending.epoch, "re-requesting boundary block");
-                    Self::request_boundary(pending.epoch, &mut boundary_sender);
-                    deadline = self.context.current() + self.retry_timeout.get();
+                if let Some(epoch) = self.pending.as_ref().map(|pending| pending.epoch) {
+                    if epoch.is_zero() {
+                        // The genesis grace elapsed with no strictly-newer
+                        // finalization; resolve from the locally known genesis.
+                        let artifact = Artifact {
+                            epoch: Epoch::zero(),
+                            finalization: None,
+                            info: self.genesis.clone(),
+                        };
+                        self.resolve(artifact);
+                        self.pending = None;
+                    } else {
+                        debug!(%epoch, "re-requesting boundary block");
+                        Self::request_boundary(epoch, &mut boundary_sender);
+                        deadline = self.context.current() + self.retry_timeout.get();
+                    }
                 }
             },
         }
@@ -198,12 +210,16 @@ where
             return false;
         }
         if finalization.epoch().is_zero() {
-            self.resolve(Artifact {
+            // Genesis needs no boundary block, but a strictly-newer finalization
+            // must still be able to supersede a replayed epoch-zero candidate.
+            // Record it as a pending candidate and resolve from local genesis only
+            // once the retry window elapses with nothing newer, matching the
+            // supersede window every non-zero epoch already gets.
+            self.pending = Some(Pending {
+                height: Height::zero(),
                 epoch: Epoch::zero(),
-                finalization: None,
-                info: self.genesis.clone(),
             });
-            return false;
+            return true;
         }
 
         let Some(height) = finalization
