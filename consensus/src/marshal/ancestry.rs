@@ -67,7 +67,7 @@ impl<B: Block> Unpin for BoxedAncestry<B> {}
 
 impl<B: Block> Ancestry<B> for BoxedAncestry<B> {
     fn peek(&self) -> Option<&B> {
-        self.0.peek()
+        self.0.peek_erased()
     }
 }
 
@@ -80,7 +80,7 @@ impl<B: Block> Stream for BoxedAncestry<B> {
 }
 
 trait ErasedAncestry<B: Block>: Stream<Item = B> + Send + Unpin + 'static {
-    fn peek(&self) -> Option<&B>;
+    fn peek_erased(&self) -> Option<&B>;
 
     fn clone_box(&self) -> Box<dyn ErasedAncestry<B>>;
 }
@@ -90,7 +90,7 @@ where
     B: Block,
     A: Ancestry<B>,
 {
-    fn peek(&self) -> Option<&B> {
+    fn peek_erased(&self) -> Option<&B> {
         Ancestry::peek(self)
     }
 
