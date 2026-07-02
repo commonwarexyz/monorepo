@@ -165,7 +165,8 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
             return Ok((BTreeMap::new(), Wrapper::empty(blob)));
         }
 
-        // Extract checksum
+        // The checksum must sit at the physical end of the blob (sync enforces this with a
+        // resize); on a mismatch the other blob still holds the last committed state.
         let checksum_index = buf.len() - crc32::Digest::SIZE;
         let stored_checksum =
             u32::from_be_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
@@ -352,12 +353,6 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
         // Get target blob (the one we will modify)
         let target_cursor = 1 - cursor;
-
-        // Update the state.
-        self.state.cursor = target_cursor;
-        self.state.next_version = next_next_version;
-
-        // Get a mutable reference to the target blob.
         let target = &mut self.state.blobs[target_cursor];
 
         // Determine if we can overwrite existing data in place, and prepare the list of data to
@@ -376,7 +371,10 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
                     target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
                     writes.push(target.blob.write_at(info.start as u64, encoded));
                 } else {
-                    // Rewrite all
+                    // Rewrite all. Mark the key order changed so an interrupted rewrite, which
+                    // may leave stale bytes at offsets an overwrite would not repair, forces
+                    // rewrites until one succeeds.
+                    self.state.key_order_changed = next_version;
                     overwrite = false;
                     break;
                 }
@@ -385,9 +383,6 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
             // If the key order has changed, we need to rewrite all data
             overwrite = false;
         }
-
-        // Clear modified keys to avoid writing the same data
-        target.modified.clear();
 
         // Overwrite existing data
         if overwrite {
@@ -412,6 +407,10 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
             // Update state
             target.version = next_version;
+            // Clear modified keys to avoid writing the same data
+            target.modified.clear();
+            self.state.cursor = target_cursor;
+            self.state.next_version = next_next_version;
             self.sync_overwrites.inc();
             return Ok(());
         }
@@ -430,22 +429,20 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         }
         next_data.put_u32(Crc32::checksum(&next_data[..]));
 
-        // Shrinking rewrites must also persist the resize, so they need a full sync.
-        if next_data.len() < target.data.len() {
-            target.blob.write_at(0, next_data.clone()).await?;
-            target.blob.resize(next_data.len() as u64).await?;
-            target.blob.sync().await?;
-        } else {
-            // Non-shrinking rewrites are a single write and can use range-scoped
-            // durability.
-            target.blob.write_at_sync(0, next_data.clone()).await?;
-        }
+        // Enforce the physical length with a resize: recovery requires the checksum at the
+        // physical end of the blob, and a dropped earlier sync whose write still landed may
+        // have left the blob longer than the in-memory mirror suggests.
+        target.blob.write_at(0, next_data.clone()).await?;
+        target.blob.resize(next_data.len() as u64).await?;
+        target.blob.sync().await?;
 
-        // Update blob state
+        // Update state
         target.version = next_version;
         target.lengths = lengths;
         target.data = next_data;
-
+        target.modified.clear();
+        self.state.cursor = target_cursor;
+        self.state.next_version = next_next_version;
         self.sync_rewrites.inc();
         Ok(())
     }
