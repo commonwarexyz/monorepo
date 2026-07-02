@@ -61,13 +61,27 @@
 //! boundary(current_epoch) = last_block(current_epoch - 1)
 //! ```
 //!
-//! As a rule of thumb, keep marshal's finalized block retention wide enough to
-//! preserve at least `[last_block(current_epoch - 1), tip]`. DKG does not need
-//! blocks before that previous boundary for ordinary restart, but it does need
-//! the boundary block itself to recover the epoch's public threshold output,
-//! participant set, and Simplex floor commitment. Pruning that boundary before
-//! the current epoch finishes leaves a restarting validator without the local
-//! public material required for normal recovery.
+//! An operator running stateful pruning MUST keep marshal's finalized block
+//! retention window at least one full epoch wide, so the previous epoch's
+//! boundary block survives until the current epoch finishes. Concretely, the
+//! marshal retention floor configured through the stateful
+//! [`PruneConfig`](crate::stateful::PruneConfig)
+//! (`max_pending_acks + 1 + retained_marshal_blocks` finalized blocks) MUST be
+//! greater than or equal to the DKG epoch length (`blocks_per_epoch`). DKG does
+//! not need blocks before that previous boundary for ordinary restart, but it
+//! does need the boundary block itself to recover the epoch's public threshold
+//! output, participant set, and Simplex floor commitment.
+//!
+//! This coupling is the operator's responsibility. The two knobs are configured
+//! independently: `blocks_per_epoch` is a DKG configuration, while the marshal
+//! retention floor is set on the stateful
+//! [`PruneConfig`](crate::stateful::PruneConfig). The library cannot enforce the
+//! relationship, and no runtime check couples them
+//! ([`PruneConfig::assert_valid`](crate::stateful::PruneConfig::assert_valid)
+//! only compares marshal and QMDB retention). Pruning the boundary before the
+//! current epoch finishes leaves a restarting validator without the local public
+//! material required for normal recovery, and the orchestrator panics on startup
+//! with a `missing finalized boundary block` error.
 //!
 //! Nodes that serve `dkg::anchor` responses for other peers also need the
 //! corresponding boundary finalization and boundary block for every epoch they
