@@ -365,10 +365,19 @@ mod tests {
         }
     }
 
-    /// One-shot gate a blob wrapper can park on, so tests can cancel an operation mid-flight.
+    /// Parks one blob operation mid-flight so a test can cancel it at a precise point.
     ///
-    /// Starts unarmed, so gated operations pass through until [Self::cancel] arms the gate for
-    /// a single operation.
+    /// Cancellation tests follow the same three steps:
+    ///
+    /// 1. Wrap the blob in [GatedWriteBlob] or [GatedResizeBlob] and hand the wrapper to the
+    ///    writer under test. The gate starts unarmed, so setup traffic passes straight
+    ///    through to the wrapped blob.
+    /// 2. Call [Self::cancel] with the operation to interrupt, e.g.
+    ///    `gate.cancel(writer.resize(3))`. This arms the gate, polls the operation until it
+    ///    parks at the gated blob call, then drops it, exactly as if the caller had dropped
+    ///    the future at that await point.
+    /// 3. Assert on what the canceled operation left behind: the writer's in-memory claims,
+    ///    the wrapped blob's contents, and whether a retry or a later sync recovers.
     #[derive(Clone, Default)]
     pub struct Gate {
         started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -376,8 +385,11 @@ mod tests {
     }
 
     impl Gate {
-        /// Arm the gate: the next gated operation signals the returned `started` receiver,
-        /// then parks until the returned `release` sender is used or dropped.
+        /// Arm the gate for the next gated operation.
+        ///
+        /// Returns two channel ends for the driver: `started` fires when an operation
+        /// reaches the gate (proof it parked there rather than somewhere earlier), and
+        /// `release` un-parks the operation when used or dropped.
         fn arm(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
@@ -386,7 +398,9 @@ mod tests {
             (started_rx, release_tx)
         }
 
-        /// Signal and park on an armed gate, or pass through an unarmed one.
+        /// The gate point. Gated wrappers call this inside the operation they gate: if the
+        /// gate is armed this signals `started` and parks until released; if not, it returns
+        /// immediately. Arming is one-shot, so only the first gated operation parks.
         pub async fn pass_once(&self) {
             let started = self.started.lock().take();
             let release = self.release.lock().take();
@@ -398,11 +412,13 @@ mod tests {
             }
         }
 
-        /// Arm the gate, drive `fut` until it parks at the gate, then drop it to simulate
-        /// cancellation.
+        /// Cancel `fut` at the gate: arm the gate, poll `fut` once so it runs up to the gated
+        /// blob call and parks there, confirm via `started` that it reached the gate, then
+        /// drop it. Dropping the parked future is the cancellation; the writer sees an
+        /// operation abandoned exactly at that blob call.
         ///
-        /// Polls once, so every await before the gate must complete within that poll (true on
-        /// the deterministic runtime).
+        /// Polls only once, so every await before the gate must complete within that poll
+        /// (true on the deterministic runtime).
         pub async fn cancel<F: futures::Future>(&self, fut: F) {
             let (started, _release) = self.arm();
             futures::pin_mut!(fut);
@@ -411,7 +427,10 @@ mod tests {
         }
     }
 
-    /// Blob wrapper whose [Gate] parks the next write before it reaches the blob.
+    /// Blob wrapper that parks the next `write_at`/`write_at_sync` at its [Gate], just before
+    /// the write reaches the wrapped blob. All other operations pass through untouched.
+    ///
+    /// Canceling a future parked here models a write dropped before any bytes hit the blob.
     #[derive(Clone)]
     pub struct GatedWriteBlob<B: crate::Blob> {
         inner: B,
@@ -472,17 +491,21 @@ mod tests {
         }
     }
 
-    /// Where [GatedResizeBlob]'s gate sits relative to the inner resize.
+    /// Which side of the wrapped operation a gated blob parks on. The two positions model
+    /// the two ways a canceled operation can relate to the disk.
     #[derive(Clone, Copy)]
     pub enum GatePosition {
-        /// Park before the inner resize runs: a canceled caller never did the work.
+        /// Park before the inner operation runs. Canceling here models a future dropped
+        /// before its I/O reached the blob: the work never happened.
         Before,
-        /// Park after the inner resize completes: a canceled caller did the work but never
-        /// observed it.
+        /// Park after the inner operation completes. Canceling here models a future dropped
+        /// after its I/O was applied but before the caller could observe the result: the
+        /// work happened, but nothing in memory knows.
         After,
     }
 
-    /// Blob wrapper whose [Gate] parks the next resize at the given [GatePosition].
+    /// Blob wrapper that parks the next `resize` at its [Gate], on the side of the wrapped
+    /// resize chosen by [GatePosition]. All other operations pass through untouched.
     #[derive(Clone)]
     pub struct GatedResizeBlob<B: crate::Blob> {
         inner: B,
@@ -1404,12 +1427,15 @@ mod tests {
             writer.write_at(0, b"hello").await.unwrap();
             writer.sync().await.unwrap();
 
-            // Cancel the shrink before it reaches the blob; the writer claims size 3.
+            // Cancel the shrink before it reaches the blob. The intent was recorded before
+            // the blob call, so the writer claims size 3 while the blob still holds 5 bytes.
             gate.cancel(writer.resize(3)).await;
             assert_eq!(writer.size(), 3);
             assert_eq!(inner.size(), 5);
 
             // Grow to 10: bytes [3, 10) must read as zeros per the Blob::resize contract.
+            // The grow must settle the owed shrink first; resizing the 5-byte blob straight
+            // to 10 would let "lo" survive inside the supposedly zeroed range.
             writer.resize(10).await.unwrap();
             assert_eq!(writer.size(), 10);
             let read = writer.read_at(0, 10).await.unwrap().coalesce();
