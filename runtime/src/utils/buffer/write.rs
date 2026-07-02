@@ -224,12 +224,12 @@ impl<B: Blob> Write<B> {
             // now-empty tip to the new end.
             self.flush(NonDurable).await?;
             self.sync_state.resize(&self.blob, len).await?;
-            let _ = self.buffer.resize(len);
+            self.buffer.offset = len;
         } else {
             // Shrink: adopt the shorter size first, so a dropped resize never leaves the
             // buffer claiming more than the blob holds. If the blob resize is dropped
             // mid-flight, the next blob operation re-issues it (see [SyncState::settle]).
-            let _ = self.buffer.resize(len);
+            self.buffer.truncate(len);
             self.sync_state.resize(&self.blob, len).await?;
         }
 
