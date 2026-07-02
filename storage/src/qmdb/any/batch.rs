@@ -1479,28 +1479,6 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        if self.reads_committed_only() {
-            let mut cached = Vec::with_capacity(keys.len());
-            let db_results = db
-                .get_many_map(keys, |data, loc| (data.value().clone(), loc, data.cached()))
-                .await?;
-            let results = db_results
-                .into_iter()
-                .enumerate()
-                .map(|(slot, result)| {
-                    result.map(|(value, loc, payload)| {
-                        cached.push((offset + slot, loc, payload));
-                        value
-                    })
-                })
-                .collect();
-            return Ok((
-                results,
-                keys.iter().map(|key| (*key).to_owned()).collect(),
-                cached,
-            ));
-        }
-
         let mut cached = Vec::new();
         let (mut results, unresolved) = self.resolve_uncommitted_reads(keys, db.strategy());
         cached.reserve(unresolved.len());
