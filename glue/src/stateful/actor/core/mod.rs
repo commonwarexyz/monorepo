@@ -59,14 +59,6 @@ pub struct PruneConfig {
     /// This should generally be set to a large enough number of blocks to facilitate downtime
     /// on a validator that has completed state sync. If marshal retains too few blocks, a rebooted
     /// node may fail to recover due to peers being unable to serve the blocks it needs to catch up.
-    ///
-    /// When this application also runs DKG/reshare, the marshal retention floor
-    /// (`max_pending_acks + 1 + retained_marshal_blocks`) MUST be at least one DKG epoch
-    /// (`blocks_per_epoch`) wide. DKG recovers each epoch's public threshold material from the
-    /// previous epoch's boundary block on restart, so pruning that boundary before the epoch
-    /// finishes panics the orchestrator on startup. This coupling is the operator's
-    /// responsibility: the two values are configured independently and are not checked by
-    /// [`assert_valid`](Self::assert_valid).
     pub retained_marshal_blocks: usize,
 
     /// Finalized blocks' worth of operations to retain in QMDB beyond `max_pending_acks + 1`.

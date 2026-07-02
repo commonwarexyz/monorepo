@@ -29,7 +29,7 @@ use crate::stateful::{
 };
 use commonware_consensus::{
     marshal::{
-        ancestry::{self as marshal_ancestry, BlockProvider},
+        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
         Identifier,
     },
@@ -247,7 +247,7 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: impl Stream<Item = A::Block> + Send + 'static,
+        mut ancestry: impl Ancestry<A::Block>,
         input: Input<A::Input, A::Provider>,
         mut response: oneshot::Sender<Option<A::Block>>,
     ) where
@@ -257,7 +257,6 @@ where
     {
         let timer = self.metrics.propose_duration.timer(context);
 
-        let mut ancestry = Box::pin(ancestry);
         let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(parent)) => parent,
             Some(None) => {
@@ -339,7 +338,7 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: impl Stream<Item = A::Block> + Send + 'static,
+        mut ancestry: impl Ancestry<A::Block>,
         mut response: oneshot::Sender<bool>,
     ) where
         S: Scheme,
@@ -348,7 +347,6 @@ where
     {
         let timer = self.metrics.verify_duration.timer(context);
 
-        let mut ancestry = Box::pin(ancestry);
         let block = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(block)) => block,
             Some(None) => {

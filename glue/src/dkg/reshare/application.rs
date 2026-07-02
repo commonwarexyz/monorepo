@@ -1,12 +1,11 @@
 use crate::dkg::{reshare::Mailbox, types::Payload, ReshareBlock};
 use commonware_consensus::{
-    marshal::ancestry::{self, Ancestry},
+    marshal::ancestry::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
     Application as ConsensusApplication, CertifiableBlock,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Signer};
 use commonware_runtime::{Clock, Metrics, Spawner};
-use futures::StreamExt as _;
 use rand::Rng;
 use std::num::NonZeroU64;
 
@@ -124,21 +123,9 @@ where
     ) -> Option<Self::Block> {
         // Select and fetch the payload for the block being built, then hand it to
         // the inner application alongside its own input.
-        let parent = ancestry.peek()?.clone();
-        let height = parent.height().next();
+        let height = ancestry.peek()?.height().next();
         let payload = if self.final_block(height) {
-            let payload = self.reshare.epoch_info(ancestry).await;
-            return self
-                .inner
-                .propose(
-                    context,
-                    ancestry::from_iter([parent]),
-                    Input {
-                        parent: input,
-                        payload,
-                    },
-                )
-                .await;
+            self.reshare.epoch_info(ancestry.clone()).await
         } else if matches!(
             self.phase(height),
             Some(EpochPhase::Midpoint | EpochPhase::Late)
@@ -164,23 +151,13 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
-        // Buffer the ancestry so it can drive both the reshare payload check and
-        // the inner verification. `epoch_info` consumes the stream, so it must be
-        // rebuilt; the front of the buffer is the block under verification.
-        let blocks: Vec<B> = ancestry.collect().await;
-        let Some(tip) = blocks.first().cloned() else {
-            return self
-                .inner
-                .verify(context, ancestry::from_iter(blocks))
-                .await;
+        let Some(tip) = ancestry.peek().cloned() else {
+            return self.inner.verify(context, ancestry).await;
         };
         let height = tip.height();
         if self.final_block(height) {
             // The final block must carry the epoch info the actor reconstructs.
-            let derived = self
-                .reshare
-                .epoch_info(ancestry::from_iter(blocks.clone()))
-                .await;
+            let derived = self.reshare.epoch_info(ancestry.clone()).await;
             if derived != tip.payload() {
                 return false;
             }
@@ -189,8 +166,6 @@ where
             // block must not carry a reshare payload.
             return false;
         }
-        self.inner
-            .verify(context, ancestry::from_iter(blocks))
-            .await
+        self.inner.verify(context, ancestry).await
     }
 }

@@ -106,8 +106,6 @@ where
                     response,
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.propose");
-                    // Aggregate the parent's input with the stateful-owned provider
-                    // for the inner application.
                     let input = Input {
                         parent,
                         provider: self.provider.clone(),

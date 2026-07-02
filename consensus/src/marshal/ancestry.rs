@@ -17,7 +17,7 @@ use std::{
 };
 
 /// A stream of blocks used by application propose and verify calls.
-pub trait Ancestry<B: Block>: Stream<Item = B> + Send + Unpin + 'static {
+pub trait Ancestry<B: Block>: Stream<Item = B> + Clone + Send + Unpin + 'static {
     /// Peeks at the latest block in the stream without consuming it. Returns [None]
     /// if the stream does not yet have a block available or has been exhausted.
     fn peek(&self) -> Option<&B>;
@@ -27,10 +27,7 @@ pub trait Ancestry<B: Block>: Stream<Item = B> + Send + Unpin + 'static {
 ///
 /// Blocks are yielded in iterator order and no parent fetching is performed. This is useful when
 /// the caller wants to bound the ancestry available to the application.
-pub fn from_iter<B>(blocks: impl IntoIterator<Item = B>) -> impl Ancestry<B>
-where
-    B: Block,
-{
+pub fn from_iter<B: Block>(blocks: impl IntoIterator<Item = B>) -> impl Ancestry<B> {
     BoundedAncestry {
         blocks: blocks.into_iter().collect(),
     }
@@ -42,7 +39,7 @@ where
 pub fn with_prefix<B, S>(blocks: impl IntoIterator<Item = B>, tail: S) -> impl Ancestry<B>
 where
     B: Block,
-    S: Stream<Item = B> + Send + Unpin + 'static,
+    S: Ancestry<B>,
 {
     PrefixedAncestry {
         blocks: blocks.into_iter().collect(),
@@ -50,6 +47,59 @@ where
     }
 }
 
+/// Type-erased ancestry stream that preserves cloneability.
+pub struct BoxedAncestry<B: Block>(Box<dyn ErasedAncestry<B>>);
+
+impl<B: Block> BoxedAncestry<B> {
+    /// Erases the concrete ancestry stream type.
+    pub fn new(ancestry: impl Ancestry<B>) -> Self {
+        Self(Box::new(ancestry))
+    }
+}
+
+impl<B: Block> Clone for BoxedAncestry<B> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone_box())
+    }
+}
+
+impl<B: Block> Unpin for BoxedAncestry<B> {}
+
+impl<B: Block> Ancestry<B> for BoxedAncestry<B> {
+    fn peek(&self) -> Option<&B> {
+        self.0.peek()
+    }
+}
+
+impl<B: Block> Stream for BoxedAncestry<B> {
+    type Item = B;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut *self.0).poll_next(cx)
+    }
+}
+
+trait ErasedAncestry<B: Block>: Stream<Item = B> + Send + Unpin + 'static {
+    fn peek(&self) -> Option<&B>;
+
+    fn clone_box(&self) -> Box<dyn ErasedAncestry<B>>;
+}
+
+impl<B, A> ErasedAncestry<B> for A
+where
+    B: Block,
+    A: Ancestry<B>,
+{
+    fn peek(&self) -> Option<&B> {
+        Ancestry::peek(self)
+    }
+
+    fn clone_box(&self) -> Box<dyn ErasedAncestry<B>> {
+        Box::new(self.clone())
+    }
+}
+
+#[derive(Clone)]
 struct BoundedAncestry<B: Block> {
     blocks: VecDeque<B>,
 }
@@ -70,6 +120,7 @@ impl<B: Block> Stream for BoundedAncestry<B> {
     }
 }
 
+#[derive(Clone)]
 struct PrefixedAncestry<B: Block, S> {
     blocks: VecDeque<B>,
     tail: S,
@@ -80,7 +131,7 @@ impl<B: Block, S> Unpin for PrefixedAncestry<B, S> {}
 impl<B, S> Ancestry<B> for PrefixedAncestry<B, S>
 where
     B: Block,
-    S: Stream<Item = B> + Send + Unpin + 'static,
+    S: Ancestry<B>,
 {
     fn peek(&self) -> Option<&B> {
         self.blocks.front()
@@ -237,9 +288,25 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     }
 }
 
+impl<M, C> Clone for AncestorStream<M, C>
+where
+    M: BlockProvider + Clone,
+    C: Clock,
+{
+    fn clone(&self) -> Self {
+        Self {
+            buffered: self.buffered.clone(),
+            marshal: self.marshal.clone(),
+            fetch_duration: self.fetch_duration.clone(),
+            clock: self.clock.clone(),
+            pending: None.into(),
+        }
+    }
+}
+
 impl<M, C> Ancestry<M::Block> for AncestorStream<M, C>
 where
-    M: BlockProvider,
+    M: BlockProvider + Clone,
     C: Clock,
 {
     fn peek(&self) -> Option<&M::Block> {

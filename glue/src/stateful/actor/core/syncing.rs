@@ -1,9 +1,6 @@
 use crate::stateful::{
     actor::{
-        core::{
-            mailbox::{ErasedAncestorStream, Message},
-            processing::Processing,
-        },
+        core::{mailbox::Message, processing::Processing},
         metrics::Metrics as StatefulMetrics,
         processor::{FinalizeStatus, Processor},
         syncer::{self, StateSyncMetadata, SyncResult},
@@ -14,10 +11,10 @@ use crate::stateful::{
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     marshal::{
-        ancestry::BlockProvider,
+        ancestry::{BlockProvider, BoxedAncestry},
         core::{Mailbox as MarshalMailbox, Variant},
     },
-    Epochable, Heightable, Viewable,
+    Block, Epochable, Heightable, Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select_loop;
@@ -35,10 +32,10 @@ use std::sync::Arc;
 use tracing::{debug, error, info_span, Instrument as _, Span};
 
 /// Verify request buffered while state sync is still in progress.
-pub(super) struct HeldVerify<C, B> {
+pub(super) struct HeldVerify<C, B: Block> {
     span: Span,
     context: C,
-    ancestry: ErasedAncestorStream<B>,
+    ancestry: BoxedAncestry<B>,
     response: oneshot::Sender<bool>,
 }
 
