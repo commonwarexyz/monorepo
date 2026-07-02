@@ -1130,8 +1130,7 @@ pub(super) async fn build_grafted_tree<
         let batch = {
             let batch = grafted_tree.new_batch_with_strategy(strategy.clone());
             let batch = batch.add_leaf_digests(leaves.iter().map(|&(_, digest)| digest));
-            let grafted_hasher =
-                grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<H>(), grafting_height);
+            let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
             batch.merkleize(&grafted_tree, &grafted_hasher)
         };
         grafted_tree.apply_batch(&batch)?;

@@ -11,11 +11,8 @@ use crate::{
         Error as JournalError,
     },
     merkle::{
-        self, batch,
-        full::Merkle,
-        hasher::{Hasher as _, Standard as StandardHasher},
-        mem::Mem,
-        Bagging, Family, Location, Position, Proof, Readable,
+        self, batch, full::Merkle, hasher::Standard as StandardHasher, mem::Mem, Bagging, Family,
+        Location, Position, Proof, Readable,
     },
     Context,
 };
@@ -23,7 +20,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared, Write};
+use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -130,20 +127,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
             "add_many expects no items added via add"
         );
 
-        let first = self.inner.leaves();
-        let hasher = &self.hasher;
-        let digests = self.inner.strategy().map_init_collect_vec(
-            items.iter().enumerate(),
-            Vec::new,
-            |buf, (i, item)| {
-                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                buf.clear();
-                item.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
-            },
-        );
-
-        self.inner = self.inner.add_leaf_digests(digests);
+        self.inner = self.inner.add_many(&self.hasher, &items);
         self.items = items;
         self
     }
@@ -390,8 +374,9 @@ where
 
     /// Align the Merkle structure to be consistent with the journal. Any items in the structure
     /// that are not in the journal are popped, and any items in the journal that are not in the
-    /// structure are added. Items are added in batches of size `apply_batch_size` to avoid memory
-    /// bloat.
+    /// structure are added. Items are added in batches of size `apply_batch_size` to bound peak
+    /// memory use: each batch's items are buffered in memory so their leaves can be hashed
+    /// across the strategy.
     async fn align(
         merkle: &mut Merkle<F, E, H::Digest, S>,
         journal: &C,
@@ -421,47 +406,14 @@ where
             );
 
             while merkle_leaves < journal_size {
-                let first = merkle_leaves;
-                let mut items = Vec::new();
-                let mut count = 0u64;
-                while count < apply_batch_size && merkle_leaves < journal_size {
-                    let op = journal.read(*merkle_leaves).await?;
-                    items.push(op);
+                let count = apply_batch_size.min(journal_size - *merkle_leaves);
+                let mut items = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    items.push(journal.read(*merkle_leaves).await?);
                     merkle_leaves += 1;
-                    count += 1;
                 }
 
-                // Hash the batch's leaves across the strategy. The serial path appends in place;
-                // the parallel path hashes with a per-worker scratch buffer to avoid a per-leaf
-                // allocation (mirrors `add_many`), then appends the collected digests.
-                let strategy = merkle.strategy();
-                let batch = strategy.run(
-                    items.len(),
-                    || {
-                        let mut buf = Vec::new();
-                        let mut batch = merkle.new_batch();
-                        for item in &items {
-                            buf.clear();
-                            item.write(&mut buf);
-                            batch = batch.add(hasher, &buf);
-                        }
-                        batch
-                    },
-                    || {
-                        let digests = strategy.map_init_collect_vec(
-                            items.iter().enumerate(),
-                            Vec::new,
-                            |buf, (i, item)| {
-                                let pos = Position::try_from(first + i as u64)
-                                    .expect("valid leaf location");
-                                buf.clear();
-                                item.write(buf);
-                                hasher.leaf_digest(pos, buf.as_slice())
-                            },
-                        );
-                        merkle.new_batch().add_leaf_digests(digests)
-                    },
-                );
+                let batch = merkle.new_batch().add_many(hasher, &items);
                 let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
                 merkle.apply_batch(&batch)?;
             }
@@ -1227,9 +1179,9 @@ mod tests {
         journal.sync().await.unwrap();
 
         // Replay with a batch size that forces multiple batches on each side. `Sequential`
-        // always takes `run()`'s serial arm, and a `Manual`-wrapped strategy with more than one
-        // thread always takes the parallel arm (no adaptive policy), so the two replays are
-        // guaranteed to exercise both paths deterministically.
+        // hashes each batch serially, and a `Manual`-wrapped strategy runs the batch hashing
+        // across its pool without any adaptive policy, so the two replays deterministically
+        // exercise both the serial and parallel hashing paths.
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut serial = Merkle::<F, _, Digest, Sequential>::init(
             context.child("mmr_serial"),

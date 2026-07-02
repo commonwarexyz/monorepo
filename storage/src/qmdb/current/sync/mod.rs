@@ -197,28 +197,16 @@ where
         &any.log.merkle,
     );
     let partial = db::partial_chunk(any.bitmap.as_ref());
-    let grafted_root = db::compute_grafted_root::<F, H, _, _, N>(
+    let ops_root = any.root();
+    let root = db::compute_db_root::<F, H, _, _, N>(
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
+        partial,
         any.inactivity_floor_loc,
+        &ops_root,
     )
     .await?;
-    let ops_root = any.root();
-    let hasher = qmdb::hasher::<H>();
-    let partial_digest = partial.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(chunk.as_slice());
-        (next_bit, digest)
-    });
-    let pending_digest =
-        db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
-            .map(|chunk| hasher.digest(chunk.as_slice()));
-    let root = db::combine_roots::<H>(
-        &ops_root,
-        &grafted_root,
-        pending_digest.as_ref(),
-        partial_digest.as_ref().map(|(nb, d)| (*nb, d)),
-    );
 
     // Initialize metadata store and construct the Db.
     let (metadata, _, _) =

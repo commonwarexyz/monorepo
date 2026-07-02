@@ -10,7 +10,6 @@ use crate::{
         storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
     },
     qmdb::{
-        self,
         any::{
             self,
             batch::{DiffCursors, DiffEntry},
@@ -670,8 +669,7 @@ where
                 grafted_batch = grafted_batch.add_leaf_digest(digest);
             }
         }
-        let grafted_hasher =
-            grafting::GraftedHasher::<F, _>::new(qmdb::hasher::<H>(), grafting_height);
+        let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
         grafted_batch.merkleize(&current_db.grafted_tree, &grafted_hasher)
     };
 

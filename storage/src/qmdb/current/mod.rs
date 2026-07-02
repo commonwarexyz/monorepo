@@ -516,6 +516,7 @@ pub mod tests {
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
+            verify_proof,
         },
         translator::Translator,
     };
@@ -3869,9 +3870,6 @@ pub mod tests {
     /// Regression: `ops_historical_proof` must verify with QMDB's ops-tree hasher configuration.
     #[test_traced("INFO")]
     fn test_current_mmb_ops_historical_proof_verifies_with_backward_bagging() {
-        use crate::qmdb::verify_proof;
-        use commonware_utils::NZU64;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");

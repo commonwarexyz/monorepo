@@ -77,6 +77,13 @@ pub const fn height<const N: usize>() -> u32 {
     BitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
 }
 
+/// Return a [GraftedHasher] over QMDB's fixed Merkle hasher configuration.
+pub(super) const fn hasher<F: Graftable, H: Hasher>(
+    grafting_height: u32,
+) -> GraftedHasher<F, merkle::hasher::Standard<H>> {
+    GraftedHasher::new(qmdb::hasher(), grafting_height)
+}
+
 /// Return the number of bitmap chunks that have a corresponding height-G ancestor in the ops tree.
 ///
 /// - For MMR, this is always the same as the number of complete_chunks.
@@ -355,7 +362,6 @@ pub(super) struct Storage<
     grafting_height: u32,
     ops_tree: &'a S,
     grafted_hasher: GraftedHasher<F, merkle::hasher::Standard<H>>,
-    _phantom: PhantomData<F>,
 }
 
 impl<
@@ -372,8 +378,7 @@ impl<
             grafted_tree,
             grafting_height,
             ops_tree,
-            grafted_hasher: GraftedHasher::new(qmdb::hasher::<H>(), grafting_height),
-            _phantom: PhantomData,
+            grafted_hasher: hasher::<F, H>(grafting_height),
         }
     }
 
