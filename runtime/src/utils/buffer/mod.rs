@@ -37,7 +37,7 @@ impl From<crate::Handle<()>> for Completion {
 }
 
 /// Durability of already-issued blob mutations.
-enum State {
+enum Status {
     // No unsynced mutations.
     Clean,
     // Unsynced mutations need a sync.
@@ -65,7 +65,7 @@ enum State {
 ///    callers must not keep using the writer after one.
 struct SyncState {
     /// Durability of already-issued mutations.
-    state: State,
+    status: Status,
 
     /// A resize issued but not yet known to have completed.
     pending_resize: Option<u64>,
@@ -75,7 +75,7 @@ impl SyncState {
     /// A state whose blob has mutations needing a sync.
     const fn dirty() -> Self {
         Self {
-            state: State::Dirty,
+            status: Status::Dirty,
             pending_resize: None,
         }
     }
@@ -83,7 +83,7 @@ impl SyncState {
     /// A state whose blob has no unsynced mutations.
     const fn clean() -> Self {
         Self {
-            state: State::Clean,
+            status: Status::Clean,
             pending_resize: None,
         }
     }
@@ -91,25 +91,25 @@ impl SyncState {
     /// Mark a new unsynced mutation.
     fn mark_dirty(&mut self) {
         assert!(
-            !matches!(self.state, State::Pending(_)),
+            !matches!(self.status, Status::Pending(_)),
             "pending sync must be joined before marking dirty"
         );
-        self.state = State::Dirty;
+        self.status = Status::Dirty;
     }
 
     /// Wait for an in-flight sync before reusing or mutating the blob.
     async fn wait_for_pending(&mut self) -> Result<(), crate::Error> {
-        let State::Pending(pending) = &self.state else {
+        let Status::Pending(pending) = &self.status else {
             return Ok(());
         };
         match pending.wait().await {
             Ok(()) => {
-                self.state = State::Clean;
+                self.status = Status::Clean;
                 Ok(())
             }
             Err(err) => {
                 // The sync failed, so the pending mutations still need durability.
-                self.state = State::Dirty;
+                self.status = Status::Dirty;
                 Err(err)
             }
         }
@@ -155,22 +155,22 @@ impl SyncState {
     ) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
         self.settle(blob).await?;
-        match self.state {
-            State::Dirty => {
+        match self.status {
+            Status::Dirty => {
                 // Earlier mutations need a full durability barrier too.
                 blob.write_at(offset, bufs).await?;
                 blob.sync().await?;
-                self.state = State::Clean;
+                self.status = Status::Clean;
                 Ok(())
             }
-            State::Clean => {
+            Status::Clean => {
                 // If this fails, a later sync must still cover the attempted write.
                 self.mark_dirty();
                 blob.write_at_sync(offset, bufs).await?;
-                self.state = State::Clean;
+                self.status = Status::Clean;
                 Ok(())
             }
-            State::Pending(_) => unreachable!("pending sync waited above"),
+            Status::Pending(_) => unreachable!("pending sync waited above"),
         }
     }
 
@@ -198,11 +198,11 @@ impl SyncState {
     async fn sync(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
         self.settle(blob).await?;
-        if matches!(self.state, State::Clean) {
+        if matches!(self.status, Status::Clean) {
             return Ok(());
         }
         blob.sync().await?;
-        self.state = State::Clean;
+        self.status = Status::Clean;
         Ok(())
     }
 
@@ -212,16 +212,16 @@ impl SyncState {
         if let Err(err) = self.settle(blob).await {
             return crate::Handle::ready(Err(err));
         }
-        match &self.state {
-            State::Clean => crate::Handle::ready(Ok(())),
-            State::Dirty => {
+        match &self.status {
+            Status::Clean => crate::Handle::ready(Ok(())),
+            Status::Dirty => {
                 // Store a shared completion so repeated calls observe the same sync.
                 let pending = Completion::from(blob.start_sync().await);
                 let handle = pending.handle();
-                self.state = State::Pending(pending);
+                self.status = Status::Pending(pending);
                 handle
             }
-            State::Pending(pending) => pending.handle(),
+            Status::Pending(pending) => pending.handle(),
         }
     }
 }
