@@ -355,14 +355,12 @@ impl Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let payload = namespace
-            .map(|ns| Cow::Owned(union_unique(ns, message)))
-            .unwrap_or_else(|| Cow::Borrowed(message));
-        self.verifier.queue((
+        self.verifier.queue(
             public_key.key,
             ed_core::Signature::from(signature.raw),
-            &payload,
-        ));
+            namespace,
+            message,
+        );
         true
     }
 }
