@@ -247,6 +247,11 @@ impl<B: Blob> Write<B> {
         self.sync_state.start_sync(&self.blob).await
     }
 
+    /// Wait for any started sync to complete without starting a new sync.
+    pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
+        self.sync_state.wait_for_pending().await
+    }
+
     /// Write bytes to the underlying blob and make them durable.
     ///
     /// Uses [`Blob::write_at_sync`] when there are no earlier unsynced mutations. Otherwise, writes

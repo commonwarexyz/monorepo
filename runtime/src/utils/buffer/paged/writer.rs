@@ -948,6 +948,11 @@ impl<B: Blob> Writer<B> {
         self.sync_state.start_sync(&self.blob).await
     }
 
+    /// Wait for any started sync to complete without starting a new sync.
+    pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
+        self.sync_state.wait_for_pending().await
+    }
+
     /// Resize the blob to the provided logical `size`.
     ///
     /// This truncates the blob to contain only `size` logical bytes. The physical blob size will
@@ -1126,11 +1131,9 @@ impl<B: Blob> Writer<B> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::{
-            paged::CHECKSUM_SLOT_LEN_SIZE,
-            tests::{DelayedStartSyncBlob, SyncTrackingBlob},
-        },
+        buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
         deterministic,
+        mocks::{next_pending_sync, DelayedSyncBlob},
         telemetry::metrics::Registry,
         Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
@@ -2219,13 +2222,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started_rx, _blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
             let handle = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
 
             // Try to sync while the started sync is still blocked.
             let mut sync = Box::pin(writer.sync());
@@ -2239,7 +2241,7 @@ mod tests {
             assert_eq!(range_syncs, 0);
 
             // Release the started sync and retry.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             writer.sync().await.unwrap();
             handle.await.unwrap();
             let (_, _, full_syncs, range_syncs) = inner.snapshot();
@@ -2254,13 +2256,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started_rx, _blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
             let handle = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
             writer.append(b"hello world").await.unwrap();
 
             // Sync must wait before flushing the buffered write.
@@ -2276,7 +2277,7 @@ mod tests {
             assert_eq!(range_syncs, 0);
 
             // Release the started sync, then flush the buffered write.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             writer.sync().await.unwrap();
             handle.await.unwrap();
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
@@ -2292,13 +2293,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started_rx, blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
             let handle = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
 
             let data = vec![7; BUFFER_SIZE + PAGE_SIZE.get() as usize];
             let append = context.child("append").spawn(move |_| async move {
@@ -2306,14 +2306,17 @@ mod tests {
                 writer
             });
             // The append has reached the pending sync wait.
-            blocked_rx.await.expect("append never waited on start_sync");
+            deferred
+                .blocked
+                .await
+                .expect("append never waited on start_sync");
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 0);
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
             // Release the started sync so the append can flush.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             let mut writer = append.await.unwrap();
             handle.await.unwrap();
             writer.sync().await.unwrap();
@@ -2329,27 +2332,29 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started_rx, blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
             let prior = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
             writer.append(b"hello world").await.unwrap();
 
             let seal = context
                 .child("seal")
                 .spawn(move |_| async move { writer.seal().await });
             // The seal has reached the pending sync wait.
-            blocked_rx.await.expect("seal never waited on start_sync");
+            deferred
+                .blocked
+                .await
+                .expect("seal never waited on start_sync");
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 0);
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
             // Release the started sync so seal can flush.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             let sealed = seal.await.unwrap().unwrap();
             prior.await.unwrap();
             let read = sealed
@@ -2371,14 +2376,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started_rx, blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
             // Start a sync, then buffer newer bytes not covered by it.
             let prior = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
             writer.append(b"hello world").await.unwrap();
 
             let snapshot = context.child("snapshot").spawn(move |_| async move {
@@ -2393,7 +2397,8 @@ mod tests {
             });
 
             // Snapshot must wait before flushing buffered bytes.
-            blocked_rx
+            deferred
+                .blocked
                 .await
                 .expect("snapshot never waited on start_sync");
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
@@ -2402,7 +2407,7 @@ mod tests {
             assert_eq!(range_syncs, 0);
 
             // Releasing the sync lets snapshot flush and read the buffered bytes.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             let _writer = snapshot.await.unwrap();
             prior.await.unwrap();
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
@@ -2418,14 +2423,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started_rx, blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
             // Start a sync, then buffer newer bytes not covered by it.
             let prior = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
             writer.append(b"hello world").await.unwrap();
 
             let replay = context.child("replay").spawn(move |_| async move {
@@ -2438,14 +2442,17 @@ mod tests {
             });
 
             // Replay must wait before flushing buffered bytes.
-            blocked_rx.await.expect("replay never waited on start_sync");
+            deferred
+                .blocked
+                .await
+                .expect("replay never waited on start_sync");
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 0);
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
             // Releasing the sync lets replay flush and read the buffered bytes.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             let _writer = replay.await.unwrap();
             prior.await.unwrap();
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
@@ -2461,14 +2468,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started_rx, blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
             // Start a sync before growing into the direct-write path.
             let prior = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
 
             let target_size = (BUFFER_SIZE + PAGE_SIZE.get() as usize) as u64;
             let resize = context.child("resize_grow").spawn(move |_| async move {
@@ -2477,7 +2483,8 @@ mod tests {
             });
 
             // Growth must wait before writing zero-filled pages.
-            blocked_rx
+            deferred
+                .blocked
                 .await
                 .expect("resize grow never waited on start_sync");
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
@@ -2486,7 +2493,7 @@ mod tests {
             assert_eq!(range_syncs, 0);
 
             // Releasing the sync lets the resize complete.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             let mut writer = resize.await.unwrap();
             prior.await.unwrap();
             assert_eq!(writer.size(), target_size);
@@ -2503,8 +2510,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, started_rx, blocked_rx, release_tx) =
-                DelayedStartSyncBlob::new(inner.clone());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
@@ -2514,7 +2520,7 @@ mod tests {
             writer.sync().await.unwrap();
             writer.append(b"x").await.unwrap();
             let prior = writer.start_sync().await;
-            started_rx.await.expect("started sync was not issued");
+            let deferred = next_pending_sync(&pending);
             let physical_size = inner.size();
 
             let resize = context.child("resize_shrink").spawn(move |_| async move {
@@ -2523,7 +2529,8 @@ mod tests {
             });
 
             // Shrink must wait before truncating the physical blob.
-            blocked_rx
+            deferred
+                .blocked
                 .await
                 .expect("resize shrink never waited on start_sync");
             assert_eq!(
@@ -2533,7 +2540,7 @@ mod tests {
             );
 
             // Releasing the sync lets the shrink truncate the blob.
-            release_tx.send(Ok(())).unwrap();
+            deferred.release.send(Ok(())).unwrap();
             let writer = resize.await.unwrap();
             prior.await.unwrap();
             assert_eq!(writer.size(), PAGE_SIZE.get() as u64);

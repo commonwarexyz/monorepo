@@ -39,7 +39,6 @@ commonware-math.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage = { path = ".", features = ["std", "test-utils"] }
 criterion.workspace = true
-governor.workspace = true
 paste.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
