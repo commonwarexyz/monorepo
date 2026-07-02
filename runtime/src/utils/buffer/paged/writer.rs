@@ -1016,10 +1016,15 @@ impl<B: Blob> Writer<B> {
 
         // A logical shrink can leave the physical page count unchanged. Only real physical
         // resizes need to create a pending sync.
+        //
+        // Resize the blob directly, not through [SyncState::resize]: this writer publishes
+        // its state only after the truncate returns, so a recorded resize re-issued by a
+        // later operation (see [SyncState::settle]) would truncate under state that still
+        // claims the old size. A dropped truncate here is simply a no-op.
         if new_physical_size != current_physical_size {
-            self.sync_state
-                .resize(&self.blob, new_physical_size)
-                .await?;
+            self.sync_state.wait_for_pending().await?;
+            self.sync_state.mark_dirty();
+            self.blob.resize(new_physical_size).await?;
         }
 
         // Evict cached pages at or beyond the new full-page boundary. The page at
@@ -1152,6 +1157,59 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    // A shrink dropped before its truncate reaches the blob is a no-op: it must not record a
+    // resize that a later operation applies under state still claiming the old size.
+    #[test_traced("DEBUG")]
+    fn test_shrink_cancel_before_truncate_is_noop() {
+        use crate::buffer::tests::{GatePosition, GatedResizeBlob};
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_noop")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedResizeBlob::new(inner, GatePosition::Before);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..3 * page + 50).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Cancel a shrink parked before the truncate reaches the blob: nothing happened.
+            gate.cancel(writer.resize(page as u64 + 30)).await;
+            assert_eq!(writer.size(), data.len() as u64);
+
+            // The writer carries on: appends and syncs land as if the shrink was never asked.
+            writer.append(&data[..10]).await.unwrap();
+            writer.sync().await.unwrap();
+            let expected_size = (data.len() + 10) as u64;
+            assert_eq!(writer.size(), expected_size);
+            drop(writer);
+
+            // The acknowledged state survives a restart.
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_noop")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), expected_size);
+            let read = reopened
+                .read_at(0, expected_size as usize)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(&read.as_ref()[..data.len()], data.as_slice());
+            assert_eq!(&read.as_ref()[data.len()..], &data[..10]);
+        });
+    }
 
     #[test_traced("DEBUG")]
     fn test_read_many_into_empty() {
