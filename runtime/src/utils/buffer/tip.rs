@@ -97,10 +97,6 @@ impl Buffer {
 
     /// Discards the first `n` bytes of the buffer and advances the offset by `n`.
     ///
-    /// To flush, callers write a [Self::slice] view of the buffered bytes to the blob and call
-    /// this only after the write succeeds. The buffer keeps the bytes until then, so a dropped
-    /// or failed write loses nothing and a retry re-flushes them.
-    ///
     /// # Panics
     ///
     /// Panics if `n` is greater than the length of the buffer.
