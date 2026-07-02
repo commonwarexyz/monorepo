@@ -708,8 +708,7 @@ where
                     if self.verified_writes.get(&round) == Some(&digest) {
                         debug!(?round, "notarized block covered by verified write");
                     } else {
-                        let handle =
-                            self.cache.put_notarized(round, digest, block.into()).await;
+                        let handle = self.cache.put_notarized(round, digest, block.into()).await;
                         syncs.push(handle);
                     }
                 } else {

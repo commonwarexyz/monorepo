@@ -725,9 +725,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(
-                marshal.verified(parent_round, parent).await
-            );
+            assert!(marshal.verified(parent_round, parent).await);
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -808,9 +806,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(
-                marshal.verified(parent_round, parent).await
-            );
+            assert!(marshal.verified(parent_round, parent).await);
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -1073,9 +1069,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(
-                marshal.verified(parent_round, parent).await
-            );
+            assert!(marshal.verified(parent_round, parent).await);
 
             // The leader builds the child via `app.propose`.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -1292,9 +1286,7 @@ mod tests {
             let pre_application = pre_setup.application;
 
             let stale_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
-            assert!(
-                pre_marshal.verified(round, stale_block).await
-            );
+            assert!(pre_marshal.verified(round, stale_block).await);
 
             // Simulate a crash: abort the actor and drop every handle so the
             // storage partition is fully released before reopening.

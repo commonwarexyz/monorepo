@@ -2453,9 +2453,7 @@ mod tests {
 
             // Validator 1 proposes coded_block_b (same inner block, different coding).
             // This stores it in v1's shard engine and actor cache.
-            assert!(
-                v1_mailbox.verified(round1, coded_block_b.clone()).await
-            );
+            assert!(v1_mailbox.verified(round1, coded_block_b.clone()).await);
             context.sleep(Duration::from_millis(100)).await;
 
             // Create finalization referencing commitment_a (the "correct" commitment).
@@ -3010,9 +3008,7 @@ mod tests {
             let stale_block = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
             let stale_coded: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
                 CodedBlock::new(stale_block, coding_config, &Sequential);
-            assert!(
-                marshal.verified(round, stale_coded).await
-            );
+            assert!(marshal.verified(round, stale_coded).await);
 
             // Simulate a replay where parent selection now points to a
             // different parent commitment than the cached block was built for.

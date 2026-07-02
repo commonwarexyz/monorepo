@@ -907,9 +907,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(context_a.clone(), parent_digest, Height::new(2), 200);
             let commitment_a = StandardHarness::commitment(&block_a);
-            assert!(
-                marshal.verified(round_a, block_a.clone()).await
-            );
+            assert!(marshal.verified(round_a, block_a.clone()).await);
 
             // Block B at view 10 (height 2, different block same height)
             let round_b = Round::new(Epoch::new(0), View::new(10));
@@ -920,9 +918,7 @@ mod tests {
             };
             let block_b = B::new::<Sha256>(context_b.clone(), parent_digest, Height::new(2), 300);
             let commitment_b = StandardHarness::commitment(&block_b);
-            assert!(
-                marshal.verified(round_b, block_b.clone()).await
-            );
+            assert!(marshal.verified(round_b, block_b.clone()).await);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1151,9 +1147,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(context_a, parent.digest(), Height::new(2), 200);
             let commitment_a = StandardHarness::commitment(&block_a);
-            assert!(
-                marshal.verified(round_a, block_a).await
-            );
+            assert!(marshal.verified(round_a, block_a).await);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1405,9 +1399,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
             let digest_a = block_a.digest();
-            assert!(
-                marshal.verified(round, block_a.clone()).await
-            );
+            assert!(marshal.verified(round, block_a.clone()).await);
 
             let block_b = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
             let digest_b = block_b.digest();
@@ -1475,9 +1467,7 @@ mod tests {
                 parent: (View::zero(), genesis.digest()),
             };
             let stale_block = B::new::<Sha256>(stale_ctx, genesis.digest(), Height::new(1), 100);
-            assert!(
-                marshal.verified(round, stale_block).await
-            );
+            assert!(marshal.verified(round, stale_block).await);
 
             // Simulate a replay where parent selection now points to a
             // different parent view than the cached block was built for.
@@ -1546,9 +1536,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(
-                marshal.verified(parent_round, parent).await
-            );
+            assert!(marshal.verified(parent_round, parent).await);
 
             // The leader builds the child via `app.propose`.
             let round = Round::new(Epoch::zero(), View::new(2));

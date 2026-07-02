@@ -1563,9 +1563,7 @@ mod tests {
             for block in &canonical {
                 let height = block.height();
                 let round = Round::new(Epoch::zero(), View::new(height.get()));
-                assert!(
-                    mailbox.verified(round, block.clone()).await
-                );
+                assert!(mailbox.verified(round, block.clone()).await);
                 let finalization = StandardHarness::make_finalization(
                     Proposal {
                         round,
@@ -1630,9 +1628,7 @@ mod tests {
             // canonical chain.
             let next = make_raw_block(canonical[2].digest(), Height::new(4), 4);
             let next_round = Round::new(Epoch::zero(), View::new(5));
-            assert!(
-                mailbox.verified(next_round, next.clone()).await
-            );
+            assert!(mailbox.verified(next_round, next.clone()).await);
             let next_finalization = StandardHarness::make_finalization(
                 Proposal {
                     round: next_round,
@@ -2171,9 +2167,7 @@ mod tests {
                 let child =
                     B::new::<Sha256>(child_context.clone(), parent_digest, Height::new(3), 200);
                 let child_digest = child.digest();
-                assert!(
-                    marshal.verified(child_round, child).await
-                );
+                assert!(marshal.verified(child_round, child).await);
 
                 let verify = wrapper.verify(child_context, child_digest).await;
                 wait_until(
@@ -2208,9 +2202,7 @@ mod tests {
                     "{kind:?}: malicious child height must not drive parent fetches"
                 );
 
-                assert!(
-                    marshal.verified(parent_round, parent).await
-                );
+                assert!(marshal.verified(parent_round, parent).await);
                 let verify_result = verify.await.expect("verify result missing");
                 if kind == WrapperKind::Inline {
                     assert!(
@@ -2743,9 +2735,7 @@ mod tests {
                 let parent =
                     B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 300);
                 let parent_digest = parent.digest();
-                assert!(
-                    marshal.verified(parent_round, parent).await
-                );
+                assert!(marshal.verified(parent_round, parent).await);
 
                 let mismatch_round = Round::new(Epoch::zero(), View::new(3));
                 let mismatched_context = Ctx {
@@ -3555,9 +3545,7 @@ mod tests {
 
             let served = make_raw_block(Sha256::hash(b"served-parent"), Height::new(1), 100);
             let served_round = Round::new(Epoch::zero(), View::new(1));
-            assert!(
-                mailbox.verified(served_round, served.clone()).await
-            );
+            assert!(mailbox.verified(served_round, served.clone()).await);
             let (response, response_rx) = oneshot::channel();
             resolver.enqueue(handler::Message::Produce {
                 key: handler::Key::Block(StandardHarness::commitment(&served)),
@@ -3567,9 +3555,7 @@ mod tests {
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(
-                mailbox.verified(next_round, next.clone()).await
-            );
+            assert!(mailbox.verified(next_round, next.clone()).await);
             let next_finalization = StandardHarness::make_finalization(
                 Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
                 &schemes,
@@ -3580,9 +3566,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
 
-            assert!(
-                mailbox.verified(floor_round, floor_block).await
-            );
+            assert!(mailbox.verified(floor_round, floor_block).await);
             assert_eq!(started_rx.await.unwrap(), Height::new(5));
         });
     }
@@ -3639,9 +3623,7 @@ mod tests {
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(
-                mailbox.verified(next_round, next.clone()).await
-            );
+            assert!(mailbox.verified(next_round, next.clone()).await);
             let next_finalization = StandardHarness::make_finalization(
                 Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
                 &schemes,
@@ -3760,9 +3742,7 @@ mod tests {
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(
-                mailbox.verified(next_round, next.clone()).await
-            );
+            assert!(mailbox.verified(next_round, next.clone()).await);
             let next_finalization = StandardHarness::make_finalization(
                 Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
                 &schemes,
@@ -3837,9 +3817,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(
-                mailbox.verified(block1_round, block1.clone()).await
-            );
+            assert!(mailbox.verified(block1_round, block1.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -3880,9 +3858,7 @@ mod tests {
             )
             .await;
 
-            assert!(
-                mailbox.verified(floor_round, floor_block.clone()).await
-            );
+            assert!(mailbox.verified(floor_round, floor_block.clone()).await);
             assert_eq!(
                 mailbox
                     .get_block(Height::new(5))
@@ -3945,9 +3921,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(
-                mailbox.verified(block1_round, block1).await
-            );
+            assert!(mailbox.verified(block1_round, block1).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -4058,9 +4032,7 @@ mod tests {
             let missing = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let later = make_raw_block(missing.digest(), Height::new(7), 700);
             let later_round = Round::new(Epoch::zero(), View::new(7));
-            assert!(
-                mailbox.verified(later_round, later.clone()).await
-            );
+            assert!(mailbox.verified(later_round, later.clone()).await);
             let later_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     later_round,
@@ -4085,9 +4057,7 @@ mod tests {
                 "gap repair must wait until the floor anchor is resolved"
             );
 
-            assert!(
-                mailbox.verified(floor_round, floor_block).await
-            );
+            assert!(mailbox.verified(floor_round, floor_block).await);
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -4177,9 +4147,7 @@ mod tests {
             )
             .await;
 
-            assert!(
-                mailbox.verified(floor_round, floor_block).await
-            );
+            assert!(mailbox.verified(floor_round, floor_block).await);
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -4277,9 +4245,7 @@ mod tests {
 
             let old_next_round = Round::new(Epoch::zero(), View::new(6));
             let old_next = make_raw_block(old_floor_block.digest(), Height::new(6), 600);
-            assert!(
-                mailbox.verified(old_next_round, old_next.clone()).await
-            );
+            assert!(mailbox.verified(old_next_round, old_next.clone()).await);
             let old_next_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     old_next_round,
@@ -4294,9 +4260,7 @@ mod tests {
 
             let new_next_round = Round::new(Epoch::zero(), View::new(8));
             let new_next = make_raw_block(new_floor_block.digest(), Height::new(8), 800);
-            assert!(
-                mailbox.verified(new_next_round, new_next.clone()).await
-            );
+            assert!(mailbox.verified(new_next_round, new_next.clone()).await);
             let new_next_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     new_next_round,
@@ -4426,9 +4390,7 @@ mod tests {
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(
-                mailbox.verified(next_round, next.clone()).await
-            );
+            assert!(mailbox.verified(next_round, next.clone()).await);
             let next_finalization = StandardHarness::make_finalization(
                 Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
                 &schemes,
@@ -4477,9 +4439,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(
-                mailbox.verified(block1_round, block1.clone()).await
-            );
+            assert!(mailbox.verified(block1_round, block1.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -4533,9 +4493,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(
-                mailbox.verified(block2_round, block2).await
-            );
+            assert!(mailbox.verified(block2_round, block2).await);
             StandardHarness::report_finalization(&mut mailbox, block2_finalization).await;
             assert!(mailbox.get_finalization(Height::new(2)).await.is_some());
             context.sleep(Duration::from_millis(100)).await;
@@ -4548,9 +4506,7 @@ mod tests {
 
             // Once the anchor arrives, dispatch restarts at the floor
             // successor instead of treating the stale ack as progress.
-            assert!(
-                mailbox.verified(floor_round, floor_block).await
-            );
+            assert!(mailbox.verified(floor_round, floor_block).await);
             select! {
                 height = application.acknowledged() => {
                     assert_eq!(
@@ -4599,9 +4555,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(
-                mailbox.verified(block1_round, block1).await
-            );
+            assert!(mailbox.verified(block1_round, block1).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -4678,9 +4632,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(
-                mailbox.verified(block1_round, block1.clone()).await
-            );
+            assert!(mailbox.verified(block1_round, block1.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -4711,9 +4663,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(
-                mailbox.verified(block2_round, block2).await
-            );
+            assert!(mailbox.verified(block2_round, block2).await);
             StandardHarness::report_finalization(&mut mailbox, block2_finalization).await;
             wait_until(
                 &context,
@@ -4816,9 +4766,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(
-                mailbox.verified(block1_round, block1.clone()).await
-            );
+            assert!(mailbox.verified(block1_round, block1.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -4849,9 +4797,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(
-                mailbox.verified(block2_round, block2).await
-            );
+            assert!(mailbox.verified(block2_round, block2).await);
             StandardHarness::report_finalization(&mut mailbox, block2_finalization).await;
             wait_until(
                 &context,
@@ -4913,9 +4859,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(
-                mailbox.verified(block_round, block.clone()).await
-            );
+            assert!(mailbox.verified(block_round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
             assert_eq!(application.acknowledged().await, Height::new(1));
 
@@ -5382,7 +5326,7 @@ mod tests {
                 mailbox
                     .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
                     .await,
-                    "barrier verification should be processed"
+                "barrier verification should be processed"
             );
             assert_eq!(
                 resolver.fetches().len(),
@@ -5430,9 +5374,7 @@ mod tests {
             let mut mailbox = mailbox;
             assert_eq!(application.acknowledged().await, Height::zero());
 
-            assert!(
-                mailbox.verified(round, block.clone()).await
-            );
+            assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             let retain_floor = resolver.retain_count() + 2;
@@ -5551,9 +5493,7 @@ mod tests {
             let mut mailbox = mailbox;
             assert_eq!(application.acknowledged().await, Height::zero());
 
-            assert!(
-                mailbox.verified(round, block.clone()).await
-            );
+            assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             let retain_floor = resolver.retain_count() + 2;
@@ -5742,9 +5682,7 @@ mod tests {
             )
             .await;
 
-            assert!(
-                mailbox.verified(floor_round, floor_block.clone()).await
-            );
+            assert!(mailbox.verified(floor_round, floor_block.clone()).await);
             mailbox.set_floor(floor_finalization);
             select! {
                 height = started => {
@@ -5788,7 +5726,7 @@ mod tests {
                 mailbox
                     .verified(Round::new(Epoch::zero(), View::new(6)), barrier)
                     .await,
-                    "barrier verification should be processed"
+                "barrier verification should be processed"
             );
             wait_until(
                 &context,
@@ -5851,9 +5789,7 @@ mod tests {
             .await;
 
             mailbox.set_floor(finalization.clone());
-            assert!(
-                mailbox.verified(round, block.clone()).await
-            );
+            assert!(mailbox.verified(round, block.clone()).await);
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -6078,9 +6014,7 @@ mod tests {
             )
             .await;
 
-            assert!(
-                mailbox.verified(round, block.clone()).await
-            );
+            assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
 
             select! {
@@ -6415,9 +6349,7 @@ mod tests {
             .await;
             let buffer = buffer.expect("buffer was provided");
 
-            assert!(
-                mailbox.verified(round, block.clone()).await
-            );
+            assert!(mailbox.verified(round, block.clone()).await);
 
             let targets = vec![participants[1].clone(), participants[2].clone()];
             mailbox.forward(round, digest, Recipients::Some(targets.clone()));
@@ -6480,9 +6412,7 @@ mod tests {
                 QUORUM,
             );
             mailbox.set_floor(finalization);
-            assert!(
-                mailbox.verified(floor_round, floor_anchor).await
-            );
+            assert!(mailbox.verified(floor_round, floor_anchor).await);
             context.sleep(Duration::from_millis(50)).await;
 
             mailbox.hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()));
@@ -6526,9 +6456,7 @@ mod tests {
             )
             .await;
 
-            assert!(
-                mailbox.verified(round, block.clone()).await
-            );
+            assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             // Wait until marshal has durably stored the finalization.
@@ -6619,9 +6547,7 @@ mod tests {
             )
             .await;
 
-            assert!(
-                mailbox.verified(round, block.clone()).await
-            );
+            assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             while mailbox.get_finalization(Height::new(1)).await.is_none() {
