@@ -158,6 +158,18 @@ commonware_macros::stability_scope!(BETA {
         /// Create a new batch verifier.
         fn new() -> Self;
 
+        /// Create a new batch verifier with capacity for at least `capacity` items.
+        ///
+        /// The capacity is a hint: more than `capacity` items may be added, and
+        /// implementations may ignore it.
+        fn with_capacity(capacity: usize) -> Self
+        where
+            Self: Sized,
+        {
+            let _ = capacity;
+            Self::new()
+        }
+
         /// Append item to the batch.
         ///
         /// The message should not be hashed prior to calling this function. If a particular scheme

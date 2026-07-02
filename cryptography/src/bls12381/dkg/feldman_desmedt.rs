@@ -626,7 +626,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             return false;
         };
         let ack_summary = transcript_for_ack(round_transcript, dealer, &log.pub_msg).summarize();
-        let mut ack_batch = B::new();
+        let mut ack_batch = B::with_capacity(self.players.len());
         let mut reveal_count = 0;
         let max_reveals = self.max_reveals::<M>();
         let mut reveal_eval_points = Vec::new();

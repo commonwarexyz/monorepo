@@ -380,6 +380,14 @@ impl BatchVerifier for Batch {
         }
     }
 
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            publics: Vec::with_capacity(capacity),
+            hms: Vec::with_capacity(capacity),
+            signatures: Vec::with_capacity(capacity),
+        }
+    }
+
     fn add(
         &mut self,
         namespace: &[u8],

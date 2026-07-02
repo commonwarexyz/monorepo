@@ -80,6 +80,14 @@ impl Verifier {
         Self::default()
     }
 
+    /// Construct a new batch verifier with capacity for `capacity` queued
+    /// signatures.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            signatures: Vec::with_capacity(capacity),
+        }
+    }
+
     /// Queue a `(key, signature)` pair for verification of `message` under
     /// `namespace`.
     pub fn queue(
@@ -158,6 +166,9 @@ impl Verifier {
                 // the usual method. However, when m = 1 and all signatures are from a
                 // single verification key, this is nearly twice as fast.
 
+                // Group the shard's signatures by verification key (ahash's
+                // AHashMap requires std, so use hashbrown's map with the ahash
+                // hasher to retain no_std support).
                 let n = shard.len();
                 let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
                     HashMap::with_capacity_and_hasher(n, RandomState::default());
