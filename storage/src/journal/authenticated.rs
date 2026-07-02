@@ -321,10 +321,10 @@ where
         self.merkle.with_mem(f)
     }
 
-    /// Like [`Contiguous::read_many`], but skips the synchronous page-cache pass. Intended for
-    /// callers that already served cache hits via [`Contiguous::read_many_sync`] and are reading
-    /// the misses.
-    pub(crate) async fn read_many_misses(
+    /// Like [`Contiguous::read_many`], but reads the journal directly, skipping the synchronous
+    /// page-cache pass. Intended for callers that already served cache hits via
+    /// [`Contiguous::read_many_sync`] and are reading the misses.
+    pub(crate) async fn read_many_direct(
         &self,
         positions: &[u64],
     ) -> Result<Vec<C::Item>, JournalError> {
@@ -757,15 +757,16 @@ where
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<C::Item>, JournalError> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+
         // Serve page-cache hits synchronously and fall back to a single batched read for the
         // misses. The strategy policy decides per batch size whether the sync pass runs on the
         // calling thread or sharded across the pool (one scratch buffer per shard and one
         // cache-lock acquisition per blob a shard touches). The sortedness pre-check keeps
         // contract violations deterministic: without it, a non-increasing batch would error
         // only when some position missed the cache.
-        if positions.is_empty() {
-            return Ok(Vec::new());
-        }
         if !positions.windows(2).all(|w| w[0] < w[1]) {
             return self.journal.read_many(positions).await;
         }
@@ -953,12 +954,20 @@ mod tests {
 
     /// Create Merkle configuration for tests.
     fn merkle_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
+        merkle_config_with(suffix, pooler, Sequential)
+    }
+
+    fn merkle_config_with<S: Strategy>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+        strategy: S,
+    ) -> MerkleConfig<S> {
         MerkleConfig {
             journal_partition: format!("mmr-journal-{suffix}"),
             metadata_partition: format!("mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
-            strategy: Sequential,
+            strategy,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -1025,14 +1034,7 @@ mod tests {
             // positions through the batched miss fallback while the write buffer serves
             // the tail synchronously.
             let strategy = context.create_strategy(NZUsize!(2)).unwrap();
-            let merkle_cfg = MerkleConfig {
-                journal_partition: "mmr-journal-shard".into(),
-                metadata_partition: "mmr-metadata-shard".into(),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
-                strategy,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
+            let merkle_cfg = merkle_config_with("shard", &context, strategy);
             let journal_cfg = journal_config("shard", &context);
             type RayonJournal = Journal<
                 mmr::Family,

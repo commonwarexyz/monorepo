@@ -67,7 +67,8 @@ where
     metadata: Option<U::Value>,
 }
 
-/// Staged batch for a [`CurrentUnmerkleized`] batch.
+/// Staged batch returned by [`CurrentUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
+/// reference to the parent database.
 ///
 /// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
 /// stays valid only while every batch finalized on the database is an ancestor of this batch
@@ -124,6 +125,8 @@ where
     }
 
     /// Read multiple values and return a staged batch for the same keys.
+    ///
+    /// Returns results in the same order as the input keys.
     pub async fn stage(
         self,
         keys: &[&K],
@@ -213,6 +216,7 @@ where
     }
 }
 
+/// Read-expansion operations for the `current` staged batch.
 impl<F, E, C, I, H, U, const N: usize, S> CurrentStaged<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
@@ -224,6 +228,13 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    /// Set commit metadata included in the [`merkleize`](Self::merkleize) call, replacing any
+    /// metadata set before staging.
+    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
     /// Expand this staged batch with more reads.
     ///
     /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
@@ -255,6 +266,7 @@ where
     }
 }
 
+/// Staged merkleize for the `current` unordered update kind.
 impl<F, E, C, I, H, K, V, const N: usize, S>
     CurrentStaged<F, E, C, I, H, unordered::Update<K, V>, N, S>
 where
@@ -273,9 +285,10 @@ where
     /// Consumes the staged handle and write vectors. Call [`expand`](CurrentStaged::expand)
     /// before this method if more keys must be read into the staged index space.
     ///
-    /// Update indices refer to the staged read set: the initial `stage` input followed by any
-    /// [`expand`](CurrentStaged::expand) ranges. `metadata` is committed with the returned batch;
-    /// if it is `None`, metadata set before staging is used.
+    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// set: the initial `stage` input followed by any [`expand`](CurrentStaged::expand) ranges.
+    /// Metadata set via [`with_metadata`](CurrentStaged::with_metadata) (or before staging) is
+    /// committed with the returned batch.
     ///
     /// # Panics
     ///
@@ -284,23 +297,23 @@ where
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
     ) -> Result<CurrentMerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>, Error<F>> {
         let Self {
             staged,
             db,
-            metadata: staged_metadata,
+            metadata,
         } = self;
         let inner = {
             let guard = db.read().await;
             staged
-                .merkleize(updates, upserts, metadata.or(staged_metadata), &*guard)
+                .merkleize(updates, upserts, metadata, &*guard)
                 .await?
         };
         Ok(CurrentMerkleized { inner, db })
     }
 }
 
+/// Staged merkleize for the `current` ordered update kind.
 impl<F, E, C, I, H, K, V, const N: usize, S>
     CurrentStaged<F, E, C, I, H, ordered::Update<K, V>, N, S>
 where
@@ -319,9 +332,10 @@ where
     /// Consumes the staged handle and write vectors. Call [`expand`](CurrentStaged::expand)
     /// before this method if more keys must be read into the staged index space.
     ///
-    /// Update indices refer to the staged read set: the initial `stage` input followed by any
-    /// [`expand`](CurrentStaged::expand) ranges. `metadata` is committed with the returned batch;
-    /// if it is `None`, metadata set before staging is used.
+    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// set: the initial `stage` input followed by any [`expand`](CurrentStaged::expand) ranges.
+    /// Metadata set via [`with_metadata`](CurrentStaged::with_metadata) (or before staging) is
+    /// committed with the returned batch.
     ///
     /// # Panics
     ///
@@ -330,17 +344,16 @@ where
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
     ) -> Result<CurrentMerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>, Error<F>> {
         let Self {
             staged,
             db,
-            metadata: staged_metadata,
+            metadata,
         } = self;
         let inner = {
             let guard = db.read().await;
             staged
-                .merkleize(updates, upserts, metadata.or(staged_metadata), &*guard)
+                .merkleize(updates, upserts, metadata, &*guard)
                 .await?
         };
         Ok(CurrentMerkleized { inner, db })
@@ -383,6 +396,8 @@ where
     }
 
     /// Read multiple values and return a staged batch for the same keys.
+    ///
+    /// Returns results in the same order as the input keys.
     pub async fn stage(
         self,
         keys: &[&K],
@@ -1383,10 +1398,11 @@ mod tests {
 
     /// The glue staged wrapper (`CurrentUnmerkleized::stage` -> `CurrentStaged::expand` ->
     /// `CurrentStaged::merkleize`) must return the same values and root as an explicit `get_many` +
-    /// `write` + `merkleize`, including a staged delete, an upsert, and metadata passed to staged
-    /// merkleize. This guards metadata flow and db-handle pairing through the wrapper.
+    /// `write` + `merkleize`, including a staged delete, an upsert, and metadata flow (both set
+    /// on the staged handle via `with_metadata` and carried from before staging). This guards
+    /// metadata flow and db-handle pairing through the wrapper.
     #[test]
-    fn current_glue_staged_merkleize_matches_explicit_writes() {
+    fn ordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("ordered-fixed-glue-staged", &context);
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
@@ -1434,7 +1450,7 @@ mod tests {
                     .unwrap()
                     .root();
 
-            // Staged path.
+            // Staged path, with metadata set on the staged handle.
             let staged_batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
             let split = 2;
             let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
@@ -1442,7 +1458,8 @@ mod tests {
             assert_eq!(range, split..keys.len());
             staged_values.extend(suffix_values);
             let staged_root = staged
-                .merkleize(indexed_updates.clone(), upserts.clone(), Some(metadata))
+                .with_metadata(metadata)
+                .merkleize(indexed_updates.clone(), upserts.clone())
                 .await
                 .unwrap()
                 .root();
@@ -1450,18 +1467,18 @@ mod tests {
             assert_eq!(explicit_values, staged_values);
             assert_eq!(explicit_root, staged_root);
 
-            // Metadata set before staging must be committed when staged merkleize passes `None`.
-            let fallback_batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
+            // Metadata set before staging must be carried through to staged merkleize.
+            let carried_batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
                 .with_metadata(metadata);
-            let (fallback_values, staged) = fallback_batch.stage(&keys).await.unwrap();
-            let fallback_root = staged
-                .merkleize(indexed_updates.clone(), upserts.clone(), None)
+            let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
+            let carried_root = staged
+                .merkleize(indexed_updates.clone(), upserts.clone())
                 .await
                 .unwrap()
                 .root();
-            assert_eq!(explicit_values, fallback_values);
-            assert_eq!(explicit_root, fallback_root);
+            assert_eq!(explicit_values, carried_values);
+            assert_eq!(explicit_root, carried_root);
         });
     }
 

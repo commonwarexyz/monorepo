@@ -549,10 +549,10 @@ impl<'a, B: RBlob> Blob<'a, B> {
     ) -> Result<Vec<usize>, Error> {
         match self {
             Self::Writer(writer) => writer
-                .read_many_sync_cached(buf, offsets, item_size)
+                .read_many_sync_into(buf, offsets, item_size)
                 .map_err(Error::Runtime),
             Self::Sealed(sealed) => sealed
-                .read_many_sync_cached(buf, offsets, item_size)
+                .read_many_sync_into(buf, offsets, item_size)
                 .map_err(Error::Runtime),
         }
     }
@@ -565,10 +565,10 @@ impl<'a, B: RBlob> Blob<'a, B> {
     ) -> Result<Vec<usize>, Error> {
         match self {
             Self::Writer(writer) => writer
-                .read_ranges_sync_cached(buf, ranges)
+                .read_ranges_sync_into(buf, ranges)
                 .map_err(Error::Runtime),
             Self::Sealed(sealed) => sealed
-                .read_ranges_sync_cached(buf, ranges)
+                .read_ranges_sync_into(buf, ranges)
                 .map_err(Error::Runtime),
         }
     }

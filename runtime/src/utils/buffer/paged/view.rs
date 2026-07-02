@@ -199,7 +199,7 @@ impl<B: Blob> View<'_, B> {
     /// Items fully served from the in-memory tail and page cache are written to their slots in
     /// `buf`. Returns the indices of items that require a blob read; those slots hold
     /// unspecified bytes.
-    pub fn read_many_sync_cached(
+    pub fn read_many_sync_into(
         &self,
         buf: &mut [u8],
         offsets: &[u64],
@@ -231,10 +231,10 @@ impl<B: Blob> View<'_, B> {
         Ok(misses)
     }
 
-    /// Like [`Self::read_many_sync_cached`], but for variable-length ranges: `buf` holds one
+    /// Like [`Self::read_many_sync_into`], but for variable-length ranges: `buf` holds one
     /// slot per `(offset, len)` range, back to back. Returns the indices of ranges that require
     /// a blob read; their slots hold unspecified bytes.
-    pub fn read_ranges_sync_cached(
+    pub fn read_ranges_sync_into(
         &self,
         buf: &mut [u8],
         ranges: &[(u64, usize)],

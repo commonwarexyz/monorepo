@@ -67,7 +67,8 @@ where
     metadata: Option<U::Value>,
 }
 
-/// Staged batch for an [`AnyUnmerkleized`] batch.
+/// Staged batch returned by [`AnyUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
+/// reference to the parent database.
 ///
 /// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
 /// stays valid only while every batch finalized on the database is an ancestor of this batch
@@ -123,6 +124,8 @@ where
     }
 
     /// Read multiple values and return a staged batch for the same keys.
+    ///
+    /// Returns results in the same order as the input keys.
     pub async fn stage(
         self,
         keys: &[&K],
@@ -212,6 +215,7 @@ where
     }
 }
 
+/// Read-expansion operations for the `any` staged batch.
 impl<F, E, C, I, H, U, S> AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -223,6 +227,13 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    /// Set commit metadata included in the [`merkleize`](Self::merkleize) call, replacing any
+    /// metadata set before staging.
+    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
     /// Expand this staged batch with more reads.
     ///
     /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
@@ -254,6 +265,7 @@ where
     }
 }
 
+/// Staged merkleize for the `any` unordered update kind.
 impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>
 where
     F: Family,
@@ -271,9 +283,10 @@ where
     /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
     /// this method if more keys must be read into the staged index space.
     ///
-    /// Update indices refer to the staged read set: the initial `stage` input followed by any
-    /// [`expand`](AnyStaged::expand) ranges. `metadata` is committed with the returned batch; if it
-    /// is `None`, metadata set before staging is used.
+    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// set: the initial `stage` input followed by any [`expand`](AnyStaged::expand) ranges. Metadata
+    /// set via [`with_metadata`](AnyStaged::with_metadata) (or before staging) is committed with the
+    /// returned batch.
     ///
     /// # Panics
     ///
@@ -282,23 +295,23 @@ where
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>, Error<F>> {
         let Self {
             staged,
             db,
-            metadata: staged_metadata,
+            metadata,
         } = self;
         let inner = {
             let guard = db.read().await;
             staged
-                .merkleize(updates, upserts, metadata.or(staged_metadata), &*guard)
+                .merkleize(updates, upserts, metadata, &*guard)
                 .await?
         };
         Ok(AnyMerkleized { inner, db })
     }
 }
 
+/// Staged merkleize for the `any` ordered update kind.
 impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, ordered::Update<K, V>, S>
 where
     F: Family,
@@ -316,9 +329,10 @@ where
     /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
     /// this method if more keys must be read into the staged index space.
     ///
-    /// Update indices refer to the staged read set: the initial `stage` input followed by any
-    /// [`expand`](AnyStaged::expand) ranges. `metadata` is committed with the returned batch; if it
-    /// is `None`, metadata set before staging is used.
+    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// set: the initial `stage` input followed by any [`expand`](AnyStaged::expand) ranges. Metadata
+    /// set via [`with_metadata`](AnyStaged::with_metadata) (or before staging) is committed with the
+    /// returned batch.
     ///
     /// # Panics
     ///
@@ -327,17 +341,16 @@ where
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>, Error<F>> {
         let Self {
             staged,
             db,
-            metadata: staged_metadata,
+            metadata,
         } = self;
         let inner = {
             let guard = db.read().await;
             staged
-                .merkleize(updates, upserts, metadata.or(staged_metadata), &*guard)
+                .merkleize(updates, upserts, metadata, &*guard)
                 .await?
         };
         Ok(AnyMerkleized { inner, db })
@@ -379,6 +392,8 @@ where
     }
 
     /// Read multiple values and return a staged batch for the same keys.
+    ///
+    /// Returns results in the same order as the input keys.
     pub async fn stage(
         self,
         keys: &[&K],

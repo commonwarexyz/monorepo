@@ -62,41 +62,6 @@ type PendingRead<'a, K> = (usize, &'a K);
 /// Values resolved from uncommitted batches plus the slots that still need DB reads.
 type UncommittedReadResolution<'a, K, V> = (Vec<Option<V>>, Vec<PendingRead<'a, K>>);
 
-/// Pending mutations whose old committed location was already resolved by a staged read. The
-/// value is `Some` for an update and `None` for a delete; only the unordered path stages deletes
-/// (the ordered path cannot skip the deleted key's predecessor-bucket scan, so its deletes fall
-/// back to normal mutations).
-pub(crate) struct StagedUpdates<F: Family, U: update::Update> {
-    entries: Vec<StagedUpdate<F, U>>,
-}
-
-impl<F: Family, U: update::Update> StagedUpdates<F, U> {
-    pub(crate) const fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
-    }
-}
-
-/// Committed locations resolved by staged reads, as `(slot, location, cached payload)` entries in
-/// staged read-slot order.
-type StagedReads<F, U> = Vec<(usize, Location<F>, <U as update::Update>::Cached)>;
-
-/// Staged batch returned by [`UnmerkleizedBatch::stage`].
-///
-/// Owns the batch and the locations its reads resolved, so the staged reads cannot be paired with a
-/// different batch.
-pub struct Staged<F: Family, H, U: update::Update, S: Strategy>
-where
-    U: update::Update + Send + Sync,
-    H: Hasher,
-    Operation<F, U>: Codec,
-{
-    batch: UnmerkleizedBatch<F, H, U, S>,
-    keys: Vec<U::Key>,
-    cached: StagedReads<F, U>,
-}
-
 /// What happened to a key in this batch.
 #[derive(Clone)]
 pub(crate) enum DiffEntry<F: Family, V> {
@@ -235,6 +200,41 @@ where
     base: Base<F, H::Digest, U, S>,
 }
 
+/// Pending mutations whose old committed location was already resolved by a staged read. The
+/// value is `Some` for an update and `None` for a delete; only the unordered path stages deletes
+/// (the ordered path cannot skip the deleted key's predecessor-bucket scan, so its deletes fall
+/// back to normal mutations).
+pub(crate) struct StagedUpdates<F: Family, U: update::Update> {
+    entries: Vec<StagedUpdate<F, U>>,
+}
+
+impl<F: Family, U: update::Update> StagedUpdates<F, U> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+}
+
+/// Committed locations resolved by staged reads, as `(slot, location, cached payload)` entries in
+/// staged read-slot order.
+type StagedReads<F, U> = Vec<(usize, Location<F>, <U as update::Update>::Cached)>;
+
+/// Staged batch returned by [`UnmerkleizedBatch::stage`].
+///
+/// Owns the batch and the locations its reads resolved, so the staged reads cannot be paired with a
+/// different batch.
+pub struct Staged<F: Family, H, U, S: Strategy>
+where
+    U: update::Update + Send + Sync,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    batch: UnmerkleizedBatch<F, H, U, S>,
+    keys: Vec<U::Key>,
+    cached: StagedReads<F, U>,
+}
+
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 ///
@@ -256,6 +256,14 @@ where
 /// db.apply_batch(b1).await.unwrap();
 /// db.apply_batch(b3).await.unwrap();  // Also applies b2's changes.
 /// ```
+///
+/// # Branch validity
+///
+/// A `MerkleizedBatch` is a branch-scoped view rooted at a specific committed prefix of the DB,
+/// not an immutable snapshot. Reads through the chain, constructing child batches, and applying
+/// the batch later are only valid while every batch applied to the DB since this batch was
+/// merkleized is an ancestor of this batch. Applying a batch from a different fork is rejected
+/// with [`crate::qmdb::Error::StaleBatch`] (see [`Db::apply_batch`]).
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>
@@ -422,7 +430,7 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
             let chunk_len = pending.len().div_ceil(manual.parallelism_hint());
             let chunks: Vec<_> = pending.chunks(chunk_len).collect();
             manual
-                .map_collect_vec(chunks, |chunk| resolve(chunk))
+                .map_collect_vec(chunks, &resolve)
                 .into_iter()
                 .flatten()
                 .collect()
@@ -1112,7 +1120,9 @@ where
         batch
     }
 
-    /// Build the inputs for staged merkleization represented by this staged handle.
+    /// Resolve the caller's updates and upserts against the staged read set, returning the
+    /// underlying batch (with fallback mutations recorded) and the staged updates to consume at
+    /// merkleize.
     ///
     /// Each update is `(read_index, value)`, where `read_index` is the position of the key in the
     /// staged read set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
@@ -1132,7 +1142,7 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    pub(crate) fn into_parts(
+    pub(crate) fn resolve_updates(
         mut self,
         mut updates: Vec<(usize, Option<U::Value>)>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
@@ -1227,6 +1237,7 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.unordered.batch.merkleize.staged",
         level = "info",
@@ -1246,7 +1257,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
     {
         // Unordered deletes emit a `Delete` at the cached location, so they may be staged.
-        let (batch, staged_updates) = self.into_parts(updates, upserts, true);
+        let (batch, staged_updates) = self.resolve_updates(updates, upserts, true);
         batch
             .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
@@ -1274,6 +1285,7 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.ordered.batch.merkleize.staged",
         level = "info",
@@ -1294,7 +1306,7 @@ where
     {
         // Ordered deletes must rewrite the deleted key's predecessor, so they fall back to normal
         // mutations rather than reusing the cached location.
-        let (batch, staged_updates) = self.into_parts(updates, upserts, false);
+        let (batch, staged_updates) = self.resolve_updates(updates, upserts, false);
         batch
             .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
@@ -1766,7 +1778,7 @@ where
 
         // Staged updates skip the index probe and journal re-read, and their old op's next key
         // feeds the candidate sets directly. The ordered path never stages deletes (see
-        // `Staged::into_parts`), so every staged entry carries a value.
+        // `Staged::resolve_updates`), so every staged entry carries a value.
         let mut cached: Vec<(K, V::Value, Location<F>, K)> =
             Vec::with_capacity(staged_updates.entries.len());
         for (key, loc, old_next, value) in staged_updates.entries {
@@ -3455,7 +3467,7 @@ mod tests {
     }
 
     #[test]
-    fn unordered_staged_into_parts_collapses_duplicates_before_sorting() {
+    fn unordered_staged_resolve_updates_collapses_duplicates_before_sorting() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             type TestDb = UnorderedFixedDb<
@@ -3469,7 +3481,7 @@ mod tests {
             >;
             type TestUpdate = update::Unordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
-            let config = fixed_db_config::<OneCap>("unordered-staged-into-parts", &context);
+            let config = fixed_db_config::<OneCap>("unordered-staged-resolve-updates", &context);
             let db = TestDb::init(context, config).await.unwrap();
 
             let k0 = colliding_digest(0x90, 0);
@@ -3495,7 +3507,7 @@ mod tests {
                 ],
             };
 
-            let (batch, staged_updates) = staged.into_parts(
+            let (batch, staged_updates) = staged.resolve_updates(
                 vec![
                     (0, Some(old0)),
                     (1, Some(old1)),
@@ -3582,7 +3594,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_staged_into_parts_keeps_deletes_as_mutations() {
+    fn ordered_staged_resolve_updates_keeps_deletes_as_mutations() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             type TestDb = OrderedFixedDb<
@@ -3596,7 +3608,7 @@ mod tests {
             >;
             type TestUpdate = update::Ordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
-            let config = fixed_db_config::<OneCap>("ordered-staged-into-parts", &context);
+            let config = fixed_db_config::<OneCap>("ordered-staged-resolve-updates", &context);
             let db = TestDb::init(context, config).await.unwrap();
 
             let delete_key = colliding_digest(0x92, 0);
@@ -3618,7 +3630,7 @@ mod tests {
                 ],
             };
 
-            let (batch, staged_updates) = staged.into_parts(
+            let (batch, staged_updates) = staged.resolve_updates(
                 vec![(0, None), (1, Some(value_a)), (2, Some(value_b))],
                 Vec::new(),
                 false,

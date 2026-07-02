@@ -1166,7 +1166,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
 
     /// Read items at strictly increasing positions, serving only page-cache and tip-buffer
     /// hits. Returns one entry per position: `Some(item)` for sync hits and `None` for
-    /// positions that require I/O (or fail validation, which the async read path reports).
+    /// positions that require I/O (or fail validation or decode, which the async read path reports).
     fn read_many_sync_cached(&self, positions: &[u64]) -> Vec<Option<A>> {
         let items_per_blob = self.items_per_blob.get();
         let pruning_boundary = self.bounds.start;
@@ -1381,7 +1381,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     }
 
     fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
-        self.reader().read_many_sync_cached(positions)
+        self.reader().read_many_sync(positions)
     }
 
     async fn replay(

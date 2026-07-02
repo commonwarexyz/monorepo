@@ -627,22 +627,23 @@ impl<B: Blob> Writer<B> {
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
     /// items that require a blob read; their slots in `buf` hold unspecified bytes.
-    pub fn read_many_sync_cached(
+    pub fn read_many_sync_into(
         &self,
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<Vec<usize>, Error> {
-        self.view().read_many_sync_cached(buf, offsets, item_size)
+        self.view().read_many_sync_into(buf, offsets, item_size)
     }
 
-    /// Like [`Self::read_many_sync_cached`], but for variable-length `(offset, len)` ranges.
-    pub fn read_ranges_sync_cached(
+    /// Like [`Self::read_many_sync_into`], but for variable-length `(offset, len)` ranges:
+    /// `buf` holds one slot per range, back to back.
+    pub fn read_ranges_sync_into(
         &self,
         buf: &mut [u8],
         ranges: &[(u64, usize)],
     ) -> Result<Vec<usize>, Error> {
-        self.view().read_ranges_sync_cached(buf, ranges)
+        self.view().read_ranges_sync_into(buf, ranges)
     }
 
     /// Reads bytes starting at `offset` into `buf`.

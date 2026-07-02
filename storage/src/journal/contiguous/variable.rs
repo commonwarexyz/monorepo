@@ -2017,7 +2017,7 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
     }
 
     fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
-        self.reader().read_many_sync_cached(positions)
+        self.reader().read_many_sync(positions)
     }
 
     async fn replay(

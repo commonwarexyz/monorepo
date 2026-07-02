@@ -283,7 +283,7 @@ where
         // cache pass: these positions just missed it.
         misses.sort_unstable_by_key(|&(_, pos)| pos);
         let positions = Self::dedup_positions(&misses);
-        let ops = self.log.read_many_misses(&positions).await?;
+        let ops = self.log.read_many_direct(&positions).await?;
         Self::match_read_ops(keys, &misses, &positions, &ops, &map, &mut results);
         Ok(results)
     }

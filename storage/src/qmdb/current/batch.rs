@@ -501,10 +501,12 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize.staged",
         level = "info",
-        skip_all
+        skip_all,
+        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
     pub async fn merkleize<E, C, I>(
         self,
@@ -523,7 +525,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, staged_updates) = inner.into_parts(updates, upserts, true);
+        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, true);
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
@@ -556,10 +558,12 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize.staged",
         level = "info",
-        skip_all
+        skip_all,
+        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
     pub async fn merkleize<E, C, I>(
         self,
@@ -578,7 +582,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, staged_updates) = inner.into_parts(updates, upserts, false);
+        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, false);
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
@@ -631,6 +635,10 @@ where
     }
 
     /// Batch read multiple keys and return a staged batch for the same keys.
+    ///
+    /// Returns results in the same order as the input keys. The staged batch records updates by
+    /// read index: the initial keys occupy `0..keys.len()`, and each [`expand`](Staged::expand)
+    /// appends another index range.
     pub async fn stage<E, C, I>(
         self,
         keys: &[&K],
@@ -738,6 +746,10 @@ where
     }
 
     /// Batch read multiple keys and return a staged batch for the same keys.
+    ///
+    /// Returns results in the same order as the input keys. The staged batch records updates by
+    /// read index: the initial keys occupy `0..keys.len()`, and each [`expand`](Staged::expand)
+    /// appends another index range.
     pub async fn stage<E, C, I>(
         self,
         keys: &[&K],

@@ -196,7 +196,7 @@ pub trait Contiguous: Send + Sync {
     /// for sync hits and `None` for positions that require I/O or fail to decode (the async
     /// read path reports such errors).
     ///
-    /// Default implementation serves nothing.
+    /// Default implementation returns `None` for every position.
     fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {
         positions.iter().map(|_| None).collect()
     }
