@@ -217,20 +217,19 @@ mod tests {
     use super::*;
     use crate::{
         archive::{Archive as _, Error, Identifier, MultiArchive as _},
-        journal::{
-            segmented::tests::{
-                fail_pending_syncs, release_next_pending_syncs, release_pending_syncs,
-                DelayedSyncContext,
-            },
-            Error as JournalError,
-        },
+        journal::Error as JournalError,
         translator::{FourCap, TwoCap},
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::has_metric_value, BufferPooler, Error as RError,
-        Metrics as _, Runner, Spawner as _, Supervisor as _,
+        deterministic,
+        mocks::{
+            fail_pending_syncs, release_next_pending_syncs, release_pending_syncs,
+            DelayedSyncContext,
+        },
+        telemetry::metrics::has_metric_value,
+        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, sync::Mutex, NZUsize, NZU16, NZU64};
     use rand::Rng;

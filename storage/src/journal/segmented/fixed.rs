@@ -442,14 +442,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::segmented::tests::{
-        fail_pending_syncs, release_pending_syncs, DelayedSyncContext,
-    };
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Error as RError, Runner,
-        Spawner as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{fail_pending_syncs, release_pending_syncs, DelayedSyncContext},
+        BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
     };
     use commonware_utils::{sync::Mutex, NZUsize, NZU16};
     use core::num::NonZeroU16;
