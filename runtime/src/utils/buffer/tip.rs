@@ -11,8 +11,8 @@ use std::ops::{Bound, RangeBounds};
 ///
 /// - Backing storage starts detached in [Self::new] and is allocated on first write.
 /// - Logical data length is tracked separately from backing view length.
-/// - Draining paths ([Self::take] and grow-resize in [Self::resize]) hand buffered bytes to the
-///   caller and reset the tip to a detached empty state.
+/// - Draining paths ([Self::take]) hand buffered bytes to the caller and reset the tip to a
+///   detached empty state.
 /// - Subsequent writes are copy-on-write: [Self::writable] recovers mutable ownership when
 ///   backing is unique, otherwise allocates from the pool and copies existing bytes.
 /// - Prefix drains in [Self::drop_prefix] update the logical view and preserve backing whenever
