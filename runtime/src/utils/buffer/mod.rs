@@ -36,18 +36,8 @@ impl From<crate::Handle<()>> for Completion {
     }
 }
 
-/// Tracks whether blob mutations still need a sync.
-///
-/// Callers rely on three properties:
-/// - Every operation that mutates the blob first waits for an in-flight sync, so a started
-///   sync's coverage is never disturbed by later writes.
-/// - [SyncState::start_sync] on a [SyncState::Pending] state returns the in-flight sync's
-///   handle (completed syncs resolve immediately), so re-requesting a sync is a cheap way to
-///   observe outstanding work.
-/// - A failure is never lost: every handle cloned from the shared completion reports it, and
-///   an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
-///   which also marks the state [SyncState::Dirty] since the mutations still need durability.
-enum SyncState {
+/// Durability of already-issued blob mutations.
+enum State {
     // No unsynced mutations.
     Clean,
     // Unsynced mutations need a sync.
@@ -56,32 +46,89 @@ enum SyncState {
     Pending(Completion),
 }
 
+/// Tracks whether blob mutations still need a sync and whether an issued resize is still owed.
+///
+/// Callers rely on four properties:
+/// - Every operation that mutates the blob first waits for an in-flight sync, so a started
+///   sync's coverage is never disturbed by later writes.
+/// - [SyncState::start_sync] while a sync is in flight returns that sync's handle (completed
+///   syncs resolve immediately), so re-requesting a sync is a cheap way to observe outstanding
+///   work.
+/// - A failure is never lost: every handle cloned from the shared completion reports it, and
+///   an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
+///   which also marks the state dirty since the mutations still need durability.
+/// - A dropped [SyncState::resize] is never lost: the intended length is recorded before the
+///   resize is awaited, and every later operation re-issues it (see [SyncState::settle])
+///   before touching the blob. Callers may therefore adopt a resize in memory before awaiting
+///   it. A resize that returns an error keeps the intent recorded, but errors are fatal:
+///   callers must not keep using the writer after one.
+struct SyncState {
+    /// Durability of already-issued mutations.
+    state: State,
+
+    /// A resize issued but not yet known to have completed.
+    pending_resize: Option<u64>,
+}
+
 impl SyncState {
+    /// A state whose blob has mutations needing a sync.
+    const fn dirty() -> Self {
+        Self {
+            state: State::Dirty,
+            pending_resize: None,
+        }
+    }
+
+    /// A state whose blob has no unsynced mutations.
+    const fn clean() -> Self {
+        Self {
+            state: State::Clean,
+            pending_resize: None,
+        }
+    }
+
     /// Mark a new unsynced mutation.
     fn mark_dirty(&mut self) {
         assert!(
-            !matches!(self, Self::Pending(_)),
+            !matches!(self.state, State::Pending(_)),
             "pending sync must be joined before marking dirty"
         );
-        *self = Self::Dirty;
+        self.state = State::Dirty;
     }
 
     /// Wait for an in-flight sync before reusing or mutating the blob.
     async fn wait_for_pending(&mut self) -> Result<(), crate::Error> {
-        let Self::Pending(pending) = self else {
+        let State::Pending(pending) = &self.state else {
             return Ok(());
         };
         match pending.wait().await {
             Ok(()) => {
-                *self = Self::Clean;
+                self.state = State::Clean;
                 Ok(())
             }
             Err(err) => {
                 // The sync failed, so the pending mutations still need durability.
-                *self = Self::Dirty;
+                self.state = State::Dirty;
                 Err(err)
             }
         }
+    }
+
+    /// Re-issue a resize whose completion was never observed.
+    ///
+    /// [crate::Blob::resize] sets an absolute size, so re-issuing is a no-op if the dropped
+    /// resize actually completed.
+    async fn settle(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
+        let Some(len) = self.pending_resize else {
+            return Ok(());
+        };
+        self.wait_for_pending().await?;
+        // Mark dirty so the re-issued resize is covered by the next sync even if the state
+        // was clean (a resize dropped while waiting on an in-flight sync leaves it clean).
+        self.mark_dirty();
+        blob.resize(len).await?;
+        self.pending_resize = None;
+        Ok(())
     }
 
     /// Write data that will require a later sync.
@@ -92,6 +139,7 @@ impl SyncState {
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
+        self.settle(blob).await?;
         self.mark_dirty();
         blob.write_at(offset, bufs).await?;
         Ok(())
@@ -105,56 +153,67 @@ impl SyncState {
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
-        match self {
-            Self::Dirty => {
+        self.settle(blob).await?;
+        match self.state {
+            State::Dirty => {
                 // Earlier mutations need a full durability barrier too.
                 blob.write_at(offset, bufs).await?;
                 blob.sync().await?;
-                *self = Self::Clean;
+                self.state = State::Clean;
                 Ok(())
             }
-            Self::Clean => {
+            State::Clean => {
                 // If this fails, a later sync must still cover the attempted write.
                 self.mark_dirty();
                 blob.write_at_sync(offset, bufs).await?;
-                *self = Self::Clean;
+                self.state = State::Clean;
                 Ok(())
             }
-            Self::Pending(_) => unreachable!("pending sync waited above"),
+            State::Pending(_) => unreachable!("pending sync waited above"),
         }
     }
 
     /// Resize the blob and require a later sync.
     async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
+        // Record the intent before any await so a dropped resize is re-issued by the next
+        // operation. A newer resize overwrites an unsettled intent: resizes are absolute, so
+        // the skipped intermediate size was never observable.
+        self.pending_resize = Some(len);
         self.wait_for_pending().await?;
         self.mark_dirty();
         blob.resize(len).await?;
+        self.pending_resize = None;
         Ok(())
     }
 
     /// Make all pending mutations durable before returning.
     async fn sync(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
-        if matches!(self, Self::Clean) {
+        self.settle(blob).await?;
+        if matches!(self.state, State::Clean) {
             return Ok(());
         }
         blob.sync().await?;
-        *self = Self::Clean;
+        self.state = State::Clean;
         Ok(())
     }
 
     /// Start making pending mutations durable and return a handle for completion.
     async fn start_sync(&mut self, blob: &impl crate::Blob) -> crate::Handle<()> {
-        match self {
-            Self::Clean => crate::Handle::ready(Ok(())),
-            Self::Dirty => {
+        // An owed resize must reach the blob before the sync that covers it starts.
+        if let Err(err) = self.settle(blob).await {
+            return crate::Handle::ready(Err(err));
+        }
+        match &self.state {
+            State::Clean => crate::Handle::ready(Ok(())),
+            State::Dirty => {
                 // Store a shared completion so repeated calls observe the same sync.
                 let pending = Completion::from(blob.start_sync().await);
                 let handle = pending.handle();
-                *self = Self::Pending(pending);
+                self.state = State::Pending(pending);
                 handle
             }
-            Self::Pending(pending) => pending.handle(),
+            State::Pending(pending) => pending.handle(),
         }
     }
 }
@@ -405,21 +464,32 @@ mod tests {
         }
     }
 
-    /// Blob wrapper whose [Gate] parks the next resize after the inner resize completes: a
-    /// canceled caller did the work but never observed it.
+    /// Where [GatedResizeBlob]'s gate sits relative to the inner resize.
+    #[derive(Clone, Copy)]
+    pub enum GatePosition {
+        /// Park before the inner resize runs: a canceled caller never did the work.
+        Before,
+        /// Park after the inner resize completes: a canceled caller did the work but never
+        /// observed it.
+        After,
+    }
+
+    /// Blob wrapper whose [Gate] parks the next resize at the given [GatePosition].
     #[derive(Clone)]
     pub struct GatedResizeBlob<B: crate::Blob> {
         inner: B,
         gate: Gate,
+        position: GatePosition,
     }
 
     impl<B: crate::Blob> GatedResizeBlob<B> {
-        pub fn new(inner: B) -> (Self, Gate) {
+        pub fn new(inner: B, position: GatePosition) -> (Self, Gate) {
             let gate = Gate::default();
             (
                 Self {
                     inner,
                     gate: gate.clone(),
+                    position,
                 },
                 gate,
             )
@@ -453,8 +523,13 @@ mod tests {
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
+            if matches!(self.position, GatePosition::Before) {
+                self.gate.pass_once().await;
+            }
             self.inner.resize(len).await?;
-            self.gate.pass_once().await;
+            if matches!(self.position, GatePosition::After) {
+                self.gate.pass_once().await;
+            }
             Ok(())
         }
 
@@ -1308,14 +1383,14 @@ mod tests {
         });
     }
 
-    // If a resize is canceled during the blob resize itself, the writer keeps its old size and
-    // a retry completes.
+    // If a shrink is canceled after the blob resize landed, the writer already adopted the
+    // shorter size: the claimed range stays readable and a sync makes the shrink durable.
     #[test_traced]
-    fn test_write_resize_cancel_preserves_size() {
+    fn test_write_shrink_cancel_after_resize_stays_consistent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let inner = SyncTrackingBlob::new();
-            let (blob, gate) = GatedResizeBlob::new(inner.clone());
+            let (blob, gate) = GatedResizeBlob::new(inner.clone(), GatePosition::After);
             let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
 
             writer.write_at(0, b"hello").await.unwrap();
@@ -1324,13 +1399,84 @@ mod tests {
             // Cancel while the completed blob resize is held open.
             gate.cancel(writer.resize(3)).await;
 
-            // The tip was never adjusted, so the writer still claims the old size; the blob
-            // range past the new size is indeterminate until the resize is retried.
-            assert_eq!(writer.size(), 5);
-            writer.resize(3).await.unwrap();
+            // The writer adopted the shorter size before the resize, so it agrees with the
+            // truncated blob and the claimed range stays readable.
             assert_eq!(writer.size(), 3);
+            assert_eq!(inner.size(), 3);
+            let read = writer.read_at(0, 3).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hel");
+
+            // A later sync covers the landed resize.
+            writer.sync().await.unwrap();
+            let (durable, _, _, _) = inner.snapshot();
+            assert_eq!(durable.as_slice(), b"hel");
+        });
+    }
+
+    // If a shrink is canceled before the blob resize runs, the writer already adopted the
+    // shorter size, and the next blob operation re-issues the resize.
+    #[test_traced]
+    fn test_write_shrink_cancel_before_resize_settles_on_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, gate) = GatedResizeBlob::new(inner.clone(), GatePosition::Before);
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            writer.write_at(0, b"hello").await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Cancel while the resize is parked before reaching the blob.
+            gate.cancel(writer.resize(3)).await;
+
+            // The writer claims the shorter size, but the blob was never truncated.
+            assert_eq!(writer.size(), 3);
+            assert_eq!(inner.size(), 5);
+
+            // A plain sync re-issues the dropped resize and makes it durable.
             writer.sync().await.unwrap();
             assert_eq!(inner.size(), 3);
+            let (durable, _, _, _) = inner.snapshot();
+            assert_eq!(durable.as_slice(), b"hel");
+        });
+    }
+
+    // If a shrink is canceled while waiting on an in-flight started sync, the recorded resize
+    // survives the wait's clean transition and is re-issued by the next sync.
+    #[test_traced]
+    fn test_write_shrink_cancel_at_pending_sync_settles() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            writer.write_at(0, b"hello").await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Dirty the state, then hold a started sync open.
+            writer.write_at(0, b"h").await.unwrap();
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+
+            // The shrink parks waiting on the started sync. Cancel it there: the blob was
+            // never resized, but the intent is already recorded.
+            {
+                let resize = writer.resize(3);
+                futures::pin_mut!(resize);
+                assert!(resize.as_mut().now_or_never().is_none());
+            }
+            assert_eq!(writer.size(), 3);
+            assert_eq!(inner.size(), 5);
+
+            // Release the started sync; the next sync joins it, re-issues the dropped
+            // resize, and makes it durable.
+            deferred.release.send(Ok(())).unwrap();
+            handle.await.unwrap();
+            writer.sync().await.unwrap();
+            assert_eq!(inner.size(), 3);
+            let (durable, _, _, _) = inner.snapshot();
+            assert_eq!(durable.as_slice(), b"hel");
         });
     }
 

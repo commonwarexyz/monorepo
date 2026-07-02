@@ -194,9 +194,9 @@ impl<B: Blob> Writer<B> {
             current_page,
             partial_page_state,
             sync_state: if needs_sync {
-                SyncState::Dirty
+                SyncState::dirty()
             } else {
-                SyncState::Clean
+                SyncState::clean()
             },
             id: cache_ref.next_id(),
             cache_ref,
