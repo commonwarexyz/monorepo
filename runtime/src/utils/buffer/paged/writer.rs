@@ -993,23 +993,8 @@ impl<B: Blob> Writer<B> {
                 .resize(&self.blob, new_physical_size)
                 .await?;
         }
-        self.shrink_to_partial(page_data, old_crc, full_pages, partial_bytes, tail_offset)
-            .await
-    }
 
-    /// Perform a shrink to a partial page tip and make the shorter CRC slot authoritative.
-    ///
-    /// `page_data` and `old_crc` are the target page's validated contents and CRC record; the
-    /// first `partial_bytes` of `page_data` become the new tip.
-    async fn shrink_to_partial(
-        &mut self,
-        page_data: IoBuf,
-        old_crc: Checksum,
-        full_pages: u64,
-        partial_bytes: u64,
-        tail_offset: u64,
-    ) -> Result<(), Error> {
-        let logical_page_size = self.cache_ref.page_size();
+        // Durably rewrite the target page's CRC record to the shorter length.
         let new_data = &page_data.as_ref()[..partial_bytes as usize];
         let final_record = self
             .sync_partial_page_shrink(
