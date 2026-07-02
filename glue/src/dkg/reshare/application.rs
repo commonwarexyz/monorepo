@@ -5,9 +5,10 @@ use commonware_consensus::{
     Application as ConsensusApplication, CertifiableBlock,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Signer};
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{telemetry::traces::TracedExt as _, Clock, Metrics, Spawner};
 use rand::Rng;
 use std::num::NonZeroU64;
+use tracing::{debug, field};
 
 /// Per-proposal input handed to an application wrapped by [`Application`].
 ///
@@ -115,6 +116,16 @@ where
     type Block = A::Block;
     type Input = I;
 
+    #[tracing::instrument(
+        name = "dkg.reshare.application.propose",
+        level = "info",
+        skip_all,
+        fields(
+            height = field::Empty,
+            phase = field::Empty,
+            has_payload = field::Empty
+        )
+    )]
     async fn propose(
         &mut self,
         context: (E, Self::Context),
@@ -123,17 +134,24 @@ where
     ) -> Option<Self::Block> {
         // Select and fetch the payload for the block being built, then hand it to
         // the inner application alongside its own input.
-        let height = ancestry.peek()?.height().next();
+        let Some(parent) = ancestry.peek() else {
+            debug!("proposal rejected: missing parent ancestry");
+            return None;
+        };
+        let height = parent.height().next();
+        let phase = self.phase(height);
+        let span = tracing::Span::current();
+        span.record("height", height.traced());
+        span.record("phase", field::debug(phase));
+
         let payload = if self.final_block(height) {
             self.reshare.epoch_info(ancestry.clone()).await
-        } else if matches!(
-            self.phase(height),
-            Some(EpochPhase::Midpoint | EpochPhase::Late)
-        ) {
+        } else if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late)) {
             self.reshare.next_log(height).await
         } else {
             None
         };
+        span.record("has_payload", payload.is_some());
         self.inner
             .propose(
                 context,
@@ -146,6 +164,16 @@ where
             .await
     }
 
+    #[tracing::instrument(
+        name = "dkg.reshare.application.verify",
+        level = "info",
+        skip_all,
+        fields(
+            height = field::Empty,
+            phase = field::Empty,
+            has_payload = field::Empty
+        )
+    )]
     async fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -155,15 +183,24 @@ where
             return self.inner.verify(context, ancestry).await;
         };
         let height = tip.height();
+        let phase = self.phase(height);
+        let tip_payload = tip.payload();
+        let span = tracing::Span::current();
+        span.record("height", height.traced());
+        span.record("phase", field::debug(phase));
+        span.record("has_payload", tip_payload.is_some());
+
         if self.final_block(height) {
             // The final block must carry the epoch info the actor reconstructs.
             let derived = self.reshare.epoch_info(ancestry.clone()).await;
-            if derived != tip.payload() {
+            if derived != tip_payload {
+                debug!("verification rejected: final block payload mismatch");
                 return false;
             }
-        } else if matches!(self.phase(height), Some(EpochPhase::Early)) && tip.payload().is_some() {
+        } else if matches!(phase, Some(EpochPhase::Early)) && tip_payload.is_some() {
             // Dealer logs are only posted from the midpoint onward, so an early
             // block must not carry a reshare payload.
+            debug!("verification rejected: early block carried reshare payload");
             return false;
         }
         self.inner.verify(context, ancestry).await
