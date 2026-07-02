@@ -1008,8 +1008,7 @@ impl<B: Blob> Writer<B> {
             )
             .await?;
 
-        // The rewrite succeeded, so publish the shrunken state: the retained bytes become the
-        // new tip and the rewritten CRC record becomes authoritative.
+        // Update state only after the rewrite succeeds, for cancellation safety.
         self.current_page = full_pages;
         self.buffer.offset = tail_offset;
         self.buffer.clear();

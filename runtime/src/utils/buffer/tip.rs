@@ -123,18 +123,21 @@ impl Buffer {
     /// Panics if the buffer is non-empty and `len >= self.size()`: flush buffered bytes before
     /// a resize that grows or keeps the current size.
     pub(super) fn resize(&mut self, len: u64) {
+        if self.is_empty() {
+            self.offset = len;
+            return;
+        }
+
         assert!(
-            self.is_empty() || len < self.size(),
+            len < self.size(),
             "must flush buffered bytes before a grow-or-equal resize"
         );
-        match len {
-            len if self.is_empty() => self.offset = len,
-            len if len >= self.offset => self.len = (len - self.offset) as usize,
-            len => {
-                self.len = 0;
-                self.data = IoBuf::default();
-                self.offset = len;
-            }
+        if len >= self.offset {
+            self.len = (len - self.offset) as usize;
+        } else {
+            self.len = 0;
+            self.data = IoBuf::default();
+            self.offset = len;
         }
     }
 
@@ -210,8 +213,8 @@ impl Buffer {
     /// Appends the provided `data` to the buffer, and returns `true` if the buffer is over capacity
     /// after the append.
     ///
-    /// If the buffer is above capacity, the caller is responsible for flushing a prefix. Further
-    /// appends are safe, but will continue growing the buffer beyond its capacity.
+    /// If the buffer is above capacity, the caller is responsible for flushing. Further appends
+    /// are safe, but will continue growing the buffer beyond its capacity.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
         let end = self.len + data.len();
         let mut writable = self.writable(end);
