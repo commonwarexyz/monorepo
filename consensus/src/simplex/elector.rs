@@ -207,6 +207,7 @@ impl<H: Hasher> Clone for RoundRobin<H> {
     fn clone(&self) -> Self {
         Self {
             seed: self.seed.clone(),
+            terms: self.terms,
             _phantom: PhantomData,
         }
     }

@@ -33,7 +33,7 @@ use core::{
     ops::Deref,
 };
 use rand_core::CryptoRng;
-use sha2::{block_api::compress256, Digest as _, Sha256 as ISha256};
+use sha2::{Digest as _, Sha256 as ISha256, block_api::compress256};
 use zeroize::Zeroize;
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.

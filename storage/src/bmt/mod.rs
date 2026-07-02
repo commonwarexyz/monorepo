@@ -1598,11 +1598,7 @@ mod tests {
             tampered_proof.siblings[sibling_idx] = Sha256::hash(&[b"tampered"]);
             assert!(
                 tampered_proof
-                    .verify_range_inclusion::<Sha256>(
-                        start,
-                        &digests[start as usize..end],
-                        &root
-                    )
+                    .verify_range_inclusion::<Sha256>(start, &digests[start as usize..end], &root)
                     .is_err()
             );
         }
@@ -1630,7 +1626,11 @@ mod tests {
         let proof = tree
             .range_proof(start as u32, (tree_size - 1) as u32)
             .unwrap();
-        assert!(proof.verify_range_inclusion::<Sha256>(start as u32,&digests[start..tree_size],&root).is_ok());
+        assert!(
+            proof
+                .verify_range_inclusion::<Sha256>(start as u32, &digests[start..tree_size], &root)
+                .is_ok()
+        );
     }
 
     #[test]

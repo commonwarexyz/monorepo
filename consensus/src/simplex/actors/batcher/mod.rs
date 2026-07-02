@@ -2900,13 +2900,7 @@ mod tests {
             // participants have been recently active.
             let view = View::new(skip_timeout);
             batcher_mailbox.update(Span::none(), view, leader, View::zero(), None);
-            expect_timeout(
-                &mut context,
-                &mut voter_receiver,
-                view,
-                TimeoutReason::Inactivity,
-            )
-            .await;
+            expect_no_timeout(&mut context, &mut voter_receiver).await;
 
             // Test 3: Send a vote from the leader for the current view (view 5)
             let round = Round::new(epoch, view);

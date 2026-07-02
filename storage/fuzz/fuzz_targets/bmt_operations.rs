@@ -462,12 +462,12 @@ fn fuzz(input: FuzzInput) {
                     && !leaf_values.is_empty()
                 {
                     // Generate a single-element multi-proof
-                    if let Ok(mp) = t.multi_proof([*position]) {
-                        if let Some(v) = leaf_values.get(*position as usize) {
-                            let elements = vec![(Sha256::hash(&[&v.to_be_bytes()]), *position)];
-                            let root = t.root();
-                            let _ = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
-                        }
+                    if let Ok(mp) = t.multi_proof([*position])
+                        && let Some(v) = leaf_values.get(*position as usize)
+                    {
+                        let elements = vec![(Sha256::hash(&[&v.to_be_bytes()]), *position)];
+                        let root = t.root();
+                        let _ = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
                     }
                 }
             }
