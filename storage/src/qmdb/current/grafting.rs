@@ -61,10 +61,13 @@
 //! The grafted tree is incrementally maintained when grafted leaves change.
 
 use crate::merkle::{
-    self, hasher::Hasher as HasherTrait, storage::Storage as StorageTrait, Family, Graftable,
-    Location, Position, Readable,
+    self,
+    hasher::{Hasher as HasherTrait, Standard as StandardHasher},
+    storage::Storage as StorageTrait,
+    Family, Graftable, Location, Position, Readable,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_parallel::Strategy;
 use commonware_utils::bitmap::BitMap;
 use core::{cmp::Ordering, marker::PhantomData};
 use tracing::debug;
@@ -100,6 +103,30 @@ pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> 
 /// floor falls inside a root peak or inside a multi-peak chunk group, the partially covered chunk
 /// stays in the graftable region and the inactive peak count is rounded down to the latest chunk
 /// boundary expressible by whole root peaks.
+/// Compute grafted leaf digests for resolved `(chunk_idx, chunk_ops_digest, chunk)` triples:
+/// each leaf is `hash(chunk || chunk_ops_digest)`, except all-zero chunks preserve
+/// `chunk_ops_digest` directly (zero-chunk identity).
+pub(super) fn graft_chunk_digests<H: CHasher, S: Strategy, const N: usize>(
+    hasher: &StandardHasher<H>,
+    strategy: &S,
+    inputs: Vec<(usize, H::Digest, [u8; N])>,
+) -> Vec<(usize, H::Digest)> {
+    strategy.map_init_collect_vec(
+        inputs,
+        || hasher.clone(),
+        |h, (chunk_idx, chunk_ops_digest, chunk)| {
+            if chunk == BitMap::<N>::EMPTY_CHUNK {
+                (chunk_idx, chunk_ops_digest)
+            } else {
+                (
+                    chunk_idx,
+                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
+                )
+            }
+        },
+    )
+}
+
 pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
     leaves: Location<F>,
     inactivity_floor: Location<F>,

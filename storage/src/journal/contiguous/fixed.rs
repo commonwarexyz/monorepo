@@ -1164,6 +1164,73 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok((blob, offset))
     }
 
+    /// Read items at strictly increasing positions, serving only page-cache and tip-buffer
+    /// hits. Returns one entry per position: `Some(item)` for sync hits and `None` for
+    /// positions that require I/O (or fail validation or decode, which the async read path reports).
+    fn read_many_sync_cached(&self, positions: &[u64]) -> Vec<Option<A>> {
+        let items_per_blob = self.items_per_blob.get();
+        let pruning_boundary = self.bounds.start;
+        let chunk_size = A::SIZE;
+        let mut out = Vec::with_capacity(positions.len());
+        let mut buf = vec![0u8; positions.len() * chunk_size];
+        let mut hits = 0u64;
+        for group in positions.chunk_by(|a, b| {
+            super::position_to_blob(*a, items_per_blob)
+                == super::position_to_blob(*b, items_per_blob)
+        }) {
+            let all_misses = |out: &mut Vec<Option<A>>| out.extend(group.iter().map(|_| None));
+            if group
+                .iter()
+                .any(|&pos| self.validate_readable(pos).is_err())
+            {
+                all_misses(&mut out);
+                continue;
+            }
+            let blob_num = super::position_to_blob(group[0], items_per_blob);
+            let Ok(first_position) = first_in_blob(pruning_boundary, blob_num, items_per_blob)
+            else {
+                all_misses(&mut out);
+                continue;
+            };
+            let Ok(blob_offsets) = group
+                .iter()
+                .map(|&pos| Journal::<E, A>::items_to_bytes(pos - first_position))
+                .collect::<Result<Vec<u64>, _>>()
+            else {
+                all_misses(&mut out);
+                continue;
+            };
+            let Some(blob) = self.blobs.get(blob_num) else {
+                all_misses(&mut out);
+                continue;
+            };
+            let buf = &mut buf[..group.len() * chunk_size];
+            let Ok(misses) =
+                blob.read_many_sync_cached(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+            else {
+                all_misses(&mut out);
+                continue;
+            };
+            let mut misses = misses.into_iter().peekable();
+            for (idx, slice) in buf.chunks_exact(chunk_size).enumerate() {
+                if misses.peek() == Some(&idx) {
+                    misses.next();
+                    out.push(None);
+                } else if let Ok(item) = A::decode(slice) {
+                    out.push(Some(item));
+                    hits += 1;
+                } else {
+                    // A decode failure surfaces as a miss; the caller's async fallback read
+                    // reports the error.
+                    out.push(None);
+                }
+            }
+        }
+        self.metrics.record_cache_hits(hits);
+        self.metrics.items_read.inc_by(hits);
+        out
+    }
+
     /// Read the item at `pos` synchronously if its bytes are cached, else `None`.
     fn try_read_sync_cached(&self, pos: u64) -> Option<A> {
         let (blob, offset) = self.locate(pos).ok()?;
@@ -1275,6 +1342,10 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         )
     }
 
+    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
+        self.read_many_sync_cached(positions)
+    }
+
     async fn replay(
         &self,
         start_pos: u64,
@@ -1307,6 +1378,10 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         self.reader().try_read_sync(pos)
+    }
+
+    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
+        self.reader().read_many_sync(positions)
     }
 
     async fn replay(
@@ -4593,6 +4668,60 @@ mod tests {
                 let single = reader.read(pos).await.unwrap();
                 assert_eq!(batch[pos as usize], single);
             }
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_sync_matches_read_many() {
+        // Cached positions are served synchronously and match the async batched read;
+        // positions that fail validation are misses rather than errors.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(4));
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
+
+            for i in 0..20u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let positions: Vec<u64> = (0..20).collect();
+            let reader = journal.snapshot().await.unwrap();
+            let expected = reader.read_many(&positions).await.unwrap();
+
+            // Every synchronously served item must match the async read; positions the
+            // 3-page test cache cannot hold are misses, never wrong values.
+            let served = reader.read_many_sync(&positions);
+            assert_eq!(served.len(), positions.len());
+            for (item, expected) in served.into_iter().zip(&expected) {
+                if let Some(item) = item {
+                    assert_eq!(item, *expected);
+                }
+            }
+
+            // The last blob (positions 16..20) spans at most the cache capacity, so after
+            // warming exactly those positions they are all served synchronously.
+            let tail: Vec<u64> = (16..20).collect();
+            reader.read_many(&tail).await.unwrap();
+            let served = reader.read_many_sync(&tail);
+            for (item, pos) in served.into_iter().zip(&tail) {
+                assert_eq!(
+                    item.expect("warmed position is served"),
+                    expected[*pos as usize]
+                );
+            }
+
+            // A long-evicted position is a miss.
+            assert!(reader.read_many_sync(&[0])[0].is_none());
+
+            // An out-of-range position is a miss, not an error, and does not poison the
+            // valid position grouped before it.
+            let served = reader.read_many_sync(&[19, 20]);
+            assert!(served[0].is_some());
+            assert!(served[1].is_none());
             drop(reader);
 
             journal.destroy().await.unwrap();

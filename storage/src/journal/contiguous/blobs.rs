@@ -538,6 +538,40 @@ impl<'a, B: RBlob> Blob<'a, B> {
                 .map_err(Error::Runtime),
         }
     }
+
+    /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
+    /// items that require a blob read; their slots in `buf` hold unspecified bytes.
+    pub(super) fn read_many_sync_cached(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<Vec<usize>, Error> {
+        match self {
+            Self::Writer(writer) => writer
+                .read_many_sync_into(buf, offsets, item_size)
+                .map_err(Error::Runtime),
+            Self::Sealed(sealed) => sealed
+                .read_many_sync_into(buf, offsets, item_size)
+                .map_err(Error::Runtime),
+        }
+    }
+
+    /// Like [`Self::read_many_sync_cached`], but for variable-length `(offset, len)` ranges.
+    pub(super) fn read_ranges_sync_cached(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<Vec<usize>, Error> {
+        match self {
+            Self::Writer(writer) => writer
+                .read_ranges_sync_into(buf, ranges)
+                .map_err(Error::Runtime),
+            Self::Sealed(sealed) => sealed
+                .read_ranges_sync_into(buf, ranges)
+                .map_err(Error::Runtime),
+        }
+    }
 }
 
 impl<B: RBlob> FrameReader for Blob<'_, B> {

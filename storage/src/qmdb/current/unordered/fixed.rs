@@ -171,11 +171,10 @@ pub mod test {
         });
     }
 
-    /// Reads on a batch cache resolved locations that `merkleize` consumes to skip re-reading
-    /// those keys. The root must match a write-only batch's `merkleize`, both rooted at the DB
-    /// (D=0) and through one pending ancestor (D=1).
+    /// Reads on a batch must not perturb `merkleize`: the root must match a write-only batch's
+    /// `merkleize`, both rooted at the DB (D=0) and through one pending ancestor (D=1).
     #[test_traced("WARN")]
-    pub fn test_current_unordered_fixed_resolved_merkleize_parity() {
+    pub fn test_current_unordered_fixed_read_merkleize_parity() {
         fn key(i: u64) -> Digest {
             Sha256::hash(&i.to_be_bytes())
         }
@@ -248,6 +247,200 @@ pub mod test {
                 }
                 let fused_root = fb.merkleize(&db, None).await.unwrap().root();
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
+            }
+        });
+    }
+
+    /// The staged path (`stage` + `Staged::merkleize`) must produce a root byte-identical to an explicit
+    /// `get_many` + `write` + `merkleize` over the current layer, across updates, deletes, upserts,
+    /// duplicate read slots, missing keys, and prefix-then-suffix expansion, rooted at the DB
+    /// (D=0) and through one or two pending ancestors (D=1/D=2). This guards the current-layer
+    /// threading of `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`,
+    /// and `compute_current_layer` for non-empty staged updates.
+    #[test_traced("WARN")]
+    pub fn test_current_unordered_fixed_staged_merkleize_parity() {
+        fn key(i: u64) -> Digest {
+            Sha256::hash(&i.to_be_bytes())
+        }
+        fn val(i: u64) -> Digest {
+            Sha256::hash(&(i + 10000).to_be_bytes())
+        }
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = open_db(ctx.child("current"), "staged-parity".to_string()).await;
+
+            let mut seed = db.new_batch();
+            for i in 0..2000u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            // At D=1, one pending ancestor updates keys 0..50 and deletes 100..110. At D=2,
+            // the grandparent updates keys 0..10 and deletes 100..110 while the parent updates
+            // keys 20..30. The read set below then resolves through both ancestors, while
+            // key(60) still falls through to the committed DB and exercises staged cache reuse
+            // behind a stacked batch.
+            // Keep every uncommitted ancestor alive until the child is merkleized; speculative
+            // batch Merkle lookups walk weak parent links for in-memory ancestor nodes.
+            for depth in [0u8, 1u8, 2u8] {
+                let mut stack = Vec::new();
+                match depth {
+                    0 => {}
+                    1 => {
+                        let mut p = db.new_batch();
+                        for i in 0..50u64 {
+                            p = p.write(key(i), Some(val(i + 1_000)));
+                        }
+                        for i in 100..110u64 {
+                            p = p.write(key(i), None);
+                        }
+                        stack.push(p.merkleize(&db, None).await.unwrap());
+                    }
+                    2 => {
+                        let mut grandparent = db.new_batch();
+                        for i in 0..10u64 {
+                            grandparent = grandparent.write(key(i), Some(val(i + 1_000)));
+                        }
+                        for i in 100..110u64 {
+                            grandparent = grandparent.write(key(i), None);
+                        }
+                        let grandparent = grandparent.merkleize(&db, None).await.unwrap();
+
+                        let mut p = grandparent.new_batch::<Sha256>();
+                        for i in 20..30u64 {
+                            p = p.write(key(i), Some(val(i + 2_000)));
+                        }
+                        let p = p.merkleize(&db, None).await.unwrap();
+                        stack.push(grandparent);
+                        stack.push(p);
+                    }
+                    _ => unreachable!("covered depths"),
+                };
+                let new_batch = || {
+                    stack
+                        .last()
+                        .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
+                };
+
+                // Read set: key(5) duplicated at slots 0/3, read-only key(6), missing key(9000),
+                // key(60) that always remains committed, and keys 0/20/105 that resolve through
+                // ancestors when depth > 0.
+                let read_keys = [
+                    key(5),
+                    key(6),
+                    key(9000),
+                    key(5),
+                    key(0),
+                    key(20),
+                    key(60),
+                    key(105),
+                ];
+                let keys: Vec<&Digest> = read_keys.iter().collect();
+                // (read_slot, Some=upsert | None=delete).
+                let indexed_updates = vec![
+                    (0, Some(val(5_000))),
+                    (2, Some(val(5_001))),
+                    (3, Some(val(5_002))),
+                    (4, Some(val(5_003))),
+                    (5, None),
+                    (6, Some(val(5_004))),
+                    (7, Some(val(5_005))),
+                ];
+                // Upserts for unread keys: create, update existing, override key(5), delete existing.
+                let upserts = vec![
+                    (key(7000), Some(val(6_000))),
+                    (key(30), Some(val(6_001))),
+                    (key(5), Some(val(6_002))),
+                    (key(31), None),
+                ];
+
+                let mut explicit = new_batch();
+                let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
+                for (slot, value) in &indexed_updates {
+                    explicit = explicit.write(read_keys[*slot], *value);
+                }
+                for (k, v) in &upserts {
+                    explicit = explicit.write(*k, *v);
+                }
+                let explicit_root = explicit.merkleize(&db, None).await.unwrap().root();
+
+                let (staged_values, staged) = new_batch().stage(&keys, &db).await.unwrap();
+                let staged_root = staged
+                    .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
+                    .await
+                    .unwrap()
+                    .root();
+
+                assert_eq!(
+                    explicit_values, staged_values,
+                    "value mismatch at depth={depth}"
+                );
+                assert_eq!(explicit_root, staged_root, "root mismatch at depth={depth}");
+
+                let split = 3;
+                let (mut expanded_values, staged) =
+                    new_batch().stage(&keys[..split], &db).await.unwrap();
+                let (range, suffix_values, staged) =
+                    staged.expand(&keys[split..], &db).await.unwrap();
+                assert_eq!(range, split..keys.len());
+                expanded_values.extend(suffix_values);
+                let expanded_root = staged
+                    .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
+                    .await
+                    .unwrap()
+                    .root();
+
+                assert_eq!(
+                    explicit_values, expanded_values,
+                    "expanded value mismatch at depth={depth}"
+                );
+                assert_eq!(
+                    explicit_root, expanded_root,
+                    "expanded root mismatch at depth={depth}"
+                );
+
+                let planned = val(7_000);
+                let duplicate_update = val(7_001);
+                let (first_values, staged) = new_batch().stage(&keys[..1], &db).await.unwrap();
+                let (duplicate_range, duplicate_values, staged) =
+                    staged.expand(&keys[..1], &db).await.unwrap();
+                assert_eq!(duplicate_range, 1..2);
+                assert_eq!(
+                    first_values[0], duplicate_values[0],
+                    "duplicate expansion must assign a new slot without changing the base read"
+                );
+                assert_ne!(
+                    duplicate_values[0],
+                    Some(planned),
+                    "expand must not observe values computed for earlier staged slots"
+                );
+
+                let duplicate_root = staged
+                    .merkleize(
+                        vec![
+                            (0, Some(planned)),
+                            (duplicate_range.start, Some(duplicate_update)),
+                        ],
+                        Vec::new(),
+                        None,
+                        &db,
+                    )
+                    .await
+                    .unwrap()
+                    .root();
+                let expected_duplicate_root = new_batch()
+                    .write(read_keys[0], Some(planned))
+                    .write(read_keys[0], Some(duplicate_update))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap()
+                    .root();
+                assert_eq!(
+                    expected_duplicate_root, duplicate_root,
+                    "duplicate expanded slots should use normal update-order semantics"
+                );
             }
         });
     }

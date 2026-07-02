@@ -119,6 +119,68 @@ fn split_read_many<'a>(
     cache_ranges
 }
 
+/// Ensure `buf` holds one slot per range totaling its length, ranges are sorted and
+/// non-overlapping, and every requested range lies within the blob's size.
+fn validate_read_ranges(buf_len: usize, ranges: &[(u64, usize)], size: u64) -> Result<(), Error> {
+    let mut expected_len = 0usize;
+    let mut previous_end = None;
+    for &(offset, len) in ranges {
+        expected_len = expected_len.checked_add(len).ok_or(Error::OffsetOverflow)?;
+        let end = offset
+            .checked_add(len as u64)
+            .ok_or(Error::OffsetOverflow)?;
+        if let Some(previous_end) = previous_end {
+            if offset < previous_end {
+                return Err(Error::OffsetsInvalid);
+            }
+        }
+        if end > size {
+            return Err(Error::BlobInsufficientLength);
+        }
+        previous_end = Some(end);
+    }
+    if buf_len != expected_len {
+        return Err(Error::BufferLengthInvalid);
+    }
+    Ok(())
+}
+
+/// Partition a batch of variable-length range reads into bytes copied from the in-memory tail
+/// and ranges that need cache/blob reads, mirroring [split_read_many] for per-range lengths.
+/// `buf` holds one slot per range, back to back (validated by [validate_read_ranges]).
+fn split_read_ranges<'a>(
+    mut buf: &'a mut [u8],
+    ranges: &[(u64, usize)],
+    tail_offset: u64,
+    tail: &[u8],
+) -> Vec<(&'a mut [u8], u64)> {
+    let mut cache_ranges = Vec::with_capacity(ranges.len());
+    for &(offset, len) in ranges {
+        let (slot, rest) = buf.split_at_mut(len);
+        buf = rest;
+        if len == 0 {
+            continue;
+        }
+        let end = offset + len as u64;
+        if end <= tail_offset {
+            // Entirely below the tail bytes, so this needs a cache/blob read.
+            cache_ranges.push((slot, offset));
+        } else if offset >= tail_offset {
+            // Entirely within the tail bytes.
+            let src = (offset - tail_offset) as usize;
+            slot.copy_from_slice(&tail[src..src + len]);
+        } else {
+            // Straddles the boundary: copy the suffix from the tail bytes, record the prefix
+            // for a cache/blob read.
+            let prefix_len = (tail_offset - offset) as usize;
+            let (prefix, suffix) = slot.split_at_mut(prefix_len);
+            suffix.copy_from_slice(&tail[..len - prefix_len]);
+            cache_ranges.push((prefix, offset));
+        }
+    }
+    cache_ranges
+}
+
 /// Read the designated page from the underlying blob and return its logical bytes as a vector if it
 /// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
 /// check the length of the returned vector to determine if the page was partial vs full.

@@ -24,7 +24,7 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         any::{
-            batch::{MerkleizedBatch, UnmerkleizedBatch},
+            batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
             db::Db,
             operation::{Operation, Update},
             ordered, unordered,
@@ -38,7 +38,10 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
-use std::{ops::Deref, sync::Arc};
+use std::{
+    ops::{Deref, Range},
+    sync::Arc,
+};
 
 // Matches commonware_storage::qmdb::any::BITMAP_CHUNK_BYTES, which is crate-private.
 const ANY_BITMAP_CHUNK_BYTES: usize = 64;
@@ -60,6 +63,28 @@ where
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
+    db: AnyDbHandle<F, E, C, I, H, U, S>,
+    metadata: Option<U::Value>,
+}
+
+/// Staged batch returned by [`AnyUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
+/// reference to the parent database.
+///
+/// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
+/// stays valid only while every batch finalized on the database is an ancestor of this batch
+/// (see [`MerkleizedBatch`]'s branch-validity contract).
+pub struct AnyStaged<F, E, C, I, H, U, S>
+where
+    F: Family,
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    staged: Staged<F, H, U, S>,
     db: AnyDbHandle<F, E, C, I, H, U, S>,
     metadata: Option<U::Value>,
 }
@@ -92,11 +117,42 @@ where
 
     /// Read multiple values by key, falling back to committed state.
     ///
-    /// Returns results in the same order as the input keys. Each unique read is cached on the
-    /// batch for reuse at merkleize, so memory grows with the number of unique keys read.
+    /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &*db).await
+    }
+
+    /// Read multiple values and return a staged batch for the same keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn stage(
+        self,
+        keys: &[&K],
+    ) -> Result<
+        (
+            Vec<Option<V::Value>>,
+            AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>,
+        ),
+        Error<F>,
+    > {
+        let Self {
+            batch,
+            db,
+            metadata,
+        } = self;
+        let (values, staged) = {
+            let guard = db.read().await;
+            batch.stage(keys, &*guard).await?
+        };
+        Ok((
+            values,
+            AnyStaged {
+                staged,
+                db,
+                metadata,
+            },
+        ))
     }
 
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.
@@ -159,6 +215,148 @@ where
     }
 }
 
+/// Read-expansion operations for the `any` staged batch.
+impl<F, E, C, I, H, U, S> AnyStaged<F, E, C, I, H, U, S>
+where
+    F: Family,
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Set commit metadata included in the [`merkleize`](Self::merkleize) call, replacing any
+    /// metadata set before staging.
+    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    /// Expand this staged batch with more reads.
+    ///
+    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
+    /// assigned the returned range. Expansion does not deduplicate against previously staged keys
+    /// and does not observe values computed for earlier staged slots but not yet passed to
+    /// `merkleize`.
+    pub async fn expand(
+        self,
+        keys: &[&U::Key],
+    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
+        let Self {
+            staged,
+            db,
+            metadata,
+        } = self;
+        let (range, values, staged) = {
+            let guard = db.read().await;
+            staged.expand(keys, &*guard).await?
+        };
+        Ok((
+            range,
+            values,
+            Self {
+                staged,
+                db,
+                metadata,
+            },
+        ))
+    }
+}
+
+/// Staged merkleize for the `any` unordered update kind.
+impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>
+where
+    F: Family,
+    E: Storage + Clock + Metrics,
+    K: Key,
+    V: ValueEncoding + 'static,
+    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, unordered::Update<K, V>>: Codec,
+{
+    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
+    /// this method if more keys must be read into the staged index space.
+    ///
+    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// set: the initial `stage` input followed by any [`expand`](AnyStaged::expand) ranges. Metadata
+    /// set via [`with_metadata`](AnyStaged::with_metadata) (or before staging) is committed with the
+    /// returned batch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
+    pub async fn merkleize(
+        self,
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
+    ) -> Result<AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>, Error<F>> {
+        let Self {
+            staged,
+            db,
+            metadata,
+        } = self;
+        let inner = {
+            let guard = db.read().await;
+            staged
+                .merkleize(updates, upserts, metadata, &*guard)
+                .await?
+        };
+        Ok(AnyMerkleized { inner, db })
+    }
+}
+
+/// Staged merkleize for the `any` ordered update kind.
+impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, ordered::Update<K, V>, S>
+where
+    F: Family,
+    E: Storage + Clock + Metrics,
+    K: Key,
+    V: ValueEncoding + 'static,
+    C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
+    I: OrderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, ordered::Update<K, V>>: Codec,
+{
+    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    ///
+    /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
+    /// this method if more keys must be read into the staged index space.
+    ///
+    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// set: the initial `stage` input followed by any [`expand`](AnyStaged::expand) ranges. Metadata
+    /// set via [`with_metadata`](AnyStaged::with_metadata) (or before staging) is committed with the
+    /// returned batch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
+    pub async fn merkleize(
+        self,
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
+    ) -> Result<AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>, Error<F>> {
+        let Self {
+            staged,
+            db,
+            metadata,
+        } = self;
+        let inner = {
+            let guard = db.read().await;
+            staged
+                .merkleize(updates, upserts, metadata, &*guard)
+                .await?
+        };
+        Ok(AnyMerkleized { inner, db })
+    }
+}
+
 /// Key-value operations for the `any` ordered update kind.
 impl<F, E, C, I, H, K, V, S> AnyUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, S>
 where
@@ -191,6 +389,38 @@ where
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &*db).await
+    }
+
+    /// Read multiple values and return a staged batch for the same keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn stage(
+        self,
+        keys: &[&K],
+    ) -> Result<
+        (
+            Vec<Option<V::Value>>,
+            AnyStaged<F, E, C, I, H, ordered::Update<K, V>, S>,
+        ),
+        Error<F>,
+    > {
+        let Self {
+            batch,
+            db,
+            metadata,
+        } = self;
+        let (values, staged) = {
+            let guard = db.read().await;
+            batch.stage(keys, &*guard).await?
+        };
+        Ok((
+            values,
+            AnyStaged {
+                staged,
+                db,
+                metadata,
+            },
+        ))
     }
 
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.
@@ -612,5 +842,137 @@ where
             max_retained_roots: sync_config.max_retained_roots,
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+    };
+    use commonware_storage::{
+        journal::contiguous::fixed::Config as FixedJournalConfig,
+        merkle::{full::Config as MerkleConfig, mmr},
+        qmdb::any::unordered::fixed,
+        translator::TwoCap,
+    };
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::{NonZeroU16, NonZeroUsize};
+
+    type UnorderedFixedDb =
+        fixed::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+
+    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
+
+    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        FixedConfig {
+            merkle_config: MerkleConfig {
+                journal_partition: format!("stateful-any-journal-{suffix}"),
+                metadata_partition: format!("stateful-any-metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: FixedJournalConfig {
+                partition: format!("stateful-any-log-{suffix}"),
+                items_per_blob: NZU64!(7),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
+            translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
+        }
+    }
+
+    /// The glue staged wrapper (`AnyUnmerkleized::stage` -> `AnyStaged::expand` ->
+    /// `AnyStaged::merkleize`) must return the same values and root as an explicit `get_many` +
+    /// `write` + `merkleize`, including a staged delete, an upsert, and metadata flow (both set
+    /// on the staged handle via `with_metadata` and carried from before staging). This guards
+    /// metadata flow and db-handle pairing through the wrapper.
+    #[test]
+    fn unordered_fixed_staged_merkleize_matches_explicit_writes() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("unordered-fixed-glue-staged", &context);
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+                .await
+                .unwrap();
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+
+            let key = |i: u64| Sha256::hash(&i.to_be_bytes());
+            let val = |i: u64| Sha256::hash(&(i + 10_000).to_be_bytes());
+            let metadata = Sha256::hash(b"metadata");
+
+            // Seed keys 0..50 and finalize.
+            let mut seed = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            for i in 0..50u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
+                .await
+                .unwrap();
+            {
+                let mut guard = db.write().await;
+                <UnorderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
+                    .await
+                    .unwrap();
+            }
+
+            // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
+            let read_keys = [key(1), key(2), key(999)];
+            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let indexed_updates = vec![(0, Some(val(1_000))), (1, None), (2, Some(val(1_001)))];
+            let upserts = vec![(key(3), Some(val(1_002)))];
+
+            // Explicit path.
+            let mut explicit = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let explicit_values = explicit.get_many(&keys).await.unwrap();
+            for (slot, value) in &indexed_updates {
+                explicit = explicit.write(read_keys[*slot], *value);
+            }
+            for (k, v) in &upserts {
+                explicit = explicit.write(*k, *v);
+            }
+            let explicit_root =
+                crate::stateful::db::Unmerkleized::merkleize(explicit.with_metadata(metadata))
+                    .await
+                    .unwrap()
+                    .root();
+
+            // Staged path, with metadata set on the staged handle.
+            let staged_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let split = 2;
+            let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
+            let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
+            assert_eq!(range, split..keys.len());
+            staged_values.extend(suffix_values);
+            let staged_root = staged
+                .with_metadata(metadata)
+                .merkleize(indexed_updates.clone(), upserts.clone())
+                .await
+                .unwrap()
+                .root();
+
+            assert_eq!(explicit_values, staged_values);
+            assert_eq!(explicit_root, staged_root);
+
+            // Metadata set before staging must be carried through to staged merkleize.
+            let carried_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .with_metadata(metadata);
+            let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
+            let carried_root = staged
+                .merkleize(indexed_updates.clone(), upserts.clone())
+                .await
+                .unwrap()
+                .root();
+            assert_eq!(explicit_values, carried_values);
+            assert_eq!(explicit_root, carried_root);
+        });
     }
 }

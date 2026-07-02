@@ -321,6 +321,16 @@ where
         self.merkle.with_mem(f)
     }
 
+    /// Like [`Contiguous::read_many`], but reads the journal directly, skipping the synchronous
+    /// page-cache pass. Intended for callers that already served cache hits via
+    /// [`Contiguous::read_many_sync`] and are reading the misses.
+    pub(crate) async fn read_many_direct(
+        &self,
+        positions: &[u64],
+    ) -> Result<Vec<C::Item>, JournalError> {
+        self.journal.read_many(positions).await
+    }
+
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.
     ///
     /// The batch has no items (the committed items are on disk, not in memory).
@@ -747,11 +757,60 @@ where
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<C::Item>, JournalError> {
-        self.journal.read_many(positions).await
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Serve page-cache hits synchronously and fall back to a single batched read for the
+        // misses. The strategy policy decides per batch size whether the sync pass runs on the
+        // calling thread or sharded across the pool (one scratch buffer per shard and one
+        // cache-lock acquisition per blob a shard touches). The sortedness pre-check keeps
+        // contract violations deterministic: without it, a non-increasing batch would error
+        // only when some position missed the cache.
+        if !positions.windows(2).all(|w| w[0] < w[1]) {
+            return self.journal.read_many(positions).await;
+        }
+        let strategy = self.strategy();
+        let journal = &self.journal;
+        let mut results: Vec<Option<C::Item>> = strategy.run(
+            positions.len(),
+            || journal.read_many_sync(positions),
+            || {
+                let manual = strategy.manual();
+                let shard = positions.len().div_ceil(manual.parallelism_hint());
+                manual
+                    .map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
+                        journal.read_many_sync(shard)
+                    })
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            },
+        );
+        let misses: Vec<u64> = positions
+            .iter()
+            .zip(&results)
+            .filter_map(|(&pos, r)| r.is_none().then_some(pos))
+            .collect();
+        if !misses.is_empty() {
+            let read = self.journal.read_many(&misses).await?;
+            let mut read = read.into_iter();
+            for r in results.iter_mut().filter(|r| r.is_none()) {
+                *r = Some(read.next().expect("one result per miss"));
+            }
+        }
+        Ok(results
+            .into_iter()
+            .map(|r| r.expect("all positions resolved"))
+            .collect())
     }
 
     fn try_read_sync(&self, position: u64) -> Option<C::Item> {
         self.journal.try_read_sync(position)
+    }
+
+    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<C::Item>> {
+        self.journal.read_many_sync(positions)
     }
 
     async fn replay(
@@ -846,11 +905,11 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _, ThreadPooler as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::StreamExt as _;
@@ -895,12 +954,20 @@ mod tests {
 
     /// Create Merkle configuration for tests.
     fn merkle_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
+        merkle_config_with(suffix, pooler, Sequential)
+    }
+
+    fn merkle_config_with<S: Strategy>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+        strategy: S,
+    ) -> MerkleConfig<S> {
         MerkleConfig {
             journal_partition: format!("mmr-journal-{suffix}"),
             metadata_partition: format!("mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
-            strategy: Sequential,
+            strategy,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -955,6 +1022,62 @@ mod tests {
             let child: UnmerkleizedBatch<mmr::Family, Sha256, TestOp<mmr::Family>, Sequential> =
                 merkleized.new_batch();
             assert_eq!(child.hasher.root_bagging(), BackwardFold);
+        });
+    }
+
+    /// Large batched reads shard across the strategy pool and match per-position reads.
+    #[test]
+    fn test_read_many_shards_across_strategy_pool() {
+        deterministic::Runner::default().start(|context| async move {
+            // A parallelism > 1 strategy with more positions than the shard threshold
+            // exercises the sharded sync path; the tiny test page cache pushes most
+            // positions through the batched miss fallback while the write buffer serves
+            // the tail synchronously.
+            let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+            let merkle_cfg = merkle_config_with("shard", &context, strategy);
+            let journal_cfg = journal_config("shard", &context);
+            type RayonJournal = Journal<
+                mmr::Family,
+                Context,
+                ContiguousJournal<Context, TestOp<mmr::Family>>,
+                Sha256,
+                Rayon,
+            >;
+            let mut journal = RayonJournal::new(
+                context,
+                merkle_cfg,
+                journal_cfg,
+                |op: &TestOp<mmr::Family>| op.is_commit(),
+                ForwardFold,
+            )
+            .await
+            .unwrap();
+
+            let count = 4200u64;
+            for i in 0..count {
+                let op = create_operation::<mmr::Family>((i % 251) as u8);
+                journal.append(&op).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let positions: Vec<u64> = (0..count).collect();
+            let batch = Contiguous::read_many(&journal, &positions).await.unwrap();
+            assert_eq!(batch.len(), positions.len());
+            for &pos in &positions {
+                let single = Contiguous::read(&journal, pos).await.unwrap();
+                assert_eq!(batch[pos as usize], single);
+            }
+
+            // A non-increasing batch errors deterministically even when fully cached.
+            let mut unsorted = positions.clone();
+            unsorted.swap(0, 1);
+            assert!(Contiguous::read_many(&journal, &unsorted).await.is_err());
+
+            // An empty batch is a no-op, even with a multi-threaded strategy.
+            assert!(Contiguous::read_many(&journal, &[])
+                .await
+                .unwrap()
+                .is_empty());
         });
     }
 

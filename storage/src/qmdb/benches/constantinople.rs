@@ -1,13 +1,13 @@
 //! Constantinople-shape harness: load+write+merkleize at 32k updates / 1M keys.
 //!
-//! Times the full per-block state pipeline (get_many load, batch writes, merkleize, root) on the
+//! Times the full per-block state pipeline (staged load, staged merkleize, root) on the
 //! tokio runtime with EightCap, matching the production validator shape. Runs against the
 //! unordered or ordered fixed `any`/`current` DBs over `mmb`. Prints per-iteration latency with
-//! a load/write/merkleize phase split and the speculative root (a cross-binary parity check:
+//! a load/merkleize phase split and the speculative root (a cross-binary parity check:
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [updates] [threads]
+//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
 //!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
@@ -17,6 +17,8 @@
 //! - depth: number of pending ancestor batches under the timed batch
 //! - iters: timed iterations (default 15)
 //! - keys: total seeded keys (default 1,000,000)
+//! - reads: keys loaded per batch (default 32,768)
+//! - read_chunks: split reads into `stage` + `expand` chunks (default 1)
 //! - updates: keys written per batch (default 32,768)
 //! - threads: strategy pool threads (default 8)
 
@@ -145,6 +147,8 @@ struct Args {
     iters: usize,
     num_keys: u64,
     num_updates: u64,
+    num_reads: u64,
+    read_chunks: usize,
 }
 
 fn key(i: u64) -> Digest {
@@ -160,12 +164,16 @@ fn gen_muts(rng: &mut StdRng, num_updates: u64, num_keys: u64) -> Vec<(Digest, D
         .collect()
 }
 
-fn report(db: &str, depth: u8, mut times_ms: Vec<f64>) {
+fn report(db: &str, args: &Args, mut times_ms: Vec<f64>) {
     times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p = |q: f64| times_ms[((times_ms.len() - 1) as f64 * q) as usize];
     let mean: f64 = times_ms.iter().sum::<f64>() / times_ms.len() as f64;
     println!(
-        "RESULT db={db} depth={depth} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
+        "RESULT db={db} depth={} reads={} read_chunks={} updates={} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
+        args.depth,
+        args.num_reads,
+        args.read_chunks,
+        args.num_updates,
         p(0.1),
         p(0.5),
         mean,
@@ -221,41 +229,57 @@ macro_rules! run_pipeline {
                 chain.push(b.merkleize(&db, None).await.unwrap());
             }
 
-            let muts = gen_muts(&mut rng, args.num_updates, args.num_keys);
-            let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
+            let reads = gen_muts(&mut rng, args.num_reads, args.num_keys);
+            let keys: Vec<&Digest> = reads.iter().map(|(k, _)| k).collect();
+            let mut slots: Vec<_> = (0..reads.len()).collect();
+            for i in 0..args.num_updates as usize {
+                let j = i + (rng.next_u64() as usize % (slots.len() - i));
+                slots.swap(i, j);
+            }
+            let updates: Vec<_> = slots[..args.num_updates as usize]
+                .iter()
+                .map(|&idx| (idx, Some(reads[idx].1)))
+                .collect();
             let new_batch = || {
                 chain
                     .last()
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 
-            // Timed: load all touched keys, write them, merkleize, read root. Reads cache
-            // resolved locations on the batch (consumed by unordered merkleize); load and
-            // writes must share one batch for that caching to apply.
+            // Timed: load all touched keys, merkleize selected updates, read root. The
+            // load returns a staged batch that consumes `(read_index, value)` pairs after the
+            // caller has computed them.
             let start = Instant::now();
-            let mut b = new_batch();
-            let values = b.get_many(&keys, &db).await.unwrap();
+            let b = new_batch();
+            let read_chunks = args.read_chunks.min(keys.len()).max(1);
+            let chunk_len = keys.len().div_ceil(read_chunks);
+            let mut chunks = keys.chunks(chunk_len);
+            let first = chunks.next().expect("reads must be non-empty");
+            let (mut values, mut staged) = b.stage(first, &db).await.unwrap();
+            for chunk in chunks {
+                let (_, more, next) = staged.expand(chunk, &db).await.unwrap();
+                values.extend(more);
+                staged = next;
+            }
             black_box(&values);
             let t_load = start.elapsed();
-            for (k, v) in &muts {
-                b = b.write(*k, Some(*v));
-            }
-            let t_write = start.elapsed();
-            let merkleized = b.merkleize(&db, None).await.unwrap();
+            let merkleized = staged
+                .merkleize(updates, Vec::new(), None, &db)
+                .await
+                .unwrap();
             let root = merkleized.root();
             let elapsed = start.elapsed();
 
             times_ms.push(elapsed.as_secs_f64() * 1000.0);
             println!(
-                "iter={iter} ms={:.2} load={:.2} write={:.2} merk={:.2} root={root}",
+                "iter={iter} ms={:.2} load={:.2} merkleize={:.2} root={root}",
                 times_ms[iter],
                 t_load.as_secs_f64() * 1000.0,
-                (t_write - t_load).as_secs_f64() * 1000.0,
-                (elapsed - t_write).as_secs_f64() * 1000.0
+                (elapsed - t_load).as_secs_f64() * 1000.0
             );
         }
 
-        report($label, args.depth, times_ms);
+        report($label, &args, times_ms);
         db.destroy().await.unwrap();
     }};
 }
@@ -275,10 +299,12 @@ fn main() {
         depth: raw.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
         iters: raw.get(3).and_then(|s| s.parse().ok()).unwrap_or(15),
         num_keys: raw.get(4).and_then(|s| s.parse().ok()).unwrap_or(1_000_000),
-        num_updates: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
+        num_reads: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
+        read_chunks: raw.get(6).and_then(|s| s.parse().ok()).unwrap_or(1),
+        num_updates: raw.get(7).and_then(|s| s.parse().ok()).unwrap_or(32_768),
     };
     let threads: NonZeroUsize = raw
-        .get(6)
+        .get(8)
         .and_then(|s| s.parse().ok())
         .unwrap_or(NZUsize!(8));
     assert!(
@@ -293,13 +319,17 @@ fn main() {
         "db: any::unordered::fixed::mmb|any::ordered::fixed::mmb|any::unordered::variable::mmb|current::unordered::fixed::mmb|current::ordered::fixed::mmb"
     );
     assert!(
-        args.iters > 0 && args.num_keys > 0 && args.num_updates > 0,
-        "iters, keys, and updates must be non-zero"
+        args.iters > 0
+            && args.num_keys > 0
+            && args.num_updates > 0
+            && args.num_reads >= args.num_updates,
+        "iters, keys, and updates must be non-zero, and reads must be >= updates"
     );
+    assert!(args.read_chunks > 0, "read_chunks must be non-zero");
 
     eprintln!(
-        "constantinople db={db_kind} depth={} iters={} keys={} updates={} threads={threads}",
-        args.depth, args.iters, args.num_keys, args.num_updates
+        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads}",
+        args.depth, args.iters, args.num_keys, args.num_reads, args.read_chunks, args.num_updates
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {

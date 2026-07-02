@@ -193,6 +193,77 @@ impl<B: Blob> View<'_, B> {
 
         Ok(offsets.len() - blob_reads)
     }
+
+    /// Like [`Self::read_many_into`], but synchronous and cache-only.
+    ///
+    /// Items fully served from the in-memory tail and page cache are written to their slots in
+    /// `buf`. Returns the indices of items that require a blob read; those slots hold
+    /// unspecified bytes.
+    pub fn read_many_sync_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<Vec<usize>, Error> {
+        super::validate_read_many_into(buf.len(), offsets, item_size, self.size)?;
+        if offsets.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut cache_ranges =
+            super::split_read_many(buf, offsets, item_size, self.tail_offset, self.tail);
+        if cache_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+
+        // Map missed ranges back to item indices: each remaining range starts at its item's
+        // offset, and both lists are sorted.
+        let mut misses = Vec::with_capacity(cache_ranges.len());
+        let mut idx = 0;
+        for (_, offset) in cache_ranges {
+            while offsets[idx] != offset {
+                idx += 1;
+            }
+            misses.push(idx);
+            idx += 1;
+        }
+        Ok(misses)
+    }
+
+    /// Like [`Self::read_many_sync_into`], but for variable-length ranges: `buf` holds one
+    /// slot per `(offset, len)` range, back to back. Returns the indices of ranges that require
+    /// a blob read; their slots hold unspecified bytes.
+    pub fn read_ranges_sync_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<Vec<usize>, Error> {
+        super::validate_read_ranges(buf.len(), ranges, self.size)?;
+        if ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut cache_ranges = super::split_read_ranges(buf, ranges, self.tail_offset, self.tail);
+        if cache_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+
+        // Map missed reads back to range indices: each remaining read starts at its range's
+        // offset, and both lists are sorted. Zero-length ranges never miss but may share an
+        // offset with the range that follows them, so they are skipped.
+        let mut misses = Vec::with_capacity(cache_ranges.len());
+        let mut idx = 0;
+        for (_, offset) in cache_ranges {
+            while ranges[idx].1 == 0 || ranges[idx].0 != offset {
+                idx += 1;
+            }
+            misses.push(idx);
+            idx += 1;
+        }
+        Ok(misses)
+    }
 }
 
 #[cfg(test)]

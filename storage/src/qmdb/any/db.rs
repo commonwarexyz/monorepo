@@ -28,6 +28,10 @@ use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
 
+/// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
+/// keys and `(global key index, position)` pairs for page-cache misses.
+type ShardReads<T> = (Vec<Option<T>>, Vec<(usize, u64)>);
+
 /// Metrics for Any QMDBs.
 pub(crate) struct Metrics<E: Context> {
     /// State gauges.
@@ -232,10 +236,10 @@ where
 
     /// Like [`Self::get_many`] but maps each matched update through `map`, which also
     /// receives the committed location the update was read from.
-    pub(crate) async fn get_many_map<T>(
+    pub(crate) async fn get_many_map<T: Send>(
         &self,
         keys: &[&U::Key],
-        map: impl Fn(&U, Location<F>) -> T,
+        map: impl Fn(&U, Location<F>) -> T + Send + Sync,
     ) -> Result<Vec<Option<T>>, crate::qmdb::Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
@@ -245,68 +249,115 @@ where
         self.metrics.reads.get_many_calls.inc();
         self.metrics.reads.keys_requested.inc_by(keys.len() as u64);
 
-        // Phase 1: Collect candidate locations from the in-memory index. Each key may map to
-        // multiple locations due to hash collisions. The index is read-only and Send+Sync, so
-        // for large batches the probe is sharded across the strategy pool; each candidate carries
-        // its global key index, so partition order does not matter.
+        // One fused pass resolves everything the page cache can serve: probe the index, sort
+        // candidate locations, read cached operations, and match them back to keys, collecting
+        // misses. The strategy policy decides per batch size whether the pass runs on the
+        // calling thread or sharded across the pool.
         let strategy = self.strategy();
-        let mut candidates: Vec<(usize, u64)> = strategy.run(
+        let (mut results, mut misses) = strategy.run(
             keys.len(),
-            || {
-                let mut candidates = Vec::with_capacity(keys.len());
-                self.snapshot
-                    .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
-                candidates
-            },
+            || self.resolve_cached(keys, &map, 0),
             || {
                 let manual = strategy.manual();
-                let parallelism = manual.parallelism_hint();
-                let chunk = keys.len().div_ceil(parallelism);
-                let snapshot = &self.snapshot;
-                manual
-                    .map_collect_vec(
-                        keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
-                        |(ci, chunk_keys)| {
-                            let base = ci * chunk;
-                            let mut local: Vec<(usize, u64)> = Vec::with_capacity(chunk_keys.len());
-                            snapshot.get_many(chunk_keys, |key_idx, &loc| {
-                                local.push((base + key_idx, *loc))
-                            });
-                            local
-                        },
-                    )
-                    .into_iter()
-                    .flatten()
-                    .collect()
+                let chunk = keys.len().div_ceil(manual.parallelism_hint());
+                let shards: Vec<ShardReads<T>> = manual.map_collect_vec(
+                    keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
+                    |(ci, shard_keys)| self.resolve_cached(shard_keys, &map, ci * chunk),
+                );
+                let mut results = Vec::with_capacity(keys.len());
+                let mut misses = Vec::new();
+                for (shard_results, shard_misses) in shards {
+                    results.extend(shard_results);
+                    misses.extend(shard_misses);
+                }
+                (results, misses)
             },
         );
-
-        let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
-        if candidates.is_empty() {
+        if misses.is_empty() {
             return Ok(results);
         }
 
-        // Phase 2: Sort by position for batched journal reads, then deduplicate.
-        candidates.sort_unstable_by_key(|&(_, pos)| pos);
+        // Fallback: one batched read for positions the page cache could not serve, which also
+        // validates them: every candidate position is decoded by exactly one of the two passes,
+        // so corruption detection does not depend on cache state. Skip the log's synchronous
+        // cache pass: these positions just missed it.
+        misses.sort_unstable_by_key(|&(_, pos)| pos);
+        let positions = Self::dedup_positions(&misses);
+        let ops = self.log.read_many_direct(&positions).await?;
+        Self::match_read_ops(keys, &misses, &positions, &ops, &map, &mut results);
+        Ok(results)
+    }
 
-        let mut positions: Vec<u64> = Vec::with_capacity(candidates.len());
-        for &(_, pos) in &candidates {
+    /// Probe the index for `keys`, serve page-cache hits synchronously, and match them back to
+    /// keys. Returns per-key results plus `(base + key index, position)` pairs for positions
+    /// the cache could not serve. A miss is recorded even when its key already resolved so the
+    /// fallback read still validates the position.
+    fn resolve_cached<T: Send>(
+        &self,
+        keys: &[&U::Key],
+        map: &(impl Fn(&U, Location<F>) -> T + Send + Sync),
+        base: usize,
+    ) -> ShardReads<T> {
+        // Probe the in-memory index. Each key may map to multiple locations due to hash
+        // collisions.
+        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
+        self.snapshot
+            .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
+
+        // Sort by position and deduplicate for the batched cache read.
+        candidates.sort_unstable_by_key(|&(_, pos)| pos);
+        let positions = Self::dedup_positions(&candidates);
+
+        let ops = self.log.read_many_sync(&positions);
+        let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
+        let mut misses: Vec<(usize, u64)> = Vec::new();
+        let mut op_idx = 0;
+        for &(key_idx, pos) in &candidates {
+            while positions[op_idx] < pos {
+                op_idx += 1;
+            }
+            match &ops[op_idx] {
+                Some(Operation::Update(data)) => {
+                    if results[key_idx].is_none() && data.key() == keys[key_idx] {
+                        results[key_idx] = Some(map(data, Location::new(pos)));
+                    }
+                }
+                Some(_) => panic!("location does not reference update operation. loc={pos}"),
+                None => misses.push((base + key_idx, pos)),
+            }
+        }
+        (results, misses)
+    }
+
+    /// Collapse position-sorted `(key index, position)` candidates into deduplicated positions.
+    fn dedup_positions(candidates: &[(usize, u64)]) -> Vec<u64> {
+        let mut positions = Vec::with_capacity(candidates.len());
+        for &(_, pos) in candidates {
             if positions.last() != Some(&pos) {
                 positions.push(pos);
             }
         }
+        positions
+    }
 
-        // Phase 3: Batch-read from the journal (one reader acquisition, one I/O batch).
-        let ops = self.log.read_many(&positions).await?;
-
-        // Phase 4: Match operations back to keys via binary search (no HashMap).
-        for &(key_idx, pos) in &candidates {
+    /// Match operations read for deduplicated `positions` back to their position-sorted
+    /// candidates, filling each unresolved key slot whose operation carries its exact key.
+    fn match_read_ops<T>(
+        keys: &[&U::Key],
+        candidates: &[(usize, u64)],
+        positions: &[u64],
+        ops: &[Operation<F, U>],
+        map: &impl Fn(&U, Location<F>) -> T,
+        results: &mut [Option<T>],
+    ) {
+        let mut op_idx = 0;
+        for &(key_idx, pos) in candidates {
             if results[key_idx].is_some() {
                 continue;
             }
-            let op_idx = positions
-                .binary_search(&pos)
-                .expect("position was deduped from candidates");
+            while positions[op_idx] < pos {
+                op_idx += 1;
+            }
             let Operation::Update(data) = &ops[op_idx] else {
                 panic!("location does not reference update operation. loc={pos}");
             };
@@ -314,8 +365,6 @@ where
                 results[key_idx] = Some(map(data, Location::new(pos)));
             }
         }
-
-        Ok(results)
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest

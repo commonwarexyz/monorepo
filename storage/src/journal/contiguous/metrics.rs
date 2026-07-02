@@ -60,7 +60,7 @@ pub(super) struct CommonMetrics<E: Clock> {
     read_many_duration: Timed,
     /// Successful `try_read_sync` calls.
     pub try_read_sync_hits: Counter,
-    /// Items returned by read, read_many, and try_read_sync.
+    /// Items returned by read, read_many, read_many_sync, and try_read_sync.
     pub items_read: Counter,
     /// Full sync calls.
     pub sync_calls: Counter,
@@ -130,7 +130,7 @@ impl<E: RuntimeMetrics + Clock> CommonMetrics<E> {
         );
         let items_read = context.as_ref().counter(
             "items_read",
-            "Number of items returned by read, read_many, and try_read_sync",
+            "Number of items returned by read, read_many, read_many_sync, and try_read_sync",
         );
         let sync_calls = context
             .as_ref()
