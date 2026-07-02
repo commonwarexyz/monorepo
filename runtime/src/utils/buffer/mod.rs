@@ -176,9 +176,16 @@ impl SyncState {
 
     /// Resize the blob and require a later sync.
     async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
+        // A grow must not replace an incomplete shrink. Growing zero-fills the new bytes, so
+        // the bytes the shrink would have removed must not survive it: finish the shrink
+        // first. A resize to an equal or smaller size removes at least as much as the
+        // incomplete one would have, so it can simply take its place.
+        if matches!(self.pending_resize, Some(incomplete) if incomplete < len) {
+            self.settle(blob).await?;
+        }
+
         // Record the intent before any await so a dropped resize is re-issued by the next
-        // operation. A newer resize overwrites an unsettled intent: resizes are absolute, so
-        // the skipped intermediate size was never observable.
+        // operation.
         self.pending_resize = Some(len);
         self.wait_for_pending().await?;
         self.mark_dirty();
@@ -201,7 +208,7 @@ impl SyncState {
 
     /// Start making pending mutations durable and return a handle for completion.
     async fn start_sync(&mut self, blob: &impl crate::Blob) -> crate::Handle<()> {
-        // An owed resize must reach the blob before the sync that covers it starts.
+        // An incomplete resize must reach the blob before the sync that covers it starts.
         if let Err(err) = self.settle(blob).await {
             return crate::Handle::ready(Err(err));
         }
@@ -1381,6 +1388,39 @@ mod tests {
             assert_eq!(size, 5);
             let read = blob.read_at(0, 5).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), b"hello");
+        });
+    }
+
+    // A grow after a canceled shrink must not resurrect the bytes the shrink removed:
+    // everything above the shrunken size reads as zeros.
+    #[test_traced]
+    fn test_write_grow_after_canceled_shrink_zeros() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, gate) = GatedResizeBlob::new(inner.clone(), GatePosition::Before);
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            writer.write_at(0, b"hello").await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Cancel the shrink before it reaches the blob; the writer claims size 3.
+            gate.cancel(writer.resize(3)).await;
+            assert_eq!(writer.size(), 3);
+            assert_eq!(inner.size(), 5);
+
+            // Grow to 10: bytes [3, 10) must read as zeros per the Blob::resize contract.
+            writer.resize(10).await.unwrap();
+            assert_eq!(writer.size(), 10);
+            let read = writer.read_at(0, 10).await.unwrap().coalesce();
+            assert_eq!(&read.as_ref()[..3], b"hel");
+            assert_eq!(&read.as_ref()[3..], &[0; 7]);
+
+            // The zeroing is durable.
+            writer.sync().await.unwrap();
+            let (durable, _, _, _) = inner.snapshot();
+            assert_eq!(&durable[..3], b"hel");
+            assert_eq!(&durable[3..], &[0; 7]);
         });
     }
 
