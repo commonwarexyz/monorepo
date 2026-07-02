@@ -400,16 +400,14 @@ impl<
                         continue;
                     }
                 };
-                let result = match self.validate_node(&node, &sender) {
+
+                let result = match self.prepare_and_validate_node(&node, &sender).await {
                     Ok(result) => result,
                     Err(err) => {
                         debug!(?err, ?sender, "node validate failed");
                         continue;
                     }
                 };
-
-                // Initialize journal for sequencer if it does not exist
-                self.journal_prepare(&sender).await;
 
                 // Handle the parent certificate
                 if let Some(parent_chunk) = result {
@@ -862,12 +860,14 @@ impl<
     // Validation
     ////////////////////////////////////////
 
-    /// Takes a raw `Node` (from sender) from the p2p network and validates it.
+    /// Prepares the sender's journal, then validates an inbound `Node`.
     ///
     /// If valid (and not already the tracked tip for the sender), returns the implied
     /// parent chunk and its certificate.
     /// Else returns an error if the `Node` is invalid.
-    fn validate_node(
+    ///
+    /// Origin checks run before journal replay, and tip-dependent checks run after replay.
+    async fn prepare_and_validate_node(
         &mut self,
         node: &Node<C::PublicKey, P::Scheme, D>,
         sender: &C::PublicKey,
@@ -877,6 +877,13 @@ impl<
             return Err(Error::PeerMismatch);
         }
 
+        // Verify the sequencer before opening the journal so arbitrary peers cannot create
+        // journal partitions.
+        self.validate_chunk_sequencer(&node.chunk, self.epoch)?;
+
+        // Replay before checking the tracked tip so validation observes recovered journal state.
+        self.journal_prepare(sender).await;
+
         // Optimization: If the node is exactly equal to the tip,
         // don't perform further validation.
         if let Some(tip) = self.tip_manager.get(sender) {
@@ -885,8 +892,8 @@ impl<
             }
         }
 
-        // Validate chunk
-        self.validate_chunk(&node.chunk, self.epoch)?;
+        // Validate chunk against the recovered tip.
+        self.validate_chunk_tip(&node.chunk)?;
 
         // Verify the node
         node.verify(
@@ -907,7 +914,8 @@ impl<
         sender: &<P::Scheme as Verifier>::PublicKey,
     ) -> Result<(), Error> {
         // Validate chunk
-        self.validate_chunk(&ack.chunk, ack.epoch)?;
+        self.validate_chunk_sequencer(&ack.chunk, ack.epoch)?;
+        self.validate_chunk_tip(&ack.chunk)?;
 
         // Get the scheme for the epoch to validate the sender
         let Some(scheme) = self.validators_provider.scheme(ack.epoch) else {
@@ -958,12 +966,14 @@ impl<
         Ok(())
     }
 
-    /// Takes a raw chunk from the p2p network and validates it against the epoch.
+    /// Checks that the chunk sequencer is known for the epoch.
     ///
-    /// Returns the chunk if the chunk is valid.
-    /// Returns an error if the chunk is invalid.
-    fn validate_chunk(&self, chunk: &Chunk<C::PublicKey, D>, epoch: Epoch) -> Result<(), Error> {
-        // Verify sequencer
+    /// This can run before journal replay because it does not depend on tracked tips.
+    fn validate_chunk_sequencer(
+        &self,
+        chunk: &Chunk<C::PublicKey, D>,
+        epoch: Epoch,
+    ) -> Result<(), Error> {
         if self
             .sequencers_provider
             .sequencers(epoch)
@@ -973,7 +983,13 @@ impl<
             return Err(Error::UnknownSequencer(epoch, chunk.sequencer.to_string()));
         }
 
-        // Verify height
+        Ok(())
+    }
+
+    /// Checks the chunk against the currently tracked tip for its sequencer.
+    ///
+    /// For inbound nodes, call this only after replaying the sender's journal.
+    fn validate_chunk_tip(&self, chunk: &Chunk<C::PublicKey, D>) -> Result<(), Error> {
         if let Some(tip) = self.tip_manager.get(&chunk.sequencer) {
             // Height must be at least the tip height
             match chunk.height.cmp(&tip.chunk.height) {
@@ -1105,5 +1121,288 @@ impl<
 
         // Prune journal, ignoring errors
         let _ = journal.prune(section).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ordered_broadcast::{
+        mocks,
+        scheme::ed25519,
+        types::{AckSubject, SequencersProvider},
+    };
+    use commonware_codec::Encode;
+    use commonware_cryptography::{
+        certificate::{
+            mocks::Fixture, Scheme as CertificateScheme, Verifier as CertificateVerifier,
+        },
+        ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
+        sha256::Digest as Sha256Digest,
+        Signer,
+    };
+    use commonware_macros::select;
+    use commonware_p2p::{
+        simulated::{Link, Network},
+        Recipients, Sender,
+    };
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Clock, Quota, Runner as _, Supervisor as _,
+    };
+    use commonware_utils::{ordered::Set, sync::Mutex, Faults as _, N3f1, NZUsize, NZU16, NZU64};
+    use std::{
+        collections::BTreeMap,
+        num::{NonZeroU16, NonZeroU32},
+        sync::Arc,
+        time::Duration,
+    };
+
+    const TEST_NAMESPACE: &[u8] = b"ordered_broadcast_engine_test";
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    const RELIABLE_LINK: Link = Link {
+        latency: Duration::from_millis(1),
+        jitter: Duration::from_millis(0),
+        success_rate: 1.0,
+    };
+    type TestNode = Node<Ed25519PublicKey, ed25519::Scheme, Sha256Digest>;
+    type TestReporter = mocks::ReporterMailbox<Ed25519PublicKey, ed25519::Scheme, Sha256Digest>;
+    type TestEngine = Engine<
+        deterministic::Context,
+        PrivateKey,
+        EpochSequencers,
+        mocks::Provider<ed25519::Scheme>,
+        Sha256Digest,
+        mocks::Automaton<Ed25519PublicKey>,
+        mocks::Automaton<Ed25519PublicKey>,
+        TestReporter,
+        mocks::Monitor,
+        Sequential,
+    >;
+
+    #[derive(Clone, Default)]
+    struct EpochSequencers {
+        sequencers: Arc<Mutex<BTreeMap<Epoch, Arc<Set<Ed25519PublicKey>>>>>,
+    }
+
+    impl EpochSequencers {
+        fn insert(&self, epoch: Epoch, sequencers: Vec<Ed25519PublicKey>) {
+            self.sequencers
+                .lock()
+                .insert(epoch, Arc::new(Set::from_iter_dedup(sequencers)));
+        }
+    }
+
+    impl SequencersProvider for EpochSequencers {
+        type PublicKey = Ed25519PublicKey;
+
+        fn sequencers(&self, epoch: Epoch) -> Option<Arc<Set<Self::PublicKey>>> {
+            self.sequencers.lock().get(&epoch).cloned()
+        }
+    }
+
+    fn certificate(
+        fixture: &Fixture<ed25519::Scheme>,
+        chunk: &Chunk<Ed25519PublicKey, Sha256Digest>,
+        epoch: Epoch,
+    ) -> <ed25519::Scheme as CertificateVerifier>::Certificate {
+        let ctx = AckSubject { chunk, epoch };
+        let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let attestations = fixture.schemes[..quorum]
+            .iter()
+            .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
+            .collect::<Vec<_>>();
+        fixture.schemes[0]
+            .assemble::<_, N3f1>(attestations, &Sequential)
+            .expect("certificate should assemble")
+    }
+
+    fn engine(
+        context: deterministic::Context,
+        fixture: &Fixture<ed25519::Scheme>,
+        sequencers_provider: EpochSequencers,
+        reporter: TestReporter,
+        epoch: Epoch,
+        journal_name_prefix: String,
+    ) -> TestEngine {
+        let validators_provider = mocks::Provider::new();
+        assert!(validators_provider.register(epoch, fixture.schemes[0].clone()));
+
+        let chunk_verifier = ChunkVerifier::new(TEST_NAMESPACE);
+        let automaton = mocks::Automaton::<Ed25519PublicKey>::new(|_| false);
+        let mut engine = Engine::new(
+            context.child("engine"),
+            Config {
+                sequencer_signer: None::<ChunkSigner<PrivateKey>>,
+                chunk_verifier,
+                sequencers_provider,
+                validators_provider,
+                automaton: automaton.clone(),
+                relay: automaton,
+                reporter,
+                monitor: mocks::Monitor::new(epoch),
+                priority_proposals: false,
+                priority_acks: false,
+                rebroadcast_timeout: Duration::from_secs(1),
+                epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
+                height_bound: HeightDelta::new(2),
+                journal_heights_per_section: NZU64!(10),
+                journal_replay_buffer: NZUsize!(4096),
+                journal_write_buffer: NZUsize!(4096),
+                journal_name_prefix,
+                journal_compression: Some(3),
+                journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            },
+        );
+        engine.epoch = epoch;
+        engine
+    }
+
+    #[test]
+    fn stale_node_after_restart_is_rejected_and_engine_continues() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let epoch = Epoch::new(10);
+            let fixture = ed25519::fixture(&mut context, TEST_NAMESPACE, 4);
+            let validator = fixture.participants[0].clone();
+            let sequencer_sk = PrivateKey::from_seed(u64::MAX);
+            let sequencer = sequencer_sk.public_key();
+            let sequencers_provider = EpochSequencers::default();
+            sequencers_provider.insert(epoch, vec![sequencer.clone()]);
+            let journal_name_prefix = format!("ordered-broadcast-restart-{validator}-");
+
+            let mut signer = ChunkSigner::new(TEST_NAMESPACE, sequencer_sk);
+            let stale: TestNode = Node::sign(
+                &mut signer,
+                Height::zero(),
+                Sha256Digest::from([1; 32]),
+                None,
+            );
+            let stale_certificate = certificate(&fixture, &stale.chunk, epoch);
+            let persisted: TestNode = Node::sign(
+                &mut signer,
+                Height::new(1),
+                Sha256Digest::from([2; 32]),
+                Some(Parent::new(stale.chunk.payload, epoch, stale_certificate)),
+            );
+            let persisted_certificate = certificate(&fixture, &persisted.chunk, epoch);
+            let successor: TestNode = Node::sign(
+                &mut signer,
+                Height::new(2),
+                Sha256Digest::from([3; 32]),
+                Some(Parent::new(
+                    persisted.chunk.payload,
+                    epoch,
+                    persisted_certificate,
+                )),
+            );
+
+            // Persist height 1 without loading it into the restarted engine.
+            {
+                let (_reporter, reporter) = mocks::Reporter::new(
+                    context.child("writer_reporter"),
+                    ChunkVerifier::new(TEST_NAMESPACE),
+                    fixture.verifier.clone(),
+                    None,
+                );
+                let mut writer = engine(
+                    context.child("writer"),
+                    &fixture,
+                    sequencers_provider.clone(),
+                    reporter,
+                    epoch,
+                    journal_name_prefix.clone(),
+                );
+                writer.journal_prepare(&sequencer).await;
+                writer.journal_append(persisted.clone()).await;
+                writer.journal_sync(&sequencer, persisted.chunk.height).await;
+            }
+
+            let participants = vec![validator.clone(), sequencer.clone()];
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants,
+            )
+            .await;
+            network.start();
+
+            let validator_control = oracle.control(validator.clone());
+            let (validator_node_sender, validator_node_receiver) =
+                validator_control.register(0, TEST_QUOTA).await.unwrap();
+            let (validator_ack_sender, validator_ack_receiver) =
+                validator_control.register(1, TEST_QUOTA).await.unwrap();
+            let sequencer_control = oracle.control(sequencer.clone());
+            let (mut sequencer_node_sender, _sequencer_node_receiver) =
+                sequencer_control.register(0, TEST_QUOTA).await.unwrap();
+            let (_sequencer_ack_sender, _sequencer_ack_receiver) =
+                sequencer_control.register(1, TEST_QUOTA).await.unwrap();
+
+            oracle
+                .add_link(sequencer.clone(), validator.clone(), RELIABLE_LINK)
+                .await
+                .unwrap();
+            oracle
+                .add_link(validator.clone(), sequencer.clone(), RELIABLE_LINK)
+                .await
+                .unwrap();
+
+            let (reporter, mut reporter_mailbox) = mocks::Reporter::new(
+                context.child("reporter"),
+                ChunkVerifier::new(TEST_NAMESPACE),
+                fixture.verifier.clone(),
+                None,
+            );
+            reporter.start();
+            let restarted = engine(
+                context.child("restarted"),
+                &fixture,
+                sequencers_provider,
+                reporter_mailbox.clone(),
+                epoch,
+                journal_name_prefix,
+            );
+            restarted.start(
+                (validator_node_sender, validator_node_receiver),
+                (validator_ack_sender, validator_ack_receiver),
+            );
+
+            // Deliver the old signed node first, then a valid successor.
+            sequencer_node_sender.send(
+                Recipients::Some(vec![validator.clone()]),
+                stale.encode(),
+                false,
+            );
+            context.sleep(Duration::from_millis(10)).await;
+            sequencer_node_sender.send(
+                Recipients::Some(vec![validator.clone()]),
+                successor.encode(),
+                false,
+            );
+
+            // The successor carries the persisted node's certificate. Observing that lock means
+            // the engine rejected the stale node and continued processing traffic.
+            let wait_for_persisted_lock = async {
+                loop {
+                    if reporter_mailbox.get_tip(sequencer.clone()).await
+                        == Some((persisted.chunk.height, epoch))
+                    {
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+            };
+            select! {
+                _ = wait_for_persisted_lock => {},
+                _ = context.sleep(Duration::from_secs(5)) => panic!("timed out waiting for engine progress"),
+            }
+        });
     }
 }
