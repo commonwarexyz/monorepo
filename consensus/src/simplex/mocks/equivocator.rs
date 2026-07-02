@@ -3,7 +3,7 @@
 use super::relay::Relay;
 use crate::{
     simplex::{
-        elector::{Config as ElectorConfig, Elector},
+        elector::{self, Elector as _},
         scheme::Scheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
@@ -18,7 +18,7 @@ use commonware_utils::ordered::Quorum;
 use rand::{seq::IteratorRandom, Rng};
 use std::{collections::HashSet, sync::Arc};
 
-pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {
+pub struct Config<S: certificate::Scheme, L: elector::Config<S>, H: Hasher> {
     pub scheme: S,
     pub elector: L,
     pub epoch: Epoch,
@@ -29,7 +29,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {
 pub struct Equivocator<
     E: Clock + Rng + Spawner,
     S: Scheme<H::Digest>,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
     H: Hasher,
 > {
     context: ContextCell<E>,
@@ -41,11 +41,10 @@ pub struct Equivocator<
     sent: HashSet<View>,
 }
 
-impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Hasher>
+impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: Hasher>
     Equivocator<E, S, L, H>
 {
     pub fn new(context: E, cfg: Config<S, L, H>) -> Self {
-        // Build elector with participants
         let elector = cfg.elector.build(cfg.scheme.participants());
 
         Self {

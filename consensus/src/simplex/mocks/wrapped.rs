@@ -1,4 +1,7 @@
-use crate::{simplex::elector, types::Round};
+use crate::{
+    simplex::elector,
+    types::{Round, TermLength},
+};
 use commonware_codec::{types::lazy::Lazy, Encode, Read};
 use commonware_cryptography::{
     certificate::{Attestation, Scheme as CertificateScheme, Verification, Verifier},
@@ -115,6 +118,10 @@ where
 {
     type Elector = Elector<L::Elector, S>;
 
+    fn with_term_length(self, term_length: TermLength) -> Self {
+        Self(self.0.with_term_length(term_length))
+    }
+
     fn build(
         self,
         participants: &commonware_utils::ordered::Set<<Scheme<S> as Verifier>::PublicKey>,
@@ -131,6 +138,10 @@ where
     S: CertificateScheme,
     E: elector::Elector<S>,
 {
+    fn term_length(&self) -> TermLength {
+        self.inner.term_length()
+    }
+
     fn elect(
         &self,
         round: Round,

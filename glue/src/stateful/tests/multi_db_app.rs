@@ -729,9 +729,10 @@ impl EngineDefinition for MultiDbEngine {
             certification_timeout: Duration::from_secs(2),
             timeout_retry: Duration::from_millis(500),
             activity_timeout: ViewDelta::new(10),
-            skip_timeout: ViewDelta::new(5),
+            skip_timeout: Duration::from_secs(5),
             fetch_timeout: Duration::from_secs(2),
             fetch_concurrent: NZUsize!(3),
+            finalization_timeout: Duration::from_secs(3),
             forwarding: ForwardingPolicy::Disabled,
         };
 

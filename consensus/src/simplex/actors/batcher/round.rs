@@ -302,19 +302,33 @@ impl<
         self.verifier.set_leader(leader);
     }
 
-    /// Returns the leader's proposal to forward to the voter, if:
-    /// 1. We haven't already processed this (called at most once per round).
-    /// 2. The leader's proposal is known.
-    /// 3. We are not the leader (leaders don't need to forward their own proposal).
-    pub fn forward_proposal(&mut self, me: Participant) -> Option<Proposal<D>> {
+    /// Core predicate for [`Self::has_forwardable_proposal`] and
+    /// [`Self::forward_proposal`].
+    fn forwardable_proposal(&self, me: Participant) -> Option<Proposal<D>> {
         if self.proposal_sent {
             return None;
         }
         let (leader, proposal) = self.verifier.get_leader_proposal()?;
-        self.proposal_sent = true;
         if leader == me {
             return None;
         }
+        Some(proposal)
+    }
+
+    /// Returns whether there is a proposal to forward to the voter:
+    /// 1. We haven't already forwarded one (at most once per round).
+    /// 2. The leader's proposal is known.
+    /// 3. We are not the leader (leaders don't need to forward their own proposal).
+    pub fn has_forwardable_proposal(&self, me: Participant) -> bool {
+        self.forwardable_proposal(me).is_some()
+    }
+
+    /// Returns the leader's proposal to forward to the voter, marking it sent
+    /// (at most once per round). See [`Self::has_forwardable_proposal`] for
+    /// the conditions.
+    pub fn forward_proposal(&mut self, me: Participant) -> Option<Proposal<D>> {
+        let proposal = self.forwardable_proposal(me)?;
+        self.proposal_sent = true;
         Some(proposal)
     }
 

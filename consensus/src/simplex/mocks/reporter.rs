@@ -2,14 +2,14 @@
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
     simplex::{
-        elector::{Config as ElectorConfig, Elector},
+        elector::{self, Elector as _},
         scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
         },
     },
-    types::{Round, View},
+    types::{Round, TermLength, View},
     Monitor, Viewable,
 };
 use commonware_actor::Feedback;
@@ -41,17 +41,18 @@ type Faults<S, D> = HashMap<<S as Verifier>::PublicKey, HashMap<View, HashSet<Ac
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
-pub struct Config<S: Scheme, L: ElectorConfig<S>> {
+pub struct Config<S: Scheme, L: elector::Config<S>> {
     pub participants: Set<S::PublicKey>,
     pub scheme: S,
     pub elector: L,
 }
 
-pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest> {
+pub struct Reporter<E: CryptoRngCore, S: Scheme, L: elector::Config<S>, D: Digest> {
     context: Arc<Mutex<E>>,
     pub participants: Set<S::PublicKey>,
     scheme: S,
     elector: L::Elector,
+    term_length: TermLength,
 
     pub leaders: Arc<Mutex<HashMap<View, S::PublicKey>>>,
     pub certified: Arc<Mutex<HashSet<View>>>,
@@ -73,7 +74,7 @@ impl<E, S, L, D> Clone for Reporter<E, S, L, D>
 where
     E: CryptoRngCore,
     S: Scheme,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
     L::Elector: Clone,
     D: Digest,
 {
@@ -83,6 +84,7 @@ where
             participants: self.participants.clone(),
             scheme: self.scheme.clone(),
             elector: self.elector.clone(),
+            term_length: self.term_length,
             leaders: self.leaders.clone(),
             certified: self.certified.clone(),
             notarizes: self.notarizes.clone(),
@@ -104,18 +106,19 @@ impl<E, S, L, D> Reporter<E, S, L, D>
 where
     E: CryptoRngCore,
     S: Scheme,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
     D: Digest + Eq + Hash + Clone,
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
-        // Build elector with participants
         let elector = cfg.elector.build(&cfg.participants);
+        let term_length = elector.term_length();
 
         Self {
             context: Arc::new(Mutex::new(context)),
             participants: cfg.participants,
             scheme: cfg.scheme,
             elector,
+            term_length,
             leaders: Arc::new(Mutex::new(HashMap::new())),
             certified: Arc::new(Mutex::new(HashSet::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
@@ -132,12 +135,12 @@ where
         }
     }
 
-    fn certified(&self, round: Round, certificate: &S::Certificate) {
+    fn certified(&self, round: Round, next_view: View, certificate: &S::Certificate) {
         // Record that this view has a certificate
         self.certified.lock().insert(round.view());
 
-        // We use the certificate from view N to determine the leader for view N+1.
-        let next_round = Round::new(round.epoch(), round.view().next());
+        // Use the certificate to determine the leader for the view it unlocks.
+        let next_round = Round::new(round.epoch(), next_view);
         let mut leaders = self.leaders.lock();
         leaders.entry(next_round.view()).or_insert_with(|| {
             let leader = self.elector.elect(next_round, Some(certificate));
@@ -162,7 +165,7 @@ impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
 where
     E: CryptoRngCore + Send + Sync + 'static,
     S: scheme::Scheme<D>,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
     D: Digest + Eq + Hash + Clone,
 {
     type Activity = Activity<S, D>;
@@ -206,7 +209,11 @@ where
                 Notarization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
                 self.notarizations.lock().insert(view, notarization.clone());
-                self.certified(notarization.round(), &notarization.certificate);
+                self.certified(
+                    notarization.round(),
+                    notarization.view().next(),
+                    &notarization.certificate,
+                );
             }
             Activity::Nullify(nullify) => {
                 if !nullify.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
@@ -242,7 +249,11 @@ where
                 self.nullifications
                     .lock()
                     .insert(view, nullification.clone());
-                self.certified(nullification.round, &nullification.certificate);
+                self.certified(
+                    nullification.round,
+                    nullification.view().next_term_start(self.term_length),
+                    &nullification.certificate,
+                );
             }
             Activity::Finalize(finalize) => {
                 if !finalize.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
@@ -278,7 +289,11 @@ where
                 Finalization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
                 self.finalizations.lock().insert(view, finalization.clone());
-                self.certified(finalization.round(), &finalization.certificate);
+                self.certified(
+                    finalization.round(),
+                    finalization.view().next(),
+                    &finalization.certificate,
+                );
 
                 // Send message to subscribers
                 *self.latest.lock() = finalization.view();
@@ -347,7 +362,7 @@ impl<E, S, L, D> Monitor for Reporter<E, S, L, D>
 where
     E: CryptoRngCore + Send + Sync + 'static,
     S: Scheme,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
     D: Digest + Eq + Hash + Clone,
 {
     type Index = View;

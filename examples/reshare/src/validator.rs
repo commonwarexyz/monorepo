@@ -8,7 +8,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal::resolver::p2p as marshal_resolver,
-    simplex::{elector::Config as Elector, scheme::Scheme},
+    simplex::{elector, scheme::Scheme},
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
@@ -43,7 +43,7 @@ pub async fn run<S, L>(
     callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
 ) where
     S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
-    L: Elector<S>,
+    L: elector::Config<S>,
     Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
@@ -335,7 +335,7 @@ mod test {
             pk: PublicKey,
         ) where
             S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
-            L: Elector<S>,
+            L: elector::Config<S>,
             Provider<S, PrivateKey>:
                 EpochProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
@@ -1258,7 +1258,8 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: Some(Crash::Random {
-                frequency: Duration::from_secs(2),
+                // Keep crash frequency above timeout retry so restarted validators can retry nullify.
+                frequency: Duration::from_secs(4),
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
@@ -1282,7 +1283,8 @@ mod test {
             },
             mode: Mode::Reshare(4),
             crash: Some(Crash::Random {
-                frequency: Duration::from_secs(2),
+                // Keep crash frequency above timeout retry so restarted validators can retry nullify.
+                frequency: Duration::from_secs(4),
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
@@ -1306,8 +1308,9 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: Some(Crash::Random {
-                frequency: Duration::from_secs(2),
-                downtime: Duration::from_millis(500),
+                // Keep crash frequency above timeout retry so restarted validators can retry nullify.
+                frequency: Duration::from_secs(4),
+                downtime: Duration::from_secs(1),
                 count: 4,
             }),
             failures: HashSet::new(),

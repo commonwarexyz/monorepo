@@ -71,8 +71,8 @@
 //! messages with that participant identity in that view.
 
 use crate::{
-    simplex::elector::{Config as ElectorConfig, Elector as Elected},
-    types::{Participant, Round, View},
+    simplex::elector,
+    types::{Participant, Round, TermLength, View},
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
@@ -161,9 +161,15 @@ impl Scenario {
     ///
     /// Views after the configured adversarial rounds use full synchrony
     /// (`all -> all`) to model eventual synchrony for liveness checks.
-    pub fn partitions<P: Clone>(&self, view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
-        let idx = view.get().saturating_sub(1) as usize;
-        if let Some(round) = self.rounds.get(idx) {
+    /// Each leader term consumes one scripted round, keeping network splits
+    /// aligned with stable-leader terms.
+    pub fn partitions<P: Clone>(
+        &self,
+        view: View,
+        term_length: TermLength,
+        participants: &[P],
+    ) -> (Vec<P>, Vec<P>) {
+        if let Some(round) = self.rounds.get(term_index(view, term_length)) {
             return round.partitions(participants);
         }
         (participants.to_vec(), participants.to_vec())
@@ -173,20 +179,33 @@ impl Scenario {
     ///
     /// For scripted rounds, inbound twin traffic is routed by checking the
     /// sender against the primary and secondary bitmasks. When a sender appears
-    /// in both masks, this returns [`SplitTarget::Both`].
+    /// in both masks, this returns [`SplitTarget::Both`]. Each leader term
+    /// consumes one scripted round.
     ///
     /// # Panics
     ///
     /// Panics if `sender` is not present in `participants` for a scripted
     /// round.
-    pub fn route<P: PartialEq>(&self, view: View, sender: &P, participants: &[P]) -> SplitTarget {
-        let idx = view.get().saturating_sub(1) as usize;
-        if let Some(round) = self.rounds.get(idx) {
+    pub fn route<P: PartialEq>(
+        &self,
+        view: View,
+        term_length: TermLength,
+        sender: &P,
+        participants: &[P],
+    ) -> SplitTarget {
+        if let Some(round) = self.rounds.get(term_index(view, term_length)) {
             return round.route(sender, participants);
         }
         // After attack rounds, both halves see everyone.
         SplitTarget::Both
     }
+}
+
+fn term_index(view: View, term_length: TermLength) -> usize {
+    // Convert the canonical 1-based term index into a 0-based scenario index
+    // (genesis shares index 0 with the first term).
+    let idx = view.term_index(term_length).saturating_sub(1);
+    usize::try_from(idx).expect("term index fits in usize")
 }
 
 /// Routes a sender according to explicit primary and secondary recipient sets.
@@ -201,13 +220,18 @@ fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -
     }
 }
 
-/// Returns the strict disjoint split at index `view % n`.
+/// Returns the strict disjoint split at index `term_start % n` for the leader
+/// term containing `view`.
 ///
 /// # Panics
 ///
 /// Panics if `participants` is empty.
-pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
-    let split = (view.get() as usize) % participants.len();
+pub fn view_partitions<P: Clone>(
+    view: View,
+    term_length: TermLength,
+    participants: &[P],
+) -> (Vec<P>, Vec<P>) {
+    let split = (view.term_start(term_length).get() as usize) % participants.len();
     let (primary, secondary) = participants.split_at(split);
     (primary.to_vec(), secondary.to_vec())
 }
@@ -218,8 +242,13 @@ pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec
 ///
 /// Panics if `participants` is empty or `sender` is not present in
 /// `participants`.
-pub fn view_route<P: Clone + PartialEq>(view: View, sender: &P, participants: &[P]) -> SplitTarget {
-    let (primary, secondary) = view_partitions(view, participants);
+pub fn view_route<P: Clone + PartialEq>(
+    view: View,
+    term_length: TermLength,
+    sender: &P,
+    participants: &[P],
+) -> SplitTarget {
+    let (primary, secondary) = view_partitions(view, term_length, participants);
     route_with_groups(sender, &primary, &secondary)
 }
 
@@ -270,30 +299,43 @@ impl<C> Elector<C> {
 pub struct ElectorState<E> {
     fallback: E,
     round_leaders: Arc<[Participant]>,
+    term_length: TermLength,
 }
 
-impl<S, C> ElectorConfig<S> for Elector<C>
+impl<S, C> elector::Config<S> for Elector<C>
 where
     S: Scheme,
-    C: ElectorConfig<S>,
+    C: elector::Config<S>,
 {
     type Elector = ElectorState<C::Elector>;
 
+    fn with_term_length(mut self, term_length: TermLength) -> Self {
+        self.fallback = self.fallback.with_term_length(term_length);
+        self
+    }
+
     fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector {
+        let fallback = self.fallback.build(participants);
+        let term_length = elector::Elector::term_length(&fallback);
         ElectorState {
-            fallback: self.fallback.build(participants),
+            fallback,
             round_leaders: self.round_leaders,
+            term_length,
         }
     }
 }
 
-impl<S, E> Elected<S> for ElectorState<E>
+impl<S, E> elector::Elector<S> for ElectorState<E>
 where
     S: Scheme,
-    E: Elected<S>,
+    E: elector::Elector<S>,
 {
+    fn term_length(&self) -> TermLength {
+        self.term_length
+    }
+
     fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
-        let idx = round.view().get().saturating_sub(1) as usize;
+        let idx = term_index(round.view(), self.term_length);
         if let Some(&leader) = self.round_leaders.get(idx) {
             return leader;
         }
@@ -1226,13 +1268,13 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            elector::{Config as ElectorConfig, RoundRobin},
+            elector::{self, Elector as _, RoundRobin},
             scheme::ed25519,
         },
         types::Epoch,
     };
     use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
-    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded};
+    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded, NZU64};
     use std::collections::HashSet;
 
     fn round(_: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
@@ -1709,10 +1751,55 @@ mod tests {
             rounds: vec![round(4, 3, 0b1011, 0b0110)],
         };
         let participants: Vec<u32> = (0..4).collect();
-        let (primary, secondary) = scenario.partitions(View::new(1), &participants);
+        let (primary, secondary) =
+            scenario.partitions(View::new(1), TermLength::ONE, &participants);
 
         assert_eq!(primary, vec![0, 1, 3]);
         assert_eq!(secondary, vec![1, 2]);
+    }
+
+    #[test]
+    fn scripted_partitions_can_follow_stable_leader_terms() {
+        let scenario = Scenario {
+            rounds: vec![
+                RoundScenario {
+                    leader: 0,
+                    primary_mask: 0b001,
+                    secondary_mask: 0b010,
+                },
+                RoundScenario {
+                    leader: 2,
+                    primary_mask: 0b100,
+                    secondary_mask: 0b011,
+                },
+            ],
+        };
+        let participants: Vec<u32> = (0..3).collect();
+        let term_length = TermLength::new(NZU64!(3));
+
+        let (primary, secondary) = scenario.partitions(View::new(3), term_length, &participants);
+        assert_eq!(primary, vec![0]);
+        assert_eq!(secondary, vec![1]);
+        assert_eq!(
+            scenario.route(View::new(2), term_length, &0, &participants),
+            SplitTarget::Primary
+        );
+
+        let (primary, secondary) = scenario.partitions(View::new(6), term_length, &participants);
+        assert_eq!(primary, vec![2]);
+        assert_eq!(secondary, vec![0, 1]);
+        assert_eq!(
+            scenario.route(View::new(5), term_length, &0, &participants),
+            SplitTarget::Secondary
+        );
+
+        let (primary, secondary) = scenario.partitions(View::new(7), term_length, &participants);
+        assert_eq!(primary, participants);
+        assert_eq!(secondary, vec![0, 1, 2]);
+        assert_eq!(
+            scenario.route(View::new(7), term_length, &2, &[0, 1, 2]),
+            SplitTarget::Both
+        );
     }
 
     #[test]
@@ -1748,23 +1835,46 @@ mod tests {
         let participants: Vec<u32> = (0..4).collect();
 
         assert_eq!(
-            view_partitions(View::new(1), &participants),
+            view_partitions(View::new(1), TermLength::ONE, &participants),
             (vec![0], vec![1, 2, 3])
         );
         assert_eq!(
-            view_partitions(View::new(4), &participants),
+            view_partitions(View::new(4), TermLength::ONE, &participants),
             (Vec::<u32>::new(), participants.clone())
         );
         assert_eq!(
-            view_route(View::new(1), &0, &participants),
+            view_route(View::new(1), TermLength::ONE, &0, &participants),
             SplitTarget::Primary
         );
         assert_eq!(
-            view_route(View::new(1), &3, &participants),
+            view_route(View::new(1), TermLength::ONE, &3, &participants),
             SplitTarget::Secondary
         );
         assert_eq!(
-            view_route(View::new(4), &0, &participants),
+            view_route(View::new(4), TermLength::ONE, &0, &participants),
+            SplitTarget::Secondary
+        );
+    }
+
+    #[test]
+    fn view_helpers_can_follow_stable_leader_terms() {
+        let participants: Vec<u32> = (0..5).collect();
+        let term_length = TermLength::new(NZU64!(3));
+
+        assert_eq!(
+            view_partitions(View::new(3), term_length, &participants),
+            view_partitions(View::new(1), TermLength::ONE, &participants)
+        );
+        assert_eq!(
+            view_partitions(View::new(6), term_length, &participants),
+            view_partitions(View::new(4), TermLength::ONE, &participants)
+        );
+        assert_eq!(
+            view_route(View::new(2), term_length, &0, &participants),
+            SplitTarget::Primary
+        );
+        assert_eq!(
+            view_route(View::new(6), term_length, &4, &participants),
             SplitTarget::Secondary
         );
     }
@@ -1776,23 +1886,23 @@ mod tests {
         };
         let participants: Vec<u32> = (0..5).collect();
         assert_eq!(
-            scenario.route(View::new(1), &0, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &0, &participants),
             SplitTarget::None
         );
         assert_eq!(
-            scenario.route(View::new(1), &1, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &1, &participants),
             SplitTarget::Both
         );
         assert_eq!(
-            scenario.route(View::new(1), &2, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &2, &participants),
             SplitTarget::Secondary
         );
         assert_eq!(
-            scenario.route(View::new(1), &3, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &3, &participants),
             SplitTarget::Primary
         );
         assert_eq!(
-            scenario.route(View::new(1), &4, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &4, &participants),
             SplitTarget::Primary
         );
     }
@@ -1803,12 +1913,13 @@ mod tests {
             rounds: vec![round(4, 3, 0b1010, 0b1100)],
         };
         let participants: Vec<u32> = (0..4).collect();
-        let (primary, secondary) = scenario.partitions(View::new(1), &participants);
+        let (primary, secondary) =
+            scenario.partitions(View::new(1), TermLength::ONE, &participants);
 
         assert_eq!(primary, vec![1, 3]);
         assert_eq!(secondary, vec![2, 3]);
         assert_eq!(
-            scenario.route(View::new(1), &3, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &3, &participants),
             SplitTarget::Both
         );
     }
@@ -1836,19 +1947,19 @@ mod tests {
         };
         let participants: Vec<u32> = (0..4).collect();
         assert_eq!(
-            scenario.route(View::new(1), &0, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &0, &participants),
             SplitTarget::Primary
         );
         assert_eq!(
-            scenario.route(View::new(1), &1, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &1, &participants),
             SplitTarget::Primary
         );
         assert_eq!(
-            scenario.route(View::new(1), &2, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &2, &participants),
             SplitTarget::Secondary
         );
         assert_eq!(
-            scenario.route(View::new(1), &3, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &3, &participants),
             SplitTarget::Secondary
         );
     }
@@ -1862,7 +1973,7 @@ mod tests {
 
         for participant in &participants {
             assert_eq!(
-                scenario.route(View::new(2), participant, &participants),
+                scenario.route(View::new(2), TermLength::ONE, participant, &participants),
                 SplitTarget::Both
             );
         }
@@ -1874,7 +1985,8 @@ mod tests {
             rounds: vec![round(4, 0, 0b0011, 0b1100)],
         };
         let participants: Vec<u32> = (0..4).collect();
-        let (primary, secondary) = scenario.partitions(View::new(2), &participants);
+        let (primary, secondary) =
+            scenario.partitions(View::new(2), TermLength::ONE, &participants);
         assert_eq!(primary, participants);
         assert_eq!(secondary, participants);
     }
@@ -2045,23 +2157,24 @@ mod tests {
         };
         let participants: Vec<_> = (0..64).collect();
 
-        let (primary, secondary) = scenario.partitions(View::new(1), &participants);
+        let (primary, secondary) =
+            scenario.partitions(View::new(1), TermLength::ONE, &participants);
         assert_eq!(primary, vec![60, 61, 62, 63]);
         assert_eq!(secondary, vec![61, 63]);
         assert_eq!(
-            scenario.route(View::new(1), &60, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &60, &participants),
             SplitTarget::Primary
         );
         assert_eq!(
-            scenario.route(View::new(1), &61, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &61, &participants),
             SplitTarget::Both
         );
         assert_eq!(
-            scenario.route(View::new(1), &63, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &63, &participants),
             SplitTarget::Both
         );
         assert_eq!(
-            scenario.route(View::new(1), &0, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &0, &participants),
             SplitTarget::None
         );
     }
@@ -2088,7 +2201,7 @@ mod tests {
         };
         let participants: Vec<u32> = (0..4).collect();
         assert_eq!(
-            scenario.route(View::new(1), &2, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &2, &participants),
             SplitTarget::None
         );
     }
@@ -2100,7 +2213,7 @@ mod tests {
             rounds: vec![round(4, 0, 0b0001, 0b0010)],
         };
         let participants: Vec<u32> = (0..4).collect();
-        let _ = scenario.route(View::new(1), &99, &participants);
+        let _ = scenario.route(View::new(1), TermLength::ONE, &99, &participants);
     }
 
     #[test]
@@ -2120,7 +2233,7 @@ mod tests {
             .map(|seed| PrivateKey::from_seed(seed).public_key())
             .collect();
         let participants = Set::try_from(participants).expect("participants should be unique");
-        let twins = <Elector<RoundRobin<Sha256>> as ElectorConfig<ed25519::Scheme>>::build(
+        let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
             Elector::new(
                 RoundRobin::<Sha256>::default(),
                 &case.scenario,
@@ -2128,7 +2241,7 @@ mod tests {
             ),
             &participants,
         );
-        let fallback = <RoundRobin<Sha256> as ElectorConfig<ed25519::Scheme>>::build(
+        let fallback = <RoundRobin<Sha256> as elector::Config<ed25519::Scheme>>::build(
             RoundRobin::<Sha256>::default(),
             &participants,
         );
@@ -2146,5 +2259,52 @@ mod tests {
             let round = Round::new(Epoch::new(333), View::new(view));
             assert_eq!(twins.elect(round, None), fallback.elect(round, None));
         }
+    }
+
+    #[test]
+    fn twins_elector_uses_scenario_leaders_by_term() {
+        let scenario = Scenario {
+            rounds: vec![
+                RoundScenario {
+                    leader: 0,
+                    primary_mask: 0b001,
+                    secondary_mask: 0b010,
+                },
+                RoundScenario {
+                    leader: 2,
+                    primary_mask: 0b100,
+                    secondary_mask: 0b011,
+                },
+            ],
+        };
+        let participants: Vec<_> = (0..3)
+            .map(|seed| PrivateKey::from_seed(seed).public_key())
+            .collect();
+        let participants = Set::try_from(participants).expect("participants should be unique");
+        let term_length = TermLength::new(NZU64!(3));
+        let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
+            Elector::new(
+                RoundRobin::<Sha256>::default().with_term_length(term_length),
+                &scenario,
+                3,
+            ),
+            &participants,
+        );
+        let fallback = <RoundRobin<Sha256> as elector::Config<ed25519::Scheme>>::build(
+            RoundRobin::<Sha256>::default().with_term_length(term_length),
+            &participants,
+        );
+
+        for view in 1..=3 {
+            let round = Round::new(Epoch::new(0), View::new(view));
+            assert_eq!(twins.elect(round, None), Participant::new(0));
+        }
+        for view in 4..=6 {
+            let round = Round::new(Epoch::new(0), View::new(view));
+            assert_eq!(twins.elect(round, None), Participant::new(2));
+        }
+
+        let round = Round::new(Epoch::new(333), View::new(7));
+        assert_eq!(twins.elect(round, None), fallback.elect(round, None));
     }
 }

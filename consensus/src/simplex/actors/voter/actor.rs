@@ -6,7 +6,7 @@ use super::{
 use crate::{
     simplex::{
         actors::{batcher, resolver},
-        elector::Config as Elector,
+        elector::Elector,
         metrics::{self, Outbound, TimeoutReason},
         scheme::Scheme,
         types::{
@@ -141,11 +141,6 @@ impl<
     > Actor<E, S, L, B, D, A, R, F>
 {
     pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
-        // Assert correctness of timeouts
-        if cfg.leader_timeout > cfg.certification_timeout {
-            panic!("leader timeout must be less than or equal to certification timeout");
-        }
-
         // Initialize metrics
         let outbound_messages = context.family("outbound_messages", "number of outbound messages");
         let notarization_latency =
@@ -168,6 +163,7 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
+                finalization_timeout: cfg.finalization_timeout,
             },
         );
         (
@@ -207,7 +203,7 @@ impl<
         Some(elapsed.as_secs_f64())
     }
 
-    /// Drops views that are below the activity floor.
+    /// Drops views and journal entries that are below the activity floor.
     async fn prune_views(&mut self) {
         let removed = self.state.prune();
         if removed.is_empty() {
@@ -373,17 +369,25 @@ impl<
         self.broadcast_vote(vote_sender, Vote::Nullify(nullify));
     }
 
-    /// Handle a timeout.
-    async fn timeout<Sp: Sender, Sr: Sender>(
+    /// Handles a fired timeout for the current view: broadcasts a nullify
+    /// vote (persisting and syncing it on the first attempt) and, on retries,
+    /// rebroadcasts the best entry certificate to help lagging peers enter
+    /// the view.
+    async fn handle_timeout<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
+        reason: TimeoutReason,
     ) {
+        let view = self.state.current_view();
+
         // Attempt to broadcast a nullify vote for the current view (as many times as required
         // until we exit the view)
-        let view = self.state.current_view();
-        let Some(retry) = self.try_broadcast_nullify(batcher, vote_sender, view).await else {
+        let Some(retry) = self
+            .try_broadcast_nullify(batcher, vote_sender, view, reason)
+            .await
+        else {
             return;
         };
 
@@ -394,10 +398,7 @@ impl<
         if !retry {
             return;
         }
-        let past_view = view
-            .previous()
-            .expect("we should never be in the genesis view");
-        if let Some(certificate) = self.state.get_best_certificate(past_view) {
+        if let Some(certificate) = self.state.get_best_certificate() {
             self.broadcast_certificate(certificate_sender, certificate);
         }
     }
@@ -471,6 +472,11 @@ impl<
     }
 
     /// Stores a finalization certificate and guards against leader equivocation.
+    ///
+    /// The finalization is appended to the journal without an immediate sync.
+    /// If a crash loses a finalization that healed the same-term finalize
+    /// gate, replay restores the blocked gate (which is safe) and it heals
+    /// again as soon as peers redeliver any covering finalization.
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         let view = finalization.view();
         let artifact = Artifact::Finalization(finalization.clone());
@@ -551,11 +557,12 @@ impl<
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
+        reason: TimeoutReason,
     ) -> Option<bool> {
-        let (was_retry, nullify) = self.state.construct_nullify(view)?;
-        self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)
+        let (is_retry, nullify) = self.state.construct_nullify(view, reason)?;
+        self.broadcast_nullify(batcher, vote_sender, is_retry, nullify)
             .await;
-        Some(was_retry)
+        Some(is_retry)
     }
 
     /// Broadcast a nullification certificate if the round provides a candidate.
@@ -783,7 +790,7 @@ impl<
         match msg {
             Message::Proposal { proposal, .. } => {
                 let view = proposal.view();
-                if !self.state.is_interesting(view, false) {
+                if !self.state.is_interesting_vote(view) {
                     trace!(%view, "proposal is not interesting");
                     return None;
                 }
@@ -800,7 +807,7 @@ impl<
             } => {
                 // Certificates can come from future views (they advance our view)
                 let view = certificate.view();
-                if !self.state.is_interesting(view, true) {
+                if !self.state.is_interesting_certificate(view) {
                     trace!(%view, "certificate is not interesting");
                     return None;
                 }
@@ -847,7 +854,9 @@ impl<
     /// Emits any votes or certificates that became available for `view`.
     ///
     /// We don't need to iterate over all views to check for new actions because messages we receive
-    /// only affect a single view.
+    /// only affect a single view. In particular, healing the same-term finalize gate deliberately
+    /// does not retry finalize votes for views certified while the gate was blocked (see the module
+    /// documentation on same-term vote safety for the consequences).
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
@@ -944,6 +953,12 @@ impl<
                 .expect("unable to replay journal");
             pin_mut!(stream);
             while let Some(artifact) = stream.next().await {
+                // Dropping our own nullify votes at or below the floor is safe
+                // for the same-term finalize gate: the floor finalization
+                // covers any such vote (it lies between the vote and any later
+                // same-term view), so the gate would treat it as healed anyway.
+                // If the gate ever stops keying off last_finalized, this skip
+                // must be revisited.
                 let (_, _, _, artifact) = artifact.expect("unable to replay journal");
                 if artifact.view() <= replay_floor {
                     continue;
@@ -1083,7 +1098,7 @@ impl<
                 let certify_wait = certify_pool.next_completed();
 
                 // Wait for a timeout to fire or for a message to arrive
-                let timeout = self.state.next_timeout_deadline();
+                let (deadline, reason) = self.state.next_timeout();
                 let start = self.state.current_view();
                 let mut resolved = Resolved::None;
                 let view;
@@ -1091,16 +1106,22 @@ impl<
             on_stopped => {
                 debug!("context shutdown, stopping voter");
             },
-            _ = self.context.sleep_until(timeout) => {
+            _ = self.context.sleep_until(deadline) => {
                 // Process the timeout
                 let current_view = self.state.current_view();
                 let span = info_span!(
                     parent: self.state.view_span(current_view),
                     "simplex.voter.timeout",
                     epoch = self.state.epoch().traced(),
-                    view = current_view.traced()
+                    view = current_view.traced(),
+                    reason = reason.as_str()
                 );
-                self.timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
+                self.handle_timeout(
+                    &mut batcher,
+                    &mut vote_sender,
+                    &mut certificate_sender,
+                    reason,
+                )
                     .instrument(span)
                     .await;
                 view = self.state.current_view();
@@ -1199,14 +1220,14 @@ impl<
 
                     // If we skip a view, we don't worry about forwarding our latest certified proposal
                     // because the network has already moved on
-                    let forwardable_proposal = current_view
+                    let certified_proposal = current_view
                         .previous()
-                        .and_then(|view| self.state.forwardable_proposal(view));
+                        .and_then(|view| self.state.certified_proposal(view));
 
                     // If the leader nullified or is inactive, reduce leader
                     // timeout to now
                     let (span, finalized) = self.state.batcher_context(current_view);
-                    batcher.update(span, current_view, leader, finalized, forwardable_proposal);
+                    batcher.update(span, current_view, leader, finalized, certified_proposal);
                 }
             },
         }

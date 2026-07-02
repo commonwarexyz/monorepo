@@ -15,7 +15,7 @@ use commonware_consensus::{
         resolver,
         standard::{Deferred, Standard},
     },
-    simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
+    simplex::{elector, scheme::Scheme, types::Finalization},
     types::{FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
@@ -89,7 +89,7 @@ where
     H: Hasher,
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
-    L: Elector<S>,
+    L: elector::Config<S>,
     T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
@@ -133,7 +133,7 @@ where
     H: Hasher,
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
-    L: Elector<S>,
+    L: elector::Config<S>,
     T: Strategy,
     Batch: BatchVerifier<PublicKey = C::PublicKey>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
