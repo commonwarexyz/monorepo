@@ -962,29 +962,8 @@ impl<B: Blob> Writer<B> {
             return self.sync_state.resize(&self.blob, new_physical_size).await;
         }
 
-        // Shrink into a partial page. If the target stays within the current tip page, the
-        // physical page count is unchanged and no truncate is needed. Otherwise the truncate
-        // deletes the page described by the current partial-page record, so clear the record
-        // before awaiting the truncate: a dropped truncate then cannot leave a stale record
-        // that would make a later flush skip rewriting the tip.
-        if new_physical_size != current_physical_size {
-            self.partial_page_state = None;
-            self.sync_state
-                .resize(&self.blob, new_physical_size)
-                .await?;
-        }
-        self.shrink_to_partial(full_pages, partial_bytes, logical_page_size, tail_offset)
-            .await
-    }
-
-    /// Perform a shrink to a partial page tip and make the shorter CRC slot authoritative.
-    async fn shrink_to_partial(
-        &mut self,
-        full_pages: u64,
-        partial_bytes: u64,
-        logical_page_size: u64,
-        tail_offset: u64,
-    ) -> Result<(), Error> {
+        // Shrink into a partial page. Read the target page now: its retained prefix becomes
+        // the new tip, and its CRC record seeds the rewrite below.
         let (page_data, old_crc) =
             super::get_page_with_checksum_from_blob(&self.blob, full_pages, logical_page_size)
                 .await?;
@@ -994,6 +973,42 @@ impl<B: Blob> Writer<B> {
             return Err(Error::InvalidChecksum);
         }
 
+        // If the target stays within the current tip page, the physical page count is
+        // unchanged and no truncate is needed. Otherwise the truncate deletes every physical
+        // page above the target page, including full pages that cannot be rebuilt, so publish
+        // a reduced claim before awaiting it: the target page's contents become the tip (so
+        // reads of it are served from memory) and the writer claims nothing above it. A
+        // dropped truncate then leaves the writer under-claiming, never claiming deleted
+        // pages, and clearing the record means a stale record cannot make a later flush skip
+        // rewriting the tip.
+        if new_physical_size != current_physical_size {
+            self.partial_page_state = None;
+            self.current_page = full_pages;
+            self.buffer.offset = tail_offset;
+            self.buffer.clear();
+            let over_capacity = self.buffer.append(page_data.as_ref());
+            assert!(!over_capacity);
+            self.sync_state
+                .resize(&self.blob, new_physical_size)
+                .await?;
+        }
+        self.shrink_to_partial(page_data, old_crc, full_pages, partial_bytes, tail_offset)
+            .await
+    }
+
+    /// Perform a shrink to a partial page tip and make the shorter CRC slot authoritative.
+    ///
+    /// `page_data` and `old_crc` are the target page's validated contents and CRC record; the
+    /// first `partial_bytes` of `page_data` become the new tip.
+    async fn shrink_to_partial(
+        &mut self,
+        page_data: IoBuf,
+        old_crc: Checksum,
+        full_pages: u64,
+        partial_bytes: u64,
+        tail_offset: u64,
+    ) -> Result<(), Error> {
+        let logical_page_size = self.cache_ref.page_size();
         let new_data = &page_data.as_ref()[..partial_bytes as usize];
         let final_record = self
             .sync_partial_page_shrink(
@@ -2058,7 +2073,7 @@ mod tests {
     // If a shrink is canceled after the physical truncate completes, a later sync restores the
     // tip page the truncate deleted instead of silently forgetting it.
     #[test_traced("DEBUG")]
-    fn test_shrink_cancel_after_truncate_restores_tip() {
+    fn test_shrink_cancel_after_truncate_underclaims_consistently() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (inner, blob_size) = context
@@ -2078,16 +2093,19 @@ mod tests {
 
             // Shrinking into page 1 truncates the blob to two physical pages, deleting the tip
             // page. Cancel while that completed truncate is held open.
-            gate.cancel(writer.resize(page as u64 + 30)).await;
+            let target = page as u64 + 30;
+            gate.cancel(writer.resize(target)).await;
 
-            // The canceled shrink dropped the stale record, so the writer still claims (and can
-            // still read) the old size.
+            // The canceled shrink published its reduced claim before the truncate: the writer
+            // claims exactly the pages the blob still holds and can read all of them.
             assert!(writer.partial_page_state.is_none());
-            assert_eq!(writer.size(), data.len() as u64);
-            let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
-            assert_eq!(read.as_ref(), data.as_slice());
+            assert_eq!(writer.size(), 2 * page as u64);
+            let read = writer.read_at(0, 2 * page).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[..2 * page]);
 
-            // Sync rewrites the tip page the truncate deleted, restoring the old size durably.
+            // Retrying the shrink completes it.
+            writer.resize(target).await.unwrap();
+            assert_eq!(writer.size(), target);
             writer.sync().await.unwrap();
             drop(writer);
             let (blob, blob_size) = context
@@ -2097,9 +2115,70 @@ mod tests {
             let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            assert_eq!(reopened.size(), data.len() as u64);
-            let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
-            assert_eq!(read.as_ref(), data.as_slice());
+            assert_eq!(reopened.size(), target);
+            let read = reopened
+                .read_at(0, target as usize)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), &data[..target as usize]);
+        });
+    }
+
+    // Regression: a multi-page partial shrink deletes full pages that nothing in memory can
+    // rebuild. A canceled truncate must not leave the writer claiming them (over-claiming
+    // previously made reads of the claimed range fail).
+    #[test_traced("DEBUG")]
+    fn test_shrink_cancel_multi_page_never_overclaims() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"shrink_cancel_multi")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedResizeBlob::new(inner);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..4 * page + 50).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Shrinking into page 1 truncates full pages 2-3 and the partial page. Cancel
+            // while the completed truncate is held open.
+            let target = page as u64 + 30;
+            gate.cancel(writer.resize(target)).await;
+
+            // The writer claims only the target page and below, all of it readable: page 0
+            // from the blob and page 1 from the staged tip.
+            assert!(writer.partial_page_state.is_none());
+            assert_eq!(writer.current_page, 1);
+            assert_eq!(writer.size(), 2 * page as u64);
+            let read = writer.read_at(0, 2 * page).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[..2 * page]);
+
+            // Retrying the shrink completes it, and the result survives a restart.
+            writer.resize(target).await.unwrap();
+            assert_eq!(writer.size(), target);
+            writer.sync().await.unwrap();
+            drop(writer);
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_cancel_multi")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), target);
+            let read = reopened
+                .read_at(0, target as usize)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), &data[..target as usize]);
         });
     }
 
