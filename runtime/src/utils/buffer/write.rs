@@ -83,7 +83,7 @@ impl<B: Blob> Write<B> {
             blob,
             buffer: Buffer::new(size, capacity.get(), pool),
             // Existing blob contents may not be durable yet.
-            sync_state: SyncState::Dirty,
+            sync_state: SyncState::dirty(),
         }
     }
 
@@ -217,15 +217,17 @@ impl<B: Blob> Write<B> {
     /// before resizing the underlying blob.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
         if len >= self.buffer.size() {
-            // Grow or keep size: flush buffered bytes, resize the blob, and move the
+            // Grow (or keep the size): flush buffered bytes, resize the blob, and move the
             // now-empty tip to the new end.
             self.flush(NonDurable).await?;
             self.sync_state.resize(&self.blob, len).await?;
             self.buffer.offset = len;
         } else {
-            // Shrink the blob, then the buffer.
-            self.sync_state.resize(&self.blob, len).await?;
+            // Shrink: adopt the shorter size first, so a dropped resize never leaves the
+            // buffer claiming more than the blob holds. If the blob resize is dropped
+            // mid-flight, the next blob operation re-issues it (see [SyncState::settle]).
             self.buffer.truncate(len);
+            self.sync_state.resize(&self.blob, len).await?;
         }
 
         Ok(())

@@ -178,9 +178,9 @@ impl<B: Blob> Writer<B> {
             current_page,
             partial_page_state,
             sync_state: if needs_sync {
-                SyncState::Dirty
+                SyncState::dirty()
             } else {
-                SyncState::Clean
+                SyncState::clean()
             },
             id: cache_ref.next_id(),
             cache_ref,
@@ -1065,7 +1065,7 @@ mod tests {
     use crate::{
         buffer::{
             paged::CHECKSUM_SLOT_LEN_SIZE,
-            tests::{GatedResizeBlob, GatedWriteBlob, SyncTrackingBlob},
+            tests::{GatePosition, GatedResizeBlob, GatedWriteBlob, SyncTrackingBlob},
         },
         deterministic,
         mocks::{next_pending_sync, DelayedSyncBlob},
@@ -2066,7 +2066,7 @@ mod tests {
                 .open("test_partition", b"shrink_cancel")
                 .await
                 .unwrap();
-            let (blob, gate) = GatedResizeBlob::new(inner);
+            let (blob, gate) = GatedResizeBlob::new(inner, GatePosition::After);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -2122,7 +2122,7 @@ mod tests {
                 .open("test_partition", b"shrink_cancel_multi")
                 .await
                 .unwrap();
-            let (blob, gate) = GatedResizeBlob::new(inner);
+            let (blob, gate) = GatedResizeBlob::new(inner, GatePosition::After);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -2178,7 +2178,7 @@ mod tests {
                 .open("test_partition", b"shrink_boundary_cancel")
                 .await
                 .unwrap();
-            let (blob, gate) = GatedResizeBlob::new(inner);
+            let (blob, gate) = GatedResizeBlob::new(inner, GatePosition::After);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
