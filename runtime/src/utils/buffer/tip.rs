@@ -127,7 +127,6 @@ impl Buffer {
         if len <= self.offset {
             // All buffered bytes are at or beyond `len`: drop them and restart at the new end.
             self.len = 0;
-            self.data = IoBuf::default();
             self.offset = len;
         } else {
             // Keep only the buffered bytes below `len`.
@@ -255,7 +254,7 @@ mod tests {
         assert_eq!(buffer.size(), 53);
         assert!(!buffer.is_empty());
 
-        // Confirm advancing past flushed bytes detaches them.
+        // Confirm advancing past flushed bytes empties the buffer.
         let flushed = buffer.slice(..);
         assert_eq!(flushed.as_ref(), &[1, 2, 3]);
         buffer.advance(3);

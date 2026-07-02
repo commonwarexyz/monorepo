@@ -358,7 +358,9 @@ impl<B: Blob> Writer<B> {
 
         self.write_physical_pages(physical_pages, false).await?;
 
-        // Update state only after the write succeeds, for cancellation safety.
+        // Update state only after the write succeeds, for cancellation safety. Cache chunks
+        // of `capacity` are page-aligned because the capacity is a whole number of pages
+        // (see [adjusted_capacity]).
         let mut cache_offset = self.buffer.offset;
         if let Some(completed_page) = completed_page {
             let remaining = self
@@ -467,8 +469,7 @@ impl<B: Blob> Writer<B> {
 
         let synced = self.write_physical_pages(physical_pages, sync).await?;
 
-        // The writes succeeded, so publish the new state: move the flushed full pages from the
-        // tip into the page cache and record the new partial-page state.
+        // Update state only after the writes succeed, for cancellation safety.
         let logical_page_size = self.cache_ref.page_size() as usize;
         let full_pages = self.buffer.len() / logical_page_size;
         let full_bytes = full_pages * logical_page_size;
