@@ -1,0 +1,27 @@
+[package]
+name = "commonware-vrf-dice"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Provably fair VRF dice, coin flip and lottery using commonware-cryptography."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf-dice"
+documentation = "https://docs.rs/commonware-vrf-dice"
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+chrono.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[[bin]]
+name = "commonware-vrf-dice"
+bench = false
