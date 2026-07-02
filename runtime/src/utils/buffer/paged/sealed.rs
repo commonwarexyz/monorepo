@@ -171,6 +171,15 @@ impl<B: Blob> Sealed<B> {
         self.view().read_many_sync_cached(buf, offsets, item_size)
     }
 
+    /// Like [`Self::read_many_sync_cached`], but for variable-length `(offset, len)` ranges.
+    pub fn read_ranges_sync_cached(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<Vec<usize>, Error> {
+        self.view().read_ranges_sync_cached(buf, ranges)
+    }
+
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
     ///
     /// Sealed values have no write buffer to flush, so unlike [`super::Writer::replay`] this method

@@ -556,6 +556,22 @@ impl<'a, B: RBlob> Blob<'a, B> {
                 .map_err(Error::Runtime),
         }
     }
+
+    /// Like [`Self::read_many_sync_cached`], but for variable-length `(offset, len)` ranges.
+    pub(super) fn read_ranges_sync_cached(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<Vec<usize>, Error> {
+        match self {
+            Self::Writer(writer) => writer
+                .read_ranges_sync_cached(buf, ranges)
+                .map_err(Error::Runtime),
+            Self::Sealed(sealed) => sealed
+                .read_ranges_sync_cached(buf, ranges)
+                .map_err(Error::Runtime),
+        }
+    }
 }
 
 impl<B: RBlob> FrameReader for Blob<'_, B> {

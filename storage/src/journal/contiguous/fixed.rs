@@ -1346,10 +1346,6 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         self.read_many_sync_cached(positions)
     }
 
-    fn supports_read_many_sync(&self) -> bool {
-        true
-    }
-
     async fn replay(
         &self,
         start_pos: u64,
@@ -1386,10 +1382,6 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 
     fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
         self.reader().read_many_sync_cached(positions)
-    }
-
-    fn supports_read_many_sync(&self) -> bool {
-        true
     }
 
     async fn replay(

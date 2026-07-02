@@ -191,9 +191,6 @@ pub(crate) mod test {
             let strategy = context.create_strategy(NZUsize!(2)).unwrap();
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
             let mut db = ParTest::init(context, cfg).await.unwrap();
-            // The fused path is gated on this capability; a wrapper that forgets to forward
-            // it silently degrades every large read to the fallback.
-            assert!(crate::journal::contiguous::Contiguous::supports_read_many_sync(&db.log));
 
             let mut rng = test_rng_seeded(7);
             let mut keys = Vec::with_capacity(4300);

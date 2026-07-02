@@ -636,6 +636,15 @@ impl<B: Blob> Writer<B> {
         self.view().read_many_sync_cached(buf, offsets, item_size)
     }
 
+    /// Like [`Self::read_many_sync_cached`], but for variable-length `(offset, len)` ranges.
+    pub fn read_ranges_sync_cached(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<Vec<usize>, Error> {
+        self.view().read_ranges_sync_cached(buf, ranges)
+    }
+
     /// Reads bytes starting at `offset` into `buf`.
     pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         self.view().read_into(buf, offset).await

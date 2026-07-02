@@ -60,6 +60,24 @@ const DATA_SUFFIX: &str = "_data";
 /// Suffix appended to the base partition name for the offsets journal.
 const OFFSETS_SUFFIX: &str = "_offsets";
 
+/// Decode one varint-framed item from the head of `bytes`, whose encoded length must be exactly
+/// `frame_len` (the gap to the next frame's offset). Returns `None` on any mismatch or decode
+/// failure; the async read path reports such errors.
+fn decode_frame_from_span<V: CodecShared>(
+    bytes: &[u8],
+    frame_len: usize,
+    codec_config: &V::Cfg,
+    compressed: bool,
+) -> Option<V> {
+    let mut cursor = Cursor::new(bytes);
+    let (size, varint_len) = decode_length_prefix(&mut cursor).ok()?;
+    let actual_len = size.checked_add(varint_len)?;
+    if actual_len != frame_len || frame_len > bytes.len() {
+        return None;
+    }
+    decode_item::<V>(&bytes[varint_len..frame_len], codec_config, compressed).ok()
+}
+
 /// One step of walking varint frames over a blob's bytes during recovery.
 enum Frame {
     /// A complete, decodable item began at byte `offset`.
@@ -546,6 +564,132 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     fn try_read_sync_into(&self, position: u64, buf: &mut Vec<u8>) -> Option<V> {
         self.validate_readable(position).ok()?;
         let offset = self.offsets.try_read_sync(position)?;
+        self.try_read_frame_sync(position, offset, buf)
+    }
+
+    /// Read items at strictly increasing positions, serving only page-cache hits. Returns one
+    /// entry per position: `Some(item)` for sync hits and `None` for positions that require
+    /// I/O (or fail validation or decode, which the async read path reports).
+    fn read_many_sync_cached(&self, positions: &[u64]) -> Vec<Option<V>> {
+        let mut out: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
+        if positions.is_empty() {
+            return out;
+        }
+
+        // A frame at position p spans [off(p), off(p + 1)), so one batched pass over the
+        // offsets journal resolves every queried frame's extent. Positions and their in-bounds
+        // successors interleave into one strictly increasing lookup list; the journal's last
+        // frame has no successor and takes the per-frame path below.
+        let mut lookups: Vec<u64> = Vec::with_capacity(positions.len() * 2);
+        for &position in positions {
+            if lookups.last() != Some(&position) {
+                lookups.push(position);
+            }
+            match position.checked_add(1) {
+                Some(next) if next < self.bounds.end => lookups.push(next),
+                _ => {}
+            }
+        }
+        let offsets = self.offsets.read_many_sync(&lookups);
+
+        // Split queried frames into known extents (served below by one batched cache read per
+        // data blob) and unknown extents (the last frame of a blob or of the journal, served by
+        // the per-frame path). Frames whose offset lookup missed stay `None`.
+        let items_per_blob = self.items_per_blob.get();
+        let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
+        let mut singles: Vec<(usize, u64)> = Vec::new();
+        let mut lookup_idx = 0;
+        for (idx, &position) in positions.iter().enumerate() {
+            while lookups[lookup_idx] != position {
+                lookup_idx += 1;
+            }
+            if self.validate_readable(position).is_err() {
+                continue;
+            }
+            let Some(offset) = offsets[lookup_idx] else {
+                continue;
+            };
+            // The successor lookup is adjacent in `lookups` whenever it was pushed (in
+            // bounds); a cross-blob successor's offset is in a different data blob and does
+            // not bound this frame.
+            let next = position + 1;
+            let next_offset = if next < self.bounds.end
+                && position_to_blob(position, items_per_blob)
+                    == position_to_blob(next, items_per_blob)
+            {
+                offsets[lookup_idx + 1]
+            } else {
+                None
+            };
+            match next_offset {
+                Some(next) if next > offset => {
+                    extents.push((idx, offset, (next - offset) as usize))
+                }
+                _ => singles.push((idx, offset)),
+            }
+        }
+
+        let mut buf = Vec::new();
+        let mut hits = 0u64;
+
+        // Serve known-extent frames: one batched cache read per data blob group.
+        let mut group_start = 0;
+        while group_start < extents.len() {
+            let blob_num = position_to_blob(positions[extents[group_start].0], items_per_blob);
+            let mut group_end = group_start + 1;
+            while group_end < extents.len()
+                && position_to_blob(positions[extents[group_end].0], items_per_blob) == blob_num
+            {
+                group_end += 1;
+            }
+            let group = &extents[group_start..group_end];
+            group_start = group_end;
+
+            let Some(blob) = self.data.get(blob_num) else {
+                continue;
+            };
+            let ranges: Vec<(u64, usize)> = group
+                .iter()
+                .map(|&(_, offset, len)| (offset, len))
+                .collect();
+            let total: usize = ranges.iter().map(|&(_, len)| len).sum();
+            buf.resize(total, 0);
+            let Ok(missed) = blob.read_ranges_sync_cached(&mut buf, &ranges) else {
+                continue;
+            };
+            let mut missed = missed.into_iter().peekable();
+            let mut local = 0usize;
+            for (range_idx, &(idx, _, len)) in group.iter().enumerate() {
+                let slot = &buf[local..local + len];
+                local += len;
+                if missed.peek() == Some(&range_idx) {
+                    missed.next();
+                    continue;
+                }
+                if let Some(item) =
+                    decode_frame_from_span(slot, len, &self.codec_config, self.compressed)
+                {
+                    out[idx] = Some(item);
+                    hits += 1;
+                }
+            }
+        }
+
+        // Per-frame path for frames whose extent is unknown.
+        let mut frame_buf = Vec::new();
+        for (idx, offset) in singles {
+            if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut frame_buf) {
+                out[idx] = Some(item);
+                hits += 1;
+            }
+        }
+        self.metrics.items_read.inc_by(hits);
+        out
+    }
+
+    /// Read the varint-framed item for `position` at byte `offset` from cached bytes, returning
+    /// `None` on any miss.
+    fn try_read_frame_sync(&self, position: u64, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
         let blob = self
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))?;
@@ -790,6 +934,10 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         self.metrics.try_read_sync_hits.inc();
         self.metrics.items_read.inc();
         Some(item)
+    }
+
+    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
+        self.read_many_sync_cached(positions)
     }
 
     async fn replay(
@@ -1868,6 +2016,10 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         self.reader().try_read_sync(position)
     }
 
+    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
+        self.reader().read_many_sync_cached(positions)
+    }
+
     async fn replay(
         &self,
         start_pos: u64,
@@ -2245,6 +2397,51 @@ mod tests {
                 assert_eq!(item, 7);
                 assert!(stream.next().await.is_none());
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_sync_matches_read_many() {
+        // Cached positions are served synchronously and match the async batched read;
+        // positions that fail validation are misses rather than errors.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "read-many-sync".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(64)),
+                write_buffer: NZUsize!(1024),
+            };
+            let items = (0..13)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal.sync().await.unwrap();
+
+            let positions: Vec<u64> = (0..items.len() as u64).collect();
+            let reader = journal.snapshot().await.unwrap();
+            // Warm both the offsets and data page caches, then expect every position to be
+            // served synchronously.
+            let expected = reader.read_many(&positions).await.unwrap();
+            let served = reader.read_many_sync(&positions);
+            assert_eq!(served.len(), positions.len());
+            for (item, expected) in served.into_iter().zip(&expected) {
+                assert_eq!(item.expect("cached position is served"), *expected);
+            }
+
+            // An out-of-range position is a miss, not an error. Positions grouped with it
+            // (same offsets blob) also become misses, but other groups are unaffected.
+            let served = reader.read_many_sync(&[9, 13]);
+            assert!(served[0].is_some());
+            assert!(served[1].is_none());
+            drop(reader);
 
             journal.destroy().await.unwrap();
         });

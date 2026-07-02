@@ -230,6 +230,39 @@ impl<B: Blob> View<'_, B> {
         }
         Ok(misses)
     }
+
+    /// Like [`Self::read_many_sync_cached`], but for variable-length ranges: `buf` holds one
+    /// slot per `(offset, len)` range, back to back. Returns the indices of ranges that require
+    /// a blob read; their slots hold unspecified bytes.
+    pub fn read_ranges_sync_cached(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<Vec<usize>, Error> {
+        super::validate_read_ranges(buf.len(), ranges, self.size)?;
+        if ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut cache_ranges = super::split_read_ranges(buf, ranges, self.tail_offset, self.tail);
+        if cache_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+
+        // Map missed reads back to range indices: each remaining read starts at its range's
+        // offset, and both lists are sorted.
+        let mut misses = Vec::with_capacity(cache_ranges.len());
+        let mut idx = 0;
+        for (_, offset) in cache_ranges {
+            while ranges[idx].0 != offset {
+                idx += 1;
+            }
+            misses.push(idx);
+            idx += 1;
+        }
+        Ok(misses)
+    }
 }
 
 #[cfg(test)]

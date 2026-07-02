@@ -747,30 +747,32 @@ where
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<C::Item>, JournalError> {
-        // Shard large batches across the strategy pool, serving page-cache hits synchronously
-        // (one scratch buffer per shard and one cache-lock acquisition per blob a shard
-        // touches) and falling back to a single batched read for the misses. The sortedness
-        // pre-check keeps contract violations deterministic: without it, a non-increasing
-        // batch would error only when some position missed the cache.
-        const PARALLEL_READ_THRESHOLD: usize = 4096;
-        let manual = self.strategy().manual();
-        let parallelism = manual.parallelism_hint();
-        if positions.len() < PARALLEL_READ_THRESHOLD
-            || parallelism <= 1
-            || !self.journal.supports_read_many_sync()
-            || !positions.windows(2).all(|w| w[0] < w[1])
-        {
+        // Serve page-cache hits synchronously and fall back to a single batched read for the
+        // misses. The strategy policy decides per batch size whether the sync pass runs on the
+        // calling thread or sharded across the pool (one scratch buffer per shard and one
+        // cache-lock acquisition per blob a shard touches). The sortedness pre-check keeps
+        // contract violations deterministic: without it, a non-increasing batch would error
+        // only when some position missed the cache.
+        if !positions.windows(2).all(|w| w[0] < w[1]) {
             return self.journal.read_many(positions).await;
         }
-        let shard = positions.len().div_ceil(parallelism);
+        let strategy = self.strategy();
         let journal = &self.journal;
-        let mut results: Vec<Option<C::Item>> = manual
-            .map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
-                journal.read_many_sync(shard)
-            })
-            .into_iter()
-            .flatten()
-            .collect();
+        let mut results: Vec<Option<C::Item>> = strategy.run(
+            positions.len(),
+            || journal.read_many_sync(positions),
+            || {
+                let manual = strategy.manual();
+                let shard = positions.len().div_ceil(manual.parallelism_hint());
+                manual
+                    .map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
+                        journal.read_many_sync(shard)
+                    })
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            },
+        );
         let misses: Vec<u64> = positions
             .iter()
             .zip(&results)
@@ -795,10 +797,6 @@ where
 
     fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<C::Item>> {
         self.journal.read_many_sync(positions)
-    }
-
-    fn supports_read_many_sync(&self) -> bool {
-        self.journal.supports_read_many_sync()
     }
 
     async fn replay(
