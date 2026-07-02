@@ -11,8 +11,8 @@ use std::ops::{Bound, RangeBounds};
 ///
 /// - Backing storage starts detached in [Self::new] and is allocated on first write.
 /// - Logical data length is tracked separately from backing view length.
-/// - Draining paths ([Self::take] and grow-resize in [Self::resize]) hand buffered bytes to the
-///   caller and reset the tip to a detached empty state.
+/// - Draining paths ([Self::take]) hand buffered bytes to the caller and reset the tip to a
+///   detached empty state.
 /// - Subsequent writes are copy-on-write: [Self::writable] recovers mutable ownership when
 ///   backing is unique, otherwise allocates from the pool and copies existing bytes.
 /// - Prefix drains in [Self::drop_prefix] update the logical view and preserve backing whenever
@@ -95,38 +95,43 @@ impl Buffer {
         self.data.slice(start..end)
     }
 
-    /// Adjust the buffer to correspond to resizing the logical blob to size `len`.
+    /// Discards the first `n` bytes of the buffer and advances the offset by `n`.
     ///
-    /// If the new size is greater than the current size, the existing buffered bytes are returned
-    /// (to be flushed to the underlying blob), and the tip is reset to empty. (The returned data
-    /// is what would be returned by a call to [Self::take].)
+    /// # Panics
     ///
-    /// If the new size is less than the current size (but still greater than current offset), the
-    /// buffer is truncated to the new size.
-    ///
-    /// If the new size is less than the current offset, the buffer is reset to the empty state with
-    /// an updated offset positioned at the end of the logical blob.
-    pub(super) fn resize(&mut self, len: u64) -> Option<(IoBuf, u64)> {
-        // Handle case where the buffer is empty.
-        if self.is_empty() {
-            self.offset = len;
-            return None;
+    /// Panics if `n` is greater than the length of the buffer.
+    pub(super) fn advance(&mut self, n: usize) {
+        assert!(n <= self.len);
+        match n {
+            0 => {}
+            n if n == self.len => {
+                self.data = IoBuf::default();
+                self.len = 0;
+            }
+            n => {
+                self.data = self.data.slice(n..self.len);
+                self.len -= n;
+            }
         }
+        self.offset += n as u64;
+    }
 
-        // Handle case where there is some data in the buffer.
-        if len >= self.size() {
-            let previous = self
-                .take()
-                .expect("take must succeed when resize observes buffered data");
-            self.offset = len;
-            Some(previous)
-        } else if len >= self.offset {
-            self.len = (len - self.offset) as usize;
-            None
-        } else {
+    /// Shrinks the logical blob size ([Self::size]) to `len`. Buffered bytes below `len` are
+    /// kept; the rest are discarded.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `len` does not shrink the blob.
+    pub(super) fn truncate(&mut self, len: u64) {
+        assert!(len < self.size(), "truncate must shrink the blob");
+
+        if len <= self.offset {
+            // All buffered bytes are at or beyond `len`: drop them and restart at the new end.
             self.len = 0;
             self.offset = len;
-            None
+        } else {
+            // Keep only the buffered bytes below `len`.
+            self.len = (len - self.offset) as usize;
         }
     }
 
@@ -316,26 +321,14 @@ mod tests {
     }
 
     #[test]
-    fn test_tip_resize() {
+    fn test_tip_truncate() {
         let pool = test_pool();
-        let mut buffer = Buffer::new(50, 100, pool);
-        buffer.append(&[1, 2, 3]);
-        assert_eq!(buffer.size(), 53);
-
-        // Resize the buffer to correspond to a blob resized to size 60. The returned buffer should
-        // match exactly what we'd expect to be returned by `take` since 60 is greater than the
-        // current size of 53.
-        let resized = buffer.resize(60).unwrap();
-        assert_eq!(resized.0.as_ref(), &[1, 2, 3]);
-        assert_eq!(resized.1, 50);
-        assert_eq!(buffer.size(), 60);
-        assert!(buffer.take().is_none());
-
+        let mut buffer = Buffer::new(60, 100, pool);
         buffer.append(&[4, 5, 6]);
         assert_eq!(buffer.size(), 63);
 
-        // Resize the buffer down to size 61.
-        assert!(buffer.resize(61).is_none());
+        // Truncate into the buffered bytes: the prefix below the new size survives.
+        buffer.truncate(61);
         assert_eq!(buffer.size(), 61);
         let taken = buffer.take().unwrap();
         assert_eq!(taken.0.as_ref(), &[4]);
@@ -344,12 +337,21 @@ mod tests {
 
         buffer.append(&[7, 8, 9]);
 
-        // Resize the buffer prior to the current offset of 61. This should simply reset the buffer
-        // at the new size.
-        assert!(buffer.resize(59).is_none());
+        // Truncate below the buffer's offset of 61: all buffered bytes are dropped and the
+        // empty buffer restarts at the new size.
+        buffer.truncate(59);
         assert_eq!(buffer.size(), 59);
         assert!(buffer.take().is_none());
         assert_eq!(buffer.size(), 59);
+    }
+
+    #[test]
+    #[should_panic(expected = "truncate must shrink the blob")]
+    fn test_tip_truncate_rejects_grow() {
+        let pool = test_pool();
+        let mut buffer = Buffer::new(50, 100, pool);
+        buffer.append(&[1, 2, 3]);
+        buffer.truncate(60);
     }
 
     #[test]
