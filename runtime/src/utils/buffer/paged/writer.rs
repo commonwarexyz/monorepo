@@ -1154,7 +1154,10 @@ impl<B: Blob> Writer<B> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
+        buffer::{
+            paged::CHECKSUM_SLOT_LEN_SIZE,
+            tests::{GatePosition, GatedResizeBlob, SyncTrackingBlob},
+        },
         deterministic,
         mocks::{next_pending_sync, DelayedSyncBlob},
         telemetry::metrics::Registry,
@@ -1180,8 +1183,6 @@ mod tests {
     // resize that a later operation applies under state still claiming the old size.
     #[test_traced("DEBUG")]
     fn test_shrink_cancel_before_truncate_is_noop() {
-        use crate::buffer::tests::{GatePosition, GatedResizeBlob};
-
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (inner, blob_size) = context
