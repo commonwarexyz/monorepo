@@ -8,7 +8,7 @@ use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::{
         paged::{CacheRef, Writer},
-        Completion, Write,
+        Write,
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
@@ -32,18 +32,12 @@ pub trait SectionBuffer: Send + Sync {
 
     /// Start making data currently accepted by this buffer durable.
     ///
-    /// The returned handle covers every write accepted before this call returns. It does not cover
-    /// later writes. Implementations may accept later writes before an earlier handle completes, but
-    /// any later operation that mutates the underlying blob must first wait for the outstanding
-    /// handle. If those later writes need to be flushed by another `start_sync`, this call must wait
-    /// before starting the next sync. Reusing an in-flight handle is only valid when no newer
-    /// accepted writes need a new sync.
+    /// The returned handle covers every write accepted before this call returns; later writes
+    /// need a new sync. Implementations must wait for an outstanding sync before mutating the
+    /// underlying blob and may reuse an in-flight handle when no newer writes need syncing.
     fn start_sync(&mut self) -> impl Future<Output = Handle<()>> + Send;
 
-    /// Wait for any started sync without starting a new sync.
-    ///
-    /// This observes the result of a previous [SectionBuffer::start_sync] and does not make later
-    /// writes durable.
+    /// Wait for any started sync to complete without starting a new sync.
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
     /// Resize the logical size of the buffer.
@@ -162,6 +156,15 @@ pub struct Config<F> {
 /// Each section is stored in a separate blob, named by its section number
 /// (big-endian u64). This component handles initialization, pruning, syncing,
 /// and metrics.
+///
+/// # In-flight syncs
+///
+/// Syncs started by [Manager::start_sync] complete in the background, so every path that
+/// removes a blob from `blobs` (`prune`, `remove_section`, `rewind`, `clear`, `destroy`) must
+/// call [SectionBuffer::wait_for_sync] before dropping it. This resolves the sync's shared
+/// completion first, guaranteeing that caller-held sync handles always report the sync's true
+/// result and that no buffer is dropped with I/O in flight. `destroy` waits for every blob
+/// before surfacing an error for the same reason.
 pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     context: E,
     partition: String,
@@ -180,21 +183,19 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
 }
 
 impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
+    /// Wait for all started syncs to complete, surfacing the first error only after every sync
+    /// finishes (blobs must not be dropped with a sync in flight).
     async fn wait_for_syncs<'a>(
         blobs: impl IntoIterator<Item = &'a mut F::Buffer>,
     ) -> Result<(), Error>
     where
         F::Buffer: 'a,
     {
-        let mut error = None;
-        for result in join_all(blobs.into_iter().map(|blob| blob.wait_for_sync())).await {
-            if let Err(err) = result {
-                if error.is_none() {
-                    error = Some(err);
-                }
-            }
-        }
-        error.map_or_else(|| Ok(()), |err| Err(Error::Runtime(err)))
+        join_all(blobs.into_iter().map(|blob| blob.wait_for_sync()))
+            .await
+            .into_iter()
+            .collect::<Result<(), RError>>()
+            .map_err(Error::Runtime)
     }
 
     /// Initialize a new `Manager`.
@@ -287,38 +288,37 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
-    /// Start syncing the given `sections` to storage and return each section's handle.
-    pub(crate) async fn start_syncs(
-        &mut self,
-        sections: impl crate::Sections,
-    ) -> Result<Vec<(u64, Handle<()>)>, Error> {
-        let sections = sections.sections().collect::<BTreeSet<_>>();
-        for &section in &sections {
-            self.prune_guard(section)?;
-        }
-
-        let mut handles = Vec::new();
-        for (&section, blob) in &mut self.blobs {
-            if sections.contains(&section) {
-                handles.push((section, blob.start_sync().await));
-            }
-        }
-        self.synced.inc_by(handles.len() as u64);
-        Ok(handles)
-    }
-
     /// Start syncing the given `sections` to storage.
+    ///
+    /// The returned handle completes once every selected section's sync completes, failing with
+    /// the first error encountered. Sections with an in-flight sync and no newer writes reuse
+    /// that sync's handle rather than starting a new one.
+    ///
+    /// The handle is a detached observer: dropping it does not cancel the sync, and a failure of
+    /// the started sync resurfaces from the buffer on the section's next operation. A failure to
+    /// flush buffered data while starting the sync, however, is reported only through the
+    /// returned handle, so callers must observe the handle to detect it. The `synced` metric
+    /// counts every selected section, including reused and clean no-op syncs, matching
+    /// [Manager::sync] and [Manager::sync_all].
     pub async fn start_sync(
         &mut self,
         sections: impl crate::Sections,
     ) -> Result<Handle<()>, Error> {
-        let handles: Vec<_> = self
-            .start_syncs(sections)
-            .await?
-            .into_iter()
-            .map(|(_, handle)| handle)
+        let sections = sections.sections().collect::<BTreeSet<_>>();
+        for &section in &sections {
+            self.prune_guard(section)?;
+        }
+        let futures: Vec<_> = self
+            .blobs
+            .iter_mut()
+            .filter(|(section, _)| sections.contains(section))
+            .map(|(_, blob)| blob.start_sync())
             .collect();
-        Ok(Completion::join_handles(handles))
+        self.synced.inc_by(futures.len() as u64);
+        let handles = join_all(futures).await;
+        Ok(Handle::from_future(async move {
+            try_join_all(handles).await.map(|_| ())
+        }))
     }
 
     /// Sync all sections to storage.
@@ -418,24 +418,17 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     }
 
     /// Remove all underlying blobs.
-    pub async fn destroy(self) -> Result<(), Error> {
-        let Self {
-            context,
-            partition,
-            mut blobs,
-            ..
-        } = self;
-        Self::wait_for_syncs(blobs.values_mut()).await?;
-
-        for (section, blob) in blobs.into_iter() {
+    pub async fn destroy(mut self) -> Result<(), Error> {
+        Self::wait_for_syncs(self.blobs.values_mut()).await?;
+        for (section, blob) in self.blobs.into_iter() {
             let size = blob.size();
             drop(blob);
             debug!(section, size, "destroyed blob");
-            context
-                .remove(&partition, Some(&section.to_be_bytes()))
+            self.context
+                .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
         }
-        match context.remove(&partition, None).await {
+        match self.context.remove(&self.partition, None).await {
             Ok(()) => {}
             // Partition already removed or never existed.
             Err(RError::PartitionMissing(_)) => {}
@@ -533,6 +526,10 @@ mod tests {
     use super::*;
     use commonware_runtime::{deterministic, Runner as _, Spawner as _, Supervisor as _};
     use commonware_utils::{channel::oneshot, sync::Mutex};
+    use futures::{
+        future::{BoxFuture, Shared},
+        FutureExt as _,
+    };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -540,6 +537,9 @@ mod tests {
 
     type SyncSender = oneshot::Sender<Result<(), RError>>;
     type PendingSyncs = Arc<Mutex<Vec<SyncSender>>>;
+
+    /// A shared sync result, mirroring the runtime buffers' internal completion sharing.
+    type SharedSync = Shared<BoxFuture<'static, Result<(), RError>>>;
 
     #[derive(Clone)]
     struct TestFactory {
@@ -550,7 +550,7 @@ mod tests {
     struct TestBuffer {
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
-        syncing: Option<Completion>,
+        syncing: Option<SharedSync>,
     }
 
     impl Drop for TestBuffer {
@@ -573,23 +573,24 @@ mod tests {
 
         async fn start_sync(&mut self) -> Handle<()> {
             if let Some(syncing) = &self.syncing {
-                return syncing.handle();
+                return Handle::from_future(syncing.clone());
             }
             let (sender, receiver) = oneshot::channel();
             self.pending.lock().push(sender);
-            let sync = Completion::from(Handle::from_future(async move {
+            let sync = async move {
                 receiver.await.map_err(|_| RError::Closed)??;
                 Ok(())
-            }));
-            let handle = sync.handle();
-            self.syncing = Some(sync);
-            handle
+            }
+            .boxed()
+            .shared();
+            self.syncing = Some(sync.clone());
+            Handle::from_future(sync)
         }
 
         async fn wait_for_sync(&mut self) -> Result<(), RError> {
             if let Some(syncing) = self.syncing.take() {
                 self.wait_for_syncs.fetch_add(1, Ordering::Relaxed);
-                syncing.wait().await?;
+                syncing.await?;
             }
             Ok(())
         }
@@ -660,27 +661,17 @@ mod tests {
                 .await
                 .expect("failed to start sync");
             assert_eq!(pending.lock().len(), 2);
+            futures::pin_mut!(handle);
 
-            let completed = Arc::new(AtomicUsize::new(0));
-            let completed_clone = completed.clone();
-            let waiter = context.child("combined").spawn(|_| async move {
-                handle.await.expect("sync handle should complete");
-                completed_clone.fetch_add(1, Ordering::Relaxed);
-            });
-
+            // Complete only the first section's sync: the combined handle must stay pending.
             complete_next_pending_sync(&pending, Ok(()));
-            commonware_runtime::reschedule().await;
-            assert_eq!(
-                completed.load(Ordering::Relaxed),
-                0,
+            assert!(
+                futures::poll!(handle.as_mut()).is_pending(),
                 "combined sync handle must wait for every selected section"
             );
 
             complete_next_pending_sync(&pending, Ok(()));
-            while completed.load(Ordering::Relaxed) == 0 {
-                commonware_runtime::reschedule().await;
-            }
-            waiter.await.expect("sync waiter failed");
+            handle.await.expect("sync handle should complete");
             manager.destroy().await.expect("destroy failed");
         });
     }
@@ -712,27 +703,17 @@ mod tests {
                 1,
                 "repeated start_sync should observe the in-flight section sync"
             );
+            futures::pin_mut!(second);
 
-            let completed = Arc::new(AtomicUsize::new(0));
-            let completed_clone = completed.clone();
-            let waiter = context.child("reused").spawn(|_| async move {
-                second.await.expect("reused sync handle should complete");
-                completed_clone.fetch_add(1, Ordering::Relaxed);
-            });
-
-            commonware_runtime::reschedule().await;
-            assert_eq!(
-                completed.load(Ordering::Relaxed),
-                0,
+            // The reused handle must remain tied to the in-flight sync.
+            assert!(
+                futures::poll!(second.as_mut()).is_pending(),
                 "reused start_sync handle must wait for the in-flight sync"
             );
 
             release_pending_syncs(&pending);
             first.await.expect("first sync handle should complete");
-            while completed.load(Ordering::Relaxed) == 0 {
-                commonware_runtime::reschedule().await;
-            }
-            waiter.await.expect("reused sync waiter failed");
+            second.await.expect("reused sync handle should complete");
             manager.destroy().await.expect("destroy failed");
         });
     }

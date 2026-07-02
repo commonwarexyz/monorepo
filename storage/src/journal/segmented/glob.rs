@@ -167,14 +167,6 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         self.manager.sync(sections).await
     }
 
-    /// Start syncing the given `sections` to disk and return each section's handle.
-    pub(crate) async fn start_syncs(
-        &mut self,
-        sections: impl crate::Sections,
-    ) -> Result<Vec<(u64, Handle<()>)>, Error> {
-        self.manager.start_syncs(sections).await
-    }
-
     /// Start syncing the given `sections` to disk.
     pub async fn start_sync(
         &mut self,

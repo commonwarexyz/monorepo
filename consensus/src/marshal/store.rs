@@ -47,6 +47,10 @@ pub trait Certificates: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Buffer a finalization certificate and start syncing the resulting write.
+    ///
+    /// If the finalization already exists (making the put a no-op), the returned handle still
+    /// reports the durability of all previously accepted writes, including the original write
+    /// if its sync is still in flight.
     fn put_start_sync(
         &mut self,
         height: Height,
@@ -64,8 +68,9 @@ pub trait Certificates: Send + Sync + 'static {
 
     /// Request that all buffered writes are flushed to durable storage.
     ///
-    /// Implementations without a non-blocking sync path may complete the sync before returning an
-    /// already-finished handle.
+    /// The returned handle completes once every write accepted before this call is durable,
+    /// including writes covered by a sync that is still in flight. Implementations without a
+    /// non-blocking sync path may complete the sync before returning an already-finished handle.
     fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Self::Error>> + Send {
         async move {
             self.sync().await?;
@@ -135,6 +140,10 @@ pub trait Blocks: Send + Sync + 'static {
     fn put(&mut self, block: Self::Block) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Buffer a finalized block and start syncing the resulting write.
+    ///
+    /// If the block already exists (making the put a no-op), the returned handle still reports
+    /// the durability of all previously accepted writes, including the original write if its
+    /// sync is still in flight.
     fn put_start_sync(
         &mut self,
         block: Self::Block,
@@ -150,8 +159,9 @@ pub trait Blocks: Send + Sync + 'static {
 
     /// Request that all buffered writes are flushed to durable storage.
     ///
-    /// Implementations without a non-blocking sync path may complete the sync before returning an
-    /// already-finished handle.
+    /// The returned handle completes once every write accepted before this call is durable,
+    /// including writes covered by a sync that is still in flight. Implementations without a
+    /// non-blocking sync path may complete the sync before returning an already-finished handle.
     fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Self::Error>> + Send {
         async move {
             self.sync().await?;

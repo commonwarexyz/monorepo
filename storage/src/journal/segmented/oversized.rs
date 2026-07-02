@@ -46,12 +46,9 @@ use super::{
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{buffer::Completion, BufferPooler, Handle, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Handle, Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
-use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
-    num::NonZeroUsize,
-};
+use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
 
 /// Trait for index entries that reference oversized values in glob storage.
@@ -349,44 +346,23 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             .map(|_| ())
     }
 
-    /// Start syncing both journals for the given `sections` and return each section's handle.
-    pub(crate) async fn start_syncs(
-        &mut self,
-        sections: impl crate::Sections,
-    ) -> Result<Vec<(u64, Handle<()>)>, Error> {
-        let sections = sections.sections().collect::<BTreeSet<_>>();
-        let (index, values) = try_join(
-            self.index.start_syncs(&sections),
-            self.values.start_syncs(&sections),
-        )
-        .await?;
-
-        let mut handles = BTreeMap::<u64, Vec<Handle<()>>>::new();
-        for (section, handle) in index {
-            handles.entry(section).or_default().push(handle);
-        }
-        for (section, handle) in values {
-            handles.entry(section).or_default().push(handle);
-        }
-
-        Ok(handles
-            .into_iter()
-            .map(|(section, handles)| (section, Completion::join_handles(handles)))
-            .collect())
-    }
-
     /// Start syncing both journals for the given `sections`.
+    ///
+    /// The returned handle completes once both journals' syncs complete, failing with the first
+    /// error encountered.
     pub async fn start_sync(
         &mut self,
         sections: impl crate::Sections,
     ) -> Result<Handle<()>, Error> {
-        let handles: Vec<_> = self
-            .start_syncs(sections)
-            .await?
-            .into_iter()
-            .map(|(_, handle)| handle)
-            .collect();
-        Ok(Completion::join_handles(handles))
+        let sections = sections.sections().collect::<Vec<_>>();
+        let (index, values) = try_join(
+            self.index.start_sync(&sections),
+            self.values.start_sync(&sections),
+        )
+        .await?;
+        Ok(Handle::from_future(async move {
+            try_join(index, values).await.map(|_| ())
+        }))
     }
 
     /// Sync all sections.

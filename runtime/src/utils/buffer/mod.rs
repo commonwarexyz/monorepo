@@ -1,6 +1,6 @@
 //! Buffers for reading and writing to [crate::Blob]s.
 
-use futures::future::{join_all, BoxFuture, FutureExt as _, Shared};
+use futures::future::{BoxFuture, FutureExt as _, Shared};
 
 pub mod paged;
 mod read;
@@ -11,41 +11,22 @@ pub use read::Read;
 pub use write::Write;
 
 /// A shared sync result.
+///
+/// Handles returned by [Completion::handle] are detached observers of the same shared result:
+/// dropping one neither cancels the underlying sync nor consumes its result, and every
+/// observer sees the same outcome.
 #[derive(Clone)]
-pub struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
+struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
 
 impl Completion {
     /// Return a handle for the sync result.
-    pub fn handle(&self) -> crate::Handle<()> {
+    fn handle(&self) -> crate::Handle<()> {
         crate::Handle::from_future(self.0.clone())
     }
 
     /// Wait for the sync result.
-    pub async fn wait(&self) -> Result<(), crate::Error> {
+    async fn wait(&self) -> Result<(), crate::Error> {
         self.0.clone().await
-    }
-
-    async fn into_result(self) -> Result<(), crate::Error> {
-        self.0.await
-    }
-
-    /// Return a handle that observes every provided completion.
-    pub fn join(completions: impl IntoIterator<Item = Self>) -> crate::Handle<()> {
-        let completions = completions.into_iter().collect::<Vec<_>>();
-        if completions.is_empty() {
-            return crate::Handle::ready(Ok(()));
-        }
-        crate::Handle::from_future(async move {
-            for result in join_all(completions.into_iter().map(Self::into_result)).await {
-                result?;
-            }
-            Ok(())
-        })
-    }
-
-    /// Return a handle that observes every provided handle.
-    pub fn join_handles(handles: impl IntoIterator<Item = crate::Handle<()>>) -> crate::Handle<()> {
-        Self::join(handles.into_iter().map(Self::from))
     }
 }
 
@@ -56,6 +37,16 @@ impl From<crate::Handle<()>> for Completion {
 }
 
 /// Tracks whether blob mutations still need a sync.
+///
+/// Callers (e.g. segmented journals) rely on three properties:
+/// - Every operation that mutates the blob first waits for an in-flight sync, so a started
+///   sync's coverage is never disturbed by later writes.
+/// - [SyncState::start_sync] on a [SyncState::Pending] state returns the in-flight sync's
+///   handle (completed syncs resolve immediately), so re-requesting a sync is a cheap way to
+///   observe outstanding work.
+/// - A failure is never lost: every handle cloned from the shared completion reports it, and
+///   an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
+///   which also marks the state [SyncState::Dirty] since the mutations still need durability.
 enum SyncState {
     // No unsynced mutations.
     Clean,

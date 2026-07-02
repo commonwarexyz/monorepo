@@ -10,102 +10,13 @@ use crate::{
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    buffer::Completion,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
 };
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
-use std::{
-    collections::{btree_map, BTreeMap, BTreeSet},
-    future::Future,
-    mem,
-};
+use std::collections::{btree_map, BTreeMap, BTreeSet};
 use tracing::debug;
-
-/// Tracks archive-level durability state for section writes.
-///
-/// A started section sync covers writes accepted before that sync began. Later writes to the same
-/// section are not covered by that handle, so they are recorded in `pending` for a future sync.
-/// Lower buffers own the physical barrier: if a later write or sync must mutate the blob, it waits
-/// there before issuing I/O. Operations that remove data, shut down storage, or need a full
-/// durability barrier call `wait_all` before proceeding.
-struct SyncState {
-    /// Sections with writes not yet covered by an issued sync.
-    pending: BTreeSet<u64>,
-
-    /// Syncs already issued by `start_sync`.
-    syncing: BTreeMap<u64, Completion>,
-}
-
-impl SyncState {
-    /// Create empty sync state.
-    const fn new() -> Self {
-        Self {
-            pending: BTreeSet::new(),
-            syncing: BTreeMap::new(),
-        }
-    }
-
-    /// Run a section write and mark that section as needing a future sync.
-    async fn write<F, Fut, T>(&mut self, section: u64, write: F) -> Result<T, Error>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<T, Error>>,
-    {
-        let result = write().await?;
-        self.pending.insert(section);
-        Ok(result)
-    }
-
-    /// Wait for all started syncs and clear the in-flight set.
-    async fn wait_all(&mut self) -> Result<(), Error> {
-        let syncing = mem::take(&mut self.syncing);
-        Completion::join(syncing.into_values())
-            .await
-            .map_err(crate::journal::Error::from)?;
-        Ok(())
-    }
-
-    /// Wait for in-flight syncs and drop pending sync work for pruned sections.
-    async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        self.wait_all().await?;
-        loop {
-            let next = match self.pending.iter().next() {
-                Some(section) if *section < min => *section,
-                _ => break,
-            };
-            self.pending.remove(&next);
-        }
-        Ok(())
-    }
-
-    /// Drain pending sections and record one sync metric per section.
-    fn take_pending(&mut self, syncs: &Counter) -> BTreeSet<u64> {
-        let pending = mem::take(&mut self.pending);
-        syncs.inc_by(pending.len() as u64);
-        pending
-    }
-
-    /// Prepare a `start_sync` call.
-    ///
-    /// Returns sections that need new syncs and existing in-flight syncs that the returned handle
-    /// must also observe. Lower buffers wait as needed when starting syncs for sections with newer
-    /// pending writes.
-    fn start(&mut self, syncs: &Counter) -> (BTreeSet<u64>, Vec<Completion>) {
-        let pending = self.take_pending(syncs);
-        let mut handles = Vec::with_capacity(self.syncing.len() + pending.len());
-        handles.extend(self.syncing.values().cloned());
-        (pending, handles)
-    }
-
-    /// Track an issued section sync and return the shared completion.
-    fn record_syncing(&mut self, section: u64, handle: Handle<()>) -> Completion {
-        let sync = Completion::from(handle);
-        self.syncing.insert(section, sync.clone());
-        sync
-    }
-}
 
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
@@ -197,8 +108,21 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     /// Combined index + value storage with crash recovery.
     oversized: Oversized<E, Record<K>, V>,
 
-    /// Sync state for section writes and in-flight syncs.
-    sync_state: SyncState,
+    /// Sections with writes not yet included in any sync request. Moved into `requested` when a
+    /// sync is requested; the `syncs` metric counts only this set, so each section of writes is
+    /// counted once per request.
+    pending: BTreeSet<u64>,
+
+    /// Sections included in a sync request by [crate::archive::Archive::start_sync], retained
+    /// until a full sync completes.
+    ///
+    /// Retention is load-bearing: a [crate::archive::Archive::start_sync] handle must cover
+    /// every previously accepted write, even when the call itself wrote nothing (e.g. a
+    /// duplicate put). Re-requesting these sections makes their buffers return the in-flight
+    /// sync's handle (a completed sync resolves immediately; no new I/O is issued). Pruned
+    /// sections must be removed from this set, or a later request would trip the journal's
+    /// prune guard.
+    requested: BTreeSet<u64>,
 
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -308,7 +232,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),
             oversized,
-            sync_state: SyncState::new(),
+            pending: BTreeSet::new(),
+            requested: BTreeSet::new(),
             oldest_allowed: None,
             indices,
             extra_indices,
@@ -412,15 +337,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // Write value and index entry atomically (glob first, then index)
         let section = self.section(index);
         let entry = Record::new(index, key.clone(), 0, 0);
-        let (position, _, _) = self
-            .sync_state
-            .write(section, || async {
-                self.oversized
-                    .append(section, entry, &data)
-                    .await
-                    .map_err(Error::from)
-            })
-            .await?;
+        let (position, _, _) = self.oversized.append(section, entry, &data).await?;
 
         // Store index location
         match self.indices.entry(index) {
@@ -438,6 +355,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // Insert and prune any useless keys
         self.keys
             .insert_and_retain(&key, index, |v| *v >= oldest_allowed);
+
+        // Add section to pending
+        self.pending.insert(section);
 
         // Update metrics
         let _ = self.items_tracked.try_set(self.indices.len());
@@ -463,11 +383,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         }
         debug!(min, "pruning archive");
 
-        // Pruning can remove blobs that in-flight sync handles still reference.
-        self.sync_state.prune(min).await?;
-
         // Prune oversized journal (handles both index and values)
         self.oversized.prune(min).await?;
+
+        // Remove pending and requested sync work (no need to call `sync` as we are pruning)
+        self.pending = self.pending.split_off(&min);
+        self.requested = self.requested.split_off(&min);
 
         // Remove all indices that are less than min
         loop {
@@ -489,37 +410,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.oldest_allowed = Some(min);
         let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
-    }
-
-    /// Store an item and start syncing pending writes.
-    pub async fn put_start_sync(
-        &mut self,
-        index: u64,
-        key: K,
-        data: V,
-    ) -> Result<Handle<()>, Error> {
-        self.put_internal(index, key, data, true).await?;
-        self.start_sync().await
-    }
-
-    /// Store an item with multi-index semantics and start syncing pending writes.
-    pub async fn put_multi_start_sync(
-        &mut self,
-        index: u64,
-        key: K,
-        data: V,
-    ) -> Result<Handle<()>, Error> {
-        self.put_internal(index, key, data, false).await?;
-        self.start_sync().await
-    }
-
-    /// Start syncing all pending writes.
-    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
-        let (pending, mut syncs) = self.sync_state.start(&self.syncs);
-        for (section, handle) in self.oversized.start_syncs(pending).await? {
-            syncs.push(self.sync_state.record_syncing(section, handle));
-        }
-        Ok(Completion::join(syncs))
     }
 }
 
@@ -549,14 +439,27 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.sync_state.wait_all().await?;
-        let pending = self.sync_state.take_pending(&self.syncs);
-        self.oversized.sync(pending).await?;
+        // Update metrics (`requested` sections were already counted by `start_sync`)
+        self.syncs.inc_by(self.pending.len() as u64);
+        self.requested.append(&mut self.pending);
+
+        // Sync oversized journal (handles both index and values). Re-syncing `requested` sections
+        // also waits for any of their syncs still in flight.
+        self.oversized.sync(&self.requested).await?;
+
+        self.requested.clear();
         Ok(())
     }
 
     async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
-        Self::start_sync(self).await
+        // Update metrics
+        self.syncs.inc_by(self.pending.len() as u64);
+
+        // Move sections into `requested` rather than dropping them: section buffers reuse
+        // in-flight syncs, so re-requesting a section makes this handle observe outstanding work
+        // without issuing a new sync.
+        self.requested.append(&mut self.pending);
+        Ok(self.oversized.start_sync(&self.requested).await?)
     }
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
@@ -584,8 +487,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     #[boxed]
-    async fn destroy(mut self) -> Result<(), Error> {
-        self.sync_state.wait_all().await?;
+    async fn destroy(self) -> Result<(), Error> {
         Ok(self.oversized.destroy().await?)
     }
 }

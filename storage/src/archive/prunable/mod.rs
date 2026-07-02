@@ -217,24 +217,25 @@ mod tests {
     use super::*;
     use crate::{
         archive::{Archive as _, Error, Identifier, MultiArchive as _},
-        journal::Error as JournalError,
+        journal::{
+            segmented::tests::{
+                fail_pending_syncs, release_next_pending_syncs, release_pending_syncs,
+                DelayedSyncContext,
+            },
+            Error as JournalError,
+        },
         translator::{FourCap, TwoCap},
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        deterministic,
-        telemetry::metrics::{has_metric_value, Metric, Registered},
-        Blob, BufferPool, BufferPooler, Error as RError, Handle, IoBufs, IoBufsMut, Metrics as _,
-        Name, Runner, Spawner as _, Storage, Supervisor,
+        deterministic, telemetry::metrics::has_metric_value, BufferPooler, Error as RError,
+        Metrics as _, Runner, Spawner as _, Supervisor as _,
     };
-    use commonware_utils::{
-        channel::oneshot, sequence::FixedBytes, sync::Mutex, NZUsize, NZU16, NZU64,
-    };
+    use commonware_utils::{sequence::FixedBytes, sync::Mutex, NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::{
         collections::BTreeMap,
-        mem,
         num::{NonZeroU16, NonZeroU64},
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -274,173 +275,6 @@ mod tests {
         }
     }
 
-    type SyncSender = oneshot::Sender<Result<(), RError>>;
-    type PendingSyncs = Arc<Mutex<Vec<SyncSender>>>;
-
-    #[derive(Clone)]
-    struct DelayedSyncContext<E> {
-        inner: E,
-        pending: PendingSyncs,
-    }
-
-    impl<E: Supervisor> Supervisor for DelayedSyncContext<E> {
-        fn name(&self) -> Name {
-            self.inner.name()
-        }
-
-        fn child(&self, label: &'static str) -> Self {
-            Self {
-                inner: self.inner.child(label),
-                pending: self.pending.clone(),
-            }
-        }
-
-        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
-            Self {
-                inner: self.inner.with_attribute(key, value),
-                pending: self.pending,
-            }
-        }
-    }
-
-    impl<E: commonware_runtime::Metrics> commonware_runtime::Metrics for DelayedSyncContext<E> {
-        fn register<N: Into<String>, H: Into<String>, M: Metric>(
-            &self,
-            name: N,
-            help: H,
-            metric: M,
-        ) -> Registered<M> {
-            self.inner.register(name, help, metric)
-        }
-
-        fn encode(&self) -> String {
-            self.inner.encode()
-        }
-    }
-
-    impl<E: BufferPooler> BufferPooler for DelayedSyncContext<E> {
-        fn network_buffer_pool(&self) -> &BufferPool {
-            self.inner.network_buffer_pool()
-        }
-
-        fn storage_buffer_pool(&self) -> &BufferPool {
-            self.inner.storage_buffer_pool()
-        }
-    }
-
-    impl<E: Storage> Storage for DelayedSyncContext<E> {
-        type Blob = DelayedSyncBlob<E::Blob>;
-
-        async fn open_versioned(
-            &self,
-            partition: &str,
-            name: &[u8],
-            versions: std::ops::RangeInclusive<u16>,
-        ) -> Result<(Self::Blob, u64, u16), RError> {
-            let (inner, len, version) =
-                self.inner.open_versioned(partition, name, versions).await?;
-            Ok((
-                DelayedSyncBlob {
-                    inner,
-                    pending: self.pending.clone(),
-                },
-                len,
-                version,
-            ))
-        }
-
-        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RError> {
-            self.inner.remove(partition, name).await
-        }
-
-        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RError> {
-            self.inner.scan(partition).await
-        }
-    }
-
-    #[derive(Clone)]
-    struct DelayedSyncBlob<B> {
-        inner: B,
-        pending: PendingSyncs,
-    }
-
-    impl<B: Blob> Blob for DelayedSyncBlob<B> {
-        async fn read_at_buf(
-            &self,
-            offset: u64,
-            len: usize,
-            bufs: impl Into<IoBufsMut> + Send,
-        ) -> Result<IoBufsMut, RError> {
-            self.inner.read_at_buf(offset, len, bufs).await
-        }
-
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, RError> {
-            self.inner.read_at(offset, len).await
-        }
-
-        async fn write_at(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> Result<(), RError> {
-            self.inner.write_at(offset, bufs).await
-        }
-
-        async fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> Result<(), RError> {
-            self.inner.write_at_sync(offset, bufs).await
-        }
-
-        async fn resize(&self, len: u64) -> Result<(), RError> {
-            self.inner.resize(len).await
-        }
-
-        async fn sync(&self) -> Result<(), RError> {
-            self.inner.sync().await
-        }
-
-        async fn start_sync(&self) -> Handle<()> {
-            let (sender, receiver) = oneshot::channel();
-            self.pending.lock().push(sender);
-            let inner = self.inner.clone();
-            Handle::from_future(async move {
-                receiver.await.map_err(|_| RError::Closed)??;
-                inner.sync().await
-            })
-        }
-    }
-
-    fn release_next_pending_syncs(pending: &PendingSyncs, count: usize) {
-        let senders = {
-            let mut pending = pending.lock();
-            assert!(
-                pending.len() >= count,
-                "not enough pending syncs: have {}, need {count}",
-                pending.len()
-            );
-            pending.drain(..count).collect::<Vec<_>>()
-        };
-        for sender in senders {
-            let _ = sender.send(Ok(()));
-        }
-    }
-
-    fn release_pending_syncs(pending: &PendingSyncs) {
-        for sender in mem::take(&mut *pending.lock()) {
-            let _ = sender.send(Ok(()));
-        }
-    }
-
-    fn fail_pending_syncs(pending: &PendingSyncs) {
-        for sender in mem::take(&mut *pending.lock()) {
-            let err = std::io::Error::other("injected sync failure");
-            let _ = sender.send(Err(RError::Io(err.into())));
-        }
-    }
-
     #[test_traced]
     fn test_put_after_start_sync_is_accepted_before_handle_completes() {
         let executor = deterministic::Runner::default();
@@ -450,18 +284,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = Config {
-                translator: FourCap,
-                key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value".into(),
-                codec_config: (),
-                compression: None,
-                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-            };
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -490,7 +313,10 @@ mod tests {
             release_pending_syncs(&pending);
             handle.await.expect("sync handle should complete");
 
-            let follow_up = archive.start_sync().await.expect("Failed to start next sync");
+            let follow_up = archive
+                .start_sync()
+                .await
+                .expect("Failed to start next sync");
             assert!(
                 !pending.lock().is_empty(),
                 "the later put must remain pending for a future sync"
@@ -519,18 +345,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = Config {
-                translator: FourCap,
-                key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value".into(),
-                codec_config: (),
-                compression: None,
-                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-            };
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -591,18 +406,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = Config {
-                translator: FourCap,
-                key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value".into(),
-                codec_config: (),
-                compression: None,
-                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-            };
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -663,18 +467,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = Config {
-                translator: FourCap,
-                key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value".into(),
-                codec_config: (),
-                compression: None,
-                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
-            };
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -763,6 +556,137 @@ mod tests {
                 commonware_runtime::reschedule().await;
             }
             waiter.await.expect("destroy task failed");
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_after_put_start_sync_waits_for_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("prune").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                archive.prune(2).await.expect("prune should complete");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                archive
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "prune must wait for in-flight syncs on pruned sections"
+            );
+
+            release_pending_syncs(&pending);
+            first
+                .await
+                .expect("sync handle should complete despite pruning");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let archive = waiter.await.expect("prune task failed");
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_surfaces_failed_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            fail_pending_syncs(&pending);
+
+            let err = archive
+                .prune(2)
+                .await
+                .expect_err("prune must surface a failed in-flight sync");
+            assert!(matches!(
+                err,
+                Error::Journal(JournalError::Runtime(RError::Io(_)))
+            ));
+
+            let err = first.await.expect_err("first sync handle should fail");
+            assert!(matches!(err, RError::Io(_)));
+        });
+    }
+
+    #[test_traced]
+    fn test_put_start_sync_after_prune_drops_pruned_sync_requests() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+
+            archive.prune(2).await.expect("Failed to prune");
+
+            // If pruning left section 1 in the retained sync-request set, these calls would trip
+            // the journal's prune guard.
+            let second = archive
+                .put_start_sync(2, test_key("bbb"), 20)
+                .await
+                .expect("put_start_sync after prune should succeed");
+            release_pending_syncs(&pending);
+            second.await.expect("second sync handle should complete");
+            archive
+                .sync()
+                .await
+                .expect("sync after prune should succeed");
+
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
         });
     }
 

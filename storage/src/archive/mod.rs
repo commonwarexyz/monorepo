@@ -81,6 +81,10 @@ pub trait Archive: Send {
     }
 
     /// Perform a [Archive::put] and [Archive::start_sync] in a single operation.
+    ///
+    /// If the index already exists (making the put a no-op), the returned handle still reports
+    /// the durability of all previously accepted writes, including the original write for this
+    /// index if its sync is still in flight.
     fn put_start_sync(
         &mut self,
         index: u64,
@@ -138,8 +142,9 @@ pub trait Archive: Send {
 
     /// Request that all pending writes are synced.
     ///
-    /// Implementations without a non-blocking sync path may complete the sync before returning an
-    /// already-finished handle.
+    /// The returned handle completes once every write accepted before this call is durable,
+    /// including writes covered by a sync that is still in flight. Implementations without a
+    /// non-blocking sync path may complete the sync before returning an already-finished handle.
     fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Error>> + Send {
         async move {
             self.sync().await?;
