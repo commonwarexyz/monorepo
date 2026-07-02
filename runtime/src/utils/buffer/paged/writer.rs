@@ -2620,7 +2620,9 @@ mod tests {
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
 
-            // Let the first two slot writes through; the third applies, then parks. Cancel.
+            // The shrink issues three slot writes; skipping two parks the gate at the third
+            // (the commit point), after it applied. Canceling there leaves the disk
+            // committed to the shorter length while memory never saw the shrink finish.
             gate.set_skip(2);
             gate.cancel(writer.resize((2 * page + 30) as u64)).await;
 
@@ -2669,8 +2671,8 @@ mod tests {
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
 
-            // Shrink into the last full page. Let the first two slot writes through; the
-            // third applies, then parks. Cancel.
+            // Shrink into the last full page. As above, skip two slot writes so the gate
+            // parks at the applied commit point, then cancel.
             gate.set_skip(2);
             gate.cancel(writer.resize((2 * page + 30) as u64)).await;
 
@@ -2699,6 +2701,11 @@ mod tests {
 
     /// Blob wrapper that, once armed, turns the next write into a durable partial write
     /// (cut `shortfall` bytes early) followed by an error, simulating a torn write.
+    ///
+    /// Tests use it to model power loss during a specific write: the truncated bytes are
+    /// what made it to disk, and everything after (including the writer observing success)
+    /// never happened. This proves the heal path never has both CRC slots at risk in a
+    /// single write.
     #[derive(Clone)]
     struct ArmedTearBlob<B: Blob> {
         inner: B,
@@ -2790,7 +2797,8 @@ mod tests {
         }
     }
 
-    /// Blob wrapper recording the byte range of every write.
+    /// Blob wrapper recording the byte range of every write, so tests can assert which
+    /// on-disk regions an operation did (or did not) touch.
     #[derive(Clone)]
     struct RecordingBlob<B: Blob> {
         inner: B,
@@ -2924,8 +2932,9 @@ mod tests {
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
 
-            // Cancel after the authority transfer committed: the shorter slot is now the
-            // disk-authoritative one.
+            // Skip two slot writes so the gate parks at the third (the commit point) after
+            // it applied: the shorter slot is now the disk-authoritative one, but memory
+            // never saw the shrink finish.
             let target = (2 * page + 30) as u64;
             gate.set_skip(2);
             gate.cancel(writer.resize(target)).await;
@@ -2983,8 +2992,9 @@ mod tests {
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
 
-            // Cancel after the authority transfer committed: on disk, the shorter length in
-            // the second slot is now authoritative (the record was born slot-1-authoritative).
+            // Skip two slot writes so the gate parks at the applied commit point, then
+            // cancel: on disk, the shorter length in the second slot is now authoritative
+            // (the record was born slot-1-authoritative).
             gate.set_skip(2);
             gate.cancel(writer.resize(2 * page + 30)).await;
 
