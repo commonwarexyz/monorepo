@@ -49,6 +49,21 @@ where
         RE: Receiver<PublicKey = C::PublicKey>,
     {
         let epoch = Epoch::zero();
+
+        // The one-shot DKG is never resumed or re-run. If this node already
+        // persisted its epoch-zero threshold share, the ceremony completed in a
+        // prior run and its artifacts were durably written then. Fail loudly
+        // rather than re-running the ceremony (which would misreport the completed
+        // DKG as a fresh failure once the chain has finalized past epoch zero).
+        if store.share(epoch).await.is_some() {
+            panic!(
+                "epoch-zero DKG already completed: this node's threshold share is \
+                 persisted, so the ceremony finished in a prior run and does not run \
+                 again. If the genesis artifact was not written, recover it from a peer \
+                 instead of re-running the DKG."
+            );
+        }
+
         let completion = self.dkg_completion();
         let Some(mut prepared) = self.setup_dkg(store).await else {
             self.complete_dkg(completion, store);
