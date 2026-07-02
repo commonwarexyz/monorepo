@@ -239,7 +239,6 @@ impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
 /// - **Below or above**: standard hash using ops-space positions (`F`).
 /// - **At**: the children form an ops subtree root, which is combined with a bitmap chunk element
 ///   to reconstruct the grafted leaf digest.
-#[derive(Clone)]
 pub struct Verifier<'a, F: Graftable, H: Hasher> {
     hasher: merkle::hasher::Standard<H>,
     grafting_height: u32,
@@ -254,6 +253,19 @@ pub struct Verifier<'a, F: Graftable, H: Hasher> {
     graftable_chunks: u64,
 
     _ops_family: PhantomData<F>,
+}
+
+impl<F: Graftable, H: Hasher> Clone for Verifier<'_, F, H> {
+    fn clone(&self) -> Self {
+        Self {
+            hasher: self.hasher.clone(),
+            grafting_height: self.grafting_height,
+            chunks: self.chunks.clone(),
+            start_chunk_index: self.start_chunk_index,
+            graftable_chunks: self.graftable_chunks,
+            _ops_family: PhantomData,
+        }
+    }
 }
 
 impl<'a, F: Graftable, H: Hasher> Verifier<'a, F, H> {

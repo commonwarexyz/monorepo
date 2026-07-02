@@ -55,7 +55,6 @@ where
 /// Inbox for sending messages to the DKG [Actor].
 ///
 /// [Actor]: super::Actor
-#[derive(Clone)]
 pub struct Mailbox<H, C, V, A = Exact>
 where
     H: Hasher,
@@ -64,6 +63,20 @@ where
     A: Acknowledgement,
 {
     sender: Sender<Message<H, C, V, A>>,
+}
+
+impl<H, C, V, A> Clone for Mailbox<H, C, V, A>
+where
+    H: Hasher,
+    C: Signer,
+    V: Variant,
+    A: Acknowledgement,
+{
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
 }
 
 impl<H, C, V, A> Mailbox<H, C, V, A>

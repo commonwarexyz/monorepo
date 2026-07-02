@@ -22,13 +22,34 @@ use std::future::Future;
 ///
 /// This variant distributes blocks as erasure-coded shards, allowing reconstruction
 /// from a subset of shards. This reduces bandwidth requirements for block propagation.
-#[derive(Default, Clone, Copy)]
+#[derive(Default)]
 pub struct Coding<B, C, H, P>(std::marker::PhantomData<(B, C, H, P)>)
 where
     B: CertifiableBlock<Context = Context<Commitment, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey;
+
+impl<B, C, H, P> Clone for Coding<B, C, H, P>
+where
+    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<B, C, H, P> Copy for Coding<B, C, H, P>
+where
+    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+}
 
 impl<B, C, H, P> Variant for Coding<B, C, H, P>
 where

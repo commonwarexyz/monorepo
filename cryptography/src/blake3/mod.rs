@@ -47,14 +47,6 @@ pub struct Blake3 {
     hasher: CoreBlake3,
 }
 
-impl Clone for Blake3 {
-    fn clone(&self) -> Self {
-        // Per the `Hasher` contract, `Clone` resets: we never duplicate in-progress
-        // hasher state.
-        Self::default()
-    }
-}
-
 impl Hasher for Blake3 {
     type Digest = Digest;
 

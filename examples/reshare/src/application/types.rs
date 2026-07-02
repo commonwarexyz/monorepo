@@ -13,7 +13,6 @@ use commonware_runtime::{Buf, BufMut};
 use std::num::NonZeroU32;
 
 /// A block in the reshare chain.
-#[derive(Clone)]
 pub struct Block<H, C, V>
 where
     H: Hasher,
@@ -31,6 +30,22 @@ where
 
     /// An optional outcome of a dealing operation.
     pub log: Option<SignedDealerLog<V, C>>,
+}
+
+impl<H, C, V> Clone for Block<H, C, V>
+where
+    H: Hasher,
+    C: Signer,
+    V: Variant,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            parent: self.parent,
+            height: self.height,
+            log: self.log.clone(),
+        }
+    }
 }
 
 impl<H, C, V> Block<H, C, V>

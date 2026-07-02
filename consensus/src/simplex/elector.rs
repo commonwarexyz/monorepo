@@ -92,10 +92,19 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
 /// The rotation order can be shuffled at construction using a seed.
 ///
 /// Works with any signing scheme.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct RoundRobin<H: Hasher = Sha256> {
     seed: Option<Vec<u8>>,
     _phantom: PhantomData<H>,
+}
+
+impl<H: Hasher> Clone for RoundRobin<H> {
+    fn clone(&self) -> Self {
+        Self {
+            seed: self.seed.clone(),
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<H: Hasher> RoundRobin<H> {

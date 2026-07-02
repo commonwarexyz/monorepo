@@ -499,10 +499,17 @@ pub enum Error {
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CODING_ZODA";
 
-#[derive(Clone, Copy)]
 pub struct Zoda<H> {
     _marker: PhantomData<H>,
 }
+
+impl<H> Clone for Zoda<H> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<H> Copy for Zoda<H> {}
 
 impl<H> std::fmt::Debug for Zoda<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

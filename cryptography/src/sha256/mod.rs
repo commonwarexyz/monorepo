@@ -162,14 +162,6 @@ pub struct Sha256 {
     hasher: ISha256,
 }
 
-impl Clone for Sha256 {
-    fn clone(&self) -> Self {
-        // Per the `Hasher` contract, `Clone` resets: we never duplicate in-progress
-        // hasher state.
-        Self::default()
-    }
-}
-
 impl Sha256 {
     /// Convenience function for testing that creates an easily recognizable digest by repeating a
     /// single byte.
