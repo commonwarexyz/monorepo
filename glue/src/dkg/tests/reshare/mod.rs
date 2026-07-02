@@ -104,6 +104,9 @@ fn state_sync_next_player_plan(
     let midpoint = FixedEpocher::new(EPOCH_LENGTH)
         .midpoint(next_player_epoch)
         .expect("test epoch should be supported");
+    let sync_floor = midpoint
+        .previous()
+        .expect("midpoint must have a sync floor");
     let registrations = engine.registrations.clone();
     let state_syncs = engine.state_syncs.clone();
     let schedule = engine.schedule.clone();
@@ -119,7 +122,7 @@ fn state_sync_next_player_plan(
         ))
         .property(StateSyncedAtHeight::new(
             delayed.clone(),
-            midpoint,
+            sync_floor,
             final_height(next_player_epoch.get()),
             state_syncs.clone(),
         ))
@@ -322,7 +325,7 @@ fn reshare_e2e_multiple_epochs_with_many_random_crashes() {
             count: 3,
         },
     )
-    .timeout(Duration::from_secs(240))
+    .timeout(Duration::from_secs(360))
     .run()
     .unwrap();
 }

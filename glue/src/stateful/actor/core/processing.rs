@@ -3,7 +3,7 @@ use crate::stateful::{
         core::mailbox::Message,
         processor::{FinalizeStatus, Processor},
     },
-    Application,
+    Application, Input,
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -46,8 +46,8 @@ where
     /// Actor ingress.
     pub(super) mailbox: actor_mailbox::Receiver<Message<E, A>>,
 
-    /// Source of input (e.g. transactions) passed to the application on propose.
-    pub(super) input_provider: A::InputProvider,
+    /// Provider cloned into each proposal.
+    pub(super) provider: A::Provider,
 
     /// Marshal mailbox used for lazy block lookup.
     pub(super) marshal: MarshalMailbox<S, V>,
@@ -102,16 +102,23 @@ where
                     span,
                     context,
                     ancestry,
+                    parent,
                     response,
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.propose");
+                    // Aggregate the parent's input with the stateful-owned provider
+                    // for the inner application.
+                    let input = Input {
+                        parent,
+                        provider: self.provider.clone(),
+                    };
                     self.processor
                         .propose(
                             self.context.as_present(),
                             self.marshal.clone(),
                             context,
                             ancestry,
-                            &mut self.input_provider,
+                            input,
                             response,
                         )
                         .instrument(process)

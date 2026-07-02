@@ -31,6 +31,7 @@ where
         span: Span,
         context: (E, A::Context),
         ancestry: ErasedAncestorStream<A::Block>,
+        parent: A::Input,
         response: oneshot::Sender<Option<A::Block>>,
     },
 
@@ -202,11 +203,13 @@ where
     type SigningScheme = A::SigningScheme;
     type Context = A::Context;
     type Block = A::Block;
+    type Input = A::Input;
 
     async fn propose(
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Stream<Item = Self::Block> + Send + 'static,
+        parent: Self::Input,
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
@@ -218,6 +221,7 @@ where
             span,
             context,
             ancestry: Box::pin(ancestry),
+            parent,
             response,
         });
         receiver.await.ok().flatten()

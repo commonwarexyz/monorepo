@@ -185,5 +185,8 @@ mod actor;
 pub(crate) use actor::DkgConfig;
 pub use actor::{Actor, Config};
 
+mod application;
+pub use application::{Application, Input};
+
 mod metrics;
 pub(crate) mod store;

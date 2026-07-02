@@ -522,11 +522,13 @@ where
     type SigningScheme = ConsensusScheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block<V>;
+    type Input = ();
 
     async fn propose(
         &mut self,
         (_, context): (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
+        _input: Self::Input,
     ) -> Option<Self::Block> {
         let parent = ancestry.peek()?.clone();
         let height = parent.height().next();

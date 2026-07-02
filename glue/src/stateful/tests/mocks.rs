@@ -1,6 +1,6 @@
 use crate::stateful::{
     db::{DatabaseSet, ManagedDb, Merkleized, Unmerkleized},
-    Application, Proposed,
+    Application, Input, Proposed,
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -170,7 +170,8 @@ impl Application<deterministic::Context> for TestApp {
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
     type Databases = TestDatabases;
-    type InputProvider = ();
+    type Provider = ();
+    type Input = ();
 
     fn sync_targets(
         block: &Self::Block,
@@ -187,7 +188,7 @@ impl Application<deterministic::Context> for TestApp {
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        _input: &mut Self::InputProvider,
+        _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, deterministic::Context>> {
         None
     }

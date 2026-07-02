@@ -67,8 +67,8 @@ where
     /// Inner application.
     pub(super) application: A,
 
-    /// Source of input (e.g. transactions) passed to the application on propose.
-    pub(super) input_provider: A::InputProvider,
+    /// Provider cloned into each proposal after state sync.
+    pub(super) provider: A::Provider,
 
     /// Marshal actor mailbox.
     pub(super) marshal: MarshalMailbox<S, V>,
@@ -313,7 +313,7 @@ where
         Processing {
             context: self.context,
             mailbox: self.mailbox,
-            input_provider: self.input_provider,
+            provider: self.provider,
             marshal: self.marshal,
             processor,
             skip_finalized_until: Some(synced_height),
@@ -380,7 +380,7 @@ mod tests {
                     context: ContextCell::new(context.child("syncing")),
                     mailbox,
                     application: TestApp,
-                    input_provider: (),
+                    provider: (),
                     marshal: init_marshal_mailbox(context.child("marshal")).await,
                     sync_metadata: Arc::new(AsyncMutex::new(
                         StateSyncMetadata::init(&context, "syncing-test").await,

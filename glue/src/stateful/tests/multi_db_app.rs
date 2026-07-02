@@ -10,7 +10,7 @@ use crate::{
             DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
         },
         probe::{Config as ProbeConfig, Probe},
-        Application, Config as StatefulConfig, Proposed, PruneConfig, Stateful as StatefulActor,
+        Application, Config as StatefulConfig, Input, Proposed, PruneConfig, Stateful as StatefulActor,
         SyncPlan,
     },
 };
@@ -245,7 +245,8 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = MultiDatabaseSet<E>;
-    type InputProvider = ();
+    type Provider = ();
+    type Input = ();
 
     async fn genesis(&mut self) -> Self::Block {
         self.genesis.clone()
@@ -256,7 +257,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-        _input: &mut Self::InputProvider,
+        _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
@@ -644,7 +645,7 @@ impl EngineDefinition for MultiDbEngine {
             StatefulConfig {
                 application,
                 db_config,
-                input_provider: (),
+                provider: (),
                 marshal: marshal_mailbox.clone(),
                 mailbox_size: NZUsize!(100),
                 plan,

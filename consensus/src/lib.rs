@@ -270,8 +270,14 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// The block type produced by the application's builder.
         type Block: Block;
 
+        /// Per-proposal input handed to [`propose`](Self::propose). Applications
+        /// that need no input set this to `()`.
+        type Input: Send;
+
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
+        ///
+        /// `input` is the per-proposal input for this build.
         ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
@@ -279,6 +285,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             &mut self,
             context: (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
+            input: Self::Input,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.

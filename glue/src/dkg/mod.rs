@@ -17,16 +17,19 @@
 //! # Application Contract
 //!
 //! Application blocks implement [`ReshareBlock`] and carry at most one
-//! [`types::Payload`]. During a reshare epoch, the application is responsible for
-//! connecting block production and verification to the reshare mailbox:
+//! [`types::Payload`]. Connect an application to the reshare mailbox by wrapping
+//! it in [`reshare::Application`], which drives both sides of the contract:
 //!
-//! - Include dealer logs in proposed non-final blocks by calling
-//!   [`reshare::Mailbox::next_log`].
-//! - In the final block of each epoch, proposers must include the ceremony
-//!   outcome returned by [`reshare::Mailbox::epoch_info`].
-//! - Verifiers must require the final block payload to be an
-//!   [`types::Payload::EpochInfo`] and must check that it matches the
-//!   independently constructed [`types::EpochInfo`].
+//! - For proposals, the wrapper selects and fetches the payload to include (a
+//!   dealer log from the midpoint onward, the epoch info on the final block) and
+//!   hands it to the application through [`reshare::Input`]. The
+//!   application takes it in its own `propose` and attaches it to the block it
+//!   builds, because only the application can build its block type. It does not
+//!   talk to the reshare mailbox or track epoch boundaries itself.
+//! - For verification, the wrapper rejects a final block whose payload does not
+//!   match the independently constructed [`types::EpochInfo`], and rejects stray
+//!   payloads on early non-final blocks, so the application does not implement
+//!   these checks by hand.
 //!
 //! The protocol also requires the application to provide a [`SecretStore`].
 //! Secret storage is intentionally user-owned: deployments differ on encryption,

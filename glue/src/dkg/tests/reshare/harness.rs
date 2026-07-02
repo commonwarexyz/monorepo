@@ -2,7 +2,8 @@ use crate::{
     dkg::{
         anchor,
         fence::Fence,
-        orchestrator, reshare,
+        orchestrator,
+        reshare::{self, Input as ReshareInput},
         tests::mocks::{FilteredReceiver, MemorySecretStore},
         types::*,
         ParticipantsProvider, Registrar, ReshareBlock,
@@ -18,7 +19,7 @@ use crate::{
             Unmerkleized as _,
         },
         probe::{Config as ProbeConfig, Probe},
-        Application, Config as StatefulConfig, Proposed, Stateful as StatefulActor, SyncPlan,
+        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor, SyncPlan,
     },
 };
 use commonware_broadcast::buffered;
@@ -89,7 +90,6 @@ type Qmdb<E> =
 type Database<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
 type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
 type MarshalVariant = Standard<Block>;
-type ReshareMailbox = reshare::Mailbox<Block, MinPk, ed25519::PrivateKey>;
 type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
 
 pub(super) const EPOCH_LENGTH: NonZeroU64 = NZU64!(32);
@@ -217,16 +217,9 @@ impl Block {
 #[derive(Clone)]
 struct App {
     genesis: Block,
-    reshare: ReshareMailbox,
 }
 
 impl App {
-    fn final_block(height: Height) -> bool {
-        FixedEpocher::new(EPOCH_LENGTH)
-            .containing(height)
-            .is_some_and(|info| info.last() == height)
-    }
-
     async fn execute<E: Rng + Spawner + Metrics + Clock + Storage>(
         height: Height,
         mut batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
@@ -242,7 +235,8 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = Database<E>;
-    type InputProvider = ();
+    type Provider = ();
+    type Input = ReshareInput<(), MinPk, ed25519::PrivateKey>;
 
     async fn genesis(&mut self) -> Self::Block {
         self.genesis.clone()
@@ -253,15 +247,12 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-        _input: &mut Self::InputProvider,
+        input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let parent = ancestry.peek()?.clone();
         let height = Height::new(parent.height().get() + 1);
-        let payload = if Self::final_block(height) {
-            self.reshare.epoch_info(ancestry).await
-        } else {
-            self.reshare.next_log(height).await
-        };
+        // The reshare::Application wrapper selected and fetched the payload.
+        let payload = input.parent.payload;
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
         let block = Block {
@@ -281,13 +272,9 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        // Reshare final-block payload validation is enforced by the surrounding
+        // reshare::Application wrapper; this inner app only executes state.
         let tip = ancestry.peek()?.clone();
-        if Self::final_block(tip.height()) {
-            let payload = self.reshare.epoch_info(ancestry).await;
-            if payload != tip.payload() {
-                return None;
-            }
-        }
         let merkleized = Self::execute(tip.height(), batches).await;
         Some(merkleized)
     }
@@ -830,16 +817,14 @@ impl EngineDefinition for ReshareEngine {
         );
         let reshare_handle = reshare_actor.start(dkg_network);
 
-        let application = App {
-            genesis: genesis.clone(),
-            reshare: reshare_mailbox.clone(),
-        };
         let (stateful_actor, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
             StatefulConfig {
-                application,
+                application: App {
+                    genesis: genesis.clone(),
+                },
                 db_config,
-                input_provider: (),
+                provider: (),
                 marshal: marshal.clone(),
                 mailbox_size: NZUsize!(100),
                 plan,
@@ -855,9 +840,14 @@ impl EngineDefinition for ReshareEngine {
             },
         );
 
+        // The reshare wrapper drives the payload for the stateful application.
         let deferred = Deferred::new(
             context.child("deferred"),
-            stateful_mailbox.clone(),
+            reshare::Application::new(
+                stateful_mailbox.clone(),
+                reshare_mailbox.clone(),
+                EPOCH_LENGTH,
+            ),
             marshal.clone(),
             FixedEpocher::new(EPOCH_LENGTH),
         );

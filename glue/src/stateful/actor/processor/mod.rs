@@ -25,7 +25,7 @@
 use crate::stateful::{
     actor::metrics::Metrics as StatefulMetrics,
     db::{Anchor, DatabaseSet},
-    Application, Proposed, PruneConfig,
+    Application, Input, Proposed, PruneConfig,
 };
 use commonware_consensus::{
     marshal::{
@@ -248,7 +248,7 @@ where
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
         ancestry: impl Stream<Item = A::Block> + Send + 'static,
-        input_provider: &mut A::InputProvider,
+        input: Input<A::Input, A::Provider>,
         mut response: oneshot::Sender<Option<A::Block>>,
     ) where
         S: Scheme,
@@ -305,7 +305,7 @@ where
                 (runtime_context, consensus_context),
                 ancestry,
                 batches,
-                input_provider,
+                input,
             ),
         )
         .await
@@ -920,7 +920,7 @@ mod tests {
     use crate::stateful::{
         actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
-        Application, Proposed, PruneConfig,
+        Application, Input, Proposed, PruneConfig,
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
@@ -1153,7 +1153,8 @@ mod tests {
         type Context = TestContext;
         type Block = Block;
         type Databases = DbSet<deterministic::Context>;
-        type InputProvider = ();
+        type Provider = ();
+        type Input = ();
 
         async fn genesis(&mut self) -> Self::Block {
             self.genesis.clone()
@@ -1164,7 +1165,7 @@ mod tests {
             context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-            _input: &mut Self::InputProvider,
+            _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             let mut ancestry = Box::pin(ancestry);
             let parent = ancestry.next().await?;
