@@ -155,8 +155,18 @@ pub trait Registrar: Send + Sync + 'static {
 /// never be written to plaintext protocol storage, carried on-chain, or sent to peers.
 /// This includes the dealer RNG seed, which seeds a dealer's sharing polynomial and so
 /// reveals every share that dealer sends.
+///
+/// Writes must be durable before their returned future resolves. When
+/// [`put_share`](Self::put_share), [`put_seed`](Self::put_seed), or
+/// [`put_dealing`](Self::put_dealing) resolves, the stored material MUST survive a crash: the
+/// reshare actor treats a resolved put as a durable commitment and does not re-derive the
+/// material after a restart. A buffered store that resolves before the write is stable can let a
+/// dealer reseed with fresh randomness and re-deal different shares for the same epoch
+/// (equivocation), or lose a share it has already relied upon.
 pub trait SecretStore: Send + Sync + 'static {
     /// Stores a [`Share`] for a given [`Epoch`].
+    ///
+    /// Must be durable before the returned future resolves (see the trait documentation).
     fn put_share(&mut self, epoch: Epoch, share: Share) -> impl Future<Output = ()> + Send;
 
     /// Retrieves a [`Share`] for a given [`Epoch`], if it exists.
@@ -166,6 +176,10 @@ pub trait SecretStore: Send + Sync + 'static {
     ///
     /// The seed deterministically replays this node's dealer randomness across a
     /// restart. It is secret: knowing it reveals every share the dealer distributes.
+    ///
+    /// Must be durable before the returned future resolves: no-equivocation safety depends on the
+    /// seed being recovered verbatim after a crash so the dealer replays identical randomness
+    /// rather than re-dealing fresh shares.
     fn put_seed(&mut self, epoch: Epoch, seed: Summary) -> impl Future<Output = ()> + Send;
 
     /// Retrieves the dealer RNG seed for a given [`Epoch`], if it exists.
