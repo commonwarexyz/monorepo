@@ -22,7 +22,7 @@ use commonware_consensus::{
         standard::Deferred, Start,
     },
     simplex::{self, config::ForwardingPolicy, elector::RoundRobin, types::Context, Floor},
-    types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
+    types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
     Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
 };
 use commonware_cryptography::{
@@ -452,10 +452,11 @@ where
             },
         );
 
-        let app = DkgApp {
-            reshare: reshare_mailbox.clone(),
-            blocks_per_epoch: self.config.blocks_per_epoch,
-        };
+        let app = reshare::Application::new(
+            DkgApp(PhantomData),
+            reshare_mailbox.clone(),
+            self.config.blocks_per_epoch,
+        );
         let deferred = Deferred::new(
             context.child("deferred"),
             app,
@@ -509,10 +510,7 @@ where
 }
 
 #[derive(Clone)]
-struct DkgApp<V: Variant> {
-    reshare: reshare::Mailbox<Block<V>, V, ed25519::PrivateKey>,
-    blocks_per_epoch: NonZeroU64,
-}
+struct DkgApp<V: Variant>(PhantomData<V>);
 
 impl<E, V> Application<E> for DkgApp<V>
 where
@@ -522,49 +520,30 @@ where
     type SigningScheme = ConsensusScheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block<V>;
-    type Input = ();
+    type Input = reshare::Input<(), V, ed25519::PrivateKey>;
 
     async fn propose(
         &mut self,
         (_, context): (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        _input: Self::Input,
+        input: Self::Input,
     ) -> Option<Self::Block> {
         let parent = ancestry.peek()?.clone();
         let height = parent.height().next();
-        let payload = if self.final_block(height) {
-            self.reshare.epoch_info(ancestry).await
-        } else {
-            self.reshare.next_log(height).await
-        };
         Some(Block {
             context,
             parent: parent.digest(),
             height,
-            payload,
+            payload: input.payload,
         })
     }
 
     async fn verify(
         &mut self,
         _: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        _ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
-        let tip = ancestry.peek().cloned();
-        let Some(tip) = tip else {
-            return false;
-        };
-        if self.final_block(tip.height()) {
-            let payload = self.reshare.epoch_info(ancestry).await;
-            return payload == tip.payload();
-        }
         true
-    }
-}
-
-impl<V: Variant> DkgApp<V> {
-    fn final_block(&self, height: Height) -> bool {
-        FixedEpocher::new(self.blocks_per_epoch).last(Epoch::zero()) == Some(height)
     }
 }
 

@@ -173,10 +173,9 @@ where
     type Provider: Send + Clone;
 
     /// Per-proposal input forwarded from the application wrapping
-    /// [`Stateful`](crate::stateful::Stateful), aggregated with
-    /// [`Provider`](Self::Provider) into the [`Input`] handed to
-    /// [`propose`](Self::propose). Set this to `()` when nothing wraps the
-    /// stateful actor with its own input.
+    /// [`Stateful`], aggregated with [`Provider`](Self::Provider) into the
+    /// [`Input`] handed to [`propose`](Self::propose). Set this to `()`
+    /// when nothing wraps the stateful actor with its own input.
     type Input: Send;
 
     /// Extract per-database sync targets from a finalized block.

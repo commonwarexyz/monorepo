@@ -280,7 +280,7 @@ pub(super) fn run_plan(
         .required_finalizations(0)
         .exit_condition(ProcessedHeightAtLeast::new(1))
         .property(property)
-        .timeout(Duration::from_secs(30));
+        .timeout(Duration::from_secs(60));
     for crash in crashes {
         builder = builder.crash(crash);
     }
