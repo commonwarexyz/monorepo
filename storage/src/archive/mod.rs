@@ -5,8 +5,12 @@
 //! and workloads with overlapping indices should use [MultiArchive] (allows all items with the same index
 //! to be retrieved). The same key may be stored at multiple indices in either case, and a key lookup may
 //! return any of the associated values.
+//!
+//! Storage errors from mutable operations are considered fatal for the current handle and may
+//! leave its in-memory state inconsistent with the underlying storage.
 
 use commonware_codec::Codec;
+use commonware_runtime::Handle;
 use commonware_utils::Array;
 use std::future::Future;
 use thiserror::Error;
@@ -76,6 +80,23 @@ pub trait Archive: Send {
         }
     }
 
+    /// Perform a [Archive::put] and [Archive::start_sync] in a single operation.
+    ///
+    /// If the index already exists (making the put a no-op), the returned handle still reports
+    /// the durability of all previously accepted writes, including the original write for this
+    /// index if its sync is still in flight.
+    fn put_start_sync(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<Handle<()>, Error>> + Send {
+        async move {
+            self.put(index, key, value).await?;
+            self.start_sync().await
+        }
+    }
+
     /// Retrieve an item from [Archive].
     ///
     /// Note that if the [Archive] is a [MultiArchive], there may be multiple values associated with the
@@ -119,6 +140,18 @@ pub trait Archive: Send {
     /// Sync all pending writes.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
+    /// Request that all pending writes are synced.
+    ///
+    /// The returned handle completes once every write accepted before this call is durable,
+    /// including writes covered by a sync that is still in flight. Implementations without a
+    /// non-blocking sync path may complete the sync before returning an already-finished handle.
+    fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Error>> + Send {
+        async move {
+            self.sync().await?;
+            Ok(Handle::ready(Ok(())))
+        }
+    }
+
     /// Remove all persistent data created by this [Archive].
     fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
@@ -159,6 +192,19 @@ pub trait MultiArchive: Archive {
         async move {
             self.put_multi(index, key, value).await?;
             self.sync().await
+        }
+    }
+
+    /// Perform a [MultiArchive::put_multi] and [Archive::start_sync] in a single operation.
+    fn put_multi_start_sync(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<Handle<()>, Error>> + Send {
+        async move {
+            self.put_multi(index, key, value).await?;
+            self.start_sync().await
         }
     }
 }
@@ -1179,12 +1225,14 @@ mod tests {
         T::Value: Clone,
     {
         assert_send(archive.put(1, key.clone(), value.clone()));
-        assert_send(archive.put_sync(2, key.clone(), value));
+        assert_send(archive.put_sync(2, key.clone(), value.clone()));
+        assert_send(archive.put_start_sync(3, key.clone(), value));
         assert_send(archive.get(Identifier::Index(1)));
         assert_send(archive.get(Identifier::Key(&key)));
         assert_send(archive.has(Identifier::Index(1)));
         assert_send(archive.has(Identifier::Key(&key)));
         assert_send(archive.sync());
+        assert_send(archive.start_sync());
     }
 
     #[allow(dead_code)]
@@ -1204,7 +1252,8 @@ mod tests {
         assert_archive_futures_are_send(archive, key.clone(), value.clone());
         assert_send(archive.get_all(1));
         assert_send(archive.put_multi(1, key.clone(), value.clone()));
-        assert_send(archive.put_multi_sync(2, key, value));
+        assert_send(archive.put_multi_sync(2, key.clone(), value.clone()));
+        assert_send(archive.put_multi_start_sync(3, key, value));
     }
 
     #[allow(dead_code)]

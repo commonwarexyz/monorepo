@@ -25,7 +25,7 @@ use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
-    Blob, Buf, Metrics, Storage,
+    Blob, Buf, Handle, Metrics, Storage,
 };
 use commonware_utils::NZUsize;
 use futures::{
@@ -367,6 +367,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.sync(sections).await
     }
 
+    /// Start syncing the given `sections` to storage.
+    pub async fn start_sync(
+        &mut self,
+        sections: impl crate::Sections,
+    ) -> Result<Handle<()>, Error> {
+        self.manager.start_sync(sections).await
+    }
+
     /// Sync all sections to storage.
     pub async fn sync_all(&mut self) -> Result<(), Error> {
         self.manager.sync_all().await
@@ -437,11 +445,18 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{fail_pending_syncs, release_pending_syncs, DelayedSyncContext},
+        BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{sync::Mutex, NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(44);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
@@ -1566,6 +1581,266 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_prune_waits_for_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            let handle = journal.start_sync(1).await.expect("failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("prune").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                assert!(journal.prune(2).await.expect("failed to prune"));
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                journal
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "prune must wait for in-flight syncs on pruned sections"
+            );
+
+            release_pending_syncs(&pending);
+            handle
+                .await
+                .expect("sync handle should complete despite pruning");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let journal = waiter.await.expect("prune task failed");
+            assert_eq!(journal.oldest_section(), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_destroy_waits_for_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            let handle = journal.start_sync(1).await.expect("failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("destroy").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                journal.destroy().await.expect("failed to destroy");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "destroy must wait for in-flight syncs"
+            );
+
+            release_pending_syncs(&pending);
+            handle
+                .await
+                .expect("sync handle should complete despite destruction");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            waiter.await.expect("destroy task failed");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_clear_waits_for_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            let handle = journal.start_sync(1).await.expect("failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("clear").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                journal.clear().await.expect("failed to clear");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                journal
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "clear must wait for in-flight syncs"
+            );
+
+            release_pending_syncs(&pending);
+            handle
+                .await
+                .expect("sync handle should complete despite clearing");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let mut journal = waiter.await.expect("clear task failed");
+
+            // The journal must remain usable after clear.
+            assert_eq!(journal.oldest_section(), None);
+            let position = journal
+                .append(1, &test_digest(1))
+                .await
+                .expect("failed to append after clear");
+            assert_eq!(position, 0);
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_rewind_waits_for_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            journal
+                .append(2, &test_digest(1))
+                .await
+                .expect("failed to append");
+            let handle = journal.start_sync(2).await.expect("failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let size = journal.size(1).expect("failed to get size");
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("rewind").spawn(move |_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                journal.rewind(1, size).await.expect("failed to rewind");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                journal
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "rewind must wait for in-flight syncs on removed sections"
+            );
+
+            release_pending_syncs(&pending);
+            handle
+                .await
+                .expect("sync handle should complete despite rewind");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let journal = waiter.await.expect("rewind task failed");
+            assert_eq!(journal.size(2).expect("failed to get size"), 0);
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_prune_surfaces_failed_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            let handle = journal.start_sync(1).await.expect("failed to start sync");
+            fail_pending_syncs(&pending);
+
+            let err = journal
+                .prune(2)
+                .await
+                .expect_err("prune must surface a failed in-flight sync");
+            assert!(matches!(err, Error::Runtime(RError::Io(_))));
+
+            let err = handle.await.expect_err("sync handle should fail");
+            assert!(matches!(err, RError::Io(_)));
         });
     }
 }

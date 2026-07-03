@@ -27,9 +27,6 @@ pub const DOCKER_VERSION: &str = "29.6.0";
 /// Version of Samply to download and install
 pub const SAMPLY_VERSION: &str = "0.13.1";
 
-/// Version of libjemalloc2 package for Ubuntu 24.04
-pub const LIBJEMALLOC2_VERSION: &str = "5.3.0-2build1";
-
 /// Version of logrotate package for Ubuntu 24.04
 pub const LOGROTATE_VERSION: &str = "3.21.0-2build1";
 
@@ -361,13 +358,6 @@ pub(crate) fn samply_bin_s3_key(version: &str, architecture: Architecture) -> St
     format!("{TOOLS_BINARIES_PREFIX}/samply/{version}/linux-{arch}/samply-{arch}-unknown-linux-gnu.tar.xz")
 }
 
-pub(crate) fn libjemalloc_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/libjemalloc2/{version}/linux-{arch}/libjemalloc2_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
 pub(crate) fn logrotate_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{TOOLS_BINARIES_PREFIX}/logrotate/{version}/linux-{arch}/logrotate_{version}_{arch}.deb",
@@ -483,18 +473,6 @@ const fn docker_static_arch(architecture: Architecture) -> &'static str {
         Architecture::Arm64 => "aarch64",
         Architecture::X86_64 => "x86_64",
     }
-}
-
-/// Returns the download URL for libjemalloc2 from Ubuntu archive
-pub(crate) fn libjemalloc_download_url(version: &str, architecture: Architecture) -> String {
-    let base = match architecture {
-        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
-        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
-    };
-    format!(
-        "{base}/universe/j/jemalloc/libjemalloc2_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
 }
 
 /// Returns the download URL for logrotate from Ubuntu archive
@@ -868,7 +846,6 @@ pub struct InstanceUrls {
     pub pyroscope_service: String,
     pub pyroscope_timer: String,
     pub docker_tgz: String,
-    pub libjemalloc_deb: String,
     pub logrotate_deb: String,
     pub images: Vec<(&'static str, String)>,
 }
@@ -908,7 +885,7 @@ pub(crate) fn install_binary_download_cmd(urls: &InstanceUrls) -> String {
 rm -f /home/ubuntu/binary /home/ubuntu/config.conf /home/ubuntu/hosts.yaml \
       /home/ubuntu/promtail.yml /home/ubuntu/binary.service \
       /home/ubuntu/pyroscope-agent.sh /home/ubuntu/pyroscope-agent.service \
-      /home/ubuntu/pyroscope-agent.timer /home/ubuntu/docker.tgz /home/ubuntu/libjemalloc2.deb \
+      /home/ubuntu/pyroscope-agent.timer /home/ubuntu/docker.tgz \
       /home/ubuntu/logrotate.deb
 
 # Unmask services in case previous attempt left them masked
@@ -924,14 +901,13 @@ sudo systemctl unmask docker promtail node_exporter binary 2>/dev/null || true
 {WGET} -O /home/ubuntu/pyroscope-agent.service '{}' &
 {WGET} -O /home/ubuntu/pyroscope-agent.timer '{}' &
 {WGET} -O /home/ubuntu/docker.tgz '{}' &
-{WGET} -O /home/ubuntu/libjemalloc2.deb '{}' &
 {WGET} -O /home/ubuntu/logrotate.deb '{}' &
 wait
 
 # Verify all downloads succeeded
 for f in binary config.conf hosts.yaml promtail.yml binary.service \
          pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer \
-         docker.tgz libjemalloc2.deb logrotate.deb; do
+         docker.tgz logrotate.deb; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
@@ -947,7 +923,6 @@ done
         urls.pyroscope_service,
         urls.pyroscope_timer,
         urls.docker_tgz,
-        urls.libjemalloc_deb,
         urls.logrotate_deb,
     );
     cmd.push_str(&image_download_block(&urls.images));
@@ -1028,7 +1003,7 @@ sudo chown -R ubuntu:ubuntu "$NVME_MOUNT"
 }
 
 /// Phase 3: Setup and start services on binary instances
-pub(crate) fn install_binary_setup_cmd(profiling: bool, _architecture: Architecture) -> String {
+pub(crate) fn install_binary_setup_cmd(profiling: bool) -> String {
     let image_services = install_image_services_cmd(BINARY_IMAGE_SERVICES);
     let perf_setup = if profiling {
         r#"
@@ -1055,7 +1030,6 @@ echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo 
 {image_services}
 
 # Install deb packages
-sudo dpkg -i /home/ubuntu/libjemalloc2.deb
 sudo dpkg -i /home/ubuntu/logrotate.deb
 
 # Setup Promtail
@@ -1173,15 +1147,13 @@ pub const LOGROTATE_CONF: &str = r#"
 "#;
 
 /// Generates systemd service file content for the deployed binary
-pub(crate) fn binary_service(architecture: Architecture) -> String {
-    let lib_arch = architecture.linux_lib();
-    format!(
+pub(crate) fn binary_service() -> String {
+    String::from(
         r#"[Unit]
 Description=Deployed Binary Service
 After=network.target
 
 [Service]
-Environment="LD_PRELOAD=/usr/lib/{lib_arch}/libjemalloc.so.2"
 ExecStart=/home/ubuntu/binary --hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf
 TimeoutStopSec=60
 Restart=always
@@ -1192,7 +1164,7 @@ StandardError=append:/var/log/binary.log
 
 [Install]
 WantedBy=multi-user.target
-"#
+"#,
     )
 }
 
@@ -1324,7 +1296,6 @@ mod tests {
             pyroscope_service: "pyroscope-service".to_string(),
             pyroscope_timer: "pyroscope-timer".to_string(),
             docker_tgz: "docker".to_string(),
-            libjemalloc_deb: "libjemalloc".to_string(),
             logrotate_deb: "logrotate".to_string(),
             images: binary_images()
                 .map(|image| (image, format!("image-url-{image}")))
@@ -1344,10 +1315,6 @@ mod tests {
             "tools/binaries/samply/0.13.1/linux-aarch64/samply-aarch64-unknown-linux-gnu.tar.xz"
         );
         assert_eq!(
-            libjemalloc_bin_s3_key("5.3.0-2build1", arch),
-            "tools/binaries/libjemalloc2/5.3.0-2build1/linux-arm64/libjemalloc2_5.3.0-2build1_arm64.deb"
-        );
-        assert_eq!(
             logrotate_bin_s3_key("3.21.0-2build1", arch),
             "tools/binaries/logrotate/3.21.0-2build1/linux-arm64/logrotate_3.21.0-2build1_arm64.deb"
         );
@@ -1363,10 +1330,6 @@ mod tests {
         assert_eq!(
             samply_bin_s3_key("0.13.1", arch),
             "tools/binaries/samply/0.13.1/linux-x86_64/samply-x86_64-unknown-linux-gnu.tar.xz"
-        );
-        assert_eq!(
-            libjemalloc_bin_s3_key("5.3.0-2build1", arch),
-            "tools/binaries/libjemalloc2/5.3.0-2build1/linux-amd64/libjemalloc2_5.3.0-2build1_amd64.deb"
         );
         assert_eq!(
             logrotate_bin_s3_key("3.21.0-2build1", arch),
@@ -1531,8 +1494,6 @@ mod tests {
         assert!(download.contains("-O /home/ubuntu/promtail.yml"));
         assert!(download.contains("-O /home/ubuntu/docker.tgz"));
         assert!(download.contains("-O /home/ubuntu/logrotate.deb"));
-        assert!(!download.contains("promtail.zip"));
-        assert!(!download.contains("node_exporter.tar.gz"));
         assert!(download.contains(&format!(
             "-O /home/ubuntu/images/{}",
             image_file_name(PROMTAIL_IMAGE)
@@ -1542,7 +1503,7 @@ mod tests {
             image_file_name(NODE_EXPORTER_IMAGE)
         )));
 
-        let setup = install_binary_setup_cmd(false, Architecture::Arm64);
+        let setup = install_binary_setup_cmd(false);
         assert!(setup.contains(&format!(
             "sudo docker load -i /home/ubuntu/images/{}",
             image_file_name(PROMTAIL_IMAGE)
