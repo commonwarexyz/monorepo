@@ -263,7 +263,7 @@ where
 /// not an immutable snapshot. Reads through the chain, constructing child batches, and applying
 /// the batch later are only valid while every batch applied to the DB since this batch was
 /// merkleized is an ancestor of this batch. Applying a batch from a different fork is rejected
-/// with [`crate::qmdb::Error::StaleBatch`] (see [`Db::apply_batch`]).
+/// with [`crate::qmdb::Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for more details).
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>
@@ -2303,7 +2303,8 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`crate::qmdb::Error::StaleBatch`].
+    /// different fork returns [`crate::qmdb::Error::StaleBatch`] (see
+    /// [`crate::qmdb::batch_chain`] for more details).
     ///
     /// This publishes the batch to the in-memory database state and appends it to the
     /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to
