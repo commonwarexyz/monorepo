@@ -90,6 +90,7 @@ arbitrary = [
 ]
 fuzz = [ "arbitrary", "std" ]
 std = [
+	"ahash/std",
 	"anyhow?/std",
 	"blake3/std",
 	"bytes/std",
