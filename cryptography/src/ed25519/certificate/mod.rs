@@ -131,11 +131,12 @@ impl<N: Namespace> Generic<N> {
         let namespace = subject.namespace(&self.namespace);
         let message = subject.message();
 
+        let attestations = attestations.into_iter();
         let mut invalid = BTreeSet::new();
-        let mut candidates = Vec::new();
-        let mut batch = Batch::new();
+        let mut candidates = Vec::with_capacity(attestations.size_hint().0);
+        let mut batch = Batch::new(attestations.size_hint().0);
 
-        for attestation in attestations.into_iter() {
+        for attestation in attestations {
             let Some(public_key) = self.participants.key(attestation.signer) else {
                 invalid.insert(attestation.signer);
                 continue;
@@ -270,7 +271,7 @@ impl<N: Namespace> Generic<N> {
         D: Digest,
         M: Faults,
     {
-        let mut batch = Batch::new();
+        let mut batch = Batch::new(certificate.signatures.len());
         if !self.batch_verify_certificate::<S, D, M>(&mut batch, subject, certificate) {
             return false;
         }
@@ -293,7 +294,9 @@ impl<N: Namespace> Generic<N> {
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
         M: Faults,
     {
-        let mut batch = Batch::new();
+        // Each certificate stages at most one signature per participant.
+        let per_certificate = self.participants.len();
+        let mut batch = Batch::new(certificates.size_hint().0.saturating_mul(per_certificate));
         for (subject, certificate) in certificates {
             if !self.batch_verify_certificate::<S, D, M>(&mut batch, subject, certificate) {
                 return false;

@@ -318,6 +318,11 @@ impl arbitrary::Arbitrary<'_> for Signature {
 }
 
 /// Ed25519 Batch Verifier.
+///
+/// Each added item copies its framed payload (namespace and message) into the
+/// batch and retains it until verification, where per-signature hashing runs
+/// under the caller's [Strategy]. A batch therefore holds memory proportional
+/// to the total payload bytes added.
 pub struct Batch {
     verifier: ed_core::batch::Verifier,
 }
@@ -325,13 +330,7 @@ pub struct Batch {
 impl BatchVerifier for Batch {
     type PublicKey = PublicKey;
 
-    fn new() -> Self {
-        Self {
-            verifier: ed_core::batch::Verifier::new(),
-        }
-    }
-
-    fn with_capacity(capacity: usize) -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             verifier: ed_core::batch::Verifier::with_capacity(capacity),
         }
@@ -715,7 +714,7 @@ mod tests {
     fn batch_verify_valid() {
         let v1 = vector_1();
         let v2 = vector_2();
-        let mut batch = ed25519::Batch::new();
+        let mut batch = ed25519::Batch::new(2);
         assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
         assert!(batch.add_inner(None, &v2.2, &v2.1, &v2.3));
         assert!(batch.verify(&mut test_rng(), &Sequential));
@@ -728,7 +727,7 @@ mod tests {
         let mut bad_signature = v2.3.to_vec();
         bad_signature[3] = 0xff;
 
-        let mut batch = Batch::new();
+        let mut batch = Batch::new(2);
         assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
         assert!(batch.add_inner(
             None,
@@ -741,16 +740,16 @@ mod tests {
 
     #[test]
     fn batch_verify_empty() {
-        let batch = Batch::new();
+        let batch = Batch::new(0);
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
     #[test]
-    fn batch_verify_with_capacity() {
+    fn batch_verify_capacity_hint() {
         let v1 = vector_1();
         let v2 = vector_2();
         // The capacity is a hint: adding more items must still verify.
-        let mut batch = Batch::with_capacity(1);
+        let mut batch = Batch::new(1);
         assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
         assert!(batch.add_inner(None, &v2.2, &v2.1, &v2.3));
         assert!(batch.verify(&mut test_rng(), &Sequential));

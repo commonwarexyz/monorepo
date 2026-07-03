@@ -23,7 +23,9 @@
 //! detects multiple signatures created with the same verification key and
 //! automatically coalesces terms in the final verification equation. Signatures
 //! are sharded for parallel verification, so coalescing applies to signatures
-//! that land in the same shard. In the limiting case where all signatures in
+//! that land in the same shard. Shards are contiguous ranges of the queue, so
+//! callers that queue signatures sharing a verification key adjacently
+//! maximize coalescing. In the limiting case where all signatures in
 //! the batch are made with the same verification key, coalesced batch
 //! verification runs twice as fast as ordinary batch verification.
 //!
@@ -75,11 +77,6 @@ pub struct Verifier {
 }
 
 impl Verifier {
-    /// Construct a new batch verifier.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Construct a new batch verifier with capacity for `capacity` queued
     /// signatures.
     pub fn with_capacity(capacity: usize) -> Self {
@@ -90,6 +87,10 @@ impl Verifier {
 
     /// Queue a `(key, signature)` pair for verification of `message` under
     /// `namespace`.
+    ///
+    /// The framed payload (`namespace` joined with `message`) is copied into
+    /// the batch and retained until [`Verifier::verify`], so a batch holds
+    /// memory proportional to the total payload bytes queued.
     pub fn queue(
         &mut self,
         vk: VerificationKey,
@@ -166,9 +167,10 @@ impl Verifier {
                 // the usual method. However, when m = 1 and all signatures are from a
                 // single verification key, this is nearly twice as fast.
 
-                // Group the shard's signatures by verification key (ahash's
-                // AHashMap requires std, so use hashbrown's map with the ahash
-                // hasher to retain no_std support).
+                // Group the shard's signatures by verification key. hashbrown's
+                // map with the ahash hasher stands in for ahash::AHashMap, which
+                // wraps std::collections::HashMap and is unavailable in no_std
+                // builds.
                 let n = shard.len();
                 let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
                     HashMap::with_capacity_and_hasher(n, RandomState::default());
@@ -250,7 +252,7 @@ mod tests {
         items: &[(VerificationKey, Signature, [u8; 32])],
         strategy: &impl Strategy,
     ) -> bool {
-        let mut verifier = Verifier::new();
+        let mut verifier = Verifier::default();
         for (vk, sig, msg) in items {
             verifier.queue(*vk, *sig, None, msg);
         }
@@ -302,12 +304,12 @@ mod tests {
         let namespace = b"namespace";
         let msg = b"message";
         let sig = sk.sign(&union_unique(namespace, msg));
-        let mut verifier = Verifier::new();
+        let mut verifier = Verifier::default();
         verifier.queue(sk.verification_key(), sig, Some(namespace), msg);
         assert!(verifier.verify(test_rng(), &Sequential).is_ok());
 
         // A different namespace must fail.
-        let mut verifier = Verifier::new();
+        let mut verifier = Verifier::default();
         verifier.queue(sk.verification_key(), sig, Some(b"other"), msg);
         assert!(verifier.verify(test_rng(), &Sequential).is_err());
     }
