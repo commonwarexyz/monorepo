@@ -1054,6 +1054,14 @@ fn run_with_warn_trace_collection<T>(run: impl FnOnce() -> T) -> T {
                     .target()
                     .contains("commonware_consensus::simplex::actors::"))
                 || (metadata.is_event() && *metadata.level() == Level::WARN)
+                || (metadata.is_event()
+                    && *metadata.level() == Level::DEBUG
+                    && (metadata
+                        .target()
+                        .contains("commonware_consensus::simplex::actors::resolver")
+                        || metadata
+                            .target()
+                            .contains("commonware_consensus::simplex::actors::voter")))
         }));
     let subscriber = tracing_subscriber::registry().with(collecting_layer);
     let dispatch = Dispatch::new(subscriber);
@@ -1061,7 +1069,7 @@ fn run_with_warn_trace_collection<T>(run: impl FnOnce() -> T) -> T {
     let output = dispatcher::with_default(&dispatch, run);
 
     let events = trace_store.get_all();
-    state_cov::observe_warn_events(&events);
+    state_cov::observe_trace_events(&events);
     output
 }
 
