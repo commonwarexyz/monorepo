@@ -122,6 +122,21 @@ mod tests {
             Vec::<Byte>::decode_range([0x02, 0x01, 0x02, 0x03].as_slice(), ..),
             Err(Error::ExtraData(1))
         ));
+
+        // Regression test for CWE-789 (Allocation Before Validation)
+        // Construct a buffer advertising a very large length but containing minimal payload.
+        let mut malicious_buf = BytesMut::new();
+        1_000_000usize.write(&mut malicious_buf);
+        malicious_buf.put_u8(0x01); // 1-byte payload
+
+        assert!(matches!(
+            Vec::<Byte>::decode_range(malicious_buf.clone().freeze(), ..),
+            Err(Error::EndOfBuffer)
+        ));
+        assert!(matches!(
+            Vec::<u8>::decode_range(malicious_buf.freeze(), ..),
+            Err(Error::EndOfBuffer)
+        ));
     }
 
     #[test]
