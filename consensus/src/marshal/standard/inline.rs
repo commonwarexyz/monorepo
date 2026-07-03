@@ -265,9 +265,9 @@ where
                 // notarize vote never reached the journal).
                 //
                 // The parent context recovered by simplex may differ from the one
-                // the cached block was built against, so the stored block is not safe to reuse
-                // and building a fresh block would land on the same prunable
-                // archive index and be silently dropped.
+                // the cached block was built against, so the stored block is not
+                // safe to reuse, and proposing a fresh block for a round whose
+                // digest may already have been broadcast would equivocate.
                 //
                 // Skip this view and let the voter nullify it via timeout.
                 if marshal
@@ -538,6 +538,14 @@ where
         // for the finalize vote, and it lets the sync overlap consensus voting
         // instead of freezing certify with a fresh fsync.
         let task = self.certification_gates.take(round, digest);
+
+        // `verify()` waits only on local broadcast delivery; nudge a
+        // round-bound notarized fetch so the existing waiter can be
+        // unblocked if local broadcast never arrives. For the standard
+        // variant, the digest is also the variant commitment.
+        if task.is_some() {
+            self.marshal.hint_notarized(round, digest);
+        }
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self

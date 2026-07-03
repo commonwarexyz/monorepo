@@ -297,6 +297,14 @@ where
     /// The archive name is historical: callers may start this durability work
     /// after structural validation and before the application verdict is known.
     /// Consensus must not treat presence in this cache as application validity.
+    ///
+    /// No certificate pins a round to a single candidate at this stage: an
+    /// equivocating leader can land one block at this view (possibly before a
+    /// crash) while consensus later verifies a different one. Candidates are
+    /// stored with multi-put semantics so a same-view collision cannot silently
+    /// drop the new block while the returned handle vouches only for the old
+    /// one. A digest already stored at this view is not duplicated, and the
+    /// covering handle reports the durability of its existing write.
     pub(crate) async fn put_verified(
         &mut self,
         round: Round,
@@ -306,9 +314,26 @@ where
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return Handle::ready(Ok(()));
         };
+        let view = round.view().get();
+
+        // Deduplicate against this view only: the same digest may legitimately
+        // be stored again at a later view (boundary re-proposal), and each view
+        // needs its own copy to survive per-view retention pruning.
+        match cache.verified_blocks.has_at(view, &digest).await {
+            Ok(true) => {
+                return Self::handle_start_result(
+                    cache.verified_blocks.start_sync().await,
+                    round,
+                    "verified",
+                );
+            }
+            Ok(false) => {}
+            Err(e) => panic!("failed to check verified blocks: {e}"),
+        }
+
         let result = cache
             .verified_blocks
-            .put_start_sync(round.view().get(), digest, block)
+            .put_multi_start_sync(view, digest, block)
             .await;
         Self::handle_start_result(result, round, "verified")
     }
@@ -325,7 +350,9 @@ where
             return;
         };
 
-        match cache.certified_blocks.has(Identifier::Key(&digest)).await {
+        // A digest determines its height, so scoping the dedup to this height
+        // is exact and avoids fetching values.
+        match cache.certified_blocks.has_at(height.get(), &digest).await {
             Ok(true) => return,
             Ok(false) => {}
             Err(e) => panic!("failed to check certified block: {e}"),
@@ -475,6 +502,12 @@ where
     }
 
     /// Get the block previously persisted in the verified archive for `round`.
+    ///
+    /// The archive can hold multiple candidates at one view (an equivocating
+    /// leader can land one before a crash and another after), and this returns
+    /// the first stored. Callers must not assume it is the most recently
+    /// verified candidate: check context/digest before reuse, or look up by
+    /// digest.
     pub(crate) async fn get_verified(&self, round: Round) -> Option<V::StoredBlock> {
         let cache = self.caches.get(&round.epoch())?;
         cache

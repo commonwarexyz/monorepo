@@ -977,6 +977,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_verified_after_restart_reverify_same_round_implies_recoverable() {
+        harness::verified_after_restart_reverify_same_round_implies_recoverable::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certify_after_restart_reverify_same_round_implies_recoverable() {
+        harness::certify_after_restart_reverify_same_round_implies_recoverable::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_certify_at_later_view_survives_earlier_view_pruning() {
         harness::certify_at_later_view_survives_earlier_view_pruning::<CodingHarness>();
     }

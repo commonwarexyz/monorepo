@@ -1361,6 +1361,63 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_has_at() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let cfg = test_config(&context, NZU64!(2));
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Vacant index
+            assert!(!archive.has_at(1, &test_key("aaaa1")).await.unwrap());
+
+            // Exact key at the index
+            archive.put_multi(1, test_key("aaaa1"), 10).await.unwrap();
+            assert!(archive.has_at(1, &test_key("aaaa1")).await.unwrap());
+
+            // Same key is not reported at other indices
+            assert!(!archive.has_at(2, &test_key("aaaa1")).await.unwrap());
+
+            // A translated-key collision (FourCap shares the "aaaa" prefix)
+            // must not produce a false positive
+            assert!(!archive.has_at(1, &test_key("aaaa2")).await.unwrap());
+
+            // A second entry at the same index is visible alongside the first
+            archive.put_multi(1, test_key("aaaa2"), 20).await.unwrap();
+            assert!(archive.has_at(1, &test_key("aaaa1")).await.unwrap());
+            assert!(archive.has_at(1, &test_key("aaaa2")).await.unwrap());
+
+            // A different key at an occupied index is absent
+            assert!(!archive.has_at(1, &test_key("bbbb")).await.unwrap());
+
+            archive.put_multi(3, test_key("cccc"), 30).await.unwrap();
+            archive.sync().await.unwrap();
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_config(&context, NZU64!(2));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                    .await
+                    .expect("Failed to reopen archive");
+
+            // Replay rebuilds both entries at the shared index
+            assert!(archive.has_at(1, &test_key("aaaa1")).await.unwrap());
+            assert!(archive.has_at(1, &test_key("aaaa2")).await.unwrap());
+            assert!(!archive.has_at(1, &test_key("bbbb")).await.unwrap());
+
+            // Pruned indices report absent
+            archive.prune(2).await.unwrap();
+            assert!(!archive.has_at(1, &test_key("aaaa1")).await.unwrap());
+            assert!(!archive.has_at(1, &test_key("aaaa2")).await.unwrap());
+            assert!(archive.has_at(3, &test_key("cccc")).await.unwrap());
+
+            archive.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_put_multi_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
