@@ -23,11 +23,11 @@
 //! detects multiple signatures created with the same verification key and
 //! automatically coalesces terms in the final verification equation. Signatures
 //! are sharded for parallel verification, so coalescing applies to signatures
-//! that land in the same shard. Signatures sharing a verification key are
-//! partitioned into the same shard regardless of queue order. In the limiting
-//! case where all signatures in the batch are made with the same verification
-//! key, coalesced batch verification runs twice as fast as ordinary batch
-//! verification.
+//! that land in the same shard. Sharding groups signatures by verification
+//! key on a best-effort basis, no matter how the batch was queued. In the
+//! limiting case where all signatures in the batch are made with the same
+//! verification key, coalesced batch verification runs twice as fast as
+//! ordinary batch verification.
 //!
 //! ![benchmark](https://www.zfnd.org/images/coalesced-batch-graph.png)
 //!
@@ -156,13 +156,14 @@ impl Verifier {
         )
     }
 
-    /// Build an iteration order in which signatures sharing a verification
-    /// key occupy one contiguous run, using a counting sort on each key's
-    /// first byte. Chunking the order into equal-size shards then places
-    /// signatures sharing a key into the same shard, while skewed batches
-    /// (like a single signer) still split evenly across shards. Keys crafted
-    /// to share a first byte just forfeit the grouping, which costs no more
-    /// than the unpartitioned order.
+    /// Build an iteration order that groups signatures by the first byte of
+    /// their verification key, using a counting sort. Chunking the order into
+    /// equal-size shards then keeps signatures sharing a key in the same
+    /// shard, except where a shard boundary cuts through a byte group.
+    /// Grouping is best-effort: skewed batches (like a single signer) still
+    /// split evenly across shards, and keys crafted to share a first byte
+    /// just forfeit the grouping, costing no more than the unpartitioned
+    /// order.
     fn partition(signatures: &[(VerificationKey, Vec<u8>, Signature)]) -> Vec<usize> {
         let mut counts = [0; 256];
         for (vk, _, _) in signatures {
