@@ -327,7 +327,7 @@ impl BatchVerifier for Batch {
 
     fn new(capacity: usize) -> Self {
         Self {
-            verifier: ed_core::batch::Verifier::with_capacity(capacity),
+            verifier: ed_core::batch::Verifier::new(capacity),
         }
     }
 

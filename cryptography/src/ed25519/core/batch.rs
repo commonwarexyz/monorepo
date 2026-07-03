@@ -78,7 +78,7 @@ pub struct Verifier {
 
 impl Verifier {
     /// Construct a batch verifier with space for `capacity` queued signatures.
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         Self {
             signatures: Vec::with_capacity(capacity),
         }
