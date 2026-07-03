@@ -2002,16 +2002,16 @@ where
                     .find_block_by_commitment(buffer, parent_commitment)
                     .await;
 
-                // Treat a block whose height does not strictly decrease as
-                // missing so that the existing fetch path requests the correct
-                // block from the network. This prevents an infinite loop when
-                // the archive contains corrupted parent pointers.
+                // Treat a block whose parent height is not contiguous (does not
+                // decrease by exactly one) as missing so that the existing fetch path
+                // requests the correct block from the network. This prevents an infinite
+                // loop when the archive contains corrupted parent pointers.
                 let parent_block = match parent_block {
-                    Some(ref block) if block.height() >= height => {
+                    Some(ref block) if Some(block.height()) != height.previous() => {
                         warn!(
                             current = %height,
                             parent = %block.height(),
-                            "non-monotonic parent height during gap repair, treating as missing"
+                            "non-contiguous parent height during gap repair, treating as missing"
                         );
                         None
                     }
