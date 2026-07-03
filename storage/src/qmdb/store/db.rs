@@ -509,7 +509,9 @@ mod test {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Blob, Runner, Storage, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -1089,5 +1091,51 @@ mod test {
     #[allow(dead_code)]
     fn assert_commit_is_send(db: &mut Db<deterministic::Context, Digest, Vec<u8>, TwoCap>) {
         is_send(db.commit());
+    }
+
+    #[test]
+    fn test_store_db_hardcoded_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let fixture_data: &[(&str, &[u8], &[u8])] = &[
+                (
+                    "journal_data",
+                    &[0, 0, 0, 0, 0, 0, 0, 0],
+                    &[1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 3, 1, 2, 3, 1, 2, 0, 0, 0, 0, 0, 0, 0, 2, 1, 4, 4, 5, 6, 7]
+                ),
+                (
+                    "journal_offsets-blobs",
+                    &[0, 0, 0, 0, 0, 0, 0, 0],
+                    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 35, 0, 0, 0, 0, 0, 0, 0, 48, 0, 0, 0, 0, 0, 0, 0, 64]
+                ),
+                (
+                    "journal_offsets-metadata",
+                    b"left",
+                    &[1, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 3]
+                ),
+            ];
+
+            // Manually populate the storage backend
+            for &(part, name, content) in fixture_data {
+                let (blob, _) = context.open(part, name).await.unwrap();
+                blob.resize(content.len() as u64).await.unwrap();
+                blob.write_at(0, content.to_vec()).await.unwrap();
+                blob.sync().await.unwrap();
+            }
+
+            // Reopen and verify correct recovery
+            let db = create_test_store(context.child("store").with_attribute("index", 0)).await;
+
+            let key1 = Blake3::hash(&1u64.to_be_bytes());
+            let key2 = Blake3::hash(&2u64.to_be_bytes());
+
+            assert_eq!(db.bounds().end, 4);
+            assert_eq!(db.inactivity_floor_loc, 2);
+            assert_eq!(db.get(&key1).await.unwrap().unwrap(), vec![1, 2, 3]);
+            assert_eq!(db.get(&key2).await.unwrap().unwrap(), vec![4, 5, 6, 7]);
+
+            // Ensure we can destroy the db cleanly
+            db.destroy().await.unwrap();
+        });
     }
 }
