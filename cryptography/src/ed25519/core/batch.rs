@@ -77,8 +77,7 @@ pub struct Verifier {
 }
 
 impl Verifier {
-    /// Construct a new batch verifier with capacity for `capacity` queued
-    /// signatures.
+    /// Construct a batch verifier with space for `capacity` queued signatures.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             signatures: Vec::with_capacity(capacity),
@@ -87,10 +86,6 @@ impl Verifier {
 
     /// Queue a `(key, signature)` pair for verification of `message` under
     /// `namespace`.
-    ///
-    /// The framed payload (`namespace` joined with `message`) is copied into
-    /// the batch and retained until [`Verifier::verify`], so a batch holds
-    /// memory proportional to the total payload bytes queued.
     pub fn queue(
         &mut self,
         vk: VerificationKey,
