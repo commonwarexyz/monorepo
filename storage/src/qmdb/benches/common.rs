@@ -139,20 +139,12 @@ fn var_log_cfg<C>(
 }
 
 pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap, Rayon> {
-    any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE)
+    any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, PAGE_SIZE)
 }
 
+/// [any_fix_cfg], with explicit blob sizing, page cache sizing, and logical page size (a database
+/// must be reopened with the page size it was written with).
 pub fn any_fix_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
-    items_per_blob: NonZeroU64,
-    page_cache_size: NonZeroUsize,
-) -> AnyFixedConfig<EightCap, Rayon> {
-    any_fix_cfg_with_page_size(ctx, items_per_blob, page_cache_size, PAGE_SIZE)
-}
-
-/// [any_fix_cfg_with], with an explicit logical page size (a database must be reopened with the
-/// page size it was written with).
-pub fn any_fix_cfg_with_page_size(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,

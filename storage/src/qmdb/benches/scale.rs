@@ -45,7 +45,7 @@
 #[path = "common.rs"]
 mod common;
 
-use common::{any_fix_cfg_with_page_size, gen_random_kv, make_fixed_value, AnyOFixDb, PAGE_SIZE};
+use common::{any_fix_cfg_with, gen_random_kv, make_fixed_value, AnyOFixDb, PAGE_SIZE};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     tokio::{Config, Context, Runner},
@@ -192,7 +192,7 @@ fn generate(
     let elapsed = Runner::new(cfg).start(|ctx| async move {
         let mut db = AnyOFixDb::<Mmr>::init(
             ctx.child("storage"),
-            any_fix_cfg_with_page_size(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, page_size),
+            any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, page_size),
         )
         .await
         .unwrap();
@@ -252,12 +252,10 @@ fn init(folder: &str, page_size: NonZeroU16) {
     }
 }
 
-/// Page cache size for `get`: deliberately tiny (512 * 16 KiB = 8 MiB) so uniform-random point
-/// reads miss the in-process cache and reach the storage layer, which is what the cold-read
-/// measurement is about. This cache is not reset between concurrency arms, but at most 512
-/// retained pages against the ~100K a cold pass samples bounds the contamination well under
-/// run-to-run variance. `generate` and `init` keep the realistic 1 GiB cache.
-const GET_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
+/// Page cache size for `get`: a single page, the minimum, so point reads reach the storage layer
+/// instead of the in-process cache, which is what the cold-read measurement is about. `generate`
+/// and `init` keep the realistic 1 GiB cache.
+const GET_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(1);
 
 /// Time random point reads against the database at `folder`: open it (untimed), drop the OS page
 /// cache, then run a cold pass of `num_gets` gets with `concurrency` readers in flight, followed
@@ -282,7 +280,7 @@ fn get_bench(
     let cfg = Config::default().with_storage_directory(folder);
     Runner::new(cfg).start(|ctx| async move {
         let config =
-            any_fix_cfg_with_page_size(&ctx, ITEMS_PER_BLOB, GET_PAGE_CACHE_SIZE, page_size);
+            any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, GET_PAGE_CACHE_SIZE, page_size);
         let open_start = Instant::now();
         let db = AnyOFixDb::<Mmr>::init(ctx.child("storage"), config)
             .await
@@ -392,8 +390,7 @@ fn time_init(
     page_size: NonZeroU16,
 ) -> (Duration, u64) {
     Runner::new(cfg.clone()).start(|ctx| async move {
-        let mut config =
-            any_fix_cfg_with_page_size(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, page_size);
+        let mut config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, page_size);
         config.init_cache_size = cache_size;
         let start = Instant::now();
         let db = AnyOFixDb::<Mmr>::init(ctx.child("storage"), config)
