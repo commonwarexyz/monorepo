@@ -8,6 +8,7 @@ use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
 use commonware_runtime::{
     benchmarks::{context, tokio},
+    buffer::paged::CacheRef,
     tokio::{Config, Context},
     Supervisor,
 };
@@ -52,7 +53,11 @@ fn write_updates<D: BatchableDb<K = Digest, V = Digest>>(
 async fn open_db(ctx: &Context) -> Db {
     Db::init(
         ctx.child("storage"),
-        any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, PAGE_SIZE),
+        any_fix_cfg_with(
+            ctx,
+            ITEMS_PER_BLOB,
+            CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+        ),
     )
     .await
     .unwrap()
@@ -78,7 +83,11 @@ async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
 async fn open_ord_db(ctx: &Context) -> ODb {
     ODb::init(
         ctx.child("storage"),
-        any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, PAGE_SIZE),
+        any_fix_cfg_with(
+            ctx,
+            ITEMS_PER_BLOB,
+            CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+        ),
     )
     .await
     .unwrap()

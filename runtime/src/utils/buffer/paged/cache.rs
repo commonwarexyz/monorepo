@@ -130,8 +130,9 @@ pub struct CacheRef {
     /// The next id to assign to a blob that will be managed by this cache.
     next_id: Arc<AtomicU64>,
 
-    /// Shareable reference to the page cache.
-    cache: Arc<RwLock<Cache>>,
+    /// Shareable reference to the page cache, or [None] if this handle is a passthrough that
+    /// performs no caching.
+    cache: Option<Arc<RwLock<Cache>>>,
 
     /// Pool used for page-cache and associated buffer allocations.
     pool: BufferPool,
@@ -148,7 +149,11 @@ impl CacheRef {
         Self {
             page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
-            cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
+            cache: Some(Arc::new(RwLock::new(Cache::new(
+                pool.clone(),
+                page_size,
+                capacity,
+            )))),
             pool,
         }
     }
@@ -161,6 +166,27 @@ impl CacheRef {
         capacity: NonZeroUsize,
     ) -> Self {
         Self::new(pooler.storage_buffer_pool().clone(), page_size, capacity)
+    }
+
+    /// Create a passthrough handle that performs no caching: every read fetches its page directly
+    /// from the underlying blob (with the same integrity validation), and nothing is retained.
+    ///
+    /// Useful when an external cache (e.g. the OS page cache under buffered I/O) already holds hot
+    /// pages and in-process caching would duplicate it, or when measuring uncached read cost.
+    /// Unlike a caching handle, concurrent readers of the same page each perform their own fetch.
+    pub fn passthrough(pool: BufferPool, page_size: NonZeroU16) -> Self {
+        Self {
+            page_size: page_size.get() as u64,
+            next_id: Arc::new(AtomicU64::new(0)),
+            cache: None,
+            pool,
+        }
+    }
+
+    /// Create a passthrough handle (see [CacheRef::passthrough]), extracting the storage
+    /// [BufferPool] from a [BufferPooler].
+    pub fn passthrough_from_pooler(pooler: &impl BufferPooler, page_size: NonZeroU16) -> Self {
+        Self::passthrough(pooler.storage_buffer_pool().clone(), page_size)
     }
 
     /// The page size used by this page cache.
@@ -195,7 +221,10 @@ impl CacheRef {
         mut logical_offset: u64,
     ) -> usize {
         let original_len = buf.len();
-        let page_cache = self.cache.read();
+        let Some(cache) = &self.cache else {
+            return 0;
+        };
+        let page_cache = cache.read();
         while !buf.is_empty() {
             let count = page_cache.read_at(blob_id, buf, logical_offset);
             if count == 0 {
@@ -215,7 +244,10 @@ impl CacheRef {
     /// in `ranges` correspond to cache misses that the caller must read from the underlying
     /// blob.
     pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut Vec<(&mut [u8], u64)>) {
-        let page_cache = self.cache.read();
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        let page_cache = cache.read();
         ranges.retain_mut(|(buf, logical_offset)| {
             let mut remaining = buf.len();
             let mut offset = *logical_offset;
@@ -248,8 +280,8 @@ impl CacheRef {
         // until the requested data is fully read.
         while !buf.is_empty() {
             // Read lock the page cache and see if we can get (some of) the data from it.
-            {
-                let page_cache = self.cache.read();
+            if let Some(cache) = &self.cache {
+                let page_cache = cache.read();
                 let count = page_cache.read_at(blob_id, buf, offset);
                 if count != 0 {
                     offset += count as u64;
@@ -285,11 +317,32 @@ impl CacheRef {
         let offset_in_page = offset_in_page as usize;
         trace!(page_num, blob_id, "page fault");
 
+        // Passthrough: fetch the page directly from the blob; nothing is retained and concurrent
+        // readers of the same page each perform their own fetch. Boxed and shared to match the
+        // caching path's future shape (Shared is Sync; the raw blob-read future is not).
+        let Some(cache_arc) = &self.cache else {
+            let fetch = fetch_cacheable_page(blob, page_num, self.page_size)
+                .boxed()
+                .shared();
+            let page_buf = match fetch.await {
+                Ok(page_buf) => page_buf,
+                Err(err) => {
+                    error!(page_num, ?err, "Page fetch failed");
+                    return Err(Error::ReadFailed);
+                }
+            };
+            let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
+            buf[..bytes_to_copy].copy_from_slice(
+                &page_buf.as_ref()[offset_in_page..offset_in_page + bytes_to_copy],
+            );
+            return Ok(bytes_to_copy);
+        };
+
         // Create or clone a future that retrieves the desired page from the underlying blob. This
         // requires a write lock on the page cache since we may need to modify `page_fetches` if
         // this task is the first fetcher.
         let (fetch_future, mut fetch_guard) = {
-            let mut cache = self.cache.write();
+            let mut cache = cache_arc.write();
 
             // There's a (small) chance the page was fetched & buffered by another task before we
             // were able to acquire the write lock, so check the cache before doing anything else.
@@ -308,14 +361,14 @@ impl CacheRef {
                     let fetch = Arc::clone(&entry.fetch);
                     (
                         fetch_future,
-                        PageFetchGuard::new(Arc::clone(&self.cache), key, fetch),
+                        PageFetchGuard::new(Arc::clone(cache_arc), key, fetch),
                     )
                 }
                 Entry::Vacant(v) => {
                     // Nobody is currently fetching this page, so create a future that will do the
                     // work. get_page_from_blob handles CRC validation and returns only logical bytes.
                     let blob = blob.clone();
-                    let cache = Arc::clone(&self.cache);
+                    let cache = Arc::clone(cache_arc);
                     let page_size = self.page_size;
                     let future = async move {
                         let result = fetch_cacheable_page(&blob, page_num, page_size).await;
@@ -346,7 +399,7 @@ impl CacheRef {
 
                     (
                         fetch_future,
-                        PageFetchGuard::new(Arc::clone(&self.cache), key, fetch),
+                        PageFetchGuard::new(Arc::clone(cache_arc), key, fetch),
                     )
                 }
             }
@@ -380,10 +433,13 @@ impl CacheRef {
     pub fn cache(&self, blob_id: u64, mut buf: &[u8], offset: u64) -> usize {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
+        let Some(cache) = &self.cache else {
+            return buf.len() % self.page_size as usize;
+        };
         {
             // Write lock the page cache.
             let page_size = self.page_size as usize;
-            let mut page_cache = self.cache.write();
+            let mut page_cache = cache.write();
             while buf.len() >= page_size {
                 page_cache.cache(blob_id, &buf[..page_size], page_num);
                 buf = &buf[page_size..];
@@ -401,7 +457,9 @@ impl CacheRef {
     /// truncated so subsequent reads can't observe pre-truncation bytes in a page that the tip
     /// buffer (or future writes) now owns.
     pub(super) fn invalidate_from(&self, blob_id: u64, start_page: u64) {
-        self.cache.write().invalidate_from(blob_id, start_page);
+        if let Some(cache) = &self.cache {
+            cache.write().invalidate_from(blob_id, start_page);
+        }
     }
 }
 
@@ -826,6 +884,72 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_passthrough_reads_without_caching() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let physical_page_size = PAGE_SIZE_U64 + CHECKSUM_SIZE;
+
+            // Populate a blob with 3 consecutive pages of CRC-protected data.
+            let (blob, _) = context
+                .open("test", "passthrough_blob".as_bytes())
+                .await
+                .expect("Failed to open blob");
+            for i in 0..3 {
+                let logical_data = vec![i as u8; PAGE_SIZE.get() as usize];
+                let crc = Crc32::checksum(&logical_data);
+                let record = Checksum::new(PAGE_SIZE.get(), crc);
+                let mut page_data = logical_data;
+                page_data.extend_from_slice(&record.to_bytes());
+                blob.write_at(i * physical_page_size, page_data)
+                    .await
+                    .unwrap();
+            }
+
+            let cache_ref = CacheRef::passthrough_from_pooler(&context, PAGE_SIZE);
+            assert!(cache_ref.cache.is_none());
+
+            // Every read fetches directly from the blob (with CRC validation), including reads
+            // that span a page boundary.
+            for i in 0..3 {
+                let mut buf = vec![0; PAGE_SIZE.get() as usize];
+                cache_ref
+                    .read(&blob, 0, &mut buf, i * PAGE_SIZE_U64)
+                    .await
+                    .unwrap();
+                assert_eq!(buf, [i as u8; PAGE_SIZE.get() as usize]);
+            }
+            let mut buf = vec![0; PAGE_SIZE.get() as usize];
+            cache_ref
+                .read(&blob, 0, &mut buf, PAGE_SIZE_U64 / 2)
+                .await
+                .unwrap();
+            assert_eq!(
+                &buf[..(PAGE_SIZE.get() / 2) as usize],
+                &[0u8; PAGE_SIZE.get() as usize][..(PAGE_SIZE.get() / 2) as usize]
+            );
+            assert_eq!(
+                &buf[(PAGE_SIZE.get() / 2) as usize..],
+                &[1u8; PAGE_SIZE.get() as usize][..(PAGE_SIZE.get() / 2) as usize]
+            );
+
+            // Nothing is retained: cached probes always miss, and insertion is a no-op that
+            // still reports the leftover partial-page bytes.
+            let mut buf = vec![0; PAGE_SIZE.get() as usize];
+            assert_eq!(cache_ref.read_cached(0, &mut buf, 0), 0);
+            let mut ranges = vec![(&mut buf[..], 0u64)];
+            cache_ref.read_cached_many(0, &mut ranges);
+            assert_eq!(ranges.len(), 1);
+            let logical = vec![7u8; PAGE_SIZE.get() as usize + 3];
+            assert_eq!(cache_ref.cache(0, &logical, 0), 3);
+            let mut buf = vec![0; PAGE_SIZE.get() as usize];
+            assert_eq!(cache_ref.read_cached(0, &mut buf, 0), 0);
+
+            // Invalidation is a no-op rather than a panic.
+            cache_ref.invalidate_from(0, 0);
+        });
+    }
+
+    #[test_traced]
     fn test_cache_max_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -843,7 +967,7 @@ mod tests {
 
             // Reading from the cache should return the logical bytes.
             let mut buf = vec![0u8; PAGE_SIZE.get() as usize];
-            let page_cache = cache_ref.cache.read();
+            let page_cache = cache_ref.cache.as_ref().unwrap().read();
             let bytes_read = page_cache.read_at(0, &mut buf, aligned_max_offset);
             assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
             assert!(buf.iter().all(|b| *b == 42));
@@ -873,7 +997,7 @@ mod tests {
 
             // Verify the first page was cached correctly.
             let mut buf = vec![0u8; MIN_PAGE_SIZE as usize];
-            let page_cache = cache_ref.cache.read();
+            let page_cache = cache_ref.cache.as_ref().unwrap().read();
             assert_eq!(
                 page_cache.read_at(0, &mut buf, high_offset),
                 MIN_PAGE_SIZE as usize
@@ -914,7 +1038,7 @@ mod tests {
             // Wait until the underlying read has started, ensuring the in-flight marker exists.
             started_rx.await.expect("blocking read never started");
             {
-                let page_cache = cache_ref.cache.read();
+                let page_cache = cache_ref.cache.as_ref().unwrap().read();
                 assert!(page_cache.page_fetches.contains_key(&(blob_id, 0)));
             }
 
@@ -923,7 +1047,7 @@ mod tests {
             assert!(matches!(handle.await, Err(Error::Closed)));
 
             // The guard drop path should have removed the stale in-flight entry.
-            let page_cache = cache_ref.cache.read();
+            let page_cache = cache_ref.cache.as_ref().unwrap().read();
             assert!(
                 !page_cache.page_fetches.contains_key(&(blob_id, 0)),
                 "cancelled first fetcher should not leave stale page_fetches entry"
@@ -979,7 +1103,7 @@ mod tests {
             // Wait until both tasks are registered against the same in-flight fetch.
             loop {
                 let joined = {
-                    let page_cache = cache_ref.cache.read();
+                    let page_cache = cache_ref.cache.as_ref().unwrap().read();
                     page_cache
                         .page_fetches
                         .get(&(blob_id, 0))
@@ -1013,7 +1137,7 @@ mod tests {
             // blob read.
             loop {
                 let third_entered = {
-                    let page_cache = cache_ref.cache.read();
+                    let page_cache = cache_ref.cache.as_ref().unwrap().read();
                     reads.load(Ordering::Relaxed) > 1
                         || page_cache
                             .page_fetches
@@ -1054,7 +1178,7 @@ mod tests {
             assert_eq!(fourth_buf, logical_page);
             assert_eq!(reads.load(Ordering::Relaxed), 1);
 
-            let page_cache = cache_ref.cache.read();
+            let page_cache = cache_ref.cache.as_ref().unwrap().read();
             assert!(
                 !page_cache.page_fetches.contains_key(&(blob_id, 0)),
                 "completed fetch should leave no stale page_fetches entry"
@@ -1104,7 +1228,7 @@ mod tests {
             // Wait until both tasks share the same in-flight fetch entry.
             loop {
                 let joined = {
-                    let page_cache = cache_ref.cache.read();
+                    let page_cache = cache_ref.cache.as_ref().unwrap().read();
                     page_cache
                         .page_fetches
                         .get(&(blob_id, 0))
@@ -1127,7 +1251,7 @@ mod tests {
 
             // The failed generation must remove its in-flight entry and avoid caching data.
             {
-                let page_cache = cache_ref.cache.read();
+                let page_cache = cache_ref.cache.as_ref().unwrap().read();
                 assert!(
                     !page_cache.page_fetches.contains_key(&(blob_id, 0)),
                     "erroring fetch should leave no stale page_fetches entry"
@@ -1156,7 +1280,7 @@ mod tests {
 
         // Populate two pages with distinct data.
         {
-            let mut cache = cache_ref.cache.write();
+            let mut cache = cache_ref.cache.as_ref().unwrap().write();
             cache.cache(blob_id, &page0, 0);
             cache.cache(blob_id, &page1, 1);
         }
@@ -1204,7 +1328,7 @@ mod tests {
         let page0 = vec![0x11; PAGE_SIZE.get() as usize];
         let page2 = vec![0x33; PAGE_SIZE.get() as usize];
         {
-            let mut cache = cache_ref.cache.write();
+            let mut cache = cache_ref.cache.as_ref().unwrap().write();
             cache.cache(blob_id, &page0, 0);
             // page 1 deliberately not cached
             cache.cache(blob_id, &page2, 2);
@@ -1253,7 +1377,7 @@ mod tests {
         let page_size = PAGE_SIZE.get() as usize;
 
         {
-            let mut cache = cache_ref.cache.write();
+            let mut cache = cache_ref.cache.as_ref().unwrap().write();
             for page in cached_pages {
                 // Use a distinct byte per page so cross-page reads prove both halves were copied.
                 cache.cache(blob_id, &vec![page as u8 + 1; page_size], page);

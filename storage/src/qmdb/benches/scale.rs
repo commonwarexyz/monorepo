@@ -38,8 +38,9 @@
 //! the OS page cache in-process (init's replay warms it) and runs a cold pass of `num_gets`
 //! uniform-random gets across that many spawned reader tasks, followed by a warm pass over the same
 //! keys as a control. Keys are sampled the same way `generate` derives them (`Sha256(index)` over
-//! the keyspace), so nearly all gets hit a live key. The in-process page cache is deliberately tiny
-//! in this mode so reads reach the storage layer.
+//! the keyspace), so nearly all gets hit a live key. By default this mode uses a passthrough page
+//! cache (no in-process caching) so reads always reach the storage layer; pass a non-zero
+//! `cache_pages` to measure through an in-process cache of that many pages instead.
 
 #[allow(dead_code, unused_imports, unused_macros)]
 #[path = "common.rs"]
@@ -48,6 +49,7 @@ mod common;
 use common::{any_fix_cfg_with, gen_random_kv, make_fixed_value, AnyOFixDb, PAGE_SIZE};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
+    buffer::paged::CacheRef,
     tokio::{Config, Context, Runner},
     Runner as _, Spawner as _, Supervisor as _,
 };
@@ -84,7 +86,7 @@ const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [page_size]   build a database (omit exponent => zipf 1.0; 0 => uniform; page_size = logical bytes, default 16384)\n  init     <folder> [page_size]  reopen + time init at cache off / R/4 / R (page_size must match generate)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,<concurrency>...] [page_size]   time random point reads (per concurrency: cold after an in-process cache drop, then warm)\n  destroy  <folder>              delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [page_size]   build a database (omit exponent => zipf 1.0; 0 => uniform; page_size = logical bytes, default 16384)\n  init     <folder> [page_size]  reopen + time init at cache off / R/4 / R (page_size must match generate)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,<concurrency>...] [page_size] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, 0/omitted = passthrough)\n  destroy  <folder>              delete the database"
     );
 }
 
@@ -148,7 +150,24 @@ fn main() {
                     usage();
                     return;
                 };
-                get_bench(folder, keyspace, num_gets, concurrencies, page_size)
+                // Optional in-process page cache size (7th arg): omitted or `0` selects a
+                // passthrough (no caching), so reads always reach the storage layer.
+                let cache_pages = match argv.get(6).map(|a| a.parse::<usize>()) {
+                    None => None,
+                    Some(Ok(n)) => NonZeroUsize::new(n),
+                    Some(Err(_)) => {
+                        usage();
+                        return;
+                    }
+                };
+                get_bench(
+                    folder,
+                    keyspace,
+                    num_gets,
+                    concurrencies,
+                    page_size,
+                    cache_pages,
+                )
             }
             _ => usage(),
         },
@@ -192,7 +211,11 @@ fn generate(
     let elapsed = Runner::new(cfg).start(|ctx| async move {
         let mut db = AnyOFixDb::<Mmr>::init(
             ctx.child("storage"),
-            any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, page_size),
+            any_fix_cfg_with(
+                &ctx,
+                ITEMS_PER_BLOB,
+                CacheRef::from_pooler(&ctx, page_size, PAGE_CACHE_SIZE),
+            ),
         )
         .await
         .unwrap();
@@ -252,11 +275,6 @@ fn init(folder: &str, page_size: NonZeroU16) {
     }
 }
 
-/// Page cache size for `get`: a single page, the minimum, so point reads reach the storage layer
-/// instead of the in-process cache, which is what the cold-read measurement is about. `generate`
-/// and `init` keep the realistic 1 GiB cache.
-const GET_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(1);
-
 /// Time random point reads against the database at `folder`: open it (untimed), drop the OS page
 /// cache, then run a cold pass of `num_gets` gets with `concurrency` readers in flight, followed
 /// by a warm pass over the same keys as a control.
@@ -266,6 +284,7 @@ fn get_bench(
     num_gets: u64,
     concurrencies: Vec<u64>,
     page_size: NonZeroU16,
+    cache_pages: Option<NonZeroUsize>,
 ) {
     if keyspace == 0 || num_gets == 0 {
         usage();
@@ -279,14 +298,31 @@ fn get_bench(
     }
     let cfg = Config::default().with_storage_directory(folder);
     Runner::new(cfg).start(|ctx| async move {
-        let config =
-            any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, GET_PAGE_CACHE_SIZE, page_size);
+        // Passthrough by default so point reads reach the storage layer instead of the
+        // in-process cache, which is what the cold-read measurement is about.
+        let (page_cache, cache_mode) = cache_pages.map_or_else(
+            || {
+                (
+                    CacheRef::passthrough_from_pooler(&ctx, page_size),
+                    "passthrough".to_string(),
+                )
+            },
+            |pages| {
+                (
+                    CacheRef::from_pooler(&ctx, page_size, pages),
+                    format!("{pages} pages"),
+                )
+            },
+        );
+        let config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, page_cache);
         let open_start = Instant::now();
         let db = AnyOFixDb::<Mmr>::init(ctx.child("storage"), config)
             .await
             .unwrap();
         let opened = open_start.elapsed();
-        println!("get_scale: {folder}  (logical page size {page_size}, keyspace {keyspace})");
+        println!(
+            "get_scale: {folder}  (logical page size {page_size}, page cache {cache_mode}, keyspace {keyspace})"
+        );
         println!("  open (untimed phase): {opened:?}");
         let _ = std::io::stdout().flush();
 
@@ -390,7 +426,11 @@ fn time_init(
     page_size: NonZeroU16,
 ) -> (Duration, u64) {
     Runner::new(cfg.clone()).start(|ctx| async move {
-        let mut config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, page_size);
+        let mut config = any_fix_cfg_with(
+            &ctx,
+            ITEMS_PER_BLOB,
+            CacheRef::from_pooler(&ctx, page_size, PAGE_CACHE_SIZE),
+        );
         config.init_cache_size = cache_size;
         let start = Instant::now();
         let db = AnyOFixDb::<Mmr>::init(ctx.child("storage"), config)

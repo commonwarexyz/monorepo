@@ -139,18 +139,17 @@ fn var_log_cfg<C>(
 }
 
 pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap, Rayon> {
-    any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, PAGE_SIZE)
+    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    any_fix_cfg_with(ctx, ITEMS_PER_BLOB, page_cache)
 }
 
-/// [any_fix_cfg], with explicit blob sizing, page cache sizing, and logical page size (a database
-/// must be reopened with the page size it was written with).
+/// [any_fix_cfg], with explicit blob sizing and page cache (a database must be reopened with the
+/// page size it was written with).
 pub fn any_fix_cfg_with(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
-    page_cache_size: NonZeroUsize,
-    page_size: NonZeroU16,
+    page_cache: CacheRef,
 ) -> AnyFixedConfig<EightCap, Rayon> {
-    let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     AnyFixedConfig {
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
