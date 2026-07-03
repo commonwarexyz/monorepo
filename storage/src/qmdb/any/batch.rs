@@ -1633,9 +1633,7 @@ where
                 creates.push((key, value, None));
             }
         }
-        for (key, value, base_old_loc) in parent_deleted_creates {
-            creates.push((key, value, base_old_loc));
-        }
+        creates.extend(parent_deleted_creates);
         db.strategy()
             .sort_by(&mut creates, |(a, _, _), (b, _, _)| a.cmp(b));
         for (key, value, base_old_loc) in creates {
