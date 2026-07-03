@@ -27,7 +27,7 @@ use crate::{
     utils::fnv1a_hash,
 };
 use commonware_consensus::simplex::{
-    elector::Config as Elector, mocks::reporter::Reporter, scheme::Scheme,
+    elector::Config as Elector, mocks::reporter::Reporter, scheme::Scheme, types::Activity,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_runtime::telemetry::traces::collector::RecordedEvent;
@@ -164,6 +164,19 @@ where
             }
             drop(finalizes);
 
+            let faults = reporter.faults.lock();
+            for by_view in faults.values() {
+                for (view, activities) in by_view {
+                    let v = view.get();
+                    for activity in activities {
+                        if let Some(kind) = fault_kind(activity) {
+                            data.faults.entry(v).or_default().insert(kind.to_string());
+                        }
+                    }
+                }
+            }
+            drop(faults);
+
             (idx.to_string(), data)
         })
         .collect()
@@ -212,9 +225,11 @@ pub fn observe_with_metrics(states: &BTreeMap<String, ReporterReplicaStateData>,
     observe_tokens(tokens);
 }
 
-/// Lights bounded tokens for WARN tracing events emitted by Simplex actors.
-pub fn observe_warn_events(events: &[RecordedEvent]) {
+/// Lights bounded tokens for WARN and selected DEBUG tracing events emitted by
+/// Simplex actors (resolver backfill, certification retries).
+pub fn observe_trace_events(events: &[RecordedEvent]) {
     observe_tokens(warn_event_tokens(events));
+    observe_tokens(trace_event_tokens(events));
 }
 
 fn observe_tokens(tokens: impl IntoIterator<Item = String>) {
@@ -225,6 +240,20 @@ fn observe_tokens(tokens: impl IntoIterator<Item = String>) {
             let cell = table().add(idx);
             cell.write(cell.read().saturating_add(1));
         }
+    }
+}
+
+/// Stable kind label for a recorded Byzantine equivocation fault-proof. Only the
+/// three evidence variants land in a reporter's `faults` map; anything else maps
+/// to `None`.
+fn fault_kind<S: Scheme<Sha256Digest>>(
+    activity: &Activity<S, Sha256Digest>,
+) -> Option<&'static str> {
+    match activity {
+        Activity::ConflictingNotarize(_) => Some("conflicting_notarize"),
+        Activity::ConflictingFinalize(_) => Some("conflicting_finalize"),
+        Activity::NullifyFinalize(_) => Some("nullify_finalize"),
+        _ => None,
     }
 }
 
@@ -302,6 +331,13 @@ pub fn alpha(states: &BTreeMap<String, ReporterReplicaStateData>) -> Vec<String>
             tokens.insert(format!("notarized_and_nullified:{view}"));
         }
     }
+    // Notarized but neither finalized nor nullified: the forced-inclusion /
+    // optimistic-finality window a notarized payload sits in before it decides.
+    for view in notarized.keys() {
+        if !finalized.contains_key(view) && !nullified.contains(view) {
+            tokens.insert(format!("notarized_unfinalized:{view}"));
+        }
+    }
     let notarize_votes = max_vote_counts(states.values().map(|r| &r.notarize_vote_counts));
     let nullify_votes = max_vote_counts(states.values().map(|r| &r.nullify_vote_counts));
     let finalize_votes = max_vote_counts(states.values().map(|r| &r.finalize_vote_counts));
@@ -328,6 +364,53 @@ pub fn alpha(states: &BTreeMap<String, ReporterReplicaStateData>) -> Vec<String>
     }
     if let Some(view) = states.values().map(|r| r.last_nullified).max() {
         tokens.insert(format!("max_nullified:{view}"));
+    }
+
+    // Gap between the notarization/nullification frontier and the finalization
+    // frontier: how far the network advances votes ahead of what it decides
+    // (stuck certification, timeout churn, speculative finality).
+    if let (Some(finalized_frontier), Some(notarized_frontier), Some(nullified_frontier)) = (
+        states.values().map(|r| r.last_finalized).max(),
+        states.values().map(|r| r.last_notarized).max(),
+        states.values().map(|r| r.last_nullified).max(),
+    ) {
+        tokens.insert(format!(
+            "notarized_ahead_of_finalized:{}",
+            span_bucket(notarized_frontier.saturating_sub(finalized_frontier))
+        ));
+        tokens.insert(format!(
+            "nullified_ahead_of_finalized:{}",
+            span_bucket(nullified_frontier.saturating_sub(finalized_frontier))
+        ));
+    }
+
+    // Deepest ancestry skip reached: max(view - parent) over every notarized and
+    // finalized proposal, as one bucketed token. Captures how long a
+    // skip/nullification chain got without multiplying tokens by every view.
+    if let Some(gap) = states
+        .values()
+        .flat_map(|r| r.notarizations.iter().chain(r.finalizations.iter()))
+        .map(|(view, proposal)| view.saturating_sub(proposal.parent))
+        .max()
+    {
+        tokens.insert(format!("parent_gap_global:{}", span_bucket(gap)));
+    }
+
+    // Byzantine equivocation caught: a fault-proof was constructed, reported, and
+    // re-verified. Identity-independent, aggregated over signers to kind -> views.
+    let mut fault_views: BTreeMap<&str, BTreeSet<u64>> = BTreeMap::new();
+    for replica in states.values() {
+        for (view, kinds) in &replica.faults {
+            for kind in kinds {
+                fault_views.entry(kind.as_str()).or_default().insert(*view);
+            }
+        }
+    }
+    for (kind, views) in &fault_views {
+        tokens.insert(format!("fault:{kind}"));
+        for view in views {
+            tokens.insert(format!("fault_view:{kind}:{view}"));
+        }
     }
 
     tokens.into_iter().collect()
@@ -424,6 +507,43 @@ fn warn_kind(message: &str) -> &'static str {
         "invalid nullification" => "invalid_nullification",
         "invalid finalization" => "invalid_finalization",
         _ => "other",
+    }
+}
+
+/// Lights bounded tokens for selected DEBUG events: resolver backfill deliveries
+/// and validations, and the voter certification-retry path. These are quiet
+/// (non-WARN) transitions the WARN token family cannot reach.
+fn trace_event_tokens(events: &[RecordedEvent]) -> Vec<String> {
+    let mut tokens = BTreeSet::new();
+    for event in events {
+        if event.level != Level::DEBUG {
+            continue;
+        }
+        let Some(kind) = trace_kind(&event.metadata.content) else {
+            continue;
+        };
+        tokens.insert(format!("trace_event:{kind}"));
+        if let Some(view) = event_view(event) {
+            tokens.insert(format!(
+                "trace_event_view_bucket:{kind}:{}",
+                span_bucket(view)
+            ));
+        }
+    }
+    tokens.into_iter().collect()
+}
+
+fn trace_kind(message: &str) -> Option<&'static str> {
+    match message {
+        "received notarization for request" => Some("resolver_backfill_notarization"),
+        "received nullification for request" => Some("resolver_backfill_nullification"),
+        "received finalization for request" => Some("resolver_backfill_finalization"),
+        "notarization failed verification" => Some("resolver_notarization_failed_verification"),
+        "nullification failed verification" => Some("resolver_nullification_failed_verification"),
+        "finalization failed verification" => Some("resolver_finalization_failed_verification"),
+        "attempting certification" => Some("certification_attempt"),
+        "failed to certify proposal" => Some("certification_failed"),
+        _ => None,
     }
 }
 
@@ -686,6 +806,12 @@ fn timeout_tokens(metrics: &str) -> Vec<String> {
     }
 
     let mut tokens = BTreeSet::new();
+    // The canonical set of distinct reasons that fired (no views, no counts):
+    // a fixed 8-reason domain, so it saturates while distinguishing churn regimes.
+    if !counts.is_empty() {
+        let reasons: Vec<&str> = counts.keys().copied().collect();
+        tokens.insert(format!("timeout_mix:{}", reasons.join("+")));
+    }
     for (reason, count) in counts {
         tokens.insert(format!("timeout_reason:{reason}"));
         tokens.insert(format!(
@@ -925,6 +1051,8 @@ simplex_voter_timeouts{leader="d",reason="IgnoredProposal"} 1
         assert!(tokens.contains(&"timeout_reason:IgnoredProposal".to_string()));
         assert!(tokens.contains(&"timeout_reason_count:IgnoredProposal:1".to_string()));
         assert!(!tokens.contains(&"timeout_reason:CertificationTimeout".to_string()));
+        // Only the reasons that fired, sorted; CertificationTimeout (0) excluded.
+        assert!(tokens.contains(&"timeout_mix:IgnoredProposal+LeaderTimeout".to_string()));
     }
 
     #[test]
@@ -1081,5 +1209,133 @@ simplex_voter_timeouts{leader="d",reason="IgnoredProposal"} 1
     fn alpha_empty_has_no_tokens() {
         let states = BTreeMap::new();
         assert!(alpha(&states).is_empty());
+    }
+
+    #[test]
+    fn notarized_unfinalized_is_tokenized() {
+        // View 1 notarized and finalized; view 2 notarized only; view 3 notarized
+        // and nullified. Only view 2 sits in the unfinalized window.
+        let mut states = BTreeMap::new();
+        states.insert(
+            "0".into(),
+            replica(&[(1, "aa"), (2, "bb"), (3, "cc")], &[(1, "aa")], &[3], 1),
+        );
+        let tokens = alpha(&states);
+        assert!(tokens.contains(&"notarized_unfinalized:2".to_string()));
+        assert!(!tokens.contains(&"notarized_unfinalized:1".to_string()));
+        assert!(!tokens.contains(&"notarized_unfinalized:3".to_string()));
+    }
+
+    #[test]
+    fn frontier_gap_is_tokenized() {
+        let states = BTreeMap::from([
+            (
+                "0".to_string(),
+                ReporterReplicaStateData {
+                    last_finalized: 2,
+                    last_notarized: 6,
+                    last_nullified: 3,
+                    ..Default::default()
+                },
+            ),
+            (
+                "1".to_string(),
+                ReporterReplicaStateData {
+                    last_finalized: 1,
+                    last_notarized: 4,
+                    last_nullified: 2,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let tokens = alpha(&states);
+        // Maxes: finalized 2, notarized 6, nullified 3. Gaps: notarized 4, nullified 1.
+        assert!(tokens.contains(&"notarized_ahead_of_finalized:3".to_string())); // span 4
+        assert!(tokens.contains(&"nullified_ahead_of_finalized:1".to_string()));
+        // span 1
+    }
+
+    #[test]
+    fn parent_gap_global_is_tokenized() {
+        let mut data = ReporterReplicaStateData::default();
+        data.notarizations.insert(
+            3,
+            ProposalData {
+                parent: 2,
+                payload: "aa".into(),
+            },
+        );
+        data.finalizations.insert(
+            10,
+            ProposalData {
+                parent: 2,
+                payload: "bb".into(),
+            },
+        );
+        let tokens = alpha(&BTreeMap::from([("0".to_string(), data)]));
+        // Deepest gap is 10 - 2 = 8; span_bucket(8) = 4.
+        assert!(tokens.contains(&"parent_gap_global:4".to_string()));
+    }
+
+    #[test]
+    fn faults_are_tokenized() {
+        let mut data = ReporterReplicaStateData::default();
+        data.faults
+            .insert(5, BTreeSet::from(["conflicting_notarize".to_string()]));
+        data.faults
+            .insert(7, BTreeSet::from(["nullify_finalize".to_string()]));
+        let tokens = alpha(&BTreeMap::from([("0".to_string(), data)]));
+        assert!(tokens.contains(&"fault:conflicting_notarize".to_string()));
+        assert!(tokens.contains(&"fault_view:conflicting_notarize:5".to_string()));
+        assert!(tokens.contains(&"fault:nullify_finalize".to_string()));
+        assert!(tokens.contains(&"fault_view:nullify_finalize:7".to_string()));
+    }
+
+    #[test]
+    fn trace_events_are_tokenized() {
+        use commonware_runtime::telemetry::traces::collector::EventMetadata;
+
+        let debug_event = |content: &str, view: Option<&str>| RecordedEvent {
+            level: Level::DEBUG,
+            target: "commonware_consensus::simplex::actors::resolver::actor".into(),
+            spans: Vec::new(),
+            metadata: EventMetadata {
+                content: content.into(),
+                fields: view
+                    .map(|v| vec![("view".into(), v.into())])
+                    .unwrap_or_default(),
+            },
+        };
+
+        let events = vec![
+            debug_event("received notarization for request", Some("5")),
+            debug_event("attempting certification", Some("2")),
+            debug_event("some other debug message", None),
+            RecordedEvent {
+                level: Level::WARN,
+                target: "commonware_consensus::simplex::actors::voter::actor".into(),
+                spans: Vec::new(),
+                metadata: EventMetadata {
+                    content: "attempting certification".into(),
+                    fields: Vec::new(),
+                },
+            },
+        ];
+
+        let tokens = trace_event_tokens(&events);
+        assert!(tokens.contains(&"trace_event:resolver_backfill_notarization".to_string()));
+        assert!(tokens
+            .contains(&"trace_event_view_bucket:resolver_backfill_notarization:4".to_string()));
+        assert!(tokens.contains(&"trace_event:certification_attempt".to_string()));
+        assert!(tokens.contains(&"trace_event_view_bucket:certification_attempt:2".to_string()));
+        assert!(!tokens.contains(&"trace_event:other".to_string()));
+        // The WARN-level event is not a DEBUG trace token.
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|t| t.starts_with("trace_event:certification_attempt"))
+                .count(),
+            1
+        );
     }
 }

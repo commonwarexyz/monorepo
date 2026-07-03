@@ -59,6 +59,10 @@ pub struct ReporterReplicaStateData {
     pub notarize_vote_counts: BTreeMap<u64, usize>,
     pub nullify_vote_counts: BTreeMap<u64, usize>,
     pub finalize_vote_counts: BTreeMap<u64, usize>,
+    /// Byzantine equivocation fault-proofs recorded against any signer, keyed by
+    /// view. Values are fault kinds: `conflicting_notarize`, `conflicting_finalize`,
+    /// `nullify_finalize`.
+    pub faults: BTreeMap<u64, BTreeSet<String>>,
     /// Views that have any certificate (notarization, nullification, or finalization).
     pub certified: BTreeSet<u64>,
     /// Views with a proposal certificate usable for parent selection.
