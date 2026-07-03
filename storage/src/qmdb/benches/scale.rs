@@ -103,12 +103,14 @@ fn main() {
         ) {
             (Some(folder), Some(keyspace), Some(num_updates)) => {
                 // Optional zipf exponent (5th arg): omitted => default skew (KEY_ZIPF_EXPONENT);
-                // `0` => uniform sampling (`None`).
+                // `0` => uniform sampling (`None`). Implausible exponents are rejected so a
+                // page size mistakenly passed in this position errors instead of silently
+                // building a database with the wrong key distribution.
                 let zipf_exponent = match argv.get(4).map(|a| a.parse::<f64>()) {
                     None => Some(KEY_ZIPF_EXPONENT),
-                    Some(Ok(e)) if e > 0.0 => Some(e),
-                    Some(Ok(_)) => None,
-                    Some(Err(_)) => {
+                    Some(Ok(0.0)) => None,
+                    Some(Ok(e)) if e > 0.0 && e <= 8.0 => Some(e),
+                    _ => {
                         usage();
                         return;
                     }
@@ -252,7 +254,9 @@ fn init(folder: &str, page_size: NonZeroU16) {
 
 /// Page cache size for `get`: deliberately tiny (512 * 16 KiB = 8 MiB) so uniform-random point
 /// reads miss the in-process cache and reach the storage layer, which is what the cold-read
-/// measurement is about. `generate` and `init` keep the realistic 1 GiB cache.
+/// measurement is about. This cache is not reset between concurrency arms, but at most 512
+/// retained pages against the ~100K a cold pass samples bounds the contamination well under
+/// run-to-run variance. `generate` and `init` keep the realistic 1 GiB cache.
 const GET_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 
 /// Time random point reads against the database at `folder`: open it (untimed), drop the OS page
@@ -313,10 +317,10 @@ fn get_bench(
     });
 }
 
-/// Run one pass of uniform-random gets: `concurrency` spawned reader tasks, each issuing
-/// `num_gets / concurrency` gets from its own deterministic key stream (so a repeat pass replays
-/// the same keys). Returns the elapsed time, the number of gets issued, and how many found a
-/// value.
+/// Run one pass of uniform-random gets: `num_gets` gets split across `concurrency` spawned
+/// reader tasks (the first `num_gets % concurrency` readers take one extra), each consuming its
+/// own deterministic key stream (so a repeat pass replays the same keys). Returns the elapsed
+/// time, the number of gets issued, and how many found a value.
 async fn run_gets(
     ctx: &Context,
     db: Arc<AnyOFixDb<Mmr>>,
@@ -325,14 +329,16 @@ async fn run_gets(
     concurrency: u64,
 ) -> (Duration, u64, u64) {
     let per_reader = num_gets / concurrency;
+    let remainder = num_gets % concurrency;
     let start = Instant::now();
     let readers: Vec<_> = (0..concurrency)
         .map(|reader| {
+            let gets = per_reader + u64::from(reader < remainder);
             let db = db.clone();
             ctx.child("reader").spawn(move |_| async move {
                 let mut rng = StdRng::seed_from_u64(reader);
                 let mut found = 0u64;
-                for _ in 0..per_reader {
+                for _ in 0..gets {
                     let index = rng.next_u64() % keyspace;
                     let key = Sha256::hash(&index.to_be_bytes());
                     if db.get(&key).await.unwrap().is_some() {
@@ -347,7 +353,7 @@ async fn run_gets(
     for reader in readers {
         found += reader.await.unwrap();
     }
-    (start.elapsed(), per_reader * concurrency, found)
+    (start.elapsed(), num_gets, found)
 }
 
 /// Drop the OS page cache (requires passwordless sudo), returning whether it succeeded.
