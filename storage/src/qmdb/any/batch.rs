@@ -1154,7 +1154,8 @@ where
         // Walk updates newest-first so the first surviving occurrence of a key is its last
         // write. Pre-seeding with the upsert keys drops overlapping updates: upserts are applied
         // last and win.
-        let mut handled: AHashSet<&U::Key> = upserts.iter().map(|(key, _)| key).collect();
+        let mut handled = AHashSet::with_capacity(updates.len() + upserts.len());
+        handled.extend(upserts.iter().map(|(key, _)| key));
         staged_updates.entries.reserve(updates.len());
         for (slot, value) in updates.into_iter().rev() {
             assert!(slot < slots.len(), "update index out of staged read range");
