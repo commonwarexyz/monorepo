@@ -435,6 +435,37 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
     }
 }
 
+/// Resolve `keys` against a local source (`local` returns `Some` when it owns the key, with the
+/// inner `Option` distinguishing a live value from a delete) and then against `diffs`, returning
+/// per-slot results and the slots that still need committed DB reads.
+fn resolve_reads<'a, K, F: Family, V, S: Strategy>(
+    keys: &[&'a K],
+    local: impl Fn(&K) -> Option<Option<V>>,
+    diffs: &[&DiffSlice<K, F, V>],
+    strategy: &S,
+) -> UncommittedReadResolution<'a, K, V>
+where
+    K: Ord + Sync,
+    V: Clone + Send + Sync,
+{
+    let mut results = vec![None; keys.len()];
+    let mut resolved = vec![false; keys.len()];
+    let mut pending = Vec::new();
+
+    for (i, key) in keys.iter().enumerate() {
+        if let Some(value) = local(key) {
+            results[i] = value;
+            resolved[i] = true;
+        } else {
+            pending.push((i, *key));
+        }
+    }
+    resolve_pending_from_diffs(&pending, diffs, strategy, &mut resolved, &mut results);
+
+    let unresolved = pending.into_iter().filter(|(i, _)| !resolved[*i]).collect();
+    (results, unresolved)
+}
+
 /// Apply a single diff entry to the snapshot index and activity bitmap in lockstep:
 /// install the winning `Active` location and clear the prior committed location.
 fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
@@ -1282,8 +1313,8 @@ where
         self.mutations.is_empty() && self.base.parent().is_none()
     }
 
-    /// Resolve keys against this batch and any live ancestor diffs, returning partial results and
-    /// the unresolved slots that still need committed DB reads.
+    /// Resolve keys against this batch's mutations and any live ancestor diffs, returning partial
+    /// results and the unresolved slots that still need committed DB reads.
     fn resolve_uncommitted_reads<'a>(
         &self,
         keys: &[&'a U::Key],
@@ -1292,32 +1323,22 @@ where
     where
         U::Value: Send + Sync,
     {
-        let mut results = vec![None; keys.len()];
-        let mut resolved = vec![false; keys.len()];
-        let mut pending = Vec::new();
-
-        for (i, key) in keys.iter().enumerate() {
-            // Check local mutations.
-            if let Some(value) = self.mutations.get(*key) {
-                results[i] = value.clone();
-                resolved[i] = true;
-            } else {
-                pending.push((i, *key));
-            }
-        }
-
-        if let Some(parent) = self.base.parent() {
+        let ancestors = self.base.parent().map(|parent| {
             let mut ancestors = vec![Arc::clone(parent)];
             ancestors.extend(parent.ancestors());
-            let diffs: Vec<_> = ancestors
-                .iter()
-                .map(|batch| batch.diff.as_slice())
-                .collect();
-            resolve_pending_from_diffs(&pending, &diffs, strategy, &mut resolved, &mut results);
-        }
-
-        let unresolved = pending.into_iter().filter(|(i, _)| !resolved[*i]).collect();
-        (results, unresolved)
+            ancestors
+        });
+        let diffs: Vec<_> = ancestors
+            .iter()
+            .flatten()
+            .map(|batch| batch.diff.as_slice())
+            .collect();
+        resolve_reads(
+            keys,
+            |key| self.mutations.get(key).cloned(),
+            &diffs,
+            strategy,
+        )
     }
 
     /// Read unresolved slots from the committed DB and merge them back into `results`.
@@ -2156,40 +2177,22 @@ where
             return Ok(Vec::new());
         }
 
-        let mut results = vec![None; keys.len()];
-        let mut resolved = vec![false; keys.len()];
-        let mut pending = Vec::new();
-        let mut db_indices = Vec::new();
-        let mut db_keys = Vec::new();
-
-        for (i, key) in keys.iter().enumerate() {
-            // Check local diff.
-            if let Some(entry) = lookup_sorted(self.diff.as_slice(), *key) {
-                results[i] = entry.value().cloned();
-                resolved[i] = true;
-            } else {
-                pending.push((i, *key));
-            }
-        }
-
         let ancestors: Vec<_> = self.ancestors().collect();
         let diffs: Vec<_> = ancestors
             .iter()
             .map(|batch| batch.diff.as_slice())
             .collect();
-        resolve_pending_from_diffs(&pending, &diffs, db.strategy(), &mut resolved, &mut results);
+        let (mut results, unresolved) = resolve_reads(
+            keys,
+            |key| lookup_sorted(self.diff.as_slice(), key).map(|entry| entry.value().cloned()),
+            &diffs,
+            db.strategy(),
+        );
 
-        // Need DB fallthrough.
-        for (i, key) in pending {
-            if !resolved[i] {
-                db_indices.push(i);
-                db_keys.push(key);
-            }
-        }
-
-        if !db_keys.is_empty() {
+        if !unresolved.is_empty() {
+            let db_keys: Vec<_> = unresolved.iter().map(|(_, key)| *key).collect();
             let db_results = db.get_many(&db_keys).await?;
-            for (slot, value) in db_indices.into_iter().zip(db_results) {
+            for ((slot, _), value) in unresolved.into_iter().zip(db_results) {
                 results[slot] = value;
             }
         }
