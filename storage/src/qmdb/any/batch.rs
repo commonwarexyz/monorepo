@@ -200,21 +200,11 @@ where
     base: Base<F, H::Digest, U, S>,
 }
 
-/// Pending mutations whose old committed location was already resolved by a staged read. The
-/// value is `Some` for an update and `None` for a delete; only the unordered path stages deletes
-/// (the ordered path cannot skip the deleted key's predecessor-bucket scan, so its deletes fall
-/// back to normal mutations).
-pub(crate) struct StagedUpdates<F: Family, U: update::Update> {
-    entries: Vec<StagedUpdate<F, U>>,
-}
-
-impl<F: Family, U: update::Update> StagedUpdates<F, U> {
-    pub(crate) const fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
-    }
-}
+/// Pending mutations whose old committed locations were already resolved by staged reads, sorted
+/// by location. Each value is `Some` for an update and `None` for a delete; only the unordered
+/// path stages deletes (the ordered path cannot skip the deleted key's predecessor-bucket scan,
+/// so its deletes fall back to normal mutations).
+pub(crate) type StagedUpdates<F, U> = Vec<StagedUpdate<F, U>>;
 
 /// A staged read slot's committed-DB resolution: the location and cached payload the read
 /// resolved to, or `None` when it resolved from batch mutations or ancestor diffs (or missed).
@@ -1151,7 +1141,7 @@ where
             keys,
             resolutions,
         } = self;
-        let mut staged_updates = StagedUpdates::new();
+        let mut staged_updates = StagedUpdates::<F, U>::new();
         if updates.is_empty() {
             return (Self::apply_upserts(batch, upserts), staged_updates);
         }
@@ -1161,7 +1151,7 @@ where
         // last and win.
         let mut handled = AHashSet::with_capacity(updates.len() + upserts.len());
         handled.extend(upserts.iter().map(|(key, _)| key));
-        staged_updates.entries.reserve(updates.len());
+        staged_updates.reserve(updates.len());
         for (slot, value) in updates.into_iter().rev() {
             assert!(slot < keys.len(), "update index out of staged read range");
             let key = &keys[slot];
@@ -1174,16 +1164,14 @@ where
                     // This staged update is the surviving write for `key`; do not also emit an
                     // older batch mutation for the same key.
                     batch.mutations.remove(key);
-                    staged_updates
-                        .entries
-                        .push((key.clone(), *loc, payload.clone(), value));
+                    staged_updates.push((key.clone(), *loc, payload.clone(), value));
                 }
                 _ => {
                     batch.mutations.insert(key.clone(), value);
                 }
             }
         }
-        staged_updates.entries.sort_unstable_by_key(|entry| entry.1);
+        staged_updates.sort_unstable_by_key(|entry| entry.1);
         (Self::apply_upserts(batch, upserts), staged_updates)
     }
 }
@@ -1500,12 +1488,9 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(
-            db,
-            metadata,
-            StagedUpdates::new(),
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-        )
+        self.merkleize_with_floor_scan(db, metadata, Vec::new(), |floor, tip, limit, out| {
+            fill_candidates(&db.bitmap, floor, tip, limit, out)
+        })
         .await
     }
 
@@ -1533,7 +1518,7 @@ where
 
         // `value` is `Some` for a staged update and `None` for a staged delete; the
         // location-ordered merge below emits each as an `Update`/`Delete` at the cached location.
-        let cached = staged_updates.entries;
+        let cached = staged_updates;
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false);
@@ -1691,12 +1676,9 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(
-            db,
-            metadata,
-            StagedUpdates::new(),
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-        )
+        self.merkleize_with_floor_scan(db, metadata, Vec::new(), |floor, tip, limit, out| {
+            fill_candidates(&db.bitmap, floor, tip, limit, out)
+        })
         .await
     }
 
@@ -1726,7 +1708,7 @@ where
         // Staged updates skip the index probe and journal re-read, and their old op's next key
         // feeds the candidate sets directly. The ordered path never stages deletes (see
         // `Staged::resolve_updates`), so every staged entry carries a value.
-        let cached = staged_updates.entries;
+        let cached = staged_updates;
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);
@@ -3465,7 +3447,7 @@ mod tests {
             );
 
             assert_eq!(
-                staged_updates.entries,
+                staged_updates,
                 vec![(k1, loc(10), (), None), (k0, loc(30), (), Some(new0))]
             );
             assert_eq!(batch.mutations.len(), 2);
@@ -3580,7 +3562,7 @@ mod tests {
             );
 
             assert_eq!(
-                staged_updates.entries,
+                staged_updates,
                 vec![
                     (update_b, loc(7), next_b, Some(value_b)),
                     (update_a, loc(30), next_a, Some(value_a)),
