@@ -45,8 +45,12 @@ const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 const CHECKSUM_SLOT_LEN_SIZE: usize = u16::SIZE;
 const CHECKSUM_SLOT_SIZE: usize = CHECKSUM_SLOT_LEN_SIZE + crc32::Digest::SIZE;
 
-/// Ensure `buf` has one `item_size` slot per offset, offsets are sorted and non-overlapping, and
-/// every requested range lies within the blob's size.
+/// Ensure every requested item lies within the blob's size.
+///
+/// # Panics
+///
+/// Panics if `buf` is not exactly one `item_size` slot per offset, or if offsets are not sorted
+/// and non-overlapping.
 fn validate_read_many_into(
     buf_len: usize,
     offsets: &[u64],
@@ -57,9 +61,10 @@ fn validate_read_many_into(
         .len()
         .checked_mul(item_size.get())
         .ok_or(Error::OffsetOverflow)?;
-    if buf_len != expected_len {
-        return Err(Error::BufferLengthInvalid);
-    }
+    assert_eq!(
+        buf_len, expected_len,
+        "buf must hold one item_size slot per offset"
+    );
 
     let mut previous_end = None;
     for &offset in offsets {
@@ -67,9 +72,10 @@ fn validate_read_many_into(
             .checked_add(item_size.get() as u64)
             .ok_or(Error::OffsetOverflow)?;
         if let Some(previous_end) = previous_end {
-            if offset < previous_end {
-                return Err(Error::OffsetsInvalid);
-            }
+            assert!(
+                offset >= previous_end,
+                "offsets must be sorted and non-overlapping"
+            );
         }
         if end > size {
             return Err(Error::BlobInsufficientLength);
@@ -119,8 +125,12 @@ fn split_read_many<'a>(
     cache_ranges
 }
 
-/// Ensure `buf` holds one slot per range totaling its length, ranges are sorted and
-/// non-overlapping, and every requested range lies within the blob's size.
+/// Ensure every requested range lies within the blob's size.
+///
+/// # Panics
+///
+/// Panics if `buf` does not hold one slot per range totaling its length, or if ranges are not
+/// sorted and non-overlapping.
 fn validate_read_ranges(buf_len: usize, ranges: &[(u64, usize)], size: u64) -> Result<(), Error> {
     let mut expected_len = 0usize;
     let mut previous_end = None;
@@ -130,18 +140,20 @@ fn validate_read_ranges(buf_len: usize, ranges: &[(u64, usize)], size: u64) -> R
             .checked_add(len as u64)
             .ok_or(Error::OffsetOverflow)?;
         if let Some(previous_end) = previous_end {
-            if offset < previous_end {
-                return Err(Error::OffsetsInvalid);
-            }
+            assert!(
+                offset >= previous_end,
+                "ranges must be sorted and non-overlapping"
+            );
         }
         if end > size {
             return Err(Error::BlobInsufficientLength);
         }
         previous_end = Some(end);
     }
-    if buf_len != expected_len {
-        return Err(Error::BufferLengthInvalid);
-    }
+    assert_eq!(
+        buf_len, expected_len,
+        "buf must hold one slot per range totaling its length"
+    );
     Ok(())
 }
 
@@ -478,33 +490,10 @@ mod tests {
         Ok,
         OffsetOverflow,
         BlobInsufficientLength,
-        BufferLengthInvalid,
-        OffsetsInvalid,
     }
 
     #[rstest]
     #[case::empty_offsets_are_a_noop(0, vec![], 4, 0, ValidationExpectation::Ok)]
-    #[case::buffer_len_must_match_items(
-        7,
-        vec![0, 4],
-        4,
-        16,
-        ValidationExpectation::BufferLengthInvalid
-    )]
-    #[case::offsets_must_not_overlap(
-        8,
-        vec![0, 2],
-        4,
-        16,
-        ValidationExpectation::OffsetsInvalid
-    )]
-    #[case::offsets_must_be_sorted(
-        8,
-        vec![8, 4],
-        4,
-        16,
-        ValidationExpectation::OffsetsInvalid
-    )]
     #[case::offset_plus_item_size_must_not_overflow(
         4,
         vec![u64::MAX - 1],
@@ -528,8 +517,9 @@ mod tests {
         #[case] expected: ValidationExpectation,
     ) {
         // These cases pin the shared batch-read contract used by Writer, Reader, and Sealed:
-        // the caller provides one fixed-size output slot per offset, offsets are monotonic and
-        // non-overlapping, and every requested byte must be within the logical blob size.
+        // every requested byte must be within the logical blob size, with checked offset
+        // arithmetic. Contract violations (buffer length, unsorted offsets) panic; see the
+        // should_panic tests below.
         let result = validate_read_many_into(buf_len, &offsets, NZUsize!(item_size), size);
 
         match expected {
@@ -540,13 +530,25 @@ mod tests {
             ValidationExpectation::BlobInsufficientLength => {
                 assert!(matches!(result, Err(Error::BlobInsufficientLength)))
             }
-            ValidationExpectation::BufferLengthInvalid => {
-                assert!(matches!(result, Err(Error::BufferLengthInvalid)))
-            }
-            ValidationExpectation::OffsetsInvalid => {
-                assert!(matches!(result, Err(Error::OffsetsInvalid)))
-            }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "buf must hold one item_size slot per offset")]
+    fn test_validate_read_many_into_rejects_buffer_len_mismatch() {
+        let _ = validate_read_many_into(7, &[0, 4], NZUsize!(4), 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "offsets must be sorted and non-overlapping")]
+    fn test_validate_read_many_into_rejects_overlapping_offsets() {
+        let _ = validate_read_many_into(8, &[0, 2], NZUsize!(4), 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "offsets must be sorted and non-overlapping")]
+    fn test_validate_read_many_into_rejects_unsorted_offsets() {
+        let _ = validate_read_many_into(8, &[8, 4], NZUsize!(4), 16);
     }
 
     #[test]

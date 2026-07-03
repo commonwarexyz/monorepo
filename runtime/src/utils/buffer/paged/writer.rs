@@ -1393,6 +1393,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    #[should_panic(expected = "buf must hold one item_size slot per offset")]
     fn test_read_many_into_rejects_invalid_buffer_len() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -1407,15 +1408,12 @@ mod tests {
 
             let offsets = [0u64, 4];
             let mut buf = vec![0u8; 7];
-            let err = append
-                .read_many_into(&mut buf, &offsets, NZUsize!(4))
-                .await
-                .unwrap_err();
-            assert!(matches!(err, Error::BufferLengthInvalid));
+            let _ = append.read_many_into(&mut buf, &offsets, NZUsize!(4)).await;
         });
     }
 
     #[test_traced("DEBUG")]
+    #[should_panic(expected = "offsets must be sorted and non-overlapping")]
     fn test_read_many_into_rejects_unsorted_offsets() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -1429,15 +1427,12 @@ mod tests {
             append.append(&data).await.unwrap();
 
             let mut buf = vec![0u8; 8];
-            let err = append
-                .read_many_into(&mut buf, &[8, 4], NZUsize!(4))
-                .await
-                .unwrap_err();
-            assert!(matches!(err, Error::OffsetsInvalid));
+            let _ = append.read_many_into(&mut buf, &[8, 4], NZUsize!(4)).await;
         });
     }
 
     #[test_traced("DEBUG")]
+    #[should_panic(expected = "offsets must be sorted and non-overlapping")]
     fn test_read_many_into_rejects_overlapping_offsets() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -1451,11 +1446,7 @@ mod tests {
             append.append(&data).await.unwrap();
 
             let mut buf = vec![0u8; 8];
-            let err = append
-                .read_many_into(&mut buf, &[2, 4], NZUsize!(4))
-                .await
-                .unwrap_err();
-            assert!(matches!(err, Error::OffsetsInvalid));
+            let _ = append.read_many_into(&mut buf, &[2, 4], NZUsize!(4)).await;
         });
     }
 

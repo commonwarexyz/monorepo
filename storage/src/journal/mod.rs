@@ -77,6 +77,4 @@ pub enum Error {
     ChecksumMismatch(u32, u32),
     #[error("empty append")]
     EmptyAppend,
-    #[error("positions must be strictly increasing")]
-    PositionsNotIncreasing,
 }

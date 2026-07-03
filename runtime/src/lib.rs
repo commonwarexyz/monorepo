@@ -131,10 +131,6 @@ stability_scope!(BETA {
         InvalidChecksum,
         #[error("offset overflow")]
         OffsetOverflow,
-        #[error("buffer length invalid")]
-        BufferLengthInvalid,
-        #[error("offsets invalid")]
-        OffsetsInvalid,
         #[error("io error: {0}")]
         Io(Arc<IoError>),
         #[error("buffer pool: {0}")]

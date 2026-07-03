@@ -1276,9 +1276,10 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         self.metrics.read_many_calls.inc();
         let mut prev: Option<u64> = None;
         for &pos in positions {
-            if prev.is_some_and(|p| pos <= p) {
-                return Err(Error::PositionsNotIncreasing);
-            }
+            assert!(
+                prev.is_none_or(|p| pos > p),
+                "positions must be strictly increasing"
+            );
             prev = Some(pos);
             self.validate_readable(pos)?;
         }
@@ -4529,8 +4530,8 @@ mod tests {
     }
 
     #[test_traced]
+    #[should_panic(expected = "positions must be strictly increasing")]
     fn test_read_many_rejects_unsorted_positions() {
-        // Non-increasing positions return an error rather than panicking.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
@@ -4539,17 +4540,23 @@ mod tests {
                 journal.append(&test_digest(i)).await.unwrap();
             }
 
-            assert!(matches!(
-                journal.snapshot().await.unwrap().read_many(&[2, 1]).await,
-                Err(Error::PositionsNotIncreasing)
-            ));
-            // Duplicates are not strictly increasing either.
-            assert!(matches!(
-                journal.snapshot().await.unwrap().read_many(&[1, 1]).await,
-                Err(Error::PositionsNotIncreasing)
-            ));
+            let _ = journal.snapshot().await.unwrap().read_many(&[2, 1]).await;
+        });
+    }
 
-            journal.destroy().await.unwrap();
+    #[test_traced]
+    #[should_panic(expected = "positions must be strictly increasing")]
+    fn test_read_many_rejects_duplicate_positions() {
+        // Duplicates are not strictly increasing either.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
+            for i in 0..5u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            let _ = journal.snapshot().await.unwrap().read_many(&[1, 1]).await;
         });
     }
 

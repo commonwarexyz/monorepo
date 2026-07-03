@@ -746,12 +746,13 @@ where
         // Serve page-cache hits synchronously and fall back to a single batched read for the
         // misses. The strategy policy decides per batch size whether the sync pass runs on the
         // calling thread or sharded across the pool (one scratch buffer per shard and one
-        // cache-lock acquisition per blob a shard touches). The sortedness pre-check keeps
-        // contract violations deterministic: without it, a non-increasing batch would error
-        // only when some position missed the cache.
-        if !positions.windows(2).all(|w| w[0] < w[1]) {
-            return self.journal.read_many(positions).await;
-        }
+        // cache-lock acquisition per blob a shard touches). The sortedness assert keeps
+        // contract violations deterministic: past it, a non-increasing batch would only trip
+        // per-shard validation when an inversion lands inside a single shard.
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "positions must be strictly increasing"
+        );
         let strategy = self.strategy();
         let journal = &self.journal;
         let mut results: Vec<Option<C::Item>> = strategy.run(
@@ -1051,16 +1052,27 @@ mod tests {
                 assert_eq!(batch[pos as usize], single);
             }
 
-            // A non-increasing batch errors deterministically even when fully cached.
-            let mut unsorted = positions.clone();
-            unsorted.swap(0, 1);
-            assert!(Contiguous::read_many(&journal, &unsorted).await.is_err());
-
             // An empty batch is a no-op, even with a multi-threaded strategy.
             assert!(Contiguous::read_many(&journal, &[])
                 .await
                 .unwrap()
                 .is_empty());
+        });
+    }
+
+    /// A non-increasing batch panics deterministically, even when fully cached.
+    #[test]
+    #[should_panic(expected = "positions must be strictly increasing")]
+    fn test_read_many_rejects_unsorted_positions() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut journal = create_empty_journal::<mmr::Family>(context, "unsorted").await;
+            for i in 0..2u8 {
+                let op = create_operation::<mmr::Family>(i);
+                journal.append(&op).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let _ = Contiguous::read_many(&journal, &[1, 0]).await;
         });
     }
 

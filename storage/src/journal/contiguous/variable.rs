@@ -854,9 +854,10 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         let mut buf = Vec::new();
         let mut prev: Option<u64> = None;
         for (i, &position) in positions.iter().enumerate() {
-            if prev.is_some_and(|p| position <= p) {
-                return Err(Error::PositionsNotIncreasing);
-            }
+            assert!(
+                prev.is_none_or(|p| position > p),
+                "positions must be strictly increasing"
+            );
             prev = Some(position);
             if let Some(item) = self.try_read_sync_into(position, &mut buf) {
                 result.push(Some(item));
@@ -2451,8 +2452,8 @@ mod tests {
     }
 
     #[test_traced]
+    #[should_panic(expected = "positions must be strictly increasing")]
     fn test_variable_read_many_rejects_unsorted_positions() {
-        // Non-increasing positions return an error rather than panicking.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -2472,17 +2473,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             let reader = journal.snapshot().await.unwrap();
-            assert!(matches!(
-                reader.read_many(&[2, 1]).await,
-                Err(Error::PositionsNotIncreasing)
-            ));
-            assert!(matches!(
-                reader.read_many(&[1, 1]).await,
-                Err(Error::PositionsNotIncreasing)
-            ));
-            drop(reader);
-
-            journal.destroy().await.unwrap();
+            let _ = reader.read_many(&[2, 1]).await;
         });
     }
 
