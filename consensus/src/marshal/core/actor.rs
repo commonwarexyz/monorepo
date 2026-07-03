@@ -120,12 +120,6 @@ where
     // ---------- State ----------
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
-    // Verified-block writes this lifetime, so a notarized/certified write can skip
-    // re-persisting a block the verified archive already holds. Reads consult the
-    // verified and notarized archives together (and both prune on the same
-    // boundary), so the verified copy is sufficient. The map is in-memory: after a
-    // restart the skip does not apply and the write goes through as usual.
-    verified_writes: BTreeMap<Round, <V::Block as Digestible>::Digest>,
     // Current processed floor and any pending floor update
     floor: Floor<P::Scheme, V::Commitment>,
     // Application delivery cursor
@@ -241,7 +235,6 @@ where
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 last_proposed_block: None,
-                verified_writes: BTreeMap::new(),
                 floor,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
@@ -628,7 +621,6 @@ where
                     .cache
                     .put_verified(round, digest, block.clone().into())
                     .await;
-                self.verified_writes.entry(round).or_insert(digest);
 
                 // Retain the block in memory so the subsequent `Forward` can
                 // broadcast it without reloading from storage. An older retained
@@ -649,7 +641,6 @@ where
                 // to make progress). A duplicate delivery is also a no-op, with
                 // the handle still covering the original write's durability.
                 let handle = self.cache.put_verified(round, digest, block.into()).await;
-                self.verified_writes.entry(round).or_insert(digest);
                 ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Certified {
@@ -665,7 +656,7 @@ where
                 // whose handle still covers the original write. If the round has
                 // already been pruned by tip advancement, both writes are no-ops
                 // because the round is below the retention floor.
-                let block_sync = if self.verified_writes.get(&round) == Some(&digest) {
+                let block_sync = if self.cache.has_verified(round, &digest).await {
                     debug!(?round, "certified block covered by verified write");
                     self.cache.start_sync_verified(round).await
                 } else {
@@ -704,7 +695,7 @@ where
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     self.ingest(&block, buffer, application, resolver).await;
-                    if self.verified_writes.get(&round) == Some(&digest) {
+                    if self.cache.has_verified(round, &digest).await {
                         debug!(?round, "notarized block covered by verified write");
                     } else {
                         let handle = self.cache.put_notarized(round, digest, block.into()).await;
@@ -2184,7 +2175,6 @@ where
             previous.view().saturating_sub(self.view_retention_timeout),
         );
         self.cache.prune_by_view(prune_round).await;
-        self.verified_writes = self.verified_writes.split_off(&prune_round);
 
         // Prune round-bound requests at or below the processed round.
         resolver.retain(handler::above_round_floor::<V::Commitment>(

@@ -8,7 +8,7 @@ use commonware_utils::{
 use std::{collections::HashMap, fmt::Debug, future::Future, hash::Hash, sync::Arc};
 use tracing::debug;
 
-type CertificationGateMap<D> = HashMap<(Round, D), oneshot::Receiver<bool>>;
+type GateMap<D> = HashMap<(Round, D), oneshot::Receiver<bool>>;
 
 /// A shared, thread-safe registry of in-flight certification gate tasks.
 ///
@@ -26,14 +26,14 @@ type CertificationGateMap<D> = HashMap<(Round, D), oneshot::Receiver<bool>>;
 /// taken (consumed) when certification is ready to act on the result. Stale
 /// entries are pruned after finalization via [`retain_after`](Self::retain_after).
 #[derive(Clone)]
-pub(crate) struct CertificationGates<D>
+pub(crate) struct Gates<D>
 where
     D: Eq + Hash,
 {
-    inner: Arc<Mutex<CertificationGateMap<D>>>,
+    inner: Arc<Mutex<GateMap<D>>>,
 }
 
-impl<D> Default for CertificationGates<D>
+impl<D> Default for Gates<D>
 where
     D: Eq + Hash,
 {
@@ -42,7 +42,7 @@ where
     }
 }
 
-impl<D> CertificationGates<D>
+impl<D> Gates<D>
 where
     D: Eq + Hash,
 {
@@ -71,7 +71,7 @@ where
     }
 }
 
-impl<D> CertificationGates<D>
+impl<D> Gates<D>
 where
     D: Eq + Hash + Copy,
 {
@@ -119,7 +119,7 @@ where
 /// `durable` is false only when the marshal actor is gone at shutdown (a real sync failure panics
 /// at its source), so a true-but-not-durable result abandons the gate. Returns the verdict to
 /// publish, or `None` to leave the gate unresolved.
-pub(crate) const fn gate_verdict(verdict: Option<bool>, durable: bool) -> Option<bool> {
+pub(crate) const fn handle(verdict: Option<bool>, durable: bool) -> Option<bool> {
     match verdict {
         Some(true) if !durable => None,
         other => other,
@@ -132,7 +132,7 @@ pub(crate) const fn gate_verdict(verdict: Option<bool>, durable: bool) -> Option
 /// A resolved verdict is published on `tx`. A dropped sender (the in-memory task is gone after
 /// restart) triggers `fallback`, whose receiver is awaited and published instead. A
 /// consensus-dropped receiver (`tx.closed()`) abandons the work.
-pub(crate) async fn drive_certify_gate<D, F, Fut>(
+pub(crate) async fn drive<D, F, Fut>(
     mut tx: oneshot::Sender<bool>,
     task: oneshot::Receiver<bool>,
     round: Round,
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_insert_and_take_returns_task() {
-        let tasks = CertificationGates::<D>::new();
+        let tasks = Gates::<D>::new();
         let digest = Sha256::hash(b"block");
         tasks.insert(round(1), digest, pending_task());
 
@@ -207,13 +207,13 @@ mod tests {
 
     #[test]
     fn test_take_absent_key_is_none() {
-        let tasks = CertificationGates::<D>::new();
+        let tasks = Gates::<D>::new();
         assert!(tasks.take(round(1), Sha256::hash(b"missing")).is_none());
     }
 
     #[test]
     fn test_take_distinguishes_rounds_and_digests() {
-        let tasks = CertificationGates::<D>::new();
+        let tasks = Gates::<D>::new();
         let digest_a = Sha256::hash(b"a");
         let digest_b = Sha256::hash(b"b");
         tasks.insert(round(1), digest_a, pending_task());
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_retain_after_drops_at_and_below_boundary() {
-        let tasks = CertificationGates::<D>::new();
+        let tasks = Gates::<D>::new();
         let digest = Sha256::hash(b"block");
         tasks.insert(round(1), digest, pending_task());
         tasks.insert(round(2), digest, pending_task());
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_retain_after_spans_epochs() {
-        let tasks = CertificationGates::<D>::new();
+        let tasks = Gates::<D>::new();
         let digest = Sha256::hash(b"block");
         let early = Round::new(Epoch::zero(), View::new(100));
         let late = Round::new(Epoch::new(1), View::zero());
@@ -272,29 +272,29 @@ mod tests {
 
     #[test]
     fn test_retain_after_empty_map_is_noop() {
-        let tasks = CertificationGates::<D>::new();
+        let tasks = Gates::<D>::new();
         tasks.retain_after(&round(5));
         assert!(tasks.take(round(5), Sha256::hash(b"x")).is_none());
     }
 
     #[test]
     fn test_default_matches_new() {
-        let default = <CertificationGates<D> as Default>::default();
+        let default = <Gates<D> as Default>::default();
         let digest = Sha256::hash(b"block");
         default.insert(round(1), digest, pending_task());
         assert!(default.take(round(1), digest).is_some());
     }
 
     #[test]
-    fn test_gate_verdict() {
+    fn test_handle() {
         // Verification stopped early: nothing to publish regardless of durability.
-        assert_eq!(gate_verdict(None, true), None);
-        assert_eq!(gate_verdict(None, false), None);
+        assert_eq!(handle(None, true), None);
+        assert_eq!(handle(None, false), None);
         // A false app verdict is a live rejection that needs no durability.
-        assert_eq!(gate_verdict(Some(false), false), Some(false));
-        assert_eq!(gate_verdict(Some(false), true), Some(false));
+        assert_eq!(handle(Some(false), false), Some(false));
+        assert_eq!(handle(Some(false), true), Some(false));
         // A true verdict publishes only once the store is durable.
-        assert_eq!(gate_verdict(Some(true), true), Some(true));
-        assert_eq!(gate_verdict(Some(true), false), None);
+        assert_eq!(handle(Some(true), true), Some(true));
+        assert_eq!(handle(Some(true), false), None);
     }
 }

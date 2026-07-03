@@ -44,7 +44,7 @@
 
 use crate::{
     marshal::{
-        application::certification_gates::{gate_verdict, CertificationGates},
+        application::gates::{self, Gates},
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             validation::{
@@ -142,7 +142,7 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    certification_gates: CertificationGates<B::Digest>,
+    gates: Gates<B::Digest>,
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
@@ -163,7 +163,7 @@ where
             application: self.application.clone(),
             marshal: self.marshal.clone(),
             epocher: self.epocher.clone(),
-            certification_gates: self.certification_gates.clone(),
+            gates: self.gates.clone(),
             build_duration: self.build_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
             ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
@@ -207,7 +207,7 @@ where
             application,
             marshal,
             epocher,
-            certification_gates: CertificationGates::new(),
+            gates: Gates::new(),
             build_duration,
             proposal_parent_fetch_duration,
             ancestor_fetch_duration,
@@ -242,7 +242,7 @@ where
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-        let certification_gates = self.certification_gates.clone();
+        let gates = self.gates.clone();
         let build_duration = self.build_duration.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
@@ -326,7 +326,7 @@ where
                     let digest = parent.digest();
 
                     let persist = marshal.verified_deferred(consensus_context.round, parent);
-                    certification_gates
+                    gates
                         .persist_and_defer(
                             consensus_context.round,
                             digest,
@@ -381,7 +381,7 @@ where
                 let digest = built_block.digest();
 
                 let persist = marshal.proposed_deferred(consensus_context.round, built_block);
-                certification_gates
+                gates
                     .persist_and_defer(
                         consensus_context.round,
                         digest,
@@ -406,7 +406,7 @@ where
     ///
     /// The notarize vote is cast as soon as application verification completes. The block's
     /// durable sync is deferred (it runs concurrently with consensus voting) and its
-    /// completion is registered in `certification_gates` for [`Self::certify`] to await before
+    /// completion is registered in `gates` for [`Self::certify`] to await before
     /// the finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.verify", level = "info", skip_all, fields(round = %context.round, digest = %digest))]
@@ -421,7 +421,7 @@ where
         // sender means verification did not complete and certification should use recovery fetch.
         let round = context.round;
         let (durable_tx, durable_rx) = oneshot::channel();
-        self.certification_gates.insert(round, digest, durable_rx);
+        self.gates.insert(round, digest, durable_rx);
 
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -473,26 +473,29 @@ where
                     Decision::Continue(block) => block,
                 };
 
-                // Non-reproposal path: fetch the expected parent and validate ancestry.
-                let parent =
-                    match fetch_and_validate_parent(&context, &block, &marshal, &mut tx).await {
+                // Start the candidate store immediately: it depends on neither the
+                // parent fetch (which may hit the network) nor the verdict below.
+                // Storing before validation is intentional: these caches provide
+                // candidate availability/recovery, not a validity decision. The
+                // notarize vote follows the app verdict, while certify awaits the
+                // registered gate that resolves true only after both app
+                // verification succeeds and the store is durable.
+                let store = marshal.verified(round, block.clone());
+                let verify_then_vote = async {
+                    // Non-reproposal path: fetch the expected parent and validate
+                    // ancestry.
+                    let parent = match fetch_and_validate_parent(
+                        &context, &block, &marshal, &mut tx,
+                    )
+                    .await
+                    {
                         Some(ParentCheck::Valid(parent)) => parent,
                         Some(ParentCheck::Invalid) => {
                             tx.send_lossy(false);
-                            durable_tx.send_lossy(false);
-                            return;
+                            return Some(false);
                         }
-                        None => return,
+                        None => return None,
                     };
-
-                // Run application verification and the candidate store concurrently. The
-                // block has passed structural ancestry checks, but may still fail application
-                // verification. Storing it now is intentional: these caches provide candidate
-                // availability/recovery, not an app-validity decision. The notarize vote
-                // follows the app verdict, while certify awaits the registered gate that
-                // resolves true only after both app verification succeeds and the store is durable.
-                let store = marshal.verified(round, block.clone());
-                let verify_then_vote = async {
                     let valid = run_app_verify(
                         runtime_context,
                         context,
@@ -510,7 +513,7 @@ where
                     valid
                 };
                 let (verdict, durable) = futures::join!(verify_then_vote, store);
-                if let Some(valid) = gate_verdict(verdict, durable) {
+                if let Some(valid) = gates::handle(verdict, durable) {
                     durable_tx.send_lossy(valid);
                 }
             }
@@ -537,7 +540,7 @@ where
         // once the block's sync handle completes. Awaiting it here is the durability barrier
         // for the finalize vote, and it lets the sync overlap consensus voting
         // instead of freezing certify with a fresh fsync.
-        let task = self.certification_gates.take(round, digest);
+        let task = self.gates.take(round, digest);
 
         // `verify()` waits only on local broadcast delivery, so nudge a
         // round-bound notarized fetch that can unblock the existing waiter
@@ -635,7 +638,7 @@ where
     /// Forwards consensus activity to the wrapped application reporter.
     fn report(&mut self, update: Self::Activity) -> Feedback {
         if let Update::Tip(tip_round, _, _) = &update {
-            self.certification_gates.retain_after(tip_round);
+            self.gates.retain_after(tip_round);
         }
         self.application.report(update)
     }

@@ -81,7 +81,7 @@
 use crate::{
     marshal::{
         application::{
-            certification_gates::{drive_certify_gate, gate_verdict, CertificationGates},
+            gates::{self, Gates},
             validation::{is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, Stage},
         },
         coding::{
@@ -173,7 +173,7 @@ where
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
-    certification_gates: CertificationGates<Commitment>,
+    gates: Gates<Commitment>,
 
     build_duration: Timed,
     verify_duration: Timed,
@@ -202,7 +202,7 @@ where
             scheme_provider: self.scheme_provider.clone(),
             epocher: self.epocher.clone(),
             strategy: self.strategy.clone(),
-            certification_gates: self.certification_gates.clone(),
+            gates: self.gates.clone(),
             build_duration: self.build_duration.clone(),
             verify_duration: self.verify_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
@@ -286,7 +286,7 @@ where
             scheme_provider,
             strategy,
             epocher,
-            certification_gates: CertificationGates::new(),
+            gates: Gates::new(),
 
             build_duration,
             verify_duration,
@@ -369,84 +369,83 @@ where
                     }
                 };
 
-                // The context supplies the certified parent round. Do not derive a
-                // height from the unverified child block for this lookup.
-                let fallback = core::CommitmentFallback::FetchByRound {
-                    round: Round::new(consensus_context.epoch(), parent_view),
-                };
-                let parent_request = marshal.subscribe_by_commitment(parent_commitment, fallback);
-                let parent = select! {
-                    _ = tx.closed() => {
-                        debug!(
-                            reason = "consensus dropped receiver",
-                            "skipping verification"
-                        );
-                        return;
-                    },
-                    result = parent_request => match result {
-                        Ok(parent) => parent,
-                        Err(_) => {
-                            debug!(reason = "failed to fetch parent", "skipping verification");
-                            return;
-                        }
-                    },
-                };
-
-                if let Err(err) = validate_block::<H, _, _>(
-                    &epocher,
-                    &block,
-                    &parent,
-                    &consensus_context,
-                    commitment,
-                    parent_commitment,
-                ) {
-                    debug!(
-                        ?err,
-                        expected_commitment = %commitment,
-                        block_commitment = %block.commitment(),
-                        expected_parent_commitment = %parent_commitment,
-                        parent_commitment = %parent.commitment(),
-                        expected_parent = %parent.digest(),
-                        block_parent = %block.parent(),
-                        parent_height = %parent.height(),
-                        block_height = %block.height(),
-                        "block failed coded invariant validation"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Run application verification and the candidate store concurrently.
-                // The block has passed coded structural checks, but may still fail
-                // application verification. Storing it now is intentional: these caches
-                // provide candidate availability/recovery, not an app-validity decision.
-                // This task gates the finalize vote by resolving true only after both
+                // Start the candidate store immediately: it depends on neither the
+                // parent fetch (which may hit the network) nor the verdict below.
+                // Storing before validation is intentional: these caches provide
+                // candidate availability/recovery, not a validity decision. This
+                // task gates the finalize vote by resolving true only after both
                 // app verification succeeds and the store is durable.
                 let store = stage.store(&marshal, round, block.clone());
-
-                let ancestry_stream = marshal.ancestor_stream(
-                    Arc::new(runtime_context.child("ancestor_stream")),
-                    [block.clone(), parent],
-                    ancestor_fetch_duration,
-                );
-                let validity_request = application
-                    .verify(
-                        (
-                            runtime_context.child("app_verify"),
-                            consensus_context.clone(),
-                        ),
-                        ancestry_stream,
-                    )
-                    .instrument(info_span!(
-                        "marshal.coding.application.verify",
-                        round = %consensus_context.round,
-                        commitment = %commitment,
-                        parent_view = parent_view.traced(),
-                        parent = %parent_commitment
-                    ));
-
-                // If consensus drops the receiver, we can stop work early.
                 let verify = async {
+                    // The context supplies the certified parent round. Do not derive a
+                    // height from the unverified child block for this lookup.
+                    let fallback = core::CommitmentFallback::FetchByRound {
+                        round: Round::new(consensus_context.epoch(), parent_view),
+                    };
+                    let parent_request =
+                        marshal.subscribe_by_commitment(parent_commitment, fallback);
+                    let parent = select! {
+                        _ = tx.closed() => {
+                            debug!(
+                                reason = "consensus dropped receiver",
+                                "skipping verification"
+                            );
+                            return None;
+                        },
+                        result = parent_request => match result {
+                            Ok(parent) => parent,
+                            Err(_) => {
+                                debug!(reason = "failed to fetch parent", "skipping verification");
+                                return None;
+                            }
+                        },
+                    };
+
+                    if let Err(err) = validate_block::<H, _, _>(
+                        &epocher,
+                        &block,
+                        &parent,
+                        &consensus_context,
+                        commitment,
+                        parent_commitment,
+                    ) {
+                        debug!(
+                            ?err,
+                            expected_commitment = %commitment,
+                            block_commitment = %block.commitment(),
+                            expected_parent_commitment = %parent_commitment,
+                            parent_commitment = %parent.commitment(),
+                            expected_parent = %parent.digest(),
+                            block_parent = %block.parent(),
+                            parent_height = %parent.height(),
+                            block_height = %block.height(),
+                            "block failed coded invariant validation"
+                        );
+                        return Some(false);
+                    }
+
+                    let ancestry_stream = marshal.ancestor_stream(
+                        Arc::new(runtime_context.child("ancestor_stream")),
+                        [block.clone(), parent],
+                        ancestor_fetch_duration,
+                    );
+                    let validity_request = application
+                        .verify(
+                            (
+                                runtime_context.child("app_verify"),
+                                consensus_context.clone(),
+                            ),
+                            ancestry_stream,
+                        )
+                        .instrument(info_span!(
+                            "marshal.coding.application.verify",
+                            round = %consensus_context.round,
+                            commitment = %commitment,
+                            parent_view = parent_view.traced(),
+                            parent = %parent_commitment
+                        ));
+
+                    // If consensus drops the receiver, we can stop work early.
                     let timer = verify_duration.timer(&runtime_context);
                     let result = select! {
                         _ = tx.closed() => {
@@ -466,7 +465,7 @@ where
                 // Publish only when the block is both valid and durable. App-invalid
                 // candidates may already be in the cache from the concurrent store above,
                 // so the gate verdict is the authority for consensus progress.
-                if let Some(application_valid) = gate_verdict(verdict, durable) {
+                if let Some(application_valid) = gates::handle(verdict, durable) {
                     tx.send_lossy(application_valid);
                 }
             }
@@ -617,7 +616,7 @@ where
             .child("certify_existing")
             .with_attribute("round", round);
         context.spawn(move |_| {
-            drive_certify_gate(tx, task, round, payload, move || async move {
+            gates::drive(tx, task, round, payload, move || async move {
                 marshaled
                     .certify_from_embedded_context(round, payload)
                     .await
@@ -673,7 +672,7 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
-        let certification_gates = self.certification_gates.clone();
+        let gates = self.gates.clone();
 
         // If there's no scheme for the current epoch, we cannot verify the proposal.
         // Send back a receiver with a dropped sender.
@@ -792,7 +791,7 @@ where
                     let round = consensus_context.round;
 
                     let persist = marshal.verified_deferred(round, parent);
-                    certification_gates
+                    gates
                         .persist_and_defer(
                             round,
                             commitment,
@@ -852,7 +851,7 @@ where
                 let round = consensus_context.round;
 
                 let persist = marshal.proposed_deferred(round, coded_block);
-                certification_gates
+                gates
                     .persist_and_defer(round, commitment, tx, persist, "proposed block")
                     .await;
             }
@@ -942,12 +941,12 @@ where
             let marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
             let round = consensus_context.round;
-            let certification_gates = self.certification_gates.clone();
+            let gates = self.gates.clone();
 
             // Register a certification gate task synchronously before spawning work so
             // `certify` can always find it (no race with task startup).
             let (task_tx, task_rx) = oneshot::channel();
-            certification_gates.insert(round, payload, task_rx);
+            gates.insert(round, payload, task_rx);
 
             let (mut tx, rx) = oneshot::channel();
             let context = self
@@ -1022,7 +1021,7 @@ where
         let task = self
             .deferred_verify(consensus_context, payload, None, Stage::Verified)
             .await;
-        self.certification_gates.insert(round, payload, task);
+        self.gates.insert(round, payload, task);
 
         match scheme.me() {
             Some(_) => {
@@ -1085,7 +1084,7 @@ where
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         // First, check for an in-progress certification gate task.
-        let task = self.certification_gates.take(round, payload);
+        let task = self.gates.take(round, payload);
         if let Some(task) = task {
             return self.certify_from_existing_task(round, payload, task).await;
         }
@@ -1139,7 +1138,7 @@ where
     fn report(&mut self, update: Self::Activity) -> Feedback {
         // Clean up certification gate tasks and contexts for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
-            self.certification_gates.retain_after(round);
+            self.gates.retain_after(round);
         }
         self.application.report(update)
     }

@@ -433,6 +433,11 @@ where
     }
 
     /// Add a finalization to the prunable archive.
+    ///
+    /// The blocking sync is intentional. A downstream application may write to
+    /// an external store once it observes a finalization's effects and then
+    /// assume the certificate is still readable from marshal after a restart.
+    /// Deferring this sync would silently break that recovery pattern.
     pub(crate) async fn put_finalization(
         &mut self,
         round: Round,
@@ -499,6 +504,22 @@ where
             .get(Identifier::Index(round.view().get()))
             .await
             .expect("failed to get notarization")
+    }
+
+    /// Returns whether the verified archive holds `digest` at `round`.
+    pub(crate) async fn has_verified(
+        &self,
+        round: Round,
+        digest: &<V::Block as Digestible>::Digest,
+    ) -> bool {
+        let Some(cache) = self.caches.get(&round.epoch()) else {
+            return false;
+        };
+        cache
+            .verified_blocks
+            .has_at(round.view().get(), digest)
+            .await
+            .expect("failed to check verified blocks")
     }
 
     /// Get the block previously persisted in the verified archive for `round`.
