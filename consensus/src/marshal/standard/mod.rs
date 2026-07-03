@@ -2008,200 +2008,106 @@ mod tests {
         }
     }
 
-    /// Regression for `Deferred::certify`'s `hint_notarized` bump. When `verify`
-    /// has an in-progress task with the block still missing locally, `certify`
-    /// must take that task AND nudge a round-bound notarized fetch; otherwise
-    /// the shared task would wait forever on a local subscription that nothing
-    /// drives. Removing the `hint_notarized` call makes this test hang.
+    /// Regression for certify's `hint_notarized` bump. When `verify` has an
+    /// in-progress certification gate with the block still missing locally,
+    /// `certify` must take that gate AND nudge a round-bound notarized fetch.
+    /// Otherwise the gate's verify task would wait forever on a local-only
+    /// subscription that nothing drives. Removing the `hint_notarized` call
+    /// makes this test hang.
     #[test_traced("WARN")]
-    fn test_standard_deferred_certify_bumps_notarized_fetch_for_pending_verify() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let me = participants[0].clone();
+    fn test_standard_certify_bumps_notarized_fetch_for_pending_verify() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let me = participants[0].clone();
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "deferred-certify-bumps-fetch",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
-            let mut wrapper = Wrapper::new(
-                WrapperKind::Deferred,
-                context.child("wrapper"),
-                mock_app,
-                marshal.clone(),
-            );
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                    context.child("validator"),
+                    &format!("certify-bumps-fetch-{kind:?}"),
+                    ConstantProvider::new(schemes[0].clone()),
+                    Application::<B>::manual_ack(),
+                    Some(RecordingBuffer::default()),
+                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                )
+                .await;
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block_context = Ctx {
-                round,
-                leader: me,
-                parent: (View::zero(), genesis.digest()),
-            };
-            let block =
-                B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
-            let digest = block.digest();
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let block_context = Ctx {
+                    round,
+                    leader: me,
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let block =
+                    B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
+                let digest = block.digest();
 
-            // `verify` registers a pending certification gate task; the optimistic
-            // task's `Wait` block subscription cannot pull from peers, so it
-            // stays parked until something delivers the block locally.
-            let verify_rx = wrapper.verify(block_context, digest).await;
+                // `verify` registers a pending certification gate whose `Wait`
+                // block subscription cannot pull from peers, so it stays parked
+                // until something delivers the block locally.
+                let verify_rx = wrapper.verify(block_context, digest).await;
 
-            // Stage the notarized response so the bump's fetch can resolve.
-            let proposal = Proposal::new(round, View::zero(), digest);
-            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-            resolver.respond_to_next_fetch((notarization, block).encode());
+                // Stage the notarized response so the bump's fetch can resolve.
+                let proposal = Proposal::new(round, View::zero(), digest);
+                let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
+                resolver.respond_to_next_fetch((notarization, block).encode());
 
-            // `certify` takes the in-progress task and calls `hint_notarized`,
-            // which issues a round-bound `Key::Notarized`. The recording
-            // resolver delivers; the marshal stores the block and wakes
-            // verify's digest subscription; deferred_verify produces the final
-            // verdict shared by both receivers.
-            let certify_rx = wrapper.certify(round, digest).await;
+                // `certify` takes the in-progress gate and calls `hint_notarized`,
+                // which issues a round-bound `Key::Notarized`. The recording
+                // resolver delivers, and the marshal stores the block and wakes
+                // verify's digest subscription, letting the pending verify task
+                // resolve the gate that certify awaits.
+                let certify_rx = wrapper.certify(round, digest).await;
 
-            select! {
-                result = verify_rx => {
-                    assert!(
-                        result.expect("verify resolves"),
-                        "optimistic verify should accept fetched block"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("verify must resolve after the notarized fetch delivers the block");
-                },
-            }
-            select! {
-                result = certify_rx => {
-                    assert!(
-                        result.expect("certify resolves"),
-                        "certify should succeed via the shared deferred_verify task"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("certify should resolve via the bumped notarized fetch");
-                },
-            }
+                select! {
+                    result = verify_rx => {
+                        assert!(
+                            result.expect("verify resolves"),
+                            "{kind:?}: verify should accept the fetched block"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!(
+                            "{kind:?}: verify must resolve after certification bumps a notarized fetch"
+                        );
+                    },
+                }
+                select! {
+                    result = certify_rx => {
+                        assert!(
+                            result.expect("certify resolves"),
+                            "{kind:?}: certify should succeed via the shared gate"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("{kind:?}: certify must resolve via the bumped notarized fetch");
+                    },
+                }
 
-            assert!(
-                resolver.fetches().iter().any(|fetch| matches!(
-                    (&fetch.key, &fetch.subscriber),
-                    (
-                        handler::Key::Notarized { round: request_round },
-                        handler::Annotation::Notarization { round: subscriber_round },
-                    ) if *request_round == round && *subscriber_round == round
-                )),
-                "certify must bump a notarized round fetch when verify is in progress"
-            );
-        });
-    }
-
-    /// Regression for `Inline::certify`'s `hint_notarized` bump, mirroring
-    /// [`test_standard_deferred_certify_bumps_notarized_fetch_for_pending_verify`].
-    /// When `verify` registered a certification gate but the block is still
-    /// missing locally, `certify` must nudge a round-bound notarized fetch
-    /// before awaiting the gate. Otherwise the verify task would wait forever
-    /// on a local-only subscription that nothing drives, stranding the
-    /// notarized block behind the gate.
-    #[test_traced("WARN")]
-    fn test_standard_inline_certify_bumps_notarized_fetch_for_pending_verify() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let me = participants[0].clone();
-
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "inline-certify-bumps-fetch",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
-            let mut wrapper = Wrapper::new(
-                WrapperKind::Inline,
-                context.child("wrapper"),
-                mock_app,
-                marshal.clone(),
-            );
-
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block_context = Ctx {
-                round,
-                leader: me,
-                parent: (View::zero(), genesis.digest()),
-            };
-            let block =
-                B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
-            let digest = block.digest();
-
-            // `verify` registers a pending certification gate whose `Wait`
-            // block subscription cannot pull from peers, so it stays parked
-            // until something delivers the block locally.
-            let verify_rx = wrapper.verify(block_context, digest).await;
-
-            // Stage the notarized response so the bump's fetch can resolve.
-            let proposal = Proposal::new(round, View::zero(), digest);
-            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-            resolver.respond_to_next_fetch((notarization, block).encode());
-
-            // `certify` takes the in-progress gate and calls `hint_notarized`,
-            // which issues a round-bound `Key::Notarized`. The recording
-            // resolver delivers, and the marshal stores the block and wakes
-            // verify's digest subscription, letting the inline verify task
-            // resolve the gate that certify awaits.
-            let certify_rx = wrapper.certify(round, digest).await;
-
-            select! {
-                result = verify_rx => {
-                    assert!(
-                        result.expect("verify resolves"),
-                        "inline verify should accept the fetched block"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("inline verify must resolve after certification bumps a notarized fetch");
-                },
-            }
-            select! {
-                result = certify_rx => {
-                    assert!(
-                        result.expect("certify resolves"),
-                        "inline certify should succeed via the shared gate"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("inline certify must resolve via the bumped notarized fetch");
-                },
-            }
-
-            assert!(
-                resolver.fetches().iter().any(|fetch| matches!(
-                    (&fetch.key, &fetch.subscriber),
-                    (
-                        handler::Key::Notarized { round: request_round },
-                        handler::Annotation::Notarization { round: subscriber_round },
-                    ) if *request_round == round && *subscriber_round == round
-                )),
-                "certify must bump a notarized round fetch when verify is in progress"
-            );
-        });
+                assert!(
+                    resolver.fetches().iter().any(|fetch| matches!(
+                        (&fetch.key, &fetch.subscriber),
+                        (
+                            handler::Key::Notarized { round: request_round },
+                            handler::Annotation::Notarization { round: subscriber_round },
+                        ) if *request_round == round && *subscriber_round == round
+                    )),
+                    "{kind:?}: certify must bump a notarized round fetch when verify is in progress"
+                );
+            });
+        }
     }
 
     /// Regression: if consensus drops the optimistic verify receiver before the

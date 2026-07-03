@@ -408,10 +408,10 @@ where
         digest: B::Digest,
         task: oneshot::Receiver<bool>,
     ) -> oneshot::Receiver<bool> {
-        // `verify()` waits only on local broadcast delivery; nudge a
-        // round-bound notarized fetch so the existing waiter can be
-        // unblocked if local broadcast never arrives. For the standard
-        // variant, the digest is also the variant commitment.
+        // `verify()` waits only on local broadcast delivery, so nudge a
+        // round-bound notarized fetch that can unblock the existing waiter
+        // if local broadcast never arrives. For the standard variant, the
+        // digest is also the variant commitment.
         self.marshal.hint_notarized(round, digest);
 
         // A completed gate is a live local verdict. After an unclean restart the

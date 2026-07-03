@@ -1456,6 +1456,56 @@ pub fn certify_persists_equivocated_block<H: TestHarness>() {
 /// restart, `verified()` acking durable success must imply B itself is
 /// recoverable, not merely covered by A's stale same-round write.
 pub fn verified_after_restart_reverify_same_round_implies_recoverable<H: TestHarness>() {
+    reverify_same_round_implies_recoverable::<H, _, _>(
+        "marshal.verified() returning true must imply get_block(&digest_b) \
+         recovers the verified same-round block after restart",
+        |mut handle, round, block_a, block_b| async move {
+            // Re-verify A (a replayed duplicate of the pre-crash write), then
+            // verify equivocated block B at the same round.
+            let mut peers: [ValidatorHandle<H>; 0] = [];
+            H::verify(&mut handle, round, &block_a, &mut peers).await;
+            H::verify(&mut handle, round, &block_b, &mut peers).await;
+        },
+    );
+}
+
+/// Regression: extends
+/// [`verified_after_restart_reverify_same_round_implies_recoverable`] through
+/// certification. The certify path may reuse the verified archive's covering
+/// sync for a block it believes that archive holds. A stale same-round write
+/// for A must not be treated as coverage for certifying B: `certified()`
+/// acking success must imply B is recoverable after restart.
+pub fn certify_after_restart_reverify_same_round_implies_recoverable<H: TestHarness>() {
+    reverify_same_round_implies_recoverable::<H, _, _>(
+        "marshal.certified() returning true must imply get_block(&digest_b) \
+         recovers the certified same-round block after restart",
+        |mut handle, round, _block_a, block_b| async move {
+            // Verify only equivocated block B, so certification is covered by
+            // B's verified write (the elision path) rather than a fresh
+            // notarized write, then certify it.
+            let mut peers: [ValidatorHandle<H>; 0] = [];
+            H::verify(&mut handle, round, &block_b, &mut peers).await;
+            assert!(
+                H::certify(&mut handle, round, &block_b).await,
+                "certify must ack"
+            );
+        },
+    );
+}
+
+/// Shared scaffolding for the same-round reverify-after-restart contracts.
+///
+/// Phase 1 verifies block A and crashes with it durable in the verified
+/// archive. `phase_two` runs on the restarted validator and exercises the
+/// equivocated same-round block B. Phase 3 restarts once more and asserts
+/// both candidates are recoverable by digest, panicking with `durable_claim`
+/// when B is missing.
+fn reverify_same_round_implies_recoverable<H, F, Fut>(durable_claim: &'static str, phase_two: F)
+where
+    H: TestHarness,
+    F: FnOnce(ValidatorHandle<H>, Round, H::TestBlock, H::TestBlock) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
     let Fixture {
         participants,
         schemes,
@@ -1517,9 +1567,9 @@ pub fn verified_after_restart_reverify_same_round_implies_recoverable<H: TestHar
         }
     });
 
-    // Phase 2: restart, re-verify A (a replayed duplicate of the pre-crash
-    // write), and verify equivocated block B at the same round, then crash
-    // again. A's pre-crash write must not stand in for B's durability.
+    // Phase 2: restart and exercise equivocated block B at the same round,
+    // then crash again. A's pre-crash write must not stand in for B's
+    // durability.
     let (_, checkpoint) = deterministic::Runner::from(checkpoint).start_and_recover({
         let participants = participants.clone();
         let me = me.clone();
@@ -1541,13 +1591,11 @@ pub fn verified_after_restart_reverify_same_round_implies_recoverable<H: TestHar
                 provider.clone(),
             )
             .await;
-            let mut handle = ValidatorHandle::<H> {
+            let handle = ValidatorHandle::<H> {
                 mailbox: setup.mailbox,
                 extra: setup.extra,
             };
-            let mut peers: [ValidatorHandle<H>; 0] = [];
-            H::verify(&mut handle, round, &block_a, &mut peers).await;
-            H::verify(&mut handle, round, &block_b, &mut peers).await;
+            phase_two(handle, round, block_a, block_b).await;
         }
     });
 
@@ -1577,152 +1625,7 @@ pub fn verified_after_restart_reverify_same_round_implies_recoverable<H: TestHar
             .mailbox
             .get_block(&digest_b)
             .await
-            .unwrap_or_else(|| {
-                panic!(
-                    "marshal.verified() returning true must imply get_block(&digest_b) \
-                     recovers the verified same-round block after restart"
-                )
-            });
-        assert_eq!(recovered.digest(), digest_b);
-    });
-}
-
-/// Regression: extends
-/// [`verified_after_restart_reverify_same_round_implies_recoverable`] through
-/// certification. The certify path may reuse the verified archive's covering
-/// sync for a block it believes that archive holds. A stale same-round write
-/// for A must not be treated as coverage for certifying B: `certified()`
-/// acking success must imply B is recoverable after restart.
-pub fn certify_after_restart_reverify_same_round_implies_recoverable<H: TestHarness>() {
-    let Fixture {
-        participants,
-        schemes,
-        ..
-    } = bls12381_threshold_vrf::fixture::<V, _>(&mut test_rng_seeded(0), NAMESPACE, NUM_VALIDATORS);
-
-    let me = participants[0].clone();
-    let provider = ConstantProvider::new(schemes[0].clone());
-    let round = Round::new(Epoch::zero(), View::new(1));
-    let parent = Sha256::hash(b"");
-    let parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
-
-    // Two distinct blocks at the same height/round (leader equivocation):
-    // distinct timestamps yield distinct digests.
-    let block_a = H::make_test_block(
-        parent,
-        parent_commitment,
-        Height::new(1),
-        1,
-        NUM_VALIDATORS as u16,
-    );
-    let digest_a = H::digest(&block_a);
-    let block_b = H::make_test_block(
-        parent,
-        parent_commitment,
-        Height::new(1),
-        2,
-        NUM_VALIDATORS as u16,
-    );
-    let digest_b = H::digest(&block_b);
-    assert_ne!(digest_a, digest_b, "test requires distinct digests");
-
-    // Phase 1: verify block A, then crash with A durable in the verified archive.
-    let (_, checkpoint) = contract_runner(0).start_and_recover({
-        let participants = participants.clone();
-        let me = me.clone();
-        let provider = provider.clone();
-        move |context| async move {
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
-            )
-            .await;
-            let setup = H::setup_validator(
-                context.child("validator").with_attribute("index", 0),
-                &mut oracle,
-                me.clone(),
-                provider.clone(),
-            )
-            .await;
-            let mut handle = ValidatorHandle::<H> {
-                mailbox: setup.mailbox,
-                extra: setup.extra,
-            };
-            let mut peers: [ValidatorHandle<H>; 0] = [];
-            H::verify(&mut handle, round, &block_a, &mut peers).await;
-        }
-    });
-
-    // Phase 2: restart, verify equivocated block B at the same round, and
-    // certify it, then crash again. Certification acked success, so B must
-    // survive the crash.
-    let (_, checkpoint) = deterministic::Runner::from(checkpoint).start_and_recover({
-        let participants = participants.clone();
-        let me = me.clone();
-        let provider = provider.clone();
-        move |context| async move {
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
-            )
-            .await;
-            let setup = H::setup_validator(
-                context
-                    .child("validator")
-                    .with_attribute("index", 0)
-                    .with_attribute("restart", 0),
-                &mut oracle,
-                me.clone(),
-                provider.clone(),
-            )
-            .await;
-            let mut handle = ValidatorHandle::<H> {
-                mailbox: setup.mailbox,
-                extra: setup.extra,
-            };
-            let mut peers: [ValidatorHandle<H>; 0] = [];
-            H::verify(&mut handle, round, &block_b, &mut peers).await;
-            assert!(
-                H::certify(&mut handle, round, &block_b).await,
-                "certify must ack"
-            );
-        }
-    });
-
-    // Phase 3: both same-round candidates must be recoverable.
-    deterministic::Runner::from(checkpoint).start(move |context| async move {
-        let mut oracle = setup_network_with_participants(
-            context.child("network"),
-            NZUsize!(1),
-            participants.clone(),
-        )
-        .await;
-        let restarted = H::setup_validator(
-            context
-                .child("validator")
-                .with_attribute("index", 0)
-                .with_attribute("restart", 1),
-            &mut oracle,
-            me.clone(),
-            provider.clone(),
-        )
-        .await;
-        assert!(
-            restarted.mailbox.get_block(&digest_a).await.is_some(),
-            "pre-restart verified block A must remain recoverable"
-        );
-        let recovered = restarted
-            .mailbox
-            .get_block(&digest_b)
-            .await
-            .unwrap_or_else(|| {
-                panic!(
-                    "marshal.certified() returning true must imply get_block(&digest_b) \
-                     recovers the certified same-round block after restart"
-                )
-            });
+            .unwrap_or_else(|| panic!("{durable_claim}"));
         assert_eq!(recovered.digest(), digest_b);
     });
 }

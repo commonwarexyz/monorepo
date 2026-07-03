@@ -2874,10 +2874,9 @@ mod tests {
     /// Regression: if marshal already holds a verified block for a round
     /// (say, persisted by a pre-crash propose whose notarize vote never
     /// reached the journal), a restarted leader's `propose` must return
-    /// that block's commitment instead of rebuilding. Otherwise the
-    /// new block lands on the same view index in the prunable archive,
-    /// gets silently dropped (`skip_if_index_exists=true`), and the
-    /// leader's notarize targets a commitment no peer can serve.
+    /// that block's commitment instead of rebuilding. The pre-crash
+    /// commitment may already have been broadcast, so proposing a rebuilt
+    /// block for the same round would equivocate.
     #[test_traced("WARN")]
     fn test_propose_reuses_verified_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));

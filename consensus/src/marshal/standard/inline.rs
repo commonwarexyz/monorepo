@@ -539,10 +539,10 @@ where
         // instead of freezing certify with a fresh fsync.
         let task = self.certification_gates.take(round, digest);
 
-        // `verify()` waits only on local broadcast delivery; nudge a
-        // round-bound notarized fetch so the existing waiter can be
-        // unblocked if local broadcast never arrives. For the standard
-        // variant, the digest is also the variant commitment.
+        // `verify()` waits only on local broadcast delivery, so nudge a
+        // round-bound notarized fetch that can unblock the existing waiter
+        // if local broadcast never arrives. For the standard variant, the
+        // digest is also the variant commitment.
         if task.is_some() {
             self.marshal.hint_notarized(round, digest);
         }
@@ -1319,9 +1319,10 @@ mod tests {
     /// for that round. The cached block was built against a parent context
     /// that replay may have changed, so reusing it can broadcast a proposal
     /// whose payload no longer matches the recovered header. Building a
-    /// fresh block would also be unsafe because the prunable archive silently
-    /// drops the second write at the same view index. Dropping the receiver
-    /// lets the voter nullify the view via `MissingProposal`.
+    /// fresh block would also be unsafe because the pre-crash digest may
+    /// already have been broadcast, so a second proposal for the round would
+    /// equivocate. Dropping the receiver lets the voter nullify the view via
+    /// `MissingProposal`.
     #[test_traced("WARN")]
     fn test_propose_skips_when_verified_block_exists_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
