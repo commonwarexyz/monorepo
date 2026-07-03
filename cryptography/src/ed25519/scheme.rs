@@ -318,11 +318,6 @@ impl arbitrary::Arbitrary<'_> for Signature {
 }
 
 /// Ed25519 Batch Verifier.
-///
-/// Each added item copies its framed payload (namespace and message) into the
-/// batch and retains it until verification, where per-signature hashing runs
-/// under the caller's [Strategy]. A batch therefore holds memory proportional
-/// to the total payload bytes added.
 pub struct Batch {
     verifier: ed_core::batch::Verifier,
 }
