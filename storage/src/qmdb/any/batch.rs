@@ -213,9 +213,7 @@ type StagedResolution<F, U> = Option<(Location<F>, <U as update::Update>::Cached
 /// Staged batch returned by [`UnmerkleizedBatch::stage`].
 ///
 /// Owns the batch and the locations its reads resolved, so the staged reads cannot be paired with a
-/// different batch. `keys` and `resolutions` are parallel vectors indexed by staged read slot;
-/// they are kept separate so the read path only streams the 16-byte resolutions while the update
-/// path only hashes the keys.
+/// different batch.
 pub struct Staged<F: Family, H, U, S: Strategy>
 where
     U: update::Update + Send + Sync,
