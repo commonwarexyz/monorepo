@@ -1,6 +1,6 @@
-//! Standalone, opt-in large-scale measurement of two QMDB operations at multi-GB scale: building a
-//! database (`generate`) and reopening it, i.e. rebuilding the snapshot (`bench`), with the
-//! init-time `(location -> key)` cache off vs on.
+//! Standalone, opt-in large-scale measurement of QMDB operations at multi-GB scale: building a
+//! database (`generate`), reopening it, i.e. rebuilding the snapshot (`bench`, with the init-time
+//! `(location -> key)` cache off vs on), and random point reads against it (`get`).
 //!
 //! The criterion init benchmark ([init](super::init)) can't reach these sizes: it resamples, and the
 //! database is multi-GB. This binary instead builds a *real* on-disk database once and then times a
@@ -13,10 +13,10 @@
 //! elapsed build time. A folder names the database's on-disk location:
 //!
 //! ```text
-//! cargo bench -p commonware-storage --bench init_scale --features test-traits -- generate /tmp/db 50000000 250000000 [zipf_exponent] [page_size]
-//! cargo bench -p commonware-storage --bench init_scale --features test-traits -- bench    /tmp/db [page_size]
-//! cargo bench -p commonware-storage --bench init_scale --features test-traits -- get      /tmp/db 50000000 100000 1,8,32 [page_size]
-//! cargo bench -p commonware-storage --bench init_scale --features test-traits -- destroy  /tmp/db
+//! cargo bench -p commonware-storage --bench scale --features test-traits -- generate /tmp/db 50000000 250000000 [zipf_exponent] [page_size]
+//! cargo bench -p commonware-storage --bench scale --features test-traits -- bench    /tmp/db [page_size]
+//! cargo bench -p commonware-storage --bench scale --features test-traits -- get      /tmp/db 50000000 100000 1,8,32 [page_size]
+//! cargo bench -p commonware-storage --bench scale --features test-traits -- destroy  /tmp/db
 //! ```
 //!
 //! `generate` applies `num_updates` random updates (~1 in `DELETE_FREQUENCY` are deletes) over a
@@ -237,7 +237,7 @@ fn bench(folder: &str, page_size: NonZeroU16) {
         );
         return;
     }
-    println!("init_scale: {folder}  (any::ordered::fixed::mmr, logical page size {page_size})");
+    println!("scale: {folder}  (any::ordered::fixed::mmr, logical page size {page_size})");
     println!("  replay region R = {region} ops");
     println!("  cache=off          : {baseline:?}");
     let _ = std::io::stdout().flush();
