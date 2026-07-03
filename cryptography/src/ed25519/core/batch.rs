@@ -23,11 +23,11 @@
 //! detects multiple signatures created with the same verification key and
 //! automatically coalesces terms in the final verification equation. Signatures
 //! are sharded for parallel verification, so coalescing applies to signatures
-//! that land in the same shard. Shards are contiguous ranges of the queue, so
-//! callers that queue signatures sharing a verification key adjacently
-//! maximize coalescing. In the limiting case where all signatures in
-//! the batch are made with the same verification key, coalesced batch
-//! verification runs twice as fast as ordinary batch verification.
+//! that land in the same shard. Signatures sharing a verification key are
+//! partitioned into the same shard regardless of queue order. In the limiting
+//! case where all signatures in the batch are made with the same verification
+//! key, coalesced batch verification runs twice as fast as ordinary batch
+//! verification.
 //!
 //! ![benchmark](https://www.zfnd.org/images/coalesced-batch-graph.png)
 //!
@@ -41,7 +41,7 @@ use super::{Error, Signature, VerificationKey, VerificationKeyBytes};
 use crate::transcript::{Summary, Transcript};
 use ahash::RandomState;
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_utils::union_unique;
@@ -110,109 +110,162 @@ impl Verifier {
     /// verifications. This function does not have the same verification criteria
     /// as individual verification, which may reject some signatures this method
     /// accepts.
-    #[allow(non_snake_case)]
     pub fn verify<R: RngCore + CryptoRng>(
         self,
         mut rng: R,
         strategy: &impl Strategy,
     ) -> Result<(), Error> {
-        // Split all signatures into shards for parallel processing. Each shard is roughly
-        // `n_signatures / cores` in size. Random seeds are generated for each shard, derived
-        // from the provided RNG, to compute a random scalar for each signature in the shard.
+        // Seeds are drawn before an execution path is chosen so both paths
+        // can borrow them.
         let manual = strategy.manual();
-        let shard_count = manual.parallelism_hint().min(self.signatures.len().max(1));
-        let shard_size = self.signatures.len().div_ceil(shard_count).max(1);
-        let mut shards = Vec::with_capacity(shard_count);
-        for shard in self.signatures.chunks(shard_size) {
-            let seed = Summary::random(&mut rng);
-            shards.push((shard, seed));
+        let total = self.signatures.len();
+        let shard_count = manual.parallelism_hint().min(total.max(1));
+        let seeds: Vec<Summary> = (0..shard_count)
+            .map(|_| Summary::random(&mut rng))
+            .collect();
+
+        strategy.run(
+            total,
+            // Serial verification checks the whole batch as one equation, so
+            // coalescing is global and no partition is needed.
+            || Self::verify_shard(self.signatures.iter(), total, seeds[0]),
+            // Parallel verification partitions the batch so signatures
+            // sharing a verification key coalesce within their shard, then
+            // checks one equation per shard.
+            || {
+                let order = Self::partition(&self.signatures);
+                let shard_size = total.div_ceil(shard_count).max(1);
+                let shards: Vec<_> = order
+                    .chunks(shard_size)
+                    .zip(seeds.iter().copied())
+                    .collect();
+                manual.fold(
+                    shards,
+                    || Ok(()),
+                    |result, (shard, seed)| {
+                        result?;
+                        Self::verify_shard(
+                            shard.iter().map(|&idx| &self.signatures[idx]),
+                            shard.len(),
+                            seed,
+                        )
+                    },
+                    |left, right| left.and(right),
+                )
+            },
+        )
+    }
+
+    /// Build an iteration order in which signatures sharing a verification
+    /// key occupy one contiguous run, using a counting sort on each key's
+    /// first byte. Chunking the order into equal-size shards then places
+    /// signatures sharing a key into the same shard, while skewed batches
+    /// (like a single signer) still split evenly across shards. Keys crafted
+    /// to share a first byte just forfeit the grouping, which costs no more
+    /// than the unpartitioned order.
+    fn partition(signatures: &[(VerificationKey, Vec<u8>, Signature)]) -> Vec<usize> {
+        let mut counts = [0; 256];
+        for (vk, _, _) in signatures {
+            counts[vk.as_bytes()[0] as usize] += 1;
+        }
+        let mut offsets = [0; 256];
+        let mut acc = 0;
+        for (offset, count) in offsets.iter_mut().zip(counts) {
+            *offset = acc;
+            acc += count;
+        }
+        let mut order = vec![0; signatures.len()];
+        for (i, (vk, _, _)) in signatures.iter().enumerate() {
+            let bucket = vk.as_bytes()[0] as usize;
+            order[offsets[bucket]] = i;
+            offsets[bucket] += 1;
+        }
+        order
+    }
+
+    /// Verify `n` signatures as a single verification equation, drawing a
+    /// randomizer for each signature from `seed`.
+    #[allow(non_snake_case)]
+    fn verify_shard<'a>(
+        items: impl Iterator<Item = &'a (VerificationKey, Vec<u8>, Signature)>,
+        n: usize,
+        seed: Summary,
+    ) -> Result<(), Error> {
+        let mut rng = Transcript::resume(seed).noise(NOISE_BATCH_VERIFY);
+
+        // The batch verification equation is
+        //
+        // [-sum(z_i * s_i)]B + sum([z_i]R_i) + sum([z_i * k_i]A_i) = 0.
+        //
+        // where for each signature i,
+        // - A_i is the verification key;
+        // - R_i is the signature's R value;
+        // - s_i is the signature's s value;
+        // - k_i is the hash of the message and other data, computed
+        //   here so the per-signature SHA-512 work runs under the
+        //   caller's strategy;
+        // - z_i is a random 128-bit Scalar.
+        //
+        // Normally n signatures would require a multiscalar multiplication of
+        // size 2*n + 1, together with 2*n point decompressions (to obtain A_i
+        // and R_i). However, by grouping the entries by verification key, we
+        // can "coalesce" all z_i * k_i terms for each distinct verification
+        // key into a single coefficient.
+        //
+        // For n signatures from m verification keys, this approach instead
+        // requires a multiscalar multiplication of size n + m + 1 together with
+        // only n point decompressions because verification keys are decompressed
+        // before they are queued. When m = n, so all signatures are from
+        // distinct verification keys, this saves n decompressions relative to
+        // the usual method. However, when m = 1 and all signatures are from a
+        // single verification key, this is nearly twice as fast.
+
+        // Group the signatures by verification key. hashbrown's map with the
+        // ahash hasher stands in for ahash::AHashMap, which wraps
+        // std::collections::HashMap and is unavailable in no_std builds.
+        let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
+            HashMap::with_capacity_and_hasher(n, RandomState::default());
+        let mut A_coeffs: Vec<Scalar> = Vec::with_capacity(n);
+        let mut As = Vec::with_capacity(n);
+        let mut R_coeffs = Vec::with_capacity(n);
+        let mut Rs = Vec::with_capacity(n);
+        let mut B_coeff = Scalar::ZERO;
+
+        for (vk, payload, sig) in items {
+            let k = super::scalar_from_hash(
+                Sha512::default()
+                    .chain(&sig.R_bytes[..])
+                    .chain(vk.as_bytes())
+                    .chain(payload),
+            );
+            let R = CompressedEdwardsY(sig.R_bytes)
+                .decompress()
+                .ok_or(Error::InvalidSignature)?;
+            let s = Scalar::from_canonical_bytes(sig.s_bytes)
+                .into_option()
+                .ok_or(Error::InvalidSignature)?;
+            let z = Scalar::from(gen_u128(&mut rng));
+            B_coeff -= z * s;
+            Rs.push(R);
+            R_coeffs.push(z);
+            let index = *key_indices.entry(&vk.A_bytes).or_insert_with(|| {
+                As.push(-vk.minus_A);
+                A_coeffs.push(Scalar::ZERO);
+                As.len() - 1
+            });
+            A_coeffs[index] += z * k;
         }
 
-        manual.fold(
-            shards,
-            || Ok(()),
-            |result, (shard, seed)| {
-                result?;
-                let mut rng = Transcript::resume(seed).noise(NOISE_BATCH_VERIFY);
+        let check = EdwardsPoint::vartime_multiscalar_mul(
+            once(&B_coeff).chain(A_coeffs.iter()).chain(R_coeffs.iter()),
+            once(&B).chain(As.iter()).chain(Rs.iter()),
+        );
 
-                // The batch verification equation is
-                //
-                // [-sum(z_i * s_i)]B + sum([z_i]R_i) + sum([z_i * k_i]A_i) = 0.
-                //
-                // where for each signature i,
-                // - A_i is the verification key;
-                // - R_i is the signature's R value;
-                // - s_i is the signature's s value;
-                // - k_i is the hash of the message and other data, computed
-                //   here so the per-signature SHA-512 work runs under the
-                //   caller's strategy;
-                // - z_i is a random 128-bit Scalar.
-                //
-                // Normally n signatures would require a multiscalar multiplication of
-                // size 2*n + 1, together with 2*n point decompressions (to obtain A_i
-                // and R_i). However, by grouping the shard's entries by verification
-                // key, we can "coalesce" all z_i * k_i terms for each distinct
-                // verification key into a single coefficient.
-                //
-                // For n signatures from m verification keys, this approach instead
-                // requires a multiscalar multiplication of size n + m + 1 together with
-                // only n point decompressions because verification keys are decompressed
-                // before they are queued. When m = n, so all signatures are from
-                // distinct verification keys, this saves n decompressions relative to
-                // the usual method. However, when m = 1 and all signatures are from a
-                // single verification key, this is nearly twice as fast.
-
-                // Group the shard's signatures by verification key. hashbrown's
-                // map with the ahash hasher stands in for ahash::AHashMap, which
-                // wraps std::collections::HashMap and is unavailable in no_std
-                // builds.
-                let n = shard.len();
-                let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
-                    HashMap::with_capacity_and_hasher(n, RandomState::default());
-                let mut A_coeffs: Vec<Scalar> = Vec::with_capacity(n);
-                let mut As = Vec::with_capacity(n);
-                let mut R_coeffs = Vec::with_capacity(n);
-                let mut Rs = Vec::with_capacity(n);
-                let mut B_coeff = Scalar::ZERO;
-
-                for (vk, payload, sig) in shard {
-                    let k = super::scalar_from_hash(
-                        Sha512::default()
-                            .chain(&sig.R_bytes[..])
-                            .chain(vk.as_bytes())
-                            .chain(payload),
-                    );
-                    let R = CompressedEdwardsY(sig.R_bytes)
-                        .decompress()
-                        .ok_or(Error::InvalidSignature)?;
-                    let s = Scalar::from_canonical_bytes(sig.s_bytes)
-                        .into_option()
-                        .ok_or(Error::InvalidSignature)?;
-                    let z = Scalar::from(gen_u128(&mut rng));
-                    B_coeff -= z * s;
-                    Rs.push(R);
-                    R_coeffs.push(z);
-                    let index = *key_indices.entry(&vk.A_bytes).or_insert_with(|| {
-                        As.push(-vk.minus_A);
-                        A_coeffs.push(Scalar::ZERO);
-                        As.len() - 1
-                    });
-                    A_coeffs[index] += z * k;
-                }
-
-                let check = EdwardsPoint::vartime_multiscalar_mul(
-                    once(&B_coeff).chain(A_coeffs.iter()).chain(R_coeffs.iter()),
-                    once(&B).chain(As.iter()).chain(Rs.iter()),
-                );
-
-                if check.mul_by_cofactor().is_identity() {
-                    Ok(())
-                } else {
-                    Err(Error::InvalidSignature)
-                }
-            },
-            |left, right| left.and(right),
-        )
+        if check.mul_by_cofactor().is_identity() {
+            Ok(())
+        } else {
+            Err(Error::InvalidSignature)
+        }
     }
 }
 
@@ -275,9 +328,9 @@ mod tests {
 
     #[test]
     fn test_verify_interleaved_duplicate_keys() {
-        // Round-robin queueing scatters each signer's signatures across shard
-        // boundaries, exercising coalescing of non-adjacent duplicate keys
-        // within a shard and duplicate keys split across shards.
+        // Round-robin queueing scatters each signer's signatures across the
+        // queue, exercising the partition that regroups them into shards and
+        // coalescing of duplicate keys within and across shard boundaries.
         let grouped = signatures(2, 6);
         let mut items = Vec::with_capacity(grouped.len());
         for i in 0..6 {
