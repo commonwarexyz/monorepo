@@ -1,11 +1,11 @@
 //! Standalone, opt-in large-scale measurement of QMDB operations at multi-GB scale: building a
-//! database (`generate`), reopening it, i.e. rebuilding the snapshot (`bench`, with the init-time
+//! database (`generate`), reopening it, i.e. rebuilding the snapshot (`init`, with the init-time
 //! `(location -> key)` cache off vs on), and random point reads against it (`get`).
 //!
-//! The criterion init benchmark ([init](super::init)) can't reach these sizes: it resamples, and the
-//! database is multi-GB. This binary instead builds a *real* on-disk database once and then times a
-//! *real* reopen ([`Db::init`], i.e. `build_snapshot_from_log`) at several cache sizes, so the
-//! cache's effect on the redundant collision-resolution log reads shows at scale.
+//! The criterion init benchmark ([init](super::init)) can't reach these sizes: it resamples, and
+//! the database is multi-GB. This binary instead builds a *real* on-disk database once and then
+//! times a *real* reopen ([`Db::init`], i.e. `build_snapshot_from_log`) at several cache sizes, so
+//! the cache's effect on the redundant collision-resolution log reads shows at scale.
 //!
 //! Generation and benchmarking are split so the (multi-minute, multi-GB) database is built once and
 //! reused across many reopen runs -- but generation is itself an interesting benchmark: building a
@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! cargo bench -p commonware-storage --bench scale --features test-traits -- generate /tmp/db 50000000 250000000 [zipf_exponent] [page_size]
-//! cargo bench -p commonware-storage --bench scale --features test-traits -- bench    /tmp/db [page_size]
+//! cargo bench -p commonware-storage --bench scale --features test-traits -- init     /tmp/db [page_size]
 //! cargo bench -p commonware-storage --bench scale --features test-traits -- get      /tmp/db 50000000 100000 1,8,32 [page_size]
 //! cargo bench -p commonware-storage --bench scale --features test-traits -- destroy  /tmp/db
 //! ```
@@ -22,24 +22,24 @@
 //! `generate` applies `num_updates` random updates (~1 in `DELETE_FREQUENCY` are deletes) over a
 //! `keyspace`-key index space, sampling each key uniformly or via Zipf -- there is no separate seed
 //! phase, so the populated set fills organically as keys are sampled. The optional `zipf_exponent`
-//! arg selects the distribution -- omitted is the default Zipf (`KEY_ZIPF_EXPONENT`), `0` is uniform
-//! -- so a uniform and a skewed database differ only in that distribution. It then prunes and syncs,
-//! reporting the total build time. `bench` reopens it (read-only) at cache off / a quarter of the
-//! replay region / the whole replay region, reporting each init time plus the replay-region size `R`
-//! (what the cache must cover to avoid eviction).
+//! arg selects the distribution -- omitted is the default Zipf (`KEY_ZIPF_EXPONENT`), `0` is
+//! uniform -- so a uniform and a skewed database differ only in that distribution. It then prunes
+//! and syncs, reporting the total build time. `init` reopens it (read-only) at cache off / a
+//! quarter of the replay region / the whole replay region, reporting each init time plus the
+//! replay-region size `R` (what the cache must cover to avoid eviction).
 //!
 //! The optional `page_size` arg (logical bytes; default 16384) selects the page geometry; a
-//! database must be `bench`ed with the page size it was generated with. Physical pages are 12
-//! bytes larger than logical ones (the per-page CRC record), so e.g. logical 16372 produces
-//! 16384-byte physical pages.
+//! database must be reopened (`init`) with the page size it was generated with. Physical pages are 12 bytes
+//! larger than logical ones (the per-page CRC record), so e.g. logical 16372 produces 16384-byte
+//! physical pages.
 //!
-//! `get` times random point reads through the full stack (index lookup, page cache, blob read):
-//! it opens the database (untimed), then for each entry in the comma-separated concurrency list
-//! drops the OS page cache in-process (init's replay warms it) and runs a cold pass of `num_gets`
-//! uniform-random gets across that many spawned reader tasks, followed by a warm pass over the
-//! same keys as a control. Keys are sampled the same way `generate` derives them (`Sha256(index)`
-//! over the keyspace), so nearly all gets hit a live key. The in-process page cache is
-//! deliberately tiny in this mode so reads reach the storage layer.
+//! `get` times random point reads through the full stack (index lookup, page cache, blob read): it
+//! opens the database (untimed), then for each entry in the comma-separated concurrency list drops
+//! the OS page cache in-process (init's replay warms it) and runs a cold pass of `num_gets`
+//! uniform-random gets across that many spawned reader tasks, followed by a warm pass over the same
+//! keys as a control. Keys are sampled the same way `generate` derives them (`Sha256(index)` over
+//! the keyspace), so nearly all gets hit a live key. The in-process page cache is deliberately tiny
+//! in this mode so reads reach the storage layer.
 
 #[allow(dead_code, unused_imports, unused_macros)]
 #[path = "common.rs"]
@@ -67,7 +67,7 @@ use std::{
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 
 /// Page cache size, realistic for a multi-GB database rather than the shared bench default of 8 MB
-/// (512 pages). Both `generate` and `bench` use it, so the init-cache benefit is measured on top of
+/// (512 pages). Both `generate` and `init` use it, so the init-cache benefit is measured on top of
 /// a realistic page cache instead of an unrealistically tiny one. 65536 * 16 KiB = 1 GiB.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(65536);
 
@@ -86,7 +86,7 @@ const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [page_size]   build a database (omit exponent => zipf 1.0; 0 => uniform; page_size = logical bytes, default 16384)\n  bench    <folder> [page_size]  reopen + time init at cache off / R/4 / R (page_size must match generate)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,<concurrency>...] [page_size]   time random point reads (per concurrency: cold after an in-process cache drop, then warm)\n  destroy  <folder>              delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [page_size]   build a database (omit exponent => zipf 1.0; 0 => uniform; page_size = logical bytes, default 16384)\n  init     <folder> [page_size]  reopen + time init at cache off / R/4 / R (page_size must match generate)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,<concurrency>...] [page_size]   time random point reads (per concurrency: cold after an in-process cache drop, then warm)\n  destroy  <folder>              delete the database"
     );
 }
 
@@ -123,13 +123,13 @@ fn main() {
             }
             _ => usage(),
         },
-        Some("bench") => match argv.get(1) {
+        Some("init") => match argv.get(1) {
             Some(folder) => {
                 let Some(page_size) = parse_page_size(argv.get(2)) else {
                     usage();
                     return;
                 };
-                bench(folder, page_size)
+                init(folder, page_size)
             }
             None => usage(),
         },
@@ -168,7 +168,7 @@ fn parse_page_size(arg: Option<&String>) -> Option<NonZeroU16> {
 }
 
 /// Build a database at `folder` by applying `num_updates` random updates over a `keyspace`-key index
-/// space, leaving it on disk for later `bench` runs. Reports the elapsed build time -- a large-scale
+/// space, leaving it on disk for later `init` runs. Reports the elapsed build time -- a large-scale
 /// churn/commit benchmark in its own right, not just setup for the reopen measurement.
 ///
 /// `zipf_exponent` sets the key distribution: `None` is uniform, `Some(e)` is Zipf with exponent `e`.
@@ -219,7 +219,7 @@ fn generate(
 
 /// Reopen the database at `folder` (read-only) and time `init` at three cache regimes: off, a
 /// quarter of the replay region (fills + evicts), and the whole replay region (no eviction).
-fn bench(folder: &str, page_size: NonZeroU16) {
+fn init(folder: &str, page_size: NonZeroU16) {
     if !db_dir_nonempty(folder) {
         eprintln!(
             "no database at {folder}; run `generate {folder} <keyspace> <num_updates>` first"
@@ -254,7 +254,7 @@ fn bench(folder: &str, page_size: NonZeroU16) {
 
 /// Page cache size for `get`: deliberately tiny (512 * 16 KiB = 8 MiB) so uniform-random point
 /// reads miss the in-process cache and reach the storage layer, which is what the cold-read
-/// measurement is about. `generate` and `bench` keep the realistic 1 GiB cache.
+/// measurement is about. `generate` and `init` keep the realistic 1 GiB cache.
 const GET_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 
 /// Time random point reads against the database at `folder`: open it (untimed), drop the OS page
