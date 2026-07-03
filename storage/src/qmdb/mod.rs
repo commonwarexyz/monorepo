@@ -50,7 +50,7 @@ use crate::{
     merkle::{hasher::Standard as StandardHasher, Bagging, Family, Location},
     qmdb::operation::Operation,
 };
-use commonware_cryptography::Hasher as CryptoHasher;
+use commonware_cryptography::Hasher;
 use commonware_utils::{cache::Clock, NZUsize};
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -80,7 +80,7 @@ pub use verify::{
 pub(crate) const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
 
 /// Return the Merkle hasher configuration used by QMDB operation roots and proofs.
-pub const fn hasher<H: CryptoHasher>() -> StandardHasher<H> {
+pub const fn hasher<H: Hasher>() -> StandardHasher<H> {
     StandardHasher::new(ROOT_BAGGING)
 }
 

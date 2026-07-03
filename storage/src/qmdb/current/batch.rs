@@ -6,11 +6,10 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
     merkle::{
-        self, batch::MerkleizedBatch as GenericMerkleizedBatch, hasher::Standard as StandardHasher,
-        mem::Mem, storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
+        self, batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
+        storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
     },
     qmdb::{
-        self,
         any::{
             self,
             batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
@@ -115,7 +114,6 @@ impl<const N: usize> ChunkOverlay<N> {
 /// `(chunk_idx, hash(chunk || ops_h_G_node))`, with the zero-chunk identity preserving the ops
 /// digest directly.
 async fn compute_grafted_leaves_from_batch<F, H, R, B, S, const N: usize>(
-    hasher: &StandardHasher<H>,
     ops_tree: &BatchStorageAdapter<'_, F, H::Digest, R, B>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     strategy: &S,
@@ -167,7 +165,7 @@ where
             (chunk_idx, chunk_ops_digest, chunk)
         })
         .collect();
-    Ok(grafting::graft_chunk_digests(hasher, strategy, inputs))
+    Ok(grafting::graft_chunk_digests::<H, _, N>(strategy, inputs))
 }
 
 /// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Skips locations where the
@@ -955,9 +953,7 @@ where
         (idx, chunk)
     });
 
-    let hasher = qmdb::hasher::<H>();
     let new_leaves = compute_grafted_leaves_from_batch::<F, H, _, _, S, N>(
-        &hasher,
         &ops_tree_adapter,
         chunks_to_update,
         &current_db.strategy,
@@ -977,8 +973,8 @@ where
                 grafted_batch = grafted_batch.add_leaf_digest(digest);
             }
         }
-        let gh = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-        grafted_batch.merkleize(&current_db.grafted_tree, &gh)
+        let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
+        grafted_batch.merkleize(&current_db.grafted_tree, &grafted_hasher)
     };
 
     // Build the layered bitmap (parent + overlay) before computing the canonical root, so that
@@ -998,7 +994,7 @@ where
         mem: &current_db.grafted_tree,
     };
     let grafted_storage =
-        grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, hasher.clone());
+        grafting::Storage::<F, H, _, _>::new(&layered, grafting_height, &ops_tree_adapter);
     // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
     // index `new_complete_chunks` (the chunk currently being filled with bits) -- distinct
     // from `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can
@@ -1015,7 +1011,6 @@ where
         }
     };
     let canonical_root = compute_db_root::<F, H, _, _, N>(
-        &hasher,
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,

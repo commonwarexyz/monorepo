@@ -2177,7 +2177,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::tests::{partition_sync_fault, run_contiguous_tests};
+    use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::{CacheRef, Writer},
@@ -2227,7 +2227,10 @@ mod tests {
             // partition would therefore be missed. With the fix, init must sync data before the
             // rebuilt offsets become durable, so this reopen fails.
             let data_partition = format!("{}{}", cfg.partition, DATA_SUFFIX);
-            let context = partition_sync_fault::Context::new(context, data_partition);
+            let context = commonware_runtime::mocks::SyncFaultContext {
+                inner: context,
+                fail_partition: data_partition,
+            };
             assert!(
                 Journal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone())
                     .await

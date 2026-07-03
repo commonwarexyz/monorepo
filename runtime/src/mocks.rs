@@ -1,12 +1,17 @@
-//! A mock implementation of a channel that implements the Sink and Stream traits.
+//! Mock implementations of runtime primitives for testing.
 
-use crate::{BufMut, Error, IoBufs};
+use crate::{
+    telemetry::metrics::{Metric, Registered},
+    Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
+    Storage, Supervisor,
+};
 use bytes::{Bytes, BytesMut};
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::sync::Arc;
+use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
+use std::{future::Future, mem, sync::Arc};
 
 /// Default buffer size (64 KB). Controls both how much data the stream
 /// pulls per recv and the backpressure threshold for send.
@@ -317,10 +322,370 @@ impl Drop for Stream {
     }
 }
 
+/// A sync deferred by a [DelayedSyncBlob], held open until explicitly completed.
+pub struct DeferredSync {
+    /// Completes the sync with the provided result (success runs the inner blob's sync).
+    pub release: oneshot::Sender<Result<(), Error>>,
+
+    /// Resolves once the deferred sync's handle begins waiting on `release`.
+    pub blocked: oneshot::Receiver<()>,
+}
+
+/// Syncs deferred by a [DelayedSyncContext] or [DelayedSyncBlob], in the order started.
+pub type PendingSyncs = Arc<Mutex<Vec<DeferredSync>>>;
+
+/// Context wrapper whose blobs defer [Blob::start_sync] completion until explicitly released.
+#[derive(Clone)]
+pub struct DelayedSyncContext<E> {
+    pub inner: E,
+    pub pending: PendingSyncs,
+}
+
+impl<E: Supervisor> Supervisor for DelayedSyncContext<E> {
+    fn name(&self) -> Name {
+        self.inner.name()
+    }
+
+    fn child(&self, label: &'static str) -> Self {
+        Self {
+            inner: self.inner.child(label),
+            pending: self.pending.clone(),
+        }
+    }
+
+    fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+        Self {
+            inner: self.inner.with_attribute(key, value),
+            pending: self.pending,
+        }
+    }
+}
+
+impl<E: Metrics> Metrics for DelayedSyncContext<E> {
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
+        self.inner.register(name, help, metric)
+    }
+
+    fn encode(&self) -> String {
+        self.inner.encode()
+    }
+}
+
+impl<E: BufferPooler> BufferPooler for DelayedSyncContext<E> {
+    fn network_buffer_pool(&self) -> &BufferPool {
+        self.inner.network_buffer_pool()
+    }
+
+    fn storage_buffer_pool(&self) -> &BufferPool {
+        self.inner.storage_buffer_pool()
+    }
+}
+
+impl<E: Storage> Storage for DelayedSyncContext<E> {
+    type Blob = DelayedSyncBlob<E::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            DelayedSyncBlob {
+                inner,
+                pending: self.pending.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+/// Blob wrapper that parks each started sync until it is explicitly completed.
+#[derive(Clone)]
+pub struct DelayedSyncBlob<B> {
+    inner: B,
+    pending: PendingSyncs,
+}
+
+impl<B> DelayedSyncBlob<B> {
+    /// Wrap `inner`, returning the blob and the list its deferred syncs are pushed onto.
+    pub fn new(inner: B) -> (Self, PendingSyncs) {
+        let pending = PendingSyncs::default();
+        (
+            Self {
+                inner,
+                pending: pending.clone(),
+            },
+            pending,
+        )
+    }
+}
+
+impl<B: Blob> Blob for DelayedSyncBlob<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at_buf(offset, len, bufs).await
+    }
+
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.inner.write_at(offset, bufs).await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.inner.write_at_sync(offset, bufs).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        let (release, receiver) = oneshot::channel();
+        let (notifier, blocked) = oneshot::channel();
+        self.pending.lock().push(DeferredSync { release, blocked });
+        let inner = self.inner.clone();
+        Handle::from_future(async move {
+            let _ = notifier.send(());
+            receiver.await.map_err(|_| Error::Closed)??;
+            inner.sync().await
+        })
+    }
+}
+
+/// Take the oldest pending sync, panicking if none was started.
+pub fn next_pending_sync(pending: &PendingSyncs) -> DeferredSync {
+    let mut pending = pending.lock();
+    assert!(!pending.is_empty(), "no pending sync was started");
+    pending.remove(0)
+}
+
+/// Complete the oldest `count` pending syncs successfully.
+pub fn release_next_pending_syncs(pending: &PendingSyncs, count: usize) {
+    let syncs = {
+        let mut pending = pending.lock();
+        assert!(
+            pending.len() >= count,
+            "not enough pending syncs: have {}, need {count}",
+            pending.len()
+        );
+        pending.drain(..count).collect::<Vec<_>>()
+    };
+    for sync in syncs {
+        let _ = sync.release.send(Ok(()));
+    }
+}
+
+/// Complete all pending syncs successfully.
+pub fn release_pending_syncs(pending: &PendingSyncs) {
+    for sync in mem::take(&mut *pending.lock()) {
+        let _ = sync.release.send(Ok(()));
+    }
+}
+
+/// Fail all pending syncs with an injected I/O error.
+pub fn fail_pending_syncs(pending: &PendingSyncs) {
+    for sync in mem::take(&mut *pending.lock()) {
+        let err = std::io::Error::other("injected sync failure");
+        let _ = sync.release.send(Err(Error::Io(err.into())));
+    }
+}
+
+/// Context wrapper whose blobs fail `sync` and `start_sync` for a single partition.
+#[derive(Clone)]
+pub struct SyncFaultContext<E> {
+    pub inner: E,
+    pub fail_partition: String,
+}
+
+impl<E: Supervisor> Supervisor for SyncFaultContext<E> {
+    fn name(&self) -> Name {
+        self.inner.name()
+    }
+
+    fn child(&self, label: &'static str) -> Self {
+        Self {
+            inner: self.inner.child(label),
+            fail_partition: self.fail_partition.clone(),
+        }
+    }
+
+    fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+        Self {
+            inner: self.inner.with_attribute(key, value),
+            fail_partition: self.fail_partition,
+        }
+    }
+}
+
+impl<E: Metrics> Metrics for SyncFaultContext<E> {
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
+        self.inner.register(name, help, metric)
+    }
+
+    fn encode(&self) -> String {
+        self.inner.encode()
+    }
+}
+
+impl<E: Clock> Clock for SyncFaultContext<E> {
+    fn current(&self) -> std::time::SystemTime {
+        self.inner.current()
+    }
+
+    fn sleep(&self, duration: std::time::Duration) -> impl Future<Output = ()> + Send + 'static {
+        self.inner.sleep(duration)
+    }
+
+    fn sleep_until(
+        &self,
+        deadline: std::time::SystemTime,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        self.inner.sleep_until(deadline)
+    }
+}
+
+impl<E: Clock> GovernorClock for SyncFaultContext<E> {
+    type Instant = std::time::SystemTime;
+
+    fn now(&self) -> Self::Instant {
+        self.current()
+    }
+}
+
+impl<E: Clock> ReasonablyRealtime for SyncFaultContext<E> {}
+
+impl<E: BufferPooler> BufferPooler for SyncFaultContext<E> {
+    fn network_buffer_pool(&self) -> &BufferPool {
+        self.inner.network_buffer_pool()
+    }
+
+    fn storage_buffer_pool(&self) -> &BufferPool {
+        self.inner.storage_buffer_pool()
+    }
+}
+
+impl<E: Storage> Storage for SyncFaultContext<E> {
+    type Blob = SyncFaultBlob<E::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            SyncFaultBlob {
+                inner,
+                faulty: partition == self.fail_partition,
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+/// Blob wrapper that fails `sync` and `start_sync` when marked faulty.
+#[derive(Clone)]
+pub struct SyncFaultBlob<B> {
+    inner: B,
+    faulty: bool,
+}
+
+impl<B: Blob> Blob for SyncFaultBlob<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at_buf(offset, len, bufs).await
+    }
+
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.inner.write_at(offset, bufs).await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.inner.write_at_sync(offset, bufs).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        if self.faulty {
+            let err = std::io::Error::other("injected partition sync fault");
+            return Err(Error::Io(err.into()));
+        }
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        if self.faulty {
+            return Handle::ready(self.sync().await);
+        }
+        self.inner.start_sync().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Clock, Runner, Sink, Spawner, Stream, Supervisor as _};
+    use crate::{deterministic, Clock, Runner, Sink, Spawner, Stream};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
 
