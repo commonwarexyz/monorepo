@@ -5252,3 +5252,75 @@ pub fn broadcast_caches_block<H: TestHarness>() {
             .expect("block should be cached after broadcast");
     })
 }
+
+/// Test that a non-monotonic parent height does not cause an infinite loop during gap repair.
+pub fn non_monotonic_parent_height<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(10));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+
+        let setup = H::setup_validator(
+            context.child("validator").with_attribute("index", 0),
+            &mut oracle,
+            participants[0].clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let mut handle = ValidatorHandle {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        // Create a parent block with height 2 (non-monotonic)
+        let bad_block = H::make_test_block(
+            Sha256::hash(b""),
+            H::genesis_parent_commitment(participants.len() as u16),
+            Height::new(2),
+            1,
+            participants.len() as u16,
+        );
+        let bad_digest = H::digest(&bad_block);
+        let bad_commitment = H::commitment(&bad_block);
+
+        // Create a descendant block at height 2, pointing to the bad block
+        let descendant_block = H::make_test_block(
+            bad_digest,
+            bad_commitment,
+            Height::new(2),
+            2,
+            participants.len() as u16,
+        );
+        let descendant_commitment = H::commitment(&descendant_block);
+
+        // Propose both blocks so they are in the buffer
+        H::propose(&mut handle, Round::new(Epoch::new(0), View::new(1)), &bad_block).await;
+        H::propose(&mut handle, Round::new(Epoch::new(0), View::new(2)), &descendant_block).await;
+
+        // Report finalization for the descendant only (creates a gap at height 1)
+        let descendant_proposal = Proposal {
+            round: Round::new(Epoch::new(0), View::new(2)),
+            parent: View::new(1),
+            payload: descendant_commitment,
+        };
+        let descendant_finalization = H::make_finalization(descendant_proposal, &schemes, QUORUM);
+        H::report_finalization(&mut handle.mailbox, descendant_finalization).await;
+
+        // Sleep to allow processing. Without the fix, the actor hangs here and the runner times out.
+        context.sleep(Duration::from_millis(500)).await;
+
+        // Verify the mailbox is still responsive
+        let processed_height = handle.mailbox.get_processed_height().await;
+        assert_eq!(processed_height, Height::zero());
+    });
+}
+

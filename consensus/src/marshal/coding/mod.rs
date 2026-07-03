@@ -967,6 +967,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_non_monotonic_parent_height() {
+        harness::non_monotonic_parent_height::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_certify_persists_equivocated_block() {
         harness::certify_persists_equivocated_block::<CodingHarness>();
     }

@@ -1298,6 +1298,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_non_monotonic_parent_height() {
+        harness::non_monotonic_parent_height::<InlineHarness>();
+        harness::non_monotonic_parent_height::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_init_processed_height() {
         harness::init_processed_height::<InlineHarness>();
         harness::init_processed_height::<DeferredHarness>();
