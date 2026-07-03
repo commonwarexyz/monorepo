@@ -216,17 +216,16 @@ impl<F: Family, U: update::Update> StagedUpdates<F, U> {
     }
 }
 
-/// One staged read slot: the key and, when the read resolved from the committed DB, the location
-/// and cached payload it resolved to.
-type StagedSlot<F, U> = (
-    <U as update::Update>::Key,
-    Option<(Location<F>, <U as update::Update>::Cached)>,
-);
+/// A staged read slot's committed-DB resolution: the location and cached payload the read
+/// resolved to, or `None` when it resolved from batch mutations or ancestor diffs (or missed).
+type StagedResolution<F, U> = Option<(Location<F>, <U as update::Update>::Cached)>;
 
 /// Staged batch returned by [`UnmerkleizedBatch::stage`].
 ///
 /// Owns the batch and the locations its reads resolved, so the staged reads cannot be paired with a
-/// different batch.
+/// different batch. `keys` and `resolutions` are parallel vectors indexed by staged read slot;
+/// they are kept separate so the read path only streams the 16-byte resolutions while the update
+/// path only hashes the keys.
 pub struct Staged<F: Family, H, U, S: Strategy>
 where
     U: update::Update + Send + Sync,
@@ -234,7 +233,8 @@ where
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
-    slots: Vec<StagedSlot<F, U>>,
+    keys: Vec<U::Key>,
+    resolutions: Vec<StagedResolution<F, U>>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -1102,12 +1102,13 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let start = self.slots.len();
+        let start = self.keys.len();
         let end = start
             .checked_add(keys.len())
             .expect("staged read index overflow");
-        let (values, mut slots) = self.batch.stage_reads(keys, db).await?;
-        self.slots.append(&mut slots);
+        let (values, mut keys, mut resolutions) = self.batch.stage_reads(keys, db).await?;
+        self.keys.append(&mut keys);
+        self.resolutions.append(&mut resolutions);
         Ok((start..end, values, self))
     }
 
@@ -1145,7 +1146,11 @@ where
         updates: Vec<(usize, Option<U::Value>)>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
     ) -> (UnmerkleizedBatch<F, H, U, S>, StagedUpdates<F, U>) {
-        let Self { mut batch, slots } = self;
+        let Self {
+            mut batch,
+            keys,
+            resolutions,
+        } = self;
         let mut staged_updates = StagedUpdates::new();
         if updates.is_empty() {
             return (Self::apply_upserts(batch, upserts), staged_updates);
@@ -1158,11 +1163,12 @@ where
         handled.extend(upserts.iter().map(|(key, _)| key));
         staged_updates.entries.reserve(updates.len());
         for (slot, value) in updates.into_iter().rev() {
-            assert!(slot < slots.len(), "update index out of staged read range");
-            let (key, resolution) = &slots[slot];
+            assert!(slot < keys.len(), "update index out of staged read range");
+            let key = &keys[slot];
             if !handled.insert(key) {
                 continue;
             }
+            let resolution = &resolutions[slot];
             match resolution {
                 Some((loc, payload)) if value.is_some() || U::STAGES_DELETES => {
                     // This staged update is the surviving write for `key`; do not also emit an
@@ -1415,24 +1421,39 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let (results, slots) = self.stage_reads(keys, db).await?;
-        Ok((results, Staged { batch: self, slots }))
+        let (results, keys, resolutions) = self.stage_reads(keys, db).await?;
+        Ok((
+            results,
+            Staged {
+                batch: self,
+                keys,
+                resolutions,
+            },
+        ))
     }
 
-    /// Read keys through this batch and return the values plus one staged slot per key;
-    /// committed-resolved slots carry the location and cached payload they resolved to.
+    /// Read keys through this batch and return the values plus one owned key and resolution per
+    /// staged slot; committed-resolved slots carry the location and cached payload they resolved
+    /// to.
+    #[allow(clippy::type_complexity)]
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Vec<Option<U::Value>>, Vec<StagedSlot<F, U>>), crate::qmdb::Error<F>>
+    ) -> Result<
+        (
+            Vec<Option<U::Value>>,
+            Vec<U::Key>,
+            Vec<StagedResolution<F, U>>,
+        ),
+        crate::qmdb::Error<F>,
+    >
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let mut slots: Vec<StagedSlot<F, U>> =
-            keys.iter().map(|key| ((*key).to_owned(), None)).collect();
+        let mut resolutions: Vec<StagedResolution<F, U>> = vec![None; keys.len()];
         let (mut results, unresolved) = self.resolve_uncommitted_reads(keys, db.strategy());
         Self::fill_committed_reads(
             unresolved,
@@ -1440,12 +1461,16 @@ where
             &mut results,
             |data, loc| (data.value().clone(), loc, data.cached()),
             |slot, (value, loc, payload)| {
-                slots[slot].1 = Some((loc, payload));
+                resolutions[slot] = Some((loc, payload));
                 value
             },
         )
         .await?;
-        Ok((results, slots))
+        Ok((
+            results,
+            keys.iter().map(|key| (*key).to_owned()).collect(),
+            resolutions,
+        ))
     }
 }
 
@@ -3424,13 +3449,14 @@ mod tests {
 
             let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
                 batch: db.new_batch(),
-                slots: vec![
-                    (k0, Some((loc(30), ()))),
-                    (k1, Some((loc(10), ()))),
-                    (k0, Some((loc(30), ()))),
-                    (k2, Some((loc(40), ()))),
-                    (k1, Some((loc(10), ()))),
-                    (k3, None),
+                keys: vec![k0, k1, k0, k2, k1, k3],
+                resolutions: vec![
+                    Some((loc(30), ())),
+                    Some((loc(10), ())),
+                    Some((loc(30), ())),
+                    Some((loc(40), ())),
+                    Some((loc(10), ())),
+                    None,
                 ],
             };
 
@@ -3505,7 +3531,8 @@ mod tests {
 
             let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
                 batch: db.new_batch().write(key, Some(prior)),
-                slots: vec![(key, Some((old_loc, ())))],
+                keys: vec![key],
+                resolutions: vec![Some((old_loc, ()))],
             };
             let staged = staged
                 .merkleize(vec![(0, Some(replacement))], Vec::new(), None, &db)
@@ -3547,10 +3574,11 @@ mod tests {
 
             let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
                 batch: db.new_batch(),
-                slots: vec![
-                    (delete_key, Some((loc(11), next_delete))),
-                    (update_a, Some((loc(30), next_a))),
-                    (update_b, Some((loc(7), next_b))),
+                keys: vec![delete_key, update_a, update_b],
+                resolutions: vec![
+                    Some((loc(11), next_delete)),
+                    Some((loc(30), next_a)),
+                    Some((loc(7), next_b)),
                 ],
             };
 
