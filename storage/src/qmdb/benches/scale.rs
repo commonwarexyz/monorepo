@@ -29,9 +29,9 @@
 //! replay-region size `R` (what the cache must cover to avoid eviction).
 //!
 //! The optional `page_size` arg (logical bytes; default 16384) selects the page geometry; a
-//! database must be reopened (`init`) with the page size it was generated with. Physical pages are 12 bytes
-//! larger than logical ones (the per-page CRC record), so e.g. logical 16372 produces 16384-byte
-//! physical pages.
+//! database must be reopened (`init`) with the page size it was generated with. Physical pages are
+//! 12 bytes larger than logical ones (the per-page CRC record), so e.g. logical 16372 produces
+//! 16384-byte physical pages.
 //!
 //! `get` times random point reads through the full stack (index lookup, page cache, blob read): it
 //! opens the database (untimed), then for each entry in the comma-separated concurrency list drops
@@ -61,27 +61,25 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Items per blob for the generated database. Much larger than the shared bench default (50k) so a
-/// multi-GB database is split across far fewer blob files, which keeps the partition-directory scan
-/// on reopen cheap. Note this only reduces the file count, not the on-disk byte growth.
+/// Items per blob for the generated database. Large enough so that a multi-GB database isn't split
+/// across too many files.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 
-/// Page cache size, realistic for a multi-GB database rather than the shared bench default of 8 MB
-/// (512 pages). Both `generate` and `init` use it, so the init-cache benefit is measured on top of
-/// a realistic page cache instead of an unrealistically tiny one. 65536 * 16 KiB = 1 GiB.
+/// Page cache size. 65536 * 16 KiB = 1 GiB.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(65536);
 
 /// Commit (and prune-eligible) cadence during population.
 const COMMIT_FREQUENCY: u32 = 10_000;
 
-/// Prune to the inactivity floor every this many commits during population, so the on-disk log stays
-/// bounded to roughly the active region instead of accumulating every re-appended operation until
-/// the end. At `COMMIT_FREQUENCY` this is ~1 prune per `COMMIT_FREQUENCY * PRUNE_FREQUENCY` ops.
+/// Prune to the inactivity floor every this many commits during population, so the on-disk log
+/// stays bounded to roughly the active region instead of accumulating every re-appended operation
+/// until the end. At `COMMIT_FREQUENCY` this is ~1 prune per `COMMIT_FREQUENCY * PRUNE_FREQUENCY`
+/// ops.
 const PRUNE_FREQUENCY: u32 = 100;
 
-/// Zipf exponent for update/delete key selection: churn follows a power law (a hot subset of keys is
-/// updated far more than the long tail) rather than uniform, which is more representative of real
-/// workloads. Higher = more skew; ~1.0 is classic Zipf (near YCSB's 0.99).
+/// Zipf exponent for update/delete key selection: churn follows a power law (a hot subset of keys
+/// is updated far more than the long tail) rather than uniform, which is more representative of
+/// real workloads. Higher = more skew; ~1.0 is classic Zipf.
 const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
 fn usage() {
@@ -228,8 +226,8 @@ fn init(folder: &str, page_size: NonZeroU16) {
     }
     let cfg = Config::default().with_storage_directory(folder);
 
-    // No-cache baseline; also learn the replay region R (ops above the inactivity floor) -- what the
-    // location cache must cover to avoid eviction (a key-cache would need only the key count).
+    // No-cache baseline; also learn the replay region R (ops above the inactivity floor) -- what
+    // the location cache must cover to avoid eviction (a key-cache would need only the key count).
     let (baseline, region) = time_init(&cfg, None, page_size);
     if region == 0 {
         eprintln!(
@@ -402,8 +400,8 @@ fn time_init(
     })
 }
 
-/// Whether `folder` exists and contains any entries (used to avoid silently appending to an existing
-/// database during `generate`).
+/// Whether `folder` exists and contains any entries (used to avoid silently appending to an
+/// existing database during `generate`).
 fn db_dir_nonempty(folder: &str) -> bool {
     std::fs::read_dir(folder)
         .map(|mut entries| entries.next().is_some())
