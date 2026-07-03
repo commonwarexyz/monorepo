@@ -515,7 +515,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, true);
+        let (inner, staged_updates) = inner.resolve_updates(updates, upserts);
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
@@ -572,7 +572,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, false);
+        let (inner, staged_updates) = inner.resolve_updates(updates, upserts);
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,

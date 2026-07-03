@@ -22,7 +22,7 @@ use crate::{
     },
     Context,
 };
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashSet;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -216,9 +216,12 @@ impl<F: Family, U: update::Update> StagedUpdates<F, U> {
     }
 }
 
-/// Committed locations resolved by staged reads, as `(slot, location, cached payload)` entries in
-/// staged read-slot order.
-type StagedReads<F, U> = Vec<(usize, Location<F>, <U as update::Update>::Cached)>;
+/// One staged read slot: the key and, when the read resolved from the committed DB, the location
+/// and cached payload it resolved to.
+type StagedSlot<F, U> = (
+    <U as update::Update>::Key,
+    Option<(Location<F>, <U as update::Update>::Cached)>,
+);
 
 /// Staged batch returned by [`UnmerkleizedBatch::stage`].
 ///
@@ -231,8 +234,7 @@ where
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
-    keys: Vec<U::Key>,
-    cached: StagedReads<F, U>,
+    slots: Vec<StagedSlot<F, U>>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -1100,13 +1102,12 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let start = self.keys.len();
+        let start = self.slots.len();
         let end = start
             .checked_add(keys.len())
             .expect("staged read index overflow");
-        let (values, keys, mut cached) = self.batch.stage_reads(keys, db, start).await?;
-        self.keys.extend(keys);
-        self.cached.append(&mut cached);
+        let (values, mut slots) = self.batch.stage_reads(keys, db).await?;
+        self.slots.append(&mut slots);
         Ok((start..end, values, self))
     }
 
@@ -1133,88 +1134,50 @@ where
     /// `write` semantics and wins.
     ///
     /// Committed-resolved updates reuse the staged location. Committed-resolved deletes reuse it
-    /// only when `stage_deletes` is set (the unordered path): an unordered delete just emits a
-    /// `Delete` at the cached location, whereas an ordered delete must rewrite the deleted key's
-    /// predecessor via a snapshot-bucket scan the cached location cannot skip, so ordered passes
-    /// `stage_deletes = false` and its deletes fall back to normal mutations. Keys resolved from
-    /// ancestors or missing from committed state always fall back.
+    /// only when [`update::Update::STAGES_DELETES`] is set (the unordered kind). Keys resolved
+    /// from ancestors or missing from committed state always fall back to normal mutations.
     ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
     pub(crate) fn resolve_updates(
-        mut self,
-        mut updates: Vec<(usize, Option<U::Value>)>,
+        self,
+        updates: Vec<(usize, Option<U::Value>)>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
-        stage_deletes: bool,
     ) -> (UnmerkleizedBatch<F, H, U, S>, StagedUpdates<F, U>) {
+        let Self { mut batch, slots } = self;
         let mut staged_updates = StagedUpdates::new();
         if updates.is_empty() {
-            return (Self::apply_upserts(self.batch, upserts), staged_updates);
+            return (Self::apply_upserts(batch, upserts), staged_updates);
         }
 
-        let upsert_keys = if upserts.is_empty() {
-            None
-        } else {
-            Some(upserts.iter().map(|(key, _)| key).collect::<AHashSet<_>>())
-        };
-
-        // Each update value is consumed at most once: last-write-wins means at most one update
-        // index survives per read slot, so values are moved out with `Option::take` rather than
-        // cloned.
-        let mut latest = vec![None; self.keys.len()];
-        let mut seen = AHashMap::with_capacity(updates.len());
-        for (update_idx, (slot, _)) in updates.iter().enumerate() {
-            assert!(
-                *slot < self.keys.len(),
-                "update index out of staged read range"
-            );
-            if let Some(prev) = seen.insert(&self.keys[*slot], update_idx) {
-                latest[updates[prev].0] = None;
+        // Walk updates newest-first so the first surviving occurrence of a key is its last
+        // write. Pre-seeding with the upsert keys drops overlapping updates: upserts are applied
+        // last and win.
+        let mut handled: AHashSet<&U::Key> = upserts.iter().map(|(key, _)| key).collect();
+        staged_updates.entries.reserve(updates.len());
+        for (slot, value) in updates.into_iter().rev() {
+            assert!(slot < slots.len(), "update index out of staged read range");
+            let (key, resolution) = &slots[slot];
+            if !handled.insert(key) {
+                continue;
             }
-            latest[*slot] = Some(update_idx);
-        }
-
-        // Upserts are applied last, so matching staged updates can be ignored.
-        if let Some(upsert_keys) = &upsert_keys {
-            for (slot, update_idx) in latest.iter_mut().enumerate() {
-                if update_idx.is_some() && upsert_keys.contains(&self.keys[slot]) {
-                    *update_idx = None;
+            match resolution {
+                Some((loc, payload)) if value.is_some() || U::STAGES_DELETES => {
+                    // This staged update is the surviving write for `key`; do not also emit an
+                    // older batch mutation for the same key.
+                    batch.mutations.remove(key);
+                    staged_updates
+                        .entries
+                        .push((key.clone(), *loc, payload.clone(), value));
+                }
+                _ => {
+                    batch.mutations.insert(key.clone(), value);
                 }
             }
         }
-
-        // Committed-resolved updates (and, when `stage_deletes`, deletes) reuse the staged
-        // location/payload. Ordered deletes, keys resolved from ancestors, and keys missing from
-        // committed state fall back to normal mutations: leaving `latest[slot]` set routes them to
-        // the fallback loop below.
-        staged_updates
-            .entries
-            .reserve(updates.len().min(self.cached.len()));
-        for (slot, loc, payload) in self.cached {
-            let Some(update_idx) = latest[slot] else {
-                continue;
-            };
-            if updates[update_idx].1.is_none() && !stage_deletes {
-                continue;
-            }
-            latest[slot] = None;
-            let key = self.keys[slot].clone();
-            // This staged update is the surviving write for `key`; do not also emit an older
-            // batch mutation for the same key.
-            self.batch.mutations.remove(&key);
-            let value = updates[update_idx].1.take();
-            staged_updates.entries.push((key, loc, payload, value));
-        }
         staged_updates.entries.sort_unstable_by_key(|entry| entry.1);
-        for (slot, update_idx) in latest.into_iter().enumerate() {
-            let Some(update_idx) = update_idx else {
-                continue;
-            };
-            let value = updates[update_idx].1.take();
-            self.batch.mutations.insert(self.keys[slot].clone(), value);
-        }
-        (Self::apply_upserts(self.batch, upserts), staged_updates)
+        (Self::apply_upserts(batch, upserts), staged_updates)
     }
 }
 
@@ -1256,8 +1219,7 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        // Unordered deletes emit a `Delete` at the cached location, so they may be staged.
-        let (batch, staged_updates) = self.resolve_updates(updates, upserts, true);
+        let (batch, staged_updates) = self.resolve_updates(updates, upserts);
         batch
             .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
@@ -1304,9 +1266,7 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        // Ordered deletes must rewrite the deleted key's predecessor, so they fall back to normal
-        // mutations rather than reusing the cached location.
-        let (batch, staged_updates) = self.resolve_updates(updates, upserts, false);
+        let (batch, staged_updates) = self.resolve_updates(updates, upserts);
         batch
             .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
@@ -1454,50 +1414,37 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let (results, keys, cached) = self.stage_reads(keys, db, 0).await?;
-        Ok((
-            results,
-            Staged {
-                batch: self,
-                keys,
-                cached,
-            },
-        ))
+        let (results, slots) = self.stage_reads(keys, db).await?;
+        Ok((results, Staged { batch: self, slots }))
     }
 
-    /// Read keys through this batch and return the values, owned staged keys, and committed-read
-    /// cache entries. `offset` is the staged index assigned to `keys[0]`, so cached entries can be
-    /// appended by [`stage`](Self::stage) and [`expand`](Staged::expand) without rewriting slots.
+    /// Read keys through this batch and return the values plus one staged slot per key;
+    /// committed-resolved slots carry the location and cached payload they resolved to.
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
         db: &Db<F, E, C, I, H, U, N, S>,
-        offset: usize,
-    ) -> Result<(Vec<Option<U::Value>>, Vec<U::Key>, StagedReads<F, U>), crate::qmdb::Error<F>>
+    ) -> Result<(Vec<Option<U::Value>>, Vec<StagedSlot<F, U>>), crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let mut cached = Vec::new();
+        let mut slots: Vec<StagedSlot<F, U>> =
+            keys.iter().map(|key| ((*key).to_owned(), None)).collect();
         let (mut results, unresolved) = self.resolve_uncommitted_reads(keys, db.strategy());
-        cached.reserve(unresolved.len());
         Self::fill_committed_reads(
             unresolved,
             db,
             &mut results,
             |data, loc| (data.value().clone(), loc, data.cached()),
             |slot, (value, loc, payload)| {
-                cached.push((offset + slot, loc, payload));
+                slots[slot].1 = Some((loc, payload));
                 value
             },
         )
         .await?;
-        Ok((
-            results,
-            keys.iter().map(|key| (*key).to_owned()).collect(),
-            cached,
-        ))
+        Ok((results, slots))
     }
 }
 
@@ -3476,13 +3423,13 @@ mod tests {
 
             let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
                 batch: db.new_batch(),
-                keys: vec![k0, k1, k0, k2, k1, k3],
-                cached: vec![
-                    (0, loc(30), ()),
-                    (1, loc(10), ()),
-                    (2, loc(30), ()),
-                    (3, loc(40), ()),
-                    (4, loc(10), ()),
+                slots: vec![
+                    (k0, Some((loc(30), ()))),
+                    (k1, Some((loc(10), ()))),
+                    (k0, Some((loc(30), ()))),
+                    (k2, Some((loc(40), ()))),
+                    (k1, Some((loc(10), ()))),
+                    (k3, None),
                 ],
             };
 
@@ -3496,7 +3443,6 @@ mod tests {
                     (5, Some(fallback)),
                 ],
                 vec![(k2, Some(upsert))],
-                true,
             );
 
             assert_eq!(
@@ -3558,8 +3504,7 @@ mod tests {
 
             let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
                 batch: db.new_batch().write(key, Some(prior)),
-                keys: vec![key],
-                cached: vec![(0, old_loc, ())],
+                slots: vec![(key, Some((old_loc, ())))],
             };
             let staged = staged
                 .merkleize(vec![(0, Some(replacement))], Vec::new(), None, &db)
@@ -3601,18 +3546,16 @@ mod tests {
 
             let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
                 batch: db.new_batch(),
-                keys: vec![delete_key, update_a, update_b],
-                cached: vec![
-                    (0, loc(11), next_delete),
-                    (1, loc(30), next_a),
-                    (2, loc(7), next_b),
+                slots: vec![
+                    (delete_key, Some((loc(11), next_delete))),
+                    (update_a, Some((loc(30), next_a))),
+                    (update_b, Some((loc(7), next_b))),
                 ],
             };
 
             let (batch, staged_updates) = staged.resolve_updates(
                 vec![(0, None), (1, Some(value_a)), (2, Some(value_b))],
                 Vec::new(),
-                false,
             );
 
             assert_eq!(

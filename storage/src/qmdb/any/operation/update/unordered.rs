@@ -36,6 +36,9 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type ValueEncoding = V;
     type Cached = ();
 
+    /// An unordered delete just emits a `Delete` at the resolved location.
+    const STAGES_DELETES: bool = true;
+
     fn key(&self) -> &K {
         &self.0
     }
