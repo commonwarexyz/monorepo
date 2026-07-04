@@ -88,7 +88,7 @@ impl<D: Digest> Gates<D> {
         let Ok(handle) = persist.await else {
             return;
         };
-        if !handle.durable(name, round).await {
+        if !handle.durable(round, name).await {
             return;
         }
         durable_tx.send_lossy(true);

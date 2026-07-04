@@ -21,7 +21,7 @@ pub(crate) trait Durable {
     /// `false` only when the runtime is shutting down (the handle was closed or aborted
     /// before the sync resolved), so the caller reports "not durable" and abandons the
     /// work.
-    fn durable(self, name: &'static str, round: Round) -> impl Future<Output = bool> + Send;
+    fn durable(self, round: Round, name: &'static str) -> impl Future<Output = bool> + Send;
 }
 
 impl Durable for Handle<()> {
@@ -29,9 +29,9 @@ impl Durable for Handle<()> {
         name = "marshal.durable",
         level = "info",
         skip_all,
-        fields(name = name, round = %round)
+        fields(round = %round, name = name)
     )]
-    async fn durable(self, name: &'static str, round: Round) -> bool {
+    async fn durable(self, round: Round, name: &'static str) -> bool {
         match self.await {
             Ok(()) => true,
             Err(Error::Closed | Error::Aborted) => {
@@ -52,7 +52,7 @@ mod tests {
     fn test_durable_resolves_true_on_success() {
         let runner = deterministic::Runner::default();
         runner.start(|_| async move {
-            assert!(Handle::ready(Ok(())).durable("test", Round::zero()).await);
+            assert!(Handle::ready(Ok(())).durable(Round::zero(), "test").await);
         });
     }
 
@@ -62,12 +62,12 @@ mod tests {
         runner.start(|_| async move {
             assert!(
                 !Handle::ready(Err(Error::Closed))
-                    .durable("test", Round::zero())
+                    .durable(Round::zero(), "test")
                     .await
             );
             assert!(
                 !Handle::ready(Err(Error::Aborted))
-                    .durable("test", Round::zero())
+                    .durable(Round::zero(), "test")
                     .await
             );
         });
@@ -79,7 +79,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|_| async move {
             let failure = Handle::<()>::ready(Err(Error::WriteFailed));
-            let _ = failure.durable("test", Round::zero()).await;
+            let _ = failure.durable(Round::zero(), "test").await;
         });
     }
 }
