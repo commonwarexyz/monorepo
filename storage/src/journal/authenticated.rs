@@ -770,6 +770,7 @@ where
                     .collect()
             },
         );
+        assert_eq!(results.len(), positions.len());
         let misses: Vec<u64> = positions
             .iter()
             .zip(&results)
