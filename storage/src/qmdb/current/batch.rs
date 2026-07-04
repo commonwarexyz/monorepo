@@ -515,7 +515,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, true);
+        let (inner, staged_updates) = inner.resolve_updates(updates, upserts);
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
@@ -572,7 +572,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, false);
+        let (inner, staged_updates) = inner.resolve_updates(updates, upserts);
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
@@ -688,7 +688,7 @@ where
             .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
-                StagedUpdates::new(),
+                StagedUpdates::<F, update::Unordered<K, V>>::new(),
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
@@ -799,7 +799,7 @@ where
             .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
-                StagedUpdates::new(),
+                StagedUpdates::<F, update::Ordered<K, V>>::new(),
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;

@@ -26,6 +26,10 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync {
     /// Payload cached alongside the resolved location of a batch read, consumed by merkleize.
     type Cached: Send + Sync;
 
+    /// Whether merkleize may emit a staged delete directly at its read-resolved committed
+    /// location. When false, staged deletes fall back to normal mutations.
+    const STAGES_DELETES: bool;
+
     /// The updated key.
     fn key(&self) -> &Self::Key;
 
