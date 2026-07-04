@@ -688,7 +688,7 @@ where
                     .cache
                     .put_notarization(round, digest, notarization)
                     .await;
-                syncs.push(handle.durable("notarization"));
+                syncs.push(handle.durable("notarization", round));
 
                 // A notarization alone is not enough to fetch missing proposal
                 // data. If the block is not locally available, remember the
@@ -699,7 +699,7 @@ where
                         debug!(?round, "notarized block covered by verified write");
                     } else {
                         let handle = self.cache.put_notarized(round, digest, block.into()).await;
-                        syncs.push(handle.durable("notarized"));
+                        syncs.push(handle.durable("notarized", round));
                     }
                 } else {
                     debug!(?round, "notarized block unavailable locally");
@@ -1585,8 +1585,8 @@ where
                         .put_notarization(round, digest, notarization)
                         .await;
                     join(
-                        block_sync.durable("notarized"),
-                        notarization_sync.durable("notarization"),
+                        block_sync.durable("notarized", round),
+                        notarization_sync.durable("notarization", round),
                     )
                     .await;
 

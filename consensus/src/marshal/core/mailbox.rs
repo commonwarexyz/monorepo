@@ -885,7 +885,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let Ok(handle) = self.proposed_deferred(round, block).await else {
             return false;
         };
-        handle.durable("proposed").await
+        handle.durable("proposed", round).await
     }
 
     /// Notifies the actor that a block has been verified, returning a receiver for
@@ -925,7 +925,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let Ok(handle) = self.verified_deferred(round, block).await else {
             return false;
         };
-        handle.durable("verified").await
+        handle.durable("verified", round).await
     }
 
     /// Notifies the actor that a block has been certified.
@@ -943,7 +943,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let Ok(handle) = receiver.await else {
             return false;
         };
-        handle.durable("certified").await
+        handle.durable("certified", round).await
     }
 
     /// Attempts to set the sync starting point from a finalized commitment.
