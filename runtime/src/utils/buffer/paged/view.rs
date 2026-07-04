@@ -237,11 +237,7 @@ impl<B: Blob> View<'_, B> {
     /// slot per `(offset, len)` range, back to back. Returns the indices of ranges that require
     /// a blob read, which is every index when the ranges extend past the blob. Their slots hold
     /// unspecified bytes.
-    pub fn try_read_ranges_sync_into(
-        &self,
-        buf: &mut [u8],
-        ranges: &[(u64, usize)],
-    ) -> Vec<usize> {
+    pub fn try_read_ranges_sync_into(&self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
         if super::validate_read_ranges(buf.len(), ranges, self.size).is_err() {
             return (0..ranges.len()).collect();
         }

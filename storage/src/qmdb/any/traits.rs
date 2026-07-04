@@ -5,9 +5,9 @@ use crate::{
     qmdb::{operation::Key, Error},
 };
 use commonware_codec::CodecShared;
-use commonware_cryptography::Digest;
 #[cfg(test)]
 use commonware_cryptography::sha256;
+use commonware_cryptography::Digest;
 use core::num::NonZeroU64;
 use std::{future::Future, ops::Range};
 

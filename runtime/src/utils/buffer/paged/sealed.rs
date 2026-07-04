@@ -173,11 +173,7 @@ impl<B: Blob> Sealed<B> {
 
     /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges:
     /// `buf` holds one slot per range, back to back.
-    pub fn try_read_ranges_sync_into(
-        &self,
-        buf: &mut [u8],
-        ranges: &[(u64, usize)],
-    ) -> Vec<usize> {
+    pub fn try_read_ranges_sync_into(&self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
         self.view().try_read_ranges_sync_into(buf, ranges)
     }
 
@@ -616,16 +612,14 @@ mod tests {
             // served from the sealed view's in-memory bytes.
             sealed.read_at(0, page_size).await.unwrap();
             let mut out = vec![0u8; offsets.len() * item_size];
-            let misses = sealed
-                .try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
+            let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
             assert_eq!(misses, vec![1, 2]);
             check(&out, &[0, 3]);
 
             // With only page 1 cached, item 0 becomes the miss and the straddler is served.
             sealed.read_at(page_size as u64, page_size).await.unwrap();
             let mut out = vec![0u8; offsets.len() * item_size];
-            let misses = sealed
-                .try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
+            let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
             assert_eq!(misses, vec![0]);
             check(&out, &[1, 2, 3]);
         });

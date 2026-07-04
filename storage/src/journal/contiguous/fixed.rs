@@ -1253,7 +1253,9 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         let mut buf = vec![0u8; A::SIZE];
         let item = match self.locate(pos) {
-            Ok((blob, offset)) if blob.try_read_sync_into(&mut buf, offset) => A::decode(&buf[..]).ok(),
+            Ok((blob, offset)) if blob.try_read_sync_into(&mut buf, offset) => {
+                A::decode(&buf[..]).ok()
+            }
             _ => None,
         };
         if item.is_some() {

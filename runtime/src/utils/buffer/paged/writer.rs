@@ -638,11 +638,7 @@ impl<B: Blob> Writer<B> {
 
     /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges:
     /// `buf` holds one slot per range, back to back.
-    pub fn try_read_ranges_sync_into(
-        &self,
-        buf: &mut [u8],
-        ranges: &[(u64, usize)],
-    ) -> Vec<usize> {
+    pub fn try_read_ranges_sync_into(&self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
         self.view().try_read_ranges_sync_into(buf, ranges)
     }
 
