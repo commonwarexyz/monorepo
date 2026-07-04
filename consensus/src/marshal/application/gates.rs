@@ -6,7 +6,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{collections::HashMap, fmt::Debug, future::Future, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc};
 use tracing::debug;
 
 type GateMap<D> = HashMap<(Round, D), oneshot::Receiver<bool>>;
@@ -124,7 +124,7 @@ pub(crate) async fn drive<D, F, Fut>(
     id: D,
     fallback: F,
 ) where
-    D: Debug,
+    D: Digest,
     F: FnOnce() -> Fut,
     Fut: Future<Output = oneshot::Receiver<bool>>,
 {
