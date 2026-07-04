@@ -1274,14 +1274,14 @@ mod tests {
                 cache::Manager::<_, Standard<B>, S>::init(context.child("read"), make_cfg(), ())
                     .await;
             assert_eq!(
-                mgr.find_block(digest).await,
+                mgr.find_block_matching(digest, |_| true).await,
                 None,
                 "cache should not find block before loading persisted epochs"
             );
 
             mgr.load_persisted_epochs().await;
             assert_eq!(
-                mgr.find_block(digest).await,
+                mgr.find_block_matching(digest, |_| true).await,
                 Some(block),
                 "cache should find block after loading persisted epochs"
             );

@@ -1899,7 +1899,7 @@ where
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
         // Check verified / notarized blocks via cache manager.
-        if let Some(block) = self.cache.find_block(digest).await {
+        if let Some(block) = self.cache.find_block_matching(digest, |_| true).await {
             return Some(block.into());
         }
         // Check finalized blocks.

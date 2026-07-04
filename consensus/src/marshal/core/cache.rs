@@ -392,7 +392,8 @@ where
     /// Returns a handle covering every write accepted by the round's verified-block
     /// archive before this call, including writes whose sync is still in flight.
     ///
-    /// An uninitialized epoch has accepted no writes, so its handle is already durable.
+    /// An absent epoch has nothing to observe (it never accepted a write or was
+    /// pruned below the epoch floor), so its handle resolves immediately.
     pub(crate) async fn start_sync_verified(&mut self, round: Round) -> Handle<()> {
         let Some(cache) = self.caches.get_mut(&round.epoch()) else {
             return Handle::ready(Ok(()));
@@ -403,7 +404,8 @@ where
     /// Returns a handle covering every write accepted by the round's notarization
     /// archive before this call, including writes whose sync is still in flight.
     ///
-    /// An uninitialized epoch has accepted no writes, so its handle is already durable.
+    /// An absent epoch has nothing to observe (it never accepted a write or was
+    /// pruned below the epoch floor), so its handle resolves immediately.
     pub(crate) async fn start_sync_notarizations(&mut self, round: Round) -> Handle<()> {
         let Some(cache) = self.caches.get_mut(&round.epoch()) else {
             return Handle::ready(Ok(()));
@@ -447,25 +449,16 @@ where
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
         };
-        let result = cache
+        match cache
             .finalizations
             .put_sync(round.view().get(), digest, finalization)
-            .await;
-        Self::handle_result(result, round, "finalization");
-    }
-
-    /// Helper to debug cache results.
-    fn handle_result(result: Result<(), archive::Error>, round: Round, name: &str) {
-        match result {
-            Ok(_) => {
-                debug!(?round, name, "cached");
-            }
+            .await
+        {
+            Ok(()) => debug!(?round, "cached finalization"),
             Err(archive::Error::AlreadyPrunedTo(_)) => {
-                debug!(?round, name, "already pruned");
+                debug!(?round, "finalization already pruned");
             }
-            Err(e) => {
-                panic!("failed to insert {name}: {e}");
-            }
+            Err(e) => panic!("failed to insert finalization: {e}"),
         }
     }
 
@@ -555,14 +548,6 @@ where
             }
         }
         None
-    }
-
-    /// Looks for a block (certified by height, verified, or notarized).
-    pub(crate) async fn find_block(
-        &self,
-        digest: <V::Block as Digestible>::Digest,
-    ) -> Option<V::StoredBlock> {
-        self.find_block_matching(digest, |_| true).await
     }
 
     /// Looks for a block (certified by height, verified, or notarized) that matches `predicate`.
