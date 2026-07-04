@@ -60,7 +60,7 @@ fn validate_read_many_into(
     let expected_len = offsets
         .len()
         .checked_mul(item_size.get())
-        .ok_or(Error::OffsetOverflow)?;
+        .expect("buf must hold one item_size slot per offset");
     assert_eq!(
         buf_len, expected_len,
         "buf must hold one item_size slot per offset"
@@ -135,7 +135,9 @@ fn validate_read_ranges(buf_len: usize, ranges: &[(u64, usize)], size: u64) -> R
     let mut expected_len = 0usize;
     let mut previous_end = None;
     for &(offset, len) in ranges {
-        expected_len = expected_len.checked_add(len).ok_or(Error::OffsetOverflow)?;
+        expected_len = expected_len
+            .checked_add(len)
+            .expect("buf must hold one slot per range totaling its length");
         let end = offset
             .checked_add(len as u64)
             .ok_or(Error::OffsetOverflow)?;
@@ -593,6 +595,12 @@ mod tests {
     #[should_panic(expected = "ranges must be sorted and non-overlapping")]
     fn test_validate_read_ranges_rejects_unsorted_ranges() {
         let _ = validate_read_ranges(8, &[(8, 4), (4, 4)], 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "buf must hold one slot per range totaling its length")]
+    fn test_validate_read_ranges_rejects_length_overflow() {
+        let _ = validate_read_ranges(usize::MAX, &[(0, usize::MAX), (u64::MAX, 1)], u64::MAX);
     }
 
     #[test]
