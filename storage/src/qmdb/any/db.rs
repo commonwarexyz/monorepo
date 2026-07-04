@@ -308,7 +308,7 @@ where
         candidates.sort_unstable_by_key(|&(_, pos)| pos);
         let positions = Self::dedup_positions(&candidates);
 
-        let ops = self.log.read_many_sync(&positions);
+        let ops = self.log.try_read_many_sync(&positions);
         let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
         let mut misses: Vec<(usize, u64)> = Vec::new();
         let mut op_idx = 0;

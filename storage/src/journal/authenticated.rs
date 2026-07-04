@@ -307,7 +307,7 @@ where
 
     /// Like [`Contiguous::read_many`], but reads the journal directly, skipping the synchronous
     /// page-cache pass. Intended for callers that already served cache hits via
-    /// [`Contiguous::read_many_sync`] and are reading the misses.
+    /// [`Contiguous::try_read_many_sync`] and are reading the misses.
     pub(crate) async fn read_many_direct(
         &self,
         positions: &[u64],
@@ -757,13 +757,13 @@ where
         let journal = &self.journal;
         let mut results: Vec<Option<C::Item>> = strategy.run(
             positions.len(),
-            || journal.read_many_sync(positions),
+            || journal.try_read_many_sync(positions),
             || {
                 let manual = strategy.manual();
                 let shard = positions.len().div_ceil(manual.parallelism_hint());
                 manual
                     .map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
-                        journal.read_many_sync(shard)
+                        journal.try_read_many_sync(shard)
                     })
                     .into_iter()
                     .flatten()
@@ -793,8 +793,8 @@ where
         self.journal.try_read_sync(position)
     }
 
-    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<C::Item>> {
-        self.journal.read_many_sync(positions)
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<C::Item>> {
+        self.journal.try_read_many_sync(positions)
     }
 
     async fn replay(

@@ -161,24 +161,24 @@ impl<B: Blob> Sealed<B> {
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
-    /// items that require a blob read; their slots in `buf` hold unspecified bytes.
-    pub fn read_many_sync_into(
+    /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
+    pub fn try_read_many_sync_into(
         &self,
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<Vec<usize>, Error> {
-        self.view().read_many_sync_into(buf, offsets, item_size)
+        self.view().try_read_many_sync_into(buf, offsets, item_size)
     }
 
-    /// Like [`Self::read_many_sync_into`], but for variable-length `(offset, len)` ranges:
+    /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges:
     /// `buf` holds one slot per range, back to back.
-    pub fn read_ranges_sync_into(
+    pub fn try_read_ranges_sync_into(
         &self,
         buf: &mut [u8],
         ranges: &[(u64, usize)],
     ) -> Result<Vec<usize>, Error> {
-        self.view().read_ranges_sync_into(buf, ranges)
+        self.view().try_read_ranges_sync_into(buf, ranges)
     }
 
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
@@ -573,7 +573,7 @@ mod tests {
         });
     }
 
-    /// `Sealed::read_many_sync_into` serves cached pages and the in-memory tail, and maps
+    /// `Sealed::try_read_many_sync_into` serves cached pages and the in-memory tail, and maps
     /// missed ranges (including straddling prefixes) back to item indices.
     #[test_traced("DEBUG")]
     fn test_sealed_read_many_sync_into() {
@@ -617,7 +617,7 @@ mod tests {
             sealed.read_at(0, page_size).await.unwrap();
             let mut out = vec![0u8; offsets.len() * item_size];
             let misses = sealed
-                .read_many_sync_into(&mut out, &offsets, NZUsize!(item_size))
+                .try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size))
                 .unwrap();
             assert_eq!(misses, vec![1, 2]);
             check(&out, &[0, 3]);
@@ -626,14 +626,14 @@ mod tests {
             sealed.read_at(page_size as u64, page_size).await.unwrap();
             let mut out = vec![0u8; offsets.len() * item_size];
             let misses = sealed
-                .read_many_sync_into(&mut out, &offsets, NZUsize!(item_size))
+                .try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size))
                 .unwrap();
             assert_eq!(misses, vec![0]);
             check(&out, &[1, 2, 3]);
         });
     }
 
-    /// `Sealed::read_ranges_sync_into` serves cached pages and the in-memory tail for
+    /// `Sealed::try_read_ranges_sync_into` serves cached pages and the in-memory tail for
     /// variable-length ranges, and maps missed ranges back to range indices, including when a
     /// zero-length range shares its offset with the missed range that follows it.
     #[test_traced("DEBUG")]
@@ -683,14 +683,14 @@ mod tests {
             // zero-length range never misses; the tail range is served in memory.
             sealed.read_at(0, page_size).await.unwrap();
             let mut out = vec![0u8; total_len];
-            let misses = sealed.read_ranges_sync_into(&mut out, &ranges).unwrap();
+            let misses = sealed.try_read_ranges_sync_into(&mut out, &ranges).unwrap();
             assert_eq!(misses, vec![2, 3]);
             check(&out, &[0, 4]);
 
             // With only page 1 cached, range 0 becomes the miss and the rest are served.
             sealed.read_at(page_size as u64, page_size).await.unwrap();
             let mut out = vec![0u8; total_len];
-            let misses = sealed.read_ranges_sync_into(&mut out, &ranges).unwrap();
+            let misses = sealed.try_read_ranges_sync_into(&mut out, &ranges).unwrap();
             assert_eq!(misses, vec![0]);
             check(&out, &[1, 2, 3, 4]);
         });

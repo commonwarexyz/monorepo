@@ -560,13 +560,6 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         Ok(items)
     }
 
-    /// Read an item synchronously from cached bytes, returning `None` on any miss.
-    fn try_read_sync_into(&self, position: u64, buf: &mut Vec<u8>) -> Option<V> {
-        self.validate_readable(position).ok()?;
-        let offset = self.offsets.try_read_sync(position)?;
-        self.try_read_frame_sync(position, offset, buf)
-    }
-
     /// Read the varint-framed item for `position` at byte `offset` from cached bytes, returning
     /// `None` on any miss.
     fn try_read_frame_sync(&self, position: u64, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
@@ -725,29 +718,23 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
             return Err(Error::ItemOutOfRange(last_position));
         }
 
-        // Read the items from cache if possible.
-        let mut result: Vec<Option<V>> = Vec::with_capacity(positions.len());
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "positions must be strictly increasing"
+        );
+
+        // Serve page-cache hits with one batched pass (which counts them against items_read),
+        // then read only the misses.
+        let mut result = self.try_read_many_sync(positions);
         let mut miss_indices = Vec::with_capacity(positions.len());
         let mut miss_positions = Vec::with_capacity(positions.len());
-        let mut buf = Vec::new();
-        let mut prev: Option<u64> = None;
-        for (i, &position) in positions.iter().enumerate() {
-            assert!(
-                prev.is_none_or(|p| position > p),
-                "positions must be strictly increasing"
-            );
-            prev = Some(position);
-            if let Some(item) = self.try_read_sync_into(position, &mut buf) {
-                result.push(Some(item));
-            } else {
-                result.push(None);
+        for (i, item) in result.iter().enumerate() {
+            if item.is_none() {
                 miss_indices.push(i);
-                miss_positions.push(position);
+                miss_positions.push(positions[i]);
             }
         }
-
         if miss_positions.is_empty() {
-            self.metrics.items_read.inc_by(positions.len() as u64);
             return Ok(result.into_iter().map(|r| r.unwrap()).collect());
         }
 
@@ -803,18 +790,20 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
             group_start = group_end;
         }
 
-        self.metrics.items_read.inc_by(positions.len() as u64);
+        self.metrics.items_read.inc_by(miss_positions.len() as u64);
         Ok(result.into_iter().map(|r| r.unwrap()).collect())
     }
 
     fn try_read_sync(&self, position: u64) -> Option<V> {
+        self.validate_readable(position).ok()?;
+        let offset = self.offsets.try_read_sync(position)?;
         let mut buf = Vec::new();
-        let item = self.try_read_sync_into(position, &mut buf)?;
+        let item = self.try_read_frame_sync(position, offset, &mut buf)?;
         self.metrics.items_read.inc();
         Some(item)
     }
 
-    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
         let mut out: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
         if positions.is_empty() {
             return out;
@@ -834,7 +823,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 _ => {}
             }
         }
-        let offsets = self.offsets.read_many_sync(&lookups);
+        let offsets = self.offsets.try_read_many_sync(&lookups);
 
         // Split queried frames into known extents (served below by one batched cache read per
         // data blob) and unknown extents (the last frame of a blob or of the journal, served by
@@ -898,7 +887,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 .collect();
             let total: usize = ranges.iter().map(|&(_, len)| len).sum();
             buf.resize(total, 0);
-            let Ok(missed) = blob.read_ranges_sync_into(&mut buf, &ranges) else {
+            let Ok(missed) = blob.try_read_ranges_sync_into(&mut buf, &ranges) else {
                 continue;
             };
             let mut missed = missed.into_iter().peekable();
@@ -2007,8 +1996,8 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         self.reader().try_read_sync(position)
     }
 
-    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
-        self.reader().read_many_sync(positions)
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
+        self.reader().try_read_many_sync(positions)
     }
 
     async fn replay(
@@ -2424,7 +2413,7 @@ mod tests {
             // Warm both the offsets and data page caches, then expect every position to be
             // served synchronously.
             let expected = reader.read_many(&positions).await.unwrap();
-            let served = reader.read_many_sync(&positions);
+            let served = reader.try_read_many_sync(&positions);
             assert_eq!(served.len(), positions.len());
             for (item, expected) in served.into_iter().zip(&expected) {
                 assert_eq!(item.expect("cached position is served"), *expected);
@@ -2432,7 +2421,7 @@ mod tests {
 
             // An out-of-range position is a miss, not an error. Positions grouped with it
             // (same offsets blob) also become misses, but other groups are unaffected.
-            let served = reader.read_many_sync(&[9, 13]);
+            let served = reader.try_read_many_sync(&[9, 13]);
             assert!(served[0].is_some());
             assert!(served[1].is_none());
             drop(reader);

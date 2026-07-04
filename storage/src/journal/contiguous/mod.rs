@@ -197,7 +197,7 @@ pub trait Contiguous: Send + Sync {
     /// read path reports such errors).
     ///
     /// Default implementation returns `None` for every position.
-    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {
         positions.iter().map(|_| None).collect()
     }
 

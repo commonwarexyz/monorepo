@@ -1263,7 +1263,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         item
     }
 
-    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
         let items_per_blob = self.items_per_blob.get();
         let pruning_boundary = self.bounds.start;
         let chunk_size = A::SIZE;
@@ -1302,7 +1302,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
             };
             let buf = &mut buf[..group.len() * chunk_size];
             let Ok(misses) =
-                blob.read_many_sync_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+                blob.try_read_many_sync_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
             else {
                 all_misses(&mut out);
                 continue;
@@ -1361,8 +1361,8 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         self.reader().try_read_sync(pos)
     }
 
-    fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
-        self.reader().read_many_sync(positions)
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
+        self.reader().try_read_many_sync(positions)
     }
 
     async fn replay(
@@ -4681,7 +4681,7 @@ mod tests {
 
             // Every synchronously served item must match the async read; positions the
             // 3-page test cache cannot hold are misses, never wrong values.
-            let served = reader.read_many_sync(&positions);
+            let served = reader.try_read_many_sync(&positions);
             assert_eq!(served.len(), positions.len());
             for (item, expected) in served.into_iter().zip(&expected) {
                 if let Some(item) = item {
@@ -4693,7 +4693,7 @@ mod tests {
             // warming exactly those positions they are all served synchronously.
             let tail: Vec<u64> = (16..20).collect();
             reader.read_many(&tail).await.unwrap();
-            let served = reader.read_many_sync(&tail);
+            let served = reader.try_read_many_sync(&tail);
             for (item, pos) in served.into_iter().zip(&tail) {
                 assert_eq!(
                     item.expect("warmed position is served"),
@@ -4702,11 +4702,11 @@ mod tests {
             }
 
             // A long-evicted position is a miss.
-            assert!(reader.read_many_sync(&[0])[0].is_none());
+            assert!(reader.try_read_many_sync(&[0])[0].is_none());
 
             // An out-of-range position is a miss, not an error, and does not poison the
             // valid position grouped before it.
-            let served = reader.read_many_sync(&[19, 20]);
+            let served = reader.try_read_many_sync(&[19, 20]);
             assert!(served[0].is_some());
             assert!(served[1].is_none());
             drop(reader);
