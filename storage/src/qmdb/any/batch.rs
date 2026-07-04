@@ -1168,7 +1168,7 @@ where
         let Self {
             mut batch,
             keys,
-            resolutions,
+            mut resolutions,
         } = self;
         let mut staged_updates = StagedUpdates::<F, U>::new();
         if updates.is_empty() {
@@ -1187,13 +1187,12 @@ where
             if !handled.insert(key) {
                 continue;
             }
-            let resolution = &resolutions[slot];
-            match resolution {
+            match resolutions[slot].take() {
                 Some((loc, payload)) if value.is_some() || U::STAGES_DELETES => {
                     // This staged update is the surviving write for `key`; do not also emit an
                     // older batch mutation for the same key.
                     batch.mutations.remove(key);
-                    staged_updates.push((key.clone(), *loc, payload.clone(), value));
+                    staged_updates.push((key.clone(), loc, payload, value));
                 }
                 _ => {
                     batch.mutations.insert(key.clone(), value);
@@ -1460,7 +1459,8 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let mut resolutions: Vec<StagedResolution<F, U>> = vec![None; keys.len()];
+        let mut resolutions: Vec<StagedResolution<F, U>> =
+            iter::repeat_with(|| None).take(keys.len()).collect();
         let (mut results, unresolved) = self.resolve_uncommitted_reads(keys, db.strategy());
         Self::fill_committed_reads(
             unresolved,

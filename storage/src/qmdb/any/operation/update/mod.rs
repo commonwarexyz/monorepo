@@ -24,7 +24,7 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync {
     type ValueEncoding: ValueEncoding<Value = Self::Value>;
 
     /// Payload cached alongside the resolved location of a batch read, consumed by merkleize.
-    type Cached: Clone + Send + Sync;
+    type Cached: Send + Sync;
 
     /// Whether merkleize may emit a staged delete directly at its read-resolved committed
     /// location. When false, staged deletes fall back to normal mutations.
