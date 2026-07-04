@@ -157,6 +157,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         (index / self.items_per_section) * self.items_per_section
     }
 
+    /// Returns true when `index` is below the prune floor.
+    const fn pruned(&self, index: u64) -> bool {
+        match self.oldest_allowed {
+            Some(oldest_allowed) => index < oldest_allowed,
+            None => false,
+        }
+    }
+
     /// Iterate over all positions for a given index (first + extras).
     fn iter_positions(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
         self.indices.get(&index).into_iter().copied().chain(
@@ -277,10 +285,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Fetch index
         let iter = self.keys.get(key);
-        let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
             // Continue if index is no longer allowed due to pruning.
-            if *index < min_allowed {
+            if self.pruned(*index) {
                 continue;
             }
 
@@ -526,6 +533,32 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     async fn put_multi(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
         self.put_internal(index, key, data, false).await
+    }
+
+    async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
+        self.has.inc();
+
+        // Ignore pruned indices.
+        if self.pruned(index) {
+            return Ok(false);
+        }
+
+        // A key absent from the in-memory index is not stored anywhere, so
+        // absence is decided without touching disk. A translated-key hit may
+        // be a collision, so confirm against the stored keys at `index`
+        // (reads index journal entries, never values).
+        if !self.keys.get(key).any(|candidate| *candidate == index) {
+            return Ok(false);
+        }
+        let section = self.section(index);
+        for position in self.iter_positions(index) {
+            let entry = self.oversized.get(section, position).await?;
+            if entry.key.as_ref() == key.as_ref() {
+                return Ok(true);
+            }
+            self.unnecessary_reads.inc();
+        }
+        Ok(false)
     }
 }
 
