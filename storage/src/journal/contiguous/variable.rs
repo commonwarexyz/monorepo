@@ -567,126 +567,6 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         self.try_read_frame_sync(position, offset, buf)
     }
 
-    /// Read items at strictly increasing positions, serving only page-cache hits. Returns one
-    /// entry per position: `Some(item)` for sync hits and `None` for positions that require
-    /// I/O (or fail validation or decode, which the async read path reports).
-    fn read_many_sync_cached(&self, positions: &[u64]) -> Vec<Option<V>> {
-        let mut out: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
-        if positions.is_empty() {
-            return out;
-        }
-
-        // A frame at position p spans [off(p), off(p + 1)), so one batched pass over the
-        // offsets journal resolves every queried frame's extent. Positions and their in-bounds
-        // successors interleave into one strictly increasing lookup list; the journal's last
-        // frame has no successor and takes the per-frame path below.
-        let mut lookups: Vec<u64> = Vec::with_capacity(positions.len() * 2);
-        for &position in positions {
-            if lookups.last() != Some(&position) {
-                lookups.push(position);
-            }
-            match position.checked_add(1) {
-                Some(next) if next < self.bounds.end => lookups.push(next),
-                _ => {}
-            }
-        }
-        let offsets = self.offsets.read_many_sync(&lookups);
-
-        // Split queried frames into known extents (served below by one batched cache read per
-        // data blob) and unknown extents (the last frame of a blob or of the journal, served by
-        // the per-frame path). Frames whose offset lookup missed stay `None`.
-        let items_per_blob = self.items_per_blob.get();
-        let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
-        let mut singles: Vec<(usize, u64)> = Vec::new();
-        let mut lookup_idx = 0;
-        for (idx, &position) in positions.iter().enumerate() {
-            while lookups[lookup_idx] != position {
-                lookup_idx += 1;
-            }
-            if self.validate_readable(position).is_err() {
-                continue;
-            }
-            let Some(offset) = offsets[lookup_idx] else {
-                continue;
-            };
-            // The successor lookup is adjacent in `lookups` whenever it was pushed (in
-            // bounds); a cross-blob successor's offset is in a different data blob and does
-            // not bound this frame.
-            let next = position + 1;
-            let next_offset = if next < self.bounds.end
-                && position_to_blob(position, items_per_blob)
-                    == position_to_blob(next, items_per_blob)
-            {
-                offsets[lookup_idx + 1]
-            } else {
-                None
-            };
-            match next_offset {
-                Some(next) if next > offset => {
-                    extents.push((idx, offset, (next - offset) as usize))
-                }
-                _ => singles.push((idx, offset)),
-            }
-        }
-
-        let mut buf = Vec::new();
-        let mut hits = 0u64;
-
-        // Serve known-extent frames: one batched cache read per data blob group.
-        let mut group_start = 0;
-        while group_start < extents.len() {
-            let blob_num = position_to_blob(positions[extents[group_start].0], items_per_blob);
-            let mut group_end = group_start + 1;
-            while group_end < extents.len()
-                && position_to_blob(positions[extents[group_end].0], items_per_blob) == blob_num
-            {
-                group_end += 1;
-            }
-            let group = &extents[group_start..group_end];
-            group_start = group_end;
-
-            let Some(blob) = self.data.get(blob_num) else {
-                continue;
-            };
-            let ranges: Vec<(u64, usize)> = group
-                .iter()
-                .map(|&(_, offset, len)| (offset, len))
-                .collect();
-            let total: usize = ranges.iter().map(|&(_, len)| len).sum();
-            buf.resize(total, 0);
-            let Ok(missed) = blob.read_ranges_sync_cached(&mut buf, &ranges) else {
-                continue;
-            };
-            let mut missed = missed.into_iter().peekable();
-            let mut local = 0usize;
-            for (range_idx, &(idx, _, len)) in group.iter().enumerate() {
-                let slot = &buf[local..local + len];
-                local += len;
-                if missed.peek() == Some(&range_idx) {
-                    missed.next();
-                    continue;
-                }
-                if let Some(item) =
-                    decode_frame_from_span(slot, len, &self.codec_config, self.compressed)
-                {
-                    out[idx] = Some(item);
-                    hits += 1;
-                }
-            }
-        }
-
-        // Per-frame path for frames whose extent is unknown.
-        let mut frame_buf = Vec::new();
-        for (idx, offset) in singles {
-            if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut frame_buf) {
-                out[idx] = Some(item);
-                hits += 1;
-            }
-        }
-        self.metrics.items_read.inc_by(hits);
-        out
-    }
-
     /// Read the varint-framed item for `position` at byte `offset` from cached bytes, returning
     /// `None` on any miss.
     fn try_read_frame_sync(&self, position: u64, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
@@ -815,9 +695,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
 
         // Serve from the page cache synchronously when possible, collapsing the offsets and data
         // lookups into buffer copies and avoiding the async storage path on a hit.
-        let mut buf = Vec::new();
-        if let Some(item) = self.try_read_sync_into(position, &mut buf) {
-            self.metrics.items_read.inc();
+        if let Some(item) = self.try_read_sync(position) {
             return Ok(item);
         }
 
@@ -932,13 +810,125 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
     fn try_read_sync(&self, position: u64) -> Option<V> {
         let mut buf = Vec::new();
         let item = self.try_read_sync_into(position, &mut buf)?;
-        self.metrics.try_read_sync_hits.inc();
         self.metrics.items_read.inc();
         Some(item)
     }
 
     fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
-        self.read_many_sync_cached(positions)
+        let mut out: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
+        if positions.is_empty() {
+            return out;
+        }
+
+        // A frame at position p spans [off(p), off(p + 1)), so one batched pass over the
+        // offsets journal resolves every queried frame's extent. Positions and their in-bounds
+        // successors interleave into one strictly increasing lookup list. The journal's last
+        // frame has no successor and takes the per-frame path below.
+        let mut lookups: Vec<u64> = Vec::with_capacity(positions.len() * 2);
+        for &position in positions {
+            if lookups.last() != Some(&position) {
+                lookups.push(position);
+            }
+            match position.checked_add(1) {
+                Some(next) if next < self.bounds.end => lookups.push(next),
+                _ => {}
+            }
+        }
+        let offsets = self.offsets.read_many_sync(&lookups);
+
+        // Split queried frames into known extents (served below by one batched cache read per
+        // data blob) and unknown extents (the last frame of a blob or of the journal, served by
+        // the per-frame path). Frames whose offset lookup missed stay `None`.
+        let items_per_blob = self.items_per_blob.get();
+        let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
+        let mut singles: Vec<(usize, u64)> = Vec::new();
+        let mut lookup_idx = 0;
+        for (idx, &position) in positions.iter().enumerate() {
+            while lookups[lookup_idx] != position {
+                lookup_idx += 1;
+            }
+            if self.validate_readable(position).is_err() {
+                continue;
+            }
+            let Some(offset) = offsets[lookup_idx] else {
+                continue;
+            };
+            // The successor lookup is adjacent in `lookups` whenever it was pushed (in
+            // bounds). A cross-blob successor's offset is in a different data blob and does
+            // not bound this frame.
+            let next = position + 1;
+            let next_offset = if next < self.bounds.end
+                && position_to_blob(position, items_per_blob)
+                    == position_to_blob(next, items_per_blob)
+            {
+                offsets[lookup_idx + 1]
+            } else {
+                None
+            };
+            match next_offset {
+                Some(next) if next > offset => {
+                    extents.push((idx, offset, (next - offset) as usize))
+                }
+                _ => singles.push((idx, offset)),
+            }
+        }
+
+        let mut buf = Vec::new();
+        let mut hits = 0u64;
+
+        // Serve known-extent frames: one batched cache read per data blob group.
+        let mut group_start = 0;
+        while group_start < extents.len() {
+            let blob_num = position_to_blob(positions[extents[group_start].0], items_per_blob);
+            let mut group_end = group_start + 1;
+            while group_end < extents.len()
+                && position_to_blob(positions[extents[group_end].0], items_per_blob) == blob_num
+            {
+                group_end += 1;
+            }
+            let group = &extents[group_start..group_end];
+            group_start = group_end;
+
+            let Some(blob) = self.data.get(blob_num) else {
+                continue;
+            };
+            let ranges: Vec<(u64, usize)> = group
+                .iter()
+                .map(|&(_, offset, len)| (offset, len))
+                .collect();
+            let total: usize = ranges.iter().map(|&(_, len)| len).sum();
+            buf.resize(total, 0);
+            let Ok(missed) = blob.read_ranges_sync_into(&mut buf, &ranges) else {
+                continue;
+            };
+            let mut missed = missed.into_iter().peekable();
+            let mut local = 0usize;
+            for (range_idx, &(idx, _, len)) in group.iter().enumerate() {
+                let slot = &buf[local..local + len];
+                local += len;
+                if missed.peek() == Some(&range_idx) {
+                    missed.next();
+                    continue;
+                }
+                if let Some(item) =
+                    decode_frame_from_span(slot, len, &self.codec_config, self.compressed)
+                {
+                    out[idx] = Some(item);
+                    hits += 1;
+                }
+            }
+        }
+
+        // Per-frame path for frames whose extent is unknown.
+        let mut frame_buf = Vec::new();
+        for (idx, offset) in singles {
+            if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut frame_buf) {
+                out[idx] = Some(item);
+                hits += 1;
+            }
+        }
+        self.metrics.items_read.inc_by(hits);
+        out
     }
 
     async fn replay(
@@ -6403,7 +6393,6 @@ mod tests {
                 "variable_metrics_append_many_calls_total 1",
                 "variable_metrics_read_calls_total 1",
                 "variable_metrics_read_many_calls_total 1",
-                "variable_metrics_try_read_sync_hits_total 1",
                 "variable_metrics_items_read_total 4",
                 "variable_metrics_commit_calls_total 1",
                 "variable_metrics_sync_calls_total 1",

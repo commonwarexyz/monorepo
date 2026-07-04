@@ -58,8 +58,6 @@ pub(super) struct CommonMetrics<E: Clock> {
     pub read_many_calls: Counter,
     /// Duration of non-empty batch read calls.
     read_many_duration: Timed,
-    /// Successful `try_read_sync` calls.
-    pub try_read_sync_hits: Counter,
     /// Items returned by read, read_many, read_many_sync, and try_read_sync.
     pub items_read: Counter,
     /// Full sync calls.
@@ -124,10 +122,6 @@ impl<E: RuntimeMetrics + Clock> CommonMetrics<E> {
             "read_many_duration",
             "Duration of non-empty batch read calls",
         );
-        let try_read_sync_hits = context.as_ref().counter(
-            "try_read_sync_hits",
-            "Number of try_read_sync calls that returned Some",
-        );
         let items_read = context.as_ref().counter(
             "items_read",
             "Number of items returned by read, read_many, read_many_sync, and try_read_sync",
@@ -156,7 +150,6 @@ impl<E: RuntimeMetrics + Clock> CommonMetrics<E> {
             read_duration: Timed::new(read_duration),
             read_many_calls,
             read_many_duration: Timed::new(read_many_duration),
-            try_read_sync_hits,
             items_read,
             sync_calls,
             sync_duration: Timed::new(sync_duration),

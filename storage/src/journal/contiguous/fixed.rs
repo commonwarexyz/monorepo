@@ -1163,83 +1163,6 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .expect("position in bounds maps to a retained blob");
         Ok((blob, offset))
     }
-
-    /// Read items at strictly increasing positions, serving only page-cache and tip-buffer
-    /// hits. Returns one entry per position: `Some(item)` for sync hits and `None` for
-    /// positions that require I/O (or fail validation or decode, which the async read path reports).
-    fn read_many_sync_cached(&self, positions: &[u64]) -> Vec<Option<A>> {
-        let items_per_blob = self.items_per_blob.get();
-        let pruning_boundary = self.bounds.start;
-        let chunk_size = A::SIZE;
-        let mut out = Vec::with_capacity(positions.len());
-        let mut buf = vec![0u8; positions.len() * chunk_size];
-        let mut hits = 0u64;
-        for group in positions.chunk_by(|a, b| {
-            super::position_to_blob(*a, items_per_blob)
-                == super::position_to_blob(*b, items_per_blob)
-        }) {
-            let all_misses = |out: &mut Vec<Option<A>>| out.extend(group.iter().map(|_| None));
-            if group
-                .iter()
-                .any(|&pos| self.validate_readable(pos).is_err())
-            {
-                all_misses(&mut out);
-                continue;
-            }
-            let blob_num = super::position_to_blob(group[0], items_per_blob);
-            let Ok(first_position) = first_in_blob(pruning_boundary, blob_num, items_per_blob)
-            else {
-                all_misses(&mut out);
-                continue;
-            };
-            let Ok(blob_offsets) = group
-                .iter()
-                .map(|&pos| Journal::<E, A>::items_to_bytes(pos - first_position))
-                .collect::<Result<Vec<u64>, _>>()
-            else {
-                all_misses(&mut out);
-                continue;
-            };
-            let Some(blob) = self.blobs.get(blob_num) else {
-                all_misses(&mut out);
-                continue;
-            };
-            let buf = &mut buf[..group.len() * chunk_size];
-            let Ok(misses) =
-                blob.read_many_sync_cached(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
-            else {
-                all_misses(&mut out);
-                continue;
-            };
-            let mut misses = misses.into_iter().peekable();
-            for (idx, slice) in buf.chunks_exact(chunk_size).enumerate() {
-                if misses.peek() == Some(&idx) {
-                    misses.next();
-                    out.push(None);
-                } else if let Ok(item) = A::decode(slice) {
-                    out.push(Some(item));
-                    hits += 1;
-                } else {
-                    // A decode failure surfaces as a miss; the caller's async fallback read
-                    // reports the error.
-                    out.push(None);
-                }
-            }
-        }
-        self.metrics.record_cache_hits(hits);
-        self.metrics.items_read.inc_by(hits);
-        out
-    }
-
-    /// Read the item at `pos` synchronously if its bytes are cached, else `None`.
-    fn try_read_sync_cached(&self, pos: u64) -> Option<A> {
-        let (blob, offset) = self.locate(pos).ok()?;
-        let mut buf = vec![0u8; A::SIZE];
-        if !blob.try_read_sync(offset, &mut buf) {
-            return None;
-        }
-        A::decode(&buf[..]).ok()
-    }
 }
 
 impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
@@ -1253,12 +1176,9 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         self.metrics.read_calls.inc();
 
         // Serve from the page cache synchronously when possible, avoiding the async storage path.
-        if let Some(item) = self.try_read_sync_cached(pos) {
-            self.metrics.record_cache_hits(1);
-            self.metrics.items_read.inc();
+        if let Some(item) = self.try_read_sync(pos) {
             return Ok(item);
         }
-        self.metrics.record_cache_misses(1);
 
         let _timer = self.metrics.read_timer();
         let (blob, offset) = self.locate(pos)?;
@@ -1329,22 +1249,82 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
-        self.try_read_sync_cached(pos).map_or_else(
-            || {
-                self.metrics.record_cache_misses(1);
-                None
-            },
-            |item| {
-                self.metrics.record_cache_hits(1);
-                self.metrics.try_read_sync_hits.inc();
-                self.metrics.items_read.inc();
-                Some(item)
-            },
-        )
+        let mut buf = vec![0u8; A::SIZE];
+        let item = match self.locate(pos) {
+            Ok((blob, offset)) if blob.try_read_sync(offset, &mut buf) => A::decode(&buf[..]).ok(),
+            _ => None,
+        };
+        if item.is_some() {
+            self.metrics.record_cache_hits(1);
+            self.metrics.items_read.inc();
+        } else {
+            self.metrics.record_cache_misses(1);
+        }
+        item
     }
 
     fn read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
-        self.read_many_sync_cached(positions)
+        let items_per_blob = self.items_per_blob.get();
+        let pruning_boundary = self.bounds.start;
+        let chunk_size = A::SIZE;
+        let mut out = Vec::with_capacity(positions.len());
+        let mut buf = vec![0u8; positions.len() * chunk_size];
+        let mut hits = 0u64;
+        for group in positions.chunk_by(|a, b| {
+            super::position_to_blob(*a, items_per_blob)
+                == super::position_to_blob(*b, items_per_blob)
+        }) {
+            let all_misses = |out: &mut Vec<Option<A>>| out.extend(group.iter().map(|_| None));
+            if group
+                .iter()
+                .any(|&pos| self.validate_readable(pos).is_err())
+            {
+                all_misses(&mut out);
+                continue;
+            }
+            let blob_num = super::position_to_blob(group[0], items_per_blob);
+            let Ok(first_position) = first_in_blob(pruning_boundary, blob_num, items_per_blob)
+            else {
+                all_misses(&mut out);
+                continue;
+            };
+            let Ok(blob_offsets) = group
+                .iter()
+                .map(|&pos| Journal::<E, A>::items_to_bytes(pos - first_position))
+                .collect::<Result<Vec<u64>, _>>()
+            else {
+                all_misses(&mut out);
+                continue;
+            };
+            let Some(blob) = self.blobs.get(blob_num) else {
+                all_misses(&mut out);
+                continue;
+            };
+            let buf = &mut buf[..group.len() * chunk_size];
+            let Ok(misses) =
+                blob.read_many_sync_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+            else {
+                all_misses(&mut out);
+                continue;
+            };
+            let mut misses = misses.into_iter().peekable();
+            for (idx, slice) in buf.chunks_exact(chunk_size).enumerate() {
+                if misses.peek() == Some(&idx) {
+                    misses.next();
+                    out.push(None);
+                } else if let Ok(item) = A::decode(slice) {
+                    out.push(Some(item));
+                    hits += 1;
+                } else {
+                    // A decode failure surfaces as a miss. The caller's async fallback read
+                    // reports the error.
+                    out.push(None);
+                }
+            }
+        }
+        self.metrics.record_cache_hits(hits);
+        self.metrics.items_read.inc_by(hits);
+        out
     }
 
     async fn replay(
@@ -4772,7 +4752,6 @@ mod tests {
                 "fixed_metrics_append_many_calls_total 1",
                 "fixed_metrics_read_calls_total 1",
                 "fixed_metrics_read_many_calls_total 1",
-                "fixed_metrics_try_read_sync_hits_total 1",
                 "fixed_metrics_items_read_total 5",
                 "fixed_metrics_commit_calls_total 1",
                 "fixed_metrics_sync_calls_total 1",

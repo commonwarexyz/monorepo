@@ -540,8 +540,8 @@ impl<'a, B: RBlob> Blob<'a, B> {
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
-    /// items that require a blob read; their slots in `buf` hold unspecified bytes.
-    pub(super) fn read_many_sync_cached(
+    /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
+    pub(super) fn read_many_sync_into(
         &self,
         buf: &mut [u8],
         offsets: &[u64],
@@ -557,8 +557,8 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
-    /// Like [`Self::read_many_sync_cached`], but for variable-length `(offset, len)` ranges.
-    pub(super) fn read_ranges_sync_cached(
+    /// Like [`Self::read_many_sync_into`], but for variable-length `(offset, len)` ranges.
+    pub(super) fn read_ranges_sync_into(
         &self,
         buf: &mut [u8],
         ranges: &[(u64, usize)],
