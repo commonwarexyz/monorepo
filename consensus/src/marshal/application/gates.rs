@@ -1,11 +1,12 @@
 use crate::{marshal::core::durability::Durable as _, types::Round};
+use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::Handle;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{collections::HashMap, fmt::Debug, future::Future, hash::Hash, sync::Arc};
+use std::{collections::HashMap, fmt::Debug, future::Future, sync::Arc};
 use tracing::debug;
 
 type GateMap<D> = HashMap<(Round, D), oneshot::Receiver<bool>>;
@@ -26,26 +27,17 @@ type GateMap<D> = HashMap<(Round, D), oneshot::Receiver<bool>>;
 /// taken (consumed) when certification is ready to act on the result. Stale
 /// entries are pruned after finalization via [`retain_after`](Self::retain_after).
 #[derive(Clone)]
-pub(crate) struct Gates<D>
-where
-    D: Eq + Hash,
-{
+pub(crate) struct Gates<D: Digest> {
     inner: Arc<Mutex<GateMap<D>>>,
 }
 
-impl<D> Default for Gates<D>
-where
-    D: Eq + Hash,
-{
+impl<D: Digest> Default for Gates<D> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<D> Gates<D>
-where
-    D: Eq + Hash,
-{
+impl<D: Digest> Gates<D> {
     /// Creates an empty task registry.
     pub(crate) fn new() -> Self {
         Self {
@@ -69,12 +61,7 @@ where
             .lock()
             .retain(|(task_round, _), _| task_round > finalized_round);
     }
-}
 
-impl<D> Gates<D>
-where
-    D: Eq + Hash + Copy,
-{
     /// Completes the propose durability handshake for `(round, id)`.
     ///
     /// Registers a certification gate, publishes `id` to consensus on `tx`, then awaits the
@@ -94,9 +81,7 @@ where
         tx: oneshot::Sender<D>,
         persist: oneshot::Receiver<Handle<()>>,
         name: &'static str,
-    ) where
-        D: Debug,
-    {
+    ) {
         let (durable_tx, durable_rx) = oneshot::channel();
         self.insert(round, id, durable_rx);
         tx.send_lossy(id);
