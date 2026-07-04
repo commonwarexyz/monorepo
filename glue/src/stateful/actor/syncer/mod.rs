@@ -215,7 +215,7 @@ where
 /// Durable state-sync metadata.
 pub(crate) struct StateSyncMetadata<E, C>
 where
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     C: Digest,
 {
     partition_prefix: String,
@@ -224,7 +224,7 @@ where
 
 impl<E, C> StateSyncMetadata<E, C>
 where
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     C: Digest,
 {
     /// Load the durable state-sync metadata partition, creating it if needed.

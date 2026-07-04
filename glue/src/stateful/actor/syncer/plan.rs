@@ -5,7 +5,6 @@ use commonware_consensus::{
     types::Height,
 };
 use commonware_cryptography::certificate::Scheme;
-use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Startup plan that determines whether one-time peer state sync may still run.
 ///
@@ -26,7 +25,7 @@ use commonware_runtime::{Clock, Metrics, Storage};
 /// and marshal's processed height instead.
 pub struct SyncPlan<E, S, V>
 where
-    E: Clock + Metrics + Storage,
+    E: commonware_storage::Context,
     S: Scheme,
     V: Variant,
 {
@@ -36,7 +35,7 @@ where
 
 impl<E, S, V> SyncPlan<E, S, V>
 where
-    E: Clock + Metrics + Storage,
+    E: commonware_storage::Context,
     S: Scheme,
     V: Variant,
 {

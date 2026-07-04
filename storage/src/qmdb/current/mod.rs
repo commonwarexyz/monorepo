@@ -330,7 +330,7 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, full::Config as MerkleConfig, Location},
+    merkle::{self, full::Config as MerkleConfig},
     qmdb::{
         any::{
             self,
@@ -347,7 +347,6 @@ use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 use commonware_utils::bitmap::Prunable as BitMap;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
@@ -381,10 +380,6 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
-
-    /// How the ordered-partitioned snapshot build parallelizes during init. Note that only certain
-    /// index types (such as the ordered-partitioned index) support parallel construction.
-    pub init_parallelism: super::InitParallelism,
 }
 
 impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
@@ -394,7 +389,6 @@ impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S>
             journal_config: cfg.journal_config,
             translator: cfg.translator,
             init_cache_size: cfg.init_cache_size,
-            init_parallelism: cfg.init_parallelism,
         }
     }
 }
@@ -413,15 +407,14 @@ pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: merkle::Graftable,
-    E: Context + Spawner + 'static,
+    E: Context,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
-    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
-    J: Inner<E, Item = Operation<F, U>>,
+    I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
+    J: Inner<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Committable + CodecShared,
-    crate::journal::authenticated::Journal<F, E, J, H, S>: Send + Sync + 'static,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
@@ -523,11 +516,11 @@ pub mod tests {
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
-            verify_proof, InitParallelism,
+            verify_proof,
         },
         translator::Translator,
     };
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
@@ -557,15 +550,22 @@ pub mod tests {
         partition_prefix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T, Sequential> {
+        fixed_config_with_strategy(partition_prefix, pooler, Sequential)
+    }
+
+    pub(crate) fn fixed_config_with_strategy<T: Translator + Default, S: Strategy>(
+        partition_prefix: &str,
+        pooler: &impl BufferPooler,
+        strategy: S,
+    ) -> FixedConfig<T, S> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            init_parallelism: InitParallelism::Serial,
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                strategy: Sequential,
+                strategy,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
@@ -587,7 +587,6 @@ pub mod tests {
     ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            init_parallelism: InitParallelism::Serial,
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -1389,7 +1388,6 @@ pub mod tests {
         executor.start(|context| async move {
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
-                init_parallelism: InitParallelism::Serial,
                 merkle_config: MerkleConfig {
                     journal_partition: "forged-exclusion-journal".to_string(),
                     metadata_partition: "forged-exclusion-metadata".to_string(),

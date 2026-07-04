@@ -12,7 +12,7 @@ use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_macros::select;
 use commonware_parallel::Strategy;
-use commonware_runtime::{reschedule, Clock, Metrics, Storage};
+use commonware_runtime::reschedule;
 use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
@@ -54,7 +54,7 @@ async fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T
 pub struct KeylessUnjournaledUnmerkleized<F, E, V, H, S, C = ()>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -71,7 +71,7 @@ where
 impl<F, E, V, H, S, C> Deref for KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -89,7 +89,7 @@ where
 impl<F, E, V, H, S, C> KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -120,7 +120,7 @@ where
 pub struct KeylessUnjournaledMerkleized<F, E, V, H, S, C = ()>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -135,7 +135,7 @@ where
 impl<F, E, V, H, S, C> Deref for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -153,7 +153,7 @@ where
 impl<F, E, V, H, S, C> UnmerkleizedTrait for KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -181,7 +181,7 @@ where
 impl<F, E, V, H, S, C> MerkleizedTrait for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
@@ -209,7 +209,7 @@ where
 impl<F, E, V, H, S> ManagedDb<E> for fixed::CompactDb<F, E, V, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     V: FixedValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
@@ -267,7 +267,7 @@ where
 impl<F, E, V, H, C, S> ManagedDb<E> for variable::CompactDb<F, E, V, H, C, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     V: VariableValue + 'static,
     H: Hasher + 'static,
     Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
@@ -326,7 +326,7 @@ where
 impl<F, E, V, H, S, R> StateSyncDb<E, R> for fixed::CompactDb<F, E, V, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     V: FixedValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
@@ -412,7 +412,7 @@ where
 impl<F, E, V, H, C, S, R> StateSyncDb<E, R> for variable::CompactDb<F, E, V, H, C, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
     V: VariableValue + 'static,
     H: Hasher + 'static,
     Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
@@ -506,8 +506,8 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Spawner as _,
-        Supervisor as _,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Clock as _, Runner as _,
+        Spawner as _, Supervisor as _,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,

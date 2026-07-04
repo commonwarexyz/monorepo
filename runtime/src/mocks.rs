@@ -563,6 +563,49 @@ impl<E: Metrics> Metrics for SyncFaultContext<E> {
     }
 }
 
+impl<E: crate::Spawner> crate::Spawner for SyncFaultContext<E> {
+    fn shared(self, blocking: bool) -> Self {
+        Self {
+            inner: self.inner.shared(blocking),
+            fail_partition: self.fail_partition,
+        }
+    }
+
+    fn dedicated(self) -> Self {
+        Self {
+            inner: self.inner.dedicated(),
+            fail_partition: self.fail_partition,
+        }
+    }
+
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let fail_partition = self.fail_partition;
+        self.inner.spawn(move |inner| {
+            f(Self {
+                inner,
+                fail_partition,
+            })
+        })
+    }
+
+    fn stop(
+        self,
+        value: i32,
+        timeout: Option<std::time::Duration>,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        self.inner.stop(value, timeout)
+    }
+
+    fn stopped(&self) -> crate::signal::Signal {
+        self.inner.stopped()
+    }
+}
+
 impl<E: Clock> Clock for SyncFaultContext<E> {
     fn current(&self) -> std::time::SystemTime {
         self.inner.current()

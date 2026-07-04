@@ -17,7 +17,6 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
 /// Type alias for a fixed-size operation.
@@ -41,7 +40,7 @@ pub type CompactConfig<S> = super::CompactConfig<(), S>;
 
 impl<
         F: Family,
-        E: Storage + Clock + Metrics,
+        E: crate::Context,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -64,7 +63,7 @@ impl<
     }
 }
 
-impl<F: Family, E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, S: Strategy>
+impl<F: Family, E: crate::Context, K: Array, V: FixedValue, H: Hasher, S: Strategy>
     CompactDb<F, E, K, V, H, S>
 {
     /// Returns a [CompactDb] initialized from `cfg`.

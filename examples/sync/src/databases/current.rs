@@ -18,7 +18,7 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_codec::FixedSize;
 use commonware_cryptography::{sha256, Hasher as CryptoHasher};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer, BufferPooler};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     mmr::{self, full::Config as MmrConfig, Location, Proof},
@@ -27,7 +27,6 @@ use commonware_storage::{
         any::unordered::{fixed::Operation as FixedOperation, Update},
         current::{self, FixedConfig as Config},
         operation::Committable,
-        InitParallelism,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -56,7 +55,6 @@ pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequential> {
     let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     Config {
-        init_parallelism: InitParallelism::Serial,
         merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),
@@ -79,7 +77,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
 
 impl<E> super::ExampleDatabase for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -160,7 +158,7 @@ where
 
 impl<E> super::Syncable for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
 {
     async fn size(&self) -> Location {
         self.bounds().end

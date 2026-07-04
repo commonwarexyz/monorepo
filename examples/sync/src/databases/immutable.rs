@@ -3,7 +3,7 @@
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::BufferPooler;
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{
@@ -90,7 +90,7 @@ pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec
 
 impl<E> super::ExampleDatabase for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -141,7 +141,7 @@ where
 
 impl<E> super::Syncable for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
 {
     async fn size(&self) -> Location {
         self.bounds().end
@@ -171,7 +171,7 @@ where
 
 impl<E> super::CompactSyncable for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: commonware_storage::Context,
 {
     async fn target(&self) -> compact::Target<Self::Family, Key> {
         compact::Target::new(self.root(), self.bounds().end)

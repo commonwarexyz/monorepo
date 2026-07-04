@@ -19,7 +19,6 @@ use crate::{
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Type alias for a variable-size operation.
 pub type Operation<F, K, V> = BaseOperation<F, K, VariableEncoding<V>>;
@@ -42,7 +41,7 @@ pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
 
 impl<
         F: Family,
-        E: Storage + Clock + Metrics,
+        E: crate::Context,
         K: Key,
         V: VariableValue,
         H: Hasher,
@@ -70,7 +69,7 @@ impl<
 
 impl<
         F: Family,
-        E: Storage + Clock + Metrics,
+        E: crate::Context,
         K: Key,
         V: VariableValue,
         H: Hasher,

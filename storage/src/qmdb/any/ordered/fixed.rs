@@ -17,7 +17,6 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 use commonware_utils::Array;
 
 pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
@@ -36,15 +35,8 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<
-        F: Family,
-        E: Context + Spawner + 'static,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, S>
+impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S: Strategy>
+    Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -77,7 +69,6 @@ pub mod partitioned {
     };
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
-    use commonware_runtime::Spawner;
     use commonware_utils::Array;
 
     /// An ordered key-value QMDB with a partitioned snapshot index.
@@ -102,7 +93,7 @@ pub mod partitioned {
 
     impl<
             F: Family,
-            E: Context + Spawner + 'static,
+            E: Context,
             K: Array,
             V: FixedValue,
             H: Hasher,
@@ -149,7 +140,7 @@ pub(crate) mod test {
                     },
                     Update,
                 },
-                test::fixed_db_config,
+                test::{fixed_db_config, fixed_db_config_with_strategy},
             },
             verify_proof,
         },
@@ -158,12 +149,12 @@ pub(crate) mod test {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Manual, Sequential};
     use commonware_runtime::{
         deterministic::{self, Context},
         Runner as _, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZU64};
+    use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU64};
     use futures::StreamExt as _;
     use rand::{rngs::StdRng, seq::IteratorRandom, RngCore, SeedableRng};
     use std::collections::{BTreeMap, HashMap};
@@ -593,28 +584,69 @@ pub(crate) mod test {
     }
 
     /// Build a `P`-partitioned ordered db with churny ops, then assert that reopening it with a range
-    /// of worker counts (`0` for the serial path, `1` for the single-worker de-interleave, counts that
-    /// leave trailing partition ranges empty, and counts above the partition count that clamp) all
-    /// reconstruct the identical root -- the parallel build replays the same immutable log, just split
-    /// across workers owning disjoint partition ranges (with non-zero offsets for `workers > 1`).
+    /// of worker counts (`0` for the serial path, counts that leave trailing partition ranges empty,
+    /// and counts above the partition count that clamp) all reconstruct the identical root and
+    /// key-value state -- the parallel build replays the same immutable log, just split across
+    /// workers owning disjoint partition ranges. The build derives its worker count from the
+    /// configured strategy's parallelism hint, so each reopen pins the count with a [Manual]
+    /// strategy of hint `workers` (a hint of one builds serially).
     async fn check_parallel_init_equivalence<const P: usize>(
         context: deterministic::Context,
         partition: &'static str,
-        parallelisms: &[usize],
+        worker_counts: &[usize],
     ) {
-        type PartDb<const P: usize> =
-            partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, P, Sequential>;
+        type PartDb<const P: usize, S> =
+            partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, P, S>;
+
+        /// The value each key holds after the three commits below. Keys deleted in commit 2 and
+        /// reinserted in commit 3 hold the reinserted value. Keys deleted and not reinserted are
+        /// absent. Updated keys hold the commit-2 value. The rest hold their commit-1 value.
+        fn expected_value(i: u64) -> Option<Digest> {
+            if i % 21 == 1 {
+                Some(Sha256::hash(&(i * 13).to_be_bytes()))
+            } else if i % 7 == 1 {
+                None
+            } else if i.is_multiple_of(3) {
+                Some(Sha256::hash(&((i + 1) * 11).to_be_bytes()))
+            } else {
+                Some(Sha256::hash(&(i * 7).to_be_bytes()))
+            }
+        }
+
+        /// Assert every key resolves to its expected value, catching a location filed under the
+        /// wrong key (which the root comparison alone cannot detect since the `any` root is a pure
+        /// function of the log).
+        async fn assert_expected_values<const P: usize, S: commonware_parallel::Strategy>(
+            db: &PartDb<P, S>,
+        ) {
+            for i in 0u64..4000 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                assert_eq!(
+                    db.get(&k).await.unwrap(),
+                    expected_value(i),
+                    "value mismatch for key {i}"
+                );
+            }
+        }
 
         let cfg = fixed_db_config::<OneCap>(partition, &context);
-        let mut db = PartDb::<P>::init(context.child("populate"), cfg)
+        let mut db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
             .await
             .unwrap();
+
+        // Commit 1: insert every key.
         let mut batch = db.new_batch();
         for i in 0u64..4000 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = Sha256::hash(&(i * 7).to_be_bytes());
             batch = batch.write(k, Some(v));
         }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+
+        // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
+        let mut batch = db.new_batch();
         for i in (0u64..4000).step_by(3) {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = Sha256::hash(&((i + 1) * 11).to_be_bytes());
@@ -627,41 +659,77 @@ pub(crate) mod test {
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
+
+        // Commit 3: reinsert a third of the deleted keys, so the replayed log contains
+        // delete-then-reinsert sequences for the parallel build to resolve.
+        let mut batch = db.new_batch();
+        for i in (1u64..4000).step_by(21) {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&(i * 13).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
         db.sync().await.unwrap();
         let root = db.root();
         drop(db);
 
-        // Reopen with a range of worker counts; all rebuild from the same log and must match.
-        for &workers in parallelisms {
-            let mut cfg = fixed_db_config::<OneCap>(partition, &context);
-            cfg.init_parallelism = match workers {
-                0 => crate::qmdb::InitParallelism::Serial,
-                n => {
-                    crate::qmdb::InitParallelism::Workers(core::num::NonZeroUsize::new(n).unwrap())
-                }
-            };
-            let ctx = context
-                .child("reopen")
-                .with_attribute("parallelism", workers);
-            let db = PartDb::<P>::init(ctx, cfg).await.unwrap();
-            assert_eq!(
-                db.root(),
-                root,
-                "root mismatch at P={P} init_parallelism={workers}"
+        // Reopen with a range of worker counts. All rebuild from the same log and must match the
+        // original root and serve the expected value for every key.
+        for &workers in worker_counts {
+            let cfg = fixed_db_config_with_strategy::<OneCap, _>(
+                partition,
+                &context,
+                Manual::new(Sequential, NZUsize!(workers.max(1))),
             );
+            let ctx = context.child("reopen").with_attribute("workers", workers);
+            let db = PartDb::<P, Manual<Sequential>>::init(ctx, cfg)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root, "root mismatch at P={P} workers={workers}");
+            assert_expected_values(&db).await;
             drop(db);
         }
+    }
+
+    /// A fresh db's log holds only the auto-appended CommitFloor. A multi-worker reopen must
+    /// handle the keyless single-op replay (every routed batch empty).
+    #[test_traced("WARN")]
+    fn test_ordered_partitioned_fresh_db_parallel_init() {
+        deterministic::Runner::default().start(|context| async move {
+            type FreshDb<S> =
+                partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
+
+            let cfg = fixed_db_config::<OneCap>("parallel_fresh", &context);
+            let db = FreshDb::<Sequential>::init(context.child("create"), cfg)
+                .await
+                .unwrap();
+            let root = db.root();
+            drop(db);
+
+            // A hint of 3 gives the build 3 workers.
+            let cfg = fixed_db_config_with_strategy::<OneCap, _>(
+                "parallel_fresh",
+                &context,
+                Manual::new(Sequential, NZUsize!(3)),
+            );
+            let db = FreshDb::<Manual<Sequential>>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+        });
     }
 
     #[test_traced("WARN")]
     fn test_ordered_partitioned_p1_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            // 200 leaves trailing ranges empty for P=1 (count=256, range_size=2); 300 exceeds the
-            // partition count and clamps. Both must reconstruct the same root without panicking.
+            // 200 leaves trailing ranges empty for P=1 (count=256, range_size=2) and 300 exceeds
+            // the partition count and clamps. Both must reconstruct the same root without panicking.
             check_parallel_init_equivalence::<1>(
                 context,
                 "parallel_equiv_p1",
-                &[0, 1, 2, 4, 8, 200, 300],
+                &[0, 2, 4, 8, 200, 300],
             )
             .await;
         });
@@ -670,24 +738,20 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_ordered_partitioned_p2_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            check_parallel_init_equivalence::<2>(
-                context,
-                "parallel_equiv_p2",
-                &[0, 1, 2, 4, 8, 200],
-            )
-            .await;
+            check_parallel_init_equivalence::<2>(context, "parallel_equiv_p2", &[0, 2, 4, 8, 200])
+                .await;
         });
     }
 
     /// P=3 allocates `2^24` partition slots (~800 MB per index), so it is too memory-heavy for the
-    /// default suite; run explicitly with `--ignored` (and ideally `--release`). Only serial,
-    /// single-worker, and one offset-parallel reopen are checked -- enough to validate the offset-based
-    /// range build and merge at the largest prefix width without the full worker-count sweep.
+    /// default suite. Run it explicitly with `--ignored` (and ideally `--release`). Only serial and
+    /// one offset-parallel reopen are checked -- enough to validate the offset-based range build and
+    /// merge at the largest prefix width without the full worker-count sweep.
     #[test_traced("WARN")]
     #[ignore]
     fn test_ordered_partitioned_p3_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            check_parallel_init_equivalence::<3>(context, "parallel_equiv_p3", &[0, 1, 2]).await;
+            check_parallel_init_equivalence::<3>(context, "parallel_equiv_p3", &[0, 2]).await;
         });
     }
 

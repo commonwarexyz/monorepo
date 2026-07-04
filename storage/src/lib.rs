@@ -111,16 +111,25 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         }
     }
 
-    /// A runtime context providing storage, timing, and metrics capabilities.
+    /// A runtime context providing storage, timing, metrics, and task-spawning capabilities.
     ///
     /// This is a convenience alias for the trait bound
-    /// `Storage + Clock + Metrics` that appears on nearly every type in this crate.
+    /// `Storage + Clock + Metrics + Spawner + 'static` that appears on nearly every type in this
+    /// crate.
     pub trait Context:
-        commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics
+        commonware_runtime::Storage
+        + commonware_runtime::Clock
+        + commonware_runtime::Metrics
+        + commonware_runtime::Spawner
+        + 'static
     {
     }
     impl<
-            T: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+            T: commonware_runtime::Storage
+                + commonware_runtime::Clock
+                + commonware_runtime::Metrics
+                + commonware_runtime::Spawner
+                + 'static,
         > Context for T
     {
     }

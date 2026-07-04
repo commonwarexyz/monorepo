@@ -26,11 +26,11 @@
 //! reporting the total build time.
 //!
 //! `bench` reopens it (read-only) and times one `init` at the given init cache size (`cache` entries,
-//! `0` = off) and `parallelism` (`0` = serial, `N` = N worker tasks, `auto` = from the runtime). It
-//! reports the replay-region size `R` (so a full-coverage cache is `cache = R`) and the elapsed time,
-//! and uses the P=3 partitioned ordered index (the inline-SoA config for large key sets) so the
-//! parallel `build_snapshot` override is exercised. Sweep cache/parallelism by driving the command
-//! from a shell loop.
+//! `0` = off) and `parallelism` (`0` or `1` = serial, `N > 1` = N worker tasks, `auto` = derived from the
+//! strategy). It reports the replay-region size `R` (so a full-coverage cache is `cache = R`) and the
+//! elapsed time, and uses the P=3 partitioned ordered index (the inline-SoA config for large key
+//! sets) so the parallel `build_snapshot` override is exercised. Sweep cache/parallelism by driving
+//! the command from a shell loop.
 //!
 //! Each invocation does exactly one reopen, so numbers are warm only if the OS file cache is already
 //! warm. For the realistic cold-cache case (init at process start), have the driver drop the OS cache
@@ -41,13 +41,15 @@
 mod common;
 
 use common::{any_fix_cfg_with, gen_random_kv, make_fixed_value, AnyOFixP3Db};
+use commonware_parallel::{Manual, Rayon, Strategy};
 use commonware_runtime::{
-    tokio::{Config, Runner},
+    tokio::{Config, Context, Runner},
     Runner as _, Supervisor as _,
 };
 use commonware_storage::{
     merkle::mmr::Family as Mmr,
-    qmdb::{any::traits::DbAny as _, InitParallelism},
+    qmdb::any::{traits::DbAny as _, FixedConfig},
+    translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{
@@ -78,27 +80,20 @@ const PRUNE_FREQUENCY: u32 = 100;
 /// workloads. Higher = more skew; ~1.0 is classic Zipf (near YCSB's 0.99).
 const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
-/// Map a worker count to an [InitParallelism]: `0` is the serial build, `n` spawns `n` worker tasks.
-const fn workers(n: usize) -> InitParallelism {
-    match n {
-        0 => InitParallelism::Serial,
-        n => InitParallelism::Workers(NonZeroUsize::new(n).unwrap()),
-    }
-}
-
-/// Parse a `parallelism` CLI argument: `auto` for [`InitParallelism::Auto`], otherwise a worker count
-/// (`0` = serial, `n` = `n` worker tasks).
-fn parse_parallelism(arg: &str) -> Option<InitParallelism> {
+/// Parse a `parallelism` CLI argument. `auto` derives the worker count from the strategy (`None`).
+/// Otherwise it is an exact worker count (`0` or `1` = serial, `n > 1` = `n` worker tasks).
+#[allow(clippy::option_option)]
+fn parse_parallelism(arg: &str) -> Option<Option<usize>> {
     if arg == "auto" {
-        Some(InitParallelism::Auto)
+        Some(None)
     } else {
-        arg.parse::<usize>().ok().map(workers)
+        arg.parse::<usize>().ok().map(Some)
     }
 }
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  bench     <folder> <cache> <parallelism>   reopen + time one init (cache=entries, 0=off; parallelism=0 serial / N workers / auto)\n  destroy   <folder>                          delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  bench     <folder> <cache> <parallelism>   reopen + time one init (cache=entries, 0=off; parallelism=0 or 1 serial / N>1 workers / auto)\n  destroy   <folder>                          delete the database"
     );
 }
 
@@ -188,9 +183,10 @@ fn generate(folder: &str, keyspace: u64, num_updates: u64, zipf_exponent: Option
 }
 
 /// Reopen the database at `folder` (read-only) and time one `init` of the P=3 partitioned ordered
-/// index at the given init cache size (`cache` entries; `0` = off) and `parallelism`. Reports the
-/// replay-region size `R` (a full-coverage cache is `cache = R`) and the elapsed time.
-fn bench(folder: &str, cache: usize, parallelism: InitParallelism) {
+/// index at the given init cache size (`cache` entries, `0` = off) and worker count (`None` derives
+/// it from the strategy). Reports the replay-region size `R` (a full-coverage cache is `cache = R`)
+/// and the elapsed time.
+fn bench(folder: &str, cache: usize, workers: Option<usize>) {
     if !db_dir_nonempty(folder) {
         eprintln!(
             "no database at {folder}; run `generate {folder} <keyspace> <num_updates>` first"
@@ -198,7 +194,7 @@ fn bench(folder: &str, cache: usize, parallelism: InitParallelism) {
         return;
     }
     let cfg = Config::default().with_storage_directory(folder);
-    let (elapsed, region) = time_init(&cfg, NonZeroUsize::new(cache), parallelism);
+    let (elapsed, region) = time_init(&cfg, NonZeroUsize::new(cache), workers);
     if region == 0 {
         eprintln!(
             "database at {folder} is empty; run `generate {folder} <keyspace> <num_updates>` first"
@@ -206,7 +202,7 @@ fn bench(folder: &str, cache: usize, parallelism: InitParallelism) {
         return;
     }
     println!(
-        "init_scale (any::ordered::fixed::p3::mmr) {folder} cache={cache} parallelism={parallelism:?} region={region} time={elapsed:?}"
+        "init_scale (any::ordered::fixed::p3::mmr) {folder} cache={cache} workers={workers:?} region={region} time={elapsed:?}"
     );
 }
 
@@ -218,26 +214,60 @@ fn destroy(folder: &str) {
     }
 }
 
-/// Time a single `init` of the database at `cfg`'s folder with the given cache size and worker count,
-/// returning the elapsed time and the replay-region size (`0` if the database is empty/absent).
+/// Time a single `init` of the database at `cfg`'s folder with the given cache size and worker count
+/// (`None` derives the count from the strategy), returning the elapsed time and the replay-region
+/// size (`0` if the database is empty/absent).
 fn time_init(
     cfg: &Config,
     cache_size: Option<NonZeroUsize>,
-    parallelism: InitParallelism,
+    workers: Option<usize>,
 ) -> (Duration, u64) {
     Runner::new(cfg.clone()).start(|ctx| async move {
         let mut config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE);
         config.init_cache_size = cache_size;
-        config.init_parallelism = parallelism;
-        let start = Instant::now();
-        let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config)
-            .await
-            .unwrap();
-        let elapsed = start.elapsed();
-        let end: u64 = *db.bounds().end;
-        let floor: u64 = *db.inactivity_floor_loc().await;
-        (elapsed, end.saturating_sub(floor))
+        match workers {
+            None => timed_reopen(&ctx, config).await,
+            Some(workers) => timed_reopen(&ctx, pin_workers(config, workers)).await,
+        }
     })
+}
+
+/// Rewrap `cfg`'s strategy in a [Manual] hint of `workers` so the snapshot build derives exactly
+/// `workers` workers (a hint of one builds serially), without touching the underlying thread pool.
+fn pin_workers(
+    cfg: FixedConfig<EightCap, Rayon>,
+    workers: usize,
+) -> FixedConfig<EightCap, Manual<Rayon>> {
+    let mc = cfg.merkle_config;
+    FixedConfig {
+        merkle_config: commonware_storage::merkle::full::Config {
+            journal_partition: mc.journal_partition,
+            metadata_partition: mc.metadata_partition,
+            items_per_blob: mc.items_per_blob,
+            write_buffer: mc.write_buffer,
+            strategy: Manual::new(mc.strategy, NZUsize!(workers.max(1))),
+            page_cache: mc.page_cache,
+        },
+        journal_config: cfg.journal_config,
+        translator: cfg.translator,
+        init_cache_size: cfg.init_cache_size,
+    }
+}
+
+/// Reopen the P=3 db with `config`, timing the init. Returns the elapsed time and the replay-region
+/// size.
+async fn timed_reopen<S: Strategy>(
+    ctx: &Context,
+    config: FixedConfig<EightCap, S>,
+) -> (Duration, u64) {
+    let start = Instant::now();
+    let db = AnyOFixP3Db::<Mmr, S>::init(ctx.child("storage"), config)
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+    let end: u64 = *db.bounds().end;
+    let floor: u64 = *db.inactivity_floor_loc().await;
+    (elapsed, end.saturating_sub(floor))
 }
 
 /// Whether `folder` exists and contains any entries (used to avoid silently appending to an existing

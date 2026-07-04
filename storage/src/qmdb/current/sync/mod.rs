@@ -70,7 +70,6 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
@@ -108,15 +107,14 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>
 where
     F: Graftable,
-    E: Context + Spawner + 'static,
+    E: Context,
     U: Update + Send + Sync + 'static,
-    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
     T: Translator,
-    J: Mutable<Item = Operation<F, U>>,
+    J: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
-    authenticated::Journal<F, E, J, H, S>: Send + Sync + 'static,
 {
     // Build authenticated log.
     let merkle = Merkle::<F, _, _, S>::init_sync(
@@ -152,14 +150,12 @@ where
     // during replay.
     let snapshot_context = context.child("any_snapshot");
     let any_metrics = AnyMetrics::new(context.child("any"));
-    // State-sync rebuilds derive the worker count from the runtime (`Auto`) for the snapshot build.
     let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(
         snapshot_context,
         index,
         log,
         Some(bitmap),
         cache_size,
-        crate::qmdb::InitParallelism::Auto,
         any_metrics,
     )
     .await?;
@@ -252,7 +248,7 @@ macro_rules! impl_current_sync_database {
         impl<F, E, K, V, H, T, const N: usize, S> Database for $db<F, E, K, V, H, T, N, S>
         where
             F: Graftable,
-            E: Context + Spawner + 'static,
+            E: Context,
             K: $key_bound,
             V: $value_bound + 'static,
             H: Hasher,

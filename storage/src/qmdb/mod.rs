@@ -50,15 +50,17 @@ use crate::{
     merkle::{hasher::Standard as StandardHasher, Bagging, Family, Location},
     qmdb::operation::Operation,
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
 use commonware_utils::{bitmap::BitMap, cache::Clock, channel::mpsc, NZUsize};
 use core::num::NonZeroUsize;
-use futures::{future::join_all, pin_mut, StreamExt as _};
-use std::{pin::Pin, sync::Arc};
+use futures::{
+    future::{join_all, BoxFuture},
+    pin_mut, StreamExt as _,
+};
+use std::sync::Arc;
 use thiserror::Error;
 
 pub mod any;
@@ -400,13 +402,16 @@ const SNAPSHOT_ROUTE_BATCH: usize = 4096;
 /// the main replay from running arbitrarily far ahead of a slow worker.
 const SNAPSHOT_CHANNEL_DEPTH: usize = 4;
 
+/// A batch of keyed operations routed to a snapshot-build worker: each entry is the op's key, its
+/// location, and whether it is a delete.
+type RoutedBatch<K> = Vec<(K, u64, bool)>;
+
 /// Build one parallel-init worker's partial snapshot: apply the routed operations (streamed in log
 /// order over `rx`) to `index`, resolving translated-key collisions with the worker's own log
 /// `reader` and `(location -> key)` cache. Returns the populated worker index.
-#[allow(clippy::type_complexity)]
 async fn build_snapshot_worker<F, C, T, const P: usize>(
     log: Arc<C>,
-    mut rx: mpsc::Receiver<Vec<(<C::Item as Operation<F>>::Key, u64, bool)>>,
+    mut rx: mpsc::Receiver<RoutedBatch<<C::Item as Operation<F>>::Key>>,
     mut index: crate::index::partitioned::ordered::Index<T, Location<F>, P>,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<crate::index::partitioned::ordered::Index<T, Location<F>, P>, Error<F>>
@@ -435,60 +440,37 @@ where
     Ok(index)
 }
 
-/// How `init` builds the snapshot index, for index types that support parallel construction
-/// (currently only the ordered partitioned index; every other index type builds serially regardless).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum InitParallelism {
-    /// Build serially on the calling task (no worker tasks).
-    #[default]
-    Serial,
-    /// Build with this many worker tasks, plus the task that replays and routes the log. `Workers(1)`
-    /// still de-interleaves replay from the build onto a separate task.
-    Workers(NonZeroUsize),
-    /// Build with `strategy.parallelism_hint() - 1` worker tasks, reserving one core for the
-    /// replay/routing task. Falls back to a serial build when the hint leaves no spare core.
-    Auto,
-}
-
 /// Builds a database's snapshot index from the operations log.
 ///
-/// Generic over the `Index` type so each index controls how it builds: serial index types replay the
-/// log sequentially, while the ordered partitioned index builds its partitions in parallel.
+/// Generic over the `Index` type so each index controls how it builds: serially with the default
+/// method body, or split across parallel workers with an override.
 pub trait SnapshotBuild<F: Family>: Index<Value = Location<F>> + Sized + 'static {
     /// Replay `log` from `inactivity_floor_loc`, populating `self` and invoking `callback` once per
     /// replayed location, in location order. Each call carries an activity status to append and,
-    /// optionally, an earlier location whose status it clears; implementations may report per-op
-    /// transitions (a status that a later call clears) or pre-resolved final statuses (never clearing),
-    /// but the state after the last call is identical either way. Returns the number of active keys.
-    /// `parallelism` selects how index types that build in parallel split the work; extra workers have
-    /// diminishing returns once the replay/routing task becomes the bottleneck. `cache_size` bounds
-    /// each build's `(location -> key)` cache (`None` disables it).
-    #[allow(clippy::too_many_arguments)]
+    /// optionally, an earlier location whose status it clears. Implementations may report per-op
+    /// transitions (a status that a later call clears) or pre-resolved final statuses (never
+    /// clearing), but the state after the last call is identical either way. Returns the number of
+    /// active keys.
+    ///
+    /// Index types that build in parallel split the work across `strategy`'s parallelism hint
+    /// worth of workers (a hint of one builds serially, matching how [Strategy::run] dispatches).
+    /// Index types that build serially ignore it. `cache_size` bounds each build's
+    /// `(location -> key)` cache (`None` disables it).
     fn build_snapshot<'a, E, C, S, Fn>(
         &'a mut self,
-        context: E,
+        _context: E,
         inactivity_floor_loc: Location<F>,
         log: &'a Arc<C>,
-        strategy: &'a S,
-        parallelism: InitParallelism,
+        _strategy: S,
         cache_size: Option<NonZeroUsize>,
         callback: Fn,
-    ) -> Pin<Box<dyn core::future::Future<Output = Result<usize, Error<F>>> + Send + 'a>>
+    ) -> BoxFuture<'a, Result<usize, Error<F>>>
     where
-        E: Context + Spawner + 'static,
-        C: Contiguous<Item: Operation<F> + Send> + Send + Sync + 'static,
+        E: Spawner,
+        C: Contiguous<Item: Operation<F>> + 'static,
         S: Strategy,
         Fn: FnMut(bool, Option<Location<F>>) + Send + 'a,
     {
-        // This index type builds serially, so `parallelism` has no effect; warn on an explicit
-        // worker count rather than silently ignore it (`Auto` is best-effort and stays quiet).
-        if matches!(parallelism, InitParallelism::Workers(_)) {
-            tracing::warn!(
-                ?parallelism,
-                "init_parallelism configured but this index builds serially; ignoring"
-            );
-        }
-        let _ = (context, strategy);
         Box::pin(async move {
             build_snapshot_from_log(inactivity_floor_loc, &**log, self, cache_size, callback).await
         })
@@ -505,38 +487,26 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::ordered::Index<T, Location<F>, P>
 {
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn build_snapshot<'a, E, C, S, Fn>(
         &'a mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
         log: &'a Arc<C>,
-        strategy: &'a S,
-        parallelism: InitParallelism,
+        strategy: S,
         cache_size: Option<NonZeroUsize>,
         mut callback: Fn,
-    ) -> Pin<Box<dyn core::future::Future<Output = Result<usize, Error<F>>> + Send + 'a>>
+    ) -> BoxFuture<'a, Result<usize, Error<F>>>
     where
-        E: Context + Spawner + 'static,
-        C: Contiguous<Item: Operation<F> + Send> + Send + Sync + 'static,
+        E: Spawner,
+        C: Contiguous<Item: Operation<F>> + 'static,
         S: Strategy,
         Fn: FnMut(bool, Option<Location<F>>) + Send + 'a,
     {
         Box::pin(async move {
-            let count = self.partition_count();
-            let workers = match parallelism {
-                InitParallelism::Serial => 0,
-                InitParallelism::Workers(n) => n.get().min(count),
-                // The replay/routing task occupies one core, so leave it one and spawn the rest.
-                InitParallelism::Auto => strategy
-                    .manual()
-                    .parallelism_hint()
-                    .saturating_sub(1)
-                    .min(count),
-            };
-
-            // Serial, or Auto where the hint left no spare core: build on this task.
-            if workers == 0 {
+            // A strategy without parallelism builds serially on this task, mirroring how
+            // `Strategy::run` dispatches serial bodies for such strategies.
+            let hint = strategy.manual().parallelism_hint();
+            if hint <= 1 {
                 return build_snapshot_from_log(
                     inactivity_floor_loc,
                     &**log,
@@ -547,12 +517,17 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
                 .await;
             }
 
+            // Split the build across `hint` workers (the same sizing every other hint consumer
+            // uses), fed by this task's replay/routing loop.
+            let count = self.partition_count();
+            let workers = hint.min(count);
+
             let floor = *inactivity_floor_loc;
             let range_size = count.div_ceil(workers);
 
             // `range_size` rounds up, so `range_size * workers` can exceed `count`, leaving trailing
             // ranges empty (and a naive `count - lo` would underflow). Reduce to the number of
-            // non-empty ranges; routing (`p / range_size`) then stays in `[0, workers)`.
+            // non-empty ranges so routing (`p / range_size`) stays in `[0, workers)`.
             let workers = count.div_ceil(range_size);
             let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
 
@@ -564,7 +539,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
                 senders.push(tx);
                 let log = log.clone();
 
-                // This worker owns the contiguous partition range [lo, lo + range_len); it allocates
+                // This worker owns the contiguous partition range [lo, lo + range_len). It allocates
                 // only that many slots, so per-worker memory is the range, not the full partition set.
                 let lo = w * range_size;
                 let range_len = range_size.min(count - lo);
@@ -585,8 +560,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
                 let last_commit = end.saturating_sub(1);
                 let stream = log.replay(floor, SNAPSHOT_READ_BUFFER_SIZE).await?;
                 pin_mut!(stream);
-                let mut batches: Vec<Vec<(<C::Item as Operation<F>>::Key, u64, bool)>> = (0
-                    ..workers)
+                let mut batches: Vec<RoutedBatch<_>> = (0..workers)
                     .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
                     .collect();
 
@@ -613,8 +587,8 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
                     }
                 }
 
-                // Flush remaining batches before the channels close (skip if a worker already died;
-                // the join surfaces its error).
+                // Flush remaining batches before the channels close (skip if a worker already
+                // died, since the join surfaces its error).
                 if !aborted {
                     for (w, batch) in batches.into_iter().enumerate() {
                         if !batch.is_empty() && senders[w].send(batch).await.is_err() {
@@ -630,15 +604,11 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
 
             // Join workers and install each worker's partition range into self. Each worker carries
             // its own partition offset, so installation needs no range arguments.
-            let mut total_keys = 0i64;
             let mut total_items = 0i64;
             for handle in join_all(handles).await {
-                let mut worker_index = handle.expect("snapshot worker task failed")?;
-                let (keys, items) = self.install_range(&mut worker_index);
-                total_keys += keys;
-                total_items += items;
+                let mut worker_index = handle??;
+                total_items += self.install_range(&mut worker_index);
             }
-            self.set_metrics(total_keys, total_items);
 
             // Reconstruct the activity bitmap in location order: a location is active iff it is the
             // current location of an active key, or it is the last commit. This matches the serial

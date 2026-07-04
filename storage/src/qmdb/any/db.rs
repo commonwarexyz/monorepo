@@ -24,7 +24,6 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
@@ -660,7 +659,8 @@ where
 {
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
-    /// from grafted metadata).
+    /// from grafted metadata). The snapshot build derives any parallelism from the log's
+    /// [Strategy].
     ///
     /// # Panics
     ///
@@ -672,13 +672,11 @@ where
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
         cache_size: Option<NonZeroUsize>,
-        parallelism: crate::qmdb::InitParallelism,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
-        E: Spawner + 'static,
         I: crate::qmdb::SnapshotBuild<F>,
-        AuthenticatedLog<F, E, C, H, S>: Send + Sync + 'static,
+        C: 'static,
     {
         // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
         // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
@@ -725,8 +723,8 @@ where
             }
 
             // The closure takes a brief lock per call (holding it across the build's `.await`s is
-            // not `Send`). `old_loc`, when set, clears a superseded bit: the serial build supplies
-            // it per op; the parallel build pre-resolves and passes `None`.
+            // not `Send`). `old_loc`, when set, clears a superseded bit. The serial build supplies
+            // it per op while the parallel build pre-resolves and passes `None`.
             let active_keys = {
                 let bitmap = &bitmap;
                 index
@@ -734,8 +732,7 @@ where
                         context,
                         inactivity_floor_loc,
                         &log,
-                        &strategy,
-                        parallelism,
+                        strategy,
                         cache_size,
                         |is_active, old_loc| {
                             let mut guard = bitmap.write();
@@ -751,7 +748,7 @@ where
             (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
         };
 
-        // The build has returned, so every worker clone of the log is dropped; reclaim it.
+        // The build has returned, so every worker clone of the log is dropped. Reclaim it.
         let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
 
         // The bitmap must have exactly one bit per retained log location.

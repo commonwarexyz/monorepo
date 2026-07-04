@@ -2,7 +2,7 @@
 
 use crate::{simplex::types::Finalization, types::Height, Block};
 use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
-use commonware_runtime::{BufferPooler, Clock, Handle, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Handle};
 use commonware_storage::{
     archive::{self, immutable, prunable, Archive, Identifier},
     translator::Translator,
@@ -246,7 +246,7 @@ pub trait Blocks: Send + Sync + 'static {
 
 impl<E, B, C, S> Certificates for immutable::Archive<E, B, Finalization<S, C>>
 where
-    E: BufferPooler + Storage + Metrics + Clock,
+    E: BufferPooler + commonware_storage::Context,
     B: Digest,
     C: Digest,
     S: Scheme,
@@ -297,7 +297,7 @@ where
 
 impl<E, B> Blocks for immutable::Archive<E, B::Digest, B>
 where
-    E: BufferPooler + Storage + Metrics + Clock,
+    E: BufferPooler + commonware_storage::Context,
     B: Block,
 {
     type Block = B;
@@ -347,7 +347,7 @@ where
 impl<T, E, B, C, S> Certificates for prunable::Archive<T, E, B, Finalization<S, C>>
 where
     T: Translator,
-    E: BufferPooler + Storage + Metrics + Clock,
+    E: BufferPooler + commonware_storage::Context,
     B: Digest,
     C: Digest,
     S: Scheme,
@@ -398,7 +398,7 @@ where
 impl<T, E, B> Blocks for prunable::Archive<T, E, B::Digest, B>
 where
     T: Translator,
-    E: BufferPooler + Storage + Metrics + Clock,
+    E: BufferPooler + commonware_storage::Context,
     B: Block,
 {
     type Block = B;

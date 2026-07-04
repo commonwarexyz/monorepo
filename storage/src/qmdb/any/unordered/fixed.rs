@@ -13,7 +13,6 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 use commonware_utils::Array;
 
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
@@ -32,15 +31,8 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<
-        F: Family,
-        E: Context + Spawner + 'static,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, S>
+impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S: Strategy>
+    Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -69,7 +61,6 @@ pub mod partitioned {
     };
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
-    use commonware_runtime::Spawner;
     use commonware_utils::Array;
 
     /// A key-value QMDB with a partitioned snapshot index.
@@ -94,7 +85,7 @@ pub mod partitioned {
 
     impl<
             F: Family,
-            E: Context + Spawner + 'static,
+            E: Context,
             K: Array,
             V: FixedValue,
             H: Hasher,
