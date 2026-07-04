@@ -1027,7 +1027,11 @@ impl<
         select_loop! {
             self.context,
             on_start => {
-                // Drop any pending items if we have moved to a new view
+                // Drop any pending items if we have moved to a new view. A view
+                // is exited only on successful certification, nullification, or
+                // finalization. Nullification does not cancel certification work
+                // for the exited view, so the automaton must tolerate a dropped
+                // verify receiver while certify still wants the result.
                 if let Some(ref pp) = pending_propose {
                     if pp.view() != self.state.current_view() {
                         pending_propose = None;

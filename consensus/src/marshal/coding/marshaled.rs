@@ -1017,6 +1017,11 @@ where
 
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
+        //
+        // The task's cancellation signal is the gate receiver registered below,
+        // not consensus's verify receiver. Nullification advances the view and
+        // drops the verify receiver without cancelling certification for it, so
+        // deferred verification must survive that drop for certify to consume.
         let round = consensus_context.round;
         let task = self
             .deferred_verify(consensus_context, payload, None, Stage::Verified)

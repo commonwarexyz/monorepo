@@ -480,6 +480,14 @@ where
                 // notarize vote follows the app verdict, while certify awaits the
                 // registered gate that resolves true only after both app
                 // verification succeeds and the store is durable.
+                //
+                // The verify future below aborts when consensus drops its receiver
+                // (the view exited via nullification or finalization), even though
+                // certification can still fire for a nullified view. That is
+                // deliberate: inline's certify fallback does not need the app
+                // verdict (a notarization implies f+1 honest validators already
+                // verified), and the store still completes through the join, so
+                // the fallback rides the verified write instead of re-persisting.
                 let store = marshal.verified(round, block.clone());
                 let verify_then_vote = async {
                     // Non-reproposal path: fetch the expected parent and validate

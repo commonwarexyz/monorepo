@@ -743,6 +743,13 @@ where
                 // runs in the background and forwards its final verdict to
                 // `task_tx` so `certify` observes the same result via the
                 // synchronously-registered `task_rx`.
+                //
+                // The awaits below are deliberately not guarded on `tx.closed()`.
+                // Once the optimistic verdict is delivered, the gate is the only
+                // remaining consumer, and certification can still want it after
+                // the view exits (nullification does not cancel certification
+                // work), so deferred verification must run to completion into
+                // the gate.
                 let deferred_rx = marshaled
                     .deferred_verify(context, block, Stage::Verified)
                     .await;
