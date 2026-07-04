@@ -11,7 +11,7 @@
 //! Timing is coarse by design: each measured call records one wall-clock sample. Queueing on a
 //! shared pool is included in a parallel sample's elapsed time, so contention pushes the
 //! parallel estimate up and steers concurrent callers back toward serial. Parallel is seeded
-//! unconditionally by the first call; a never-measured serial path is probed only when its
+//! unconditionally by the first call. A never-measured serial path is probed only when its
 //! projected cost stays under [`SAMPLE_LIMIT_NS`], where the projection is parallel's wall time
 //! multiplied by pool parallelism (an upper bound on the probe's cost). Both paths produce
 //! identical results, so a misjudged call only costs throughput, never correctness.
@@ -198,7 +198,7 @@ impl Entry {
         if candidate_samples == 0 {
             // Never measured: bound the probe by a projection of its cost. A serial probe of
             // work that parallel finishes in `other` wall time can take up to `other *
-            // parallelism`; a parallel probe is bounded by the serial time it replaces.
+            // parallelism`. A parallel probe is bounded by the serial time it replaces.
             let projected = match execution {
                 Execution::Serial => {
                     other.saturating_mul(u64::try_from(parallelism).unwrap_or(u64::MAX))
