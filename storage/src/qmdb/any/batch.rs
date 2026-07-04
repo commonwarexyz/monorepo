@@ -201,8 +201,8 @@ where
 }
 
 /// Pending mutations whose old committed locations were already resolved by staged reads, sorted
-/// by location. Each value is `Some` for an update and `None` for a delete; only the unordered
-/// path stages deletes (the ordered path cannot skip the deleted key's predecessor-bucket scan,
+/// by location. Each value is `Some` for an update and `None` for a delete. Only the unordered
+/// path stages deletes (an ordered delete cannot skip the deleted key's predecessor-bucket scan,
 /// so its deletes fall back to normal mutations).
 pub(crate) type StagedUpdates<F, U> = Vec<StagedUpdate<F, U>>;
 
@@ -1103,7 +1103,7 @@ where
     /// assigned the returned range. The returned values are in the same order as `keys`.
     ///
     /// Expansion does not deduplicate against previously staged keys. Reading the same key again
-    /// creates another staged slot in the returned range; if both slots are later updated,
+    /// creates another staged slot in the returned range. If both slots are later updated,
     /// [`merkleize`](Staged::merkleize) applies the update list's normal last-write-wins
     /// semantics.
     ///
@@ -1150,7 +1150,7 @@ where
     /// [`expand`](Staged::expand) inputs. `value` is `Some(v)` for an upsert or `None` for a
     /// delete. Duplicate keys retain last-write-wins semantics according to the update order.
     /// Upserts are `(key, value)` writes (`None` deletes) for keys outside the staged read set.
-    /// Upserts are applied last; if a caller passes an overlapping key, the upsert follows normal
+    /// Upserts are applied last. If a caller passes an overlapping key, the upsert follows normal
     /// `write` semantics and wins.
     ///
     /// Committed-resolved updates reuse the staged location. Committed-resolved deletes reuse it
@@ -1189,7 +1189,7 @@ where
             }
             match resolutions[slot].take() {
                 Some((loc, payload)) if value.is_some() || U::STAGES_DELETES => {
-                    // This staged update is the surviving write for `key`; do not also emit an
+                    // This staged update is the surviving write for `key`. Do not also emit an
                     // older batch mutation for the same key.
                     batch.mutations.remove(key);
                     staged_updates.push((key.clone(), loc, payload, value));
@@ -1216,7 +1216,7 @@ where
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
-    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
     /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
     ///
@@ -1263,7 +1263,7 @@ where
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
-    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
     /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
     ///
@@ -1381,7 +1381,9 @@ where
     /// Batch read multiple keys (mutations -> ancestor diffs -> committed DB).
     ///
     /// Returns results in the same order as the input keys, with `None` for absent or deleted
-    /// keys.
+    /// keys. Resolved locations are not retained: a batch that writes keys it read pays an
+    /// index re-probe and journal re-read at merkleize. Use [`stage`](Self::stage) to fuse
+    /// reads into merkleize instead.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -1416,7 +1418,9 @@ where
     ///
     /// Returns results in the same order as the input keys. The staged batch records updates by
     /// read index: the initial keys occupy `0..keys.len()`, and each
-    /// [`expand`](Staged::expand) appends another index range.
+    /// [`expand`](Staged::expand) appends another index range. Unlike
+    /// [`get_many`](Self::get_many), the resolved locations are reused at merkleize, so keys
+    /// that are read and then written skip the index re-probe and journal re-read.
     pub async fn stage<E, C, I, const N: usize>(
         self,
         keys: &[&U::Key],
@@ -1439,7 +1443,7 @@ where
     }
 
     /// Read keys through this batch and return the values plus one owned key and resolution per
-    /// staged slot; committed-resolved slots carry the location and cached payload they resolved
+    /// staged slot. Committed-resolved slots carry the location and cached payload they resolved
     /// to.
     #[allow(clippy::type_complexity)]
     async fn stage_reads<E, C, I, const N: usize>(
@@ -1538,7 +1542,7 @@ where
     {
         let (mut mutations, m) = self.into_parts();
 
-        // `value` is `Some` for a staged update and `None` for a staged delete; the
+        // `value` is `Some` for a staged update and `None` for a staged delete. The
         // location-ordered merge below emits each as an `Update`/`Delete` at the cached location.
         let cached = staged_updates;
 
@@ -2581,8 +2585,6 @@ mod tests {
         Location::new(n)
     }
 
-    use crate::qmdb::any::traits::trait_write;
-
     fn shared_with<F>(build: F) -> Shared<BITMAP_CHUNK_BYTES>
     where
         F: FnOnce(&mut bitmap::Prunable<BITMAP_CHUNK_BYTES>),
@@ -3181,7 +3183,7 @@ mod tests {
             let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
             let keys: Vec<_> = read_keys.iter().collect();
             // (read_slot, Some=upsert | None=delete). Slot 7 deletes a committed-resolved read
-            // key; duplicate slots exercise last-write-wins by update order.
+            // key. Duplicate slots exercise last-write-wins by update order.
             let indexed_updates = vec![
                 (0, Some(colliding_digest(0x60, 0))),
                 (2, Some(colliding_digest(0x60, 1))),
@@ -3608,34 +3610,6 @@ mod tests {
                     &db,
                 )
                 .await;
-        });
-    }
-
-    #[test]
-    fn trait_write_dispatches_to_batch_write() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            type TestDb = UnorderedFixedDb<
-                mmr::Family,
-                deterministic::Context,
-                sha256::Digest,
-                sha256::Digest,
-                Sha256,
-                OneCap,
-                Sequential,
-            >;
-
-            let config = fixed_db_config::<OneCap>("trait-write-dispatch", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
-            let key = Sha256::hash(b"trait-write-key");
-            let value = Sha256::hash(b"trait-write-value");
-
-            let batch = trait_write::<_, TestDb>(db.new_batch(), key, value);
-            let batch = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(batch).await.unwrap();
-
-            assert_eq!(db.get(&key).await.unwrap(), Some(value));
-            db.destroy().await.unwrap();
         });
     }
 

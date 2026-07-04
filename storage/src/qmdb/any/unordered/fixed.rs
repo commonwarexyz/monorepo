@@ -184,7 +184,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // The fused path requires parallelism > 1 (the Sequential test config never takes
-            // it) and at least 4096 keys; the tiny test page cache pushes most keys through
+            // it) and at least 4096 keys. The tiny test page cache pushes most keys through
             // the batched miss fallback, and TwoCap produces translated-key collisions.
             type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
             let strategy = context.create_strategy(NZUsize!(2)).unwrap();

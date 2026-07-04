@@ -2464,7 +2464,8 @@ mod tests {
             }
 
             // An out-of-range position is a miss, not an error. Positions grouped with it
-            // (same offsets blob) also become misses, but other groups are unaffected.
+            // (same offsets blob) are unaffected: validation trims the out-of-range suffix
+            // instead of poisoning the group.
             let served = reader.try_read_many_sync(&[9, 13]);
             assert!(served[0].is_some());
             assert!(served[1].is_none());
@@ -2524,6 +2525,39 @@ mod tests {
 
             let reader = journal.snapshot().await.unwrap();
             let _ = reader.read_many(&[1, 1]).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_direct_matches_read_many() {
+        // The probe-free direct path returns the same items as read_many, cold and warm.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "read-many-direct".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            for i in 0..12u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let positions: Vec<u64> = (0..12).collect();
+            let reader = journal.snapshot().await.unwrap();
+            let direct = reader.read_many_direct(&positions).await.unwrap();
+            assert_eq!(direct, (0..12).map(|i| i * 100).collect::<Vec<_>>());
+            let read = reader.read_many(&positions).await.unwrap();
+            assert_eq!(direct, read);
+            drop(reader);
+
+            journal.destroy().await.unwrap();
         });
     }
 

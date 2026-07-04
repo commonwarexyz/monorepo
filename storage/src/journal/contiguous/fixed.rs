@@ -4712,6 +4712,16 @@ mod tests {
             assert!(served[1].is_none());
             drop(reader);
 
+            // A pruned position is trimmed from the prefix rather than reaching offset
+            // derivation, and the valid remainder is still served.
+            journal.prune(8).await.unwrap();
+            let reader = journal.snapshot().await.unwrap();
+            reader.read_many(&[9]).await.unwrap();
+            let served = reader.try_read_many_sync(&[3, 9]);
+            assert!(served[0].is_none());
+            assert!(served[1].is_some());
+            drop(reader);
+
             journal.destroy().await.unwrap();
         });
     }

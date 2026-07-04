@@ -484,7 +484,7 @@ where
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
-    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
     /// is committed with the returned batch.
     ///
@@ -541,7 +541,7 @@ where
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
-    /// A `Some` value is an upsert; `None` is a delete. Update indices refer to the staged read
+    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
     /// is committed with the returned batch.
     ///

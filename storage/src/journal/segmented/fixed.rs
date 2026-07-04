@@ -1483,9 +1483,10 @@ mod tests {
             }
             assert_eq!(journal.section_len(0).unwrap(), 5);
 
-            // Read all 5 items in one call.
+            // Read all 5 items in one call. The reusable buffer is intentionally oversized:
+            // get_many slices it to the exact length the batch needs.
             let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
-            let mut buf = vec![0u8; 5 * chunk];
+            let mut buf = vec![0u8; 6 * chunk];
             let (items, _) = journal
                 .get_many(0, &[0, 1, 2, 3, 4], &mut buf)
                 .await

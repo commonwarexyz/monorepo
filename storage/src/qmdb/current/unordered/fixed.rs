@@ -282,7 +282,7 @@ pub mod test {
             // keys 20..30. The read set below then resolves through both ancestors, while
             // key(60) still falls through to the committed DB and exercises staged cache reuse
             // behind a stacked batch.
-            // Keep every uncommitted ancestor alive until the child is merkleized; speculative
+            // Keep every uncommitted ancestor alive until the child is merkleized. Speculative
             // batch Merkle lookups walk weak parent links for in-memory ancestor nodes.
             for depth in [0u8, 1u8, 2u8] {
                 let mut stack = Vec::new();

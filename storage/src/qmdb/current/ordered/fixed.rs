@@ -233,7 +233,7 @@ pub mod test {
             db.commit().await.unwrap();
 
             for depth in [0u8, 1u8, 2u8] {
-                // Keep every uncommitted ancestor alive until the child is merkleized; speculative
+                // Keep every uncommitted ancestor alive until the child is merkleized. Speculative
                 // batch Merkle lookups walk weak parent links for in-memory ancestor nodes.
                 let mut stack = Vec::new();
                 match depth {
