@@ -858,7 +858,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// certification), overlapping the durable sync with consensus voting. Callers
     /// that simply need durability before proceeding should use the blocking
     /// [Self::proposed].
-    #[must_use = "the receiver delivers the durable-sync handle; dropping it forfeits sync-failure observation"]
+    #[must_use = "the receiver delivers the durable-sync handle and dropping it forfeits sync-failure observation"]
     pub fn proposed_deferred(
         &self,
         round: Round,
@@ -897,7 +897,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// certification (overlapping the sync with consensus voting). Verify/certify
     /// consumers that simply need durability before proceeding should use the
     /// blocking [Self::verified].
-    #[must_use = "the receiver delivers the durable-sync handle; dropping it forfeits sync-failure observation"]
+    #[must_use = "the receiver delivers the durable-sync handle and dropping it forfeits sync-failure observation"]
     pub fn verified_deferred(
         &self,
         round: Round,
