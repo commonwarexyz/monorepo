@@ -15,17 +15,21 @@ workspace = true
 
 [dependencies]
 cfg-if.workspace = true
-commonware-macros.workspace = true
+commonware-actor-macros.workspace = true
+commonware-macros = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true
+commonware-utils = { workspace = true, features = ["std"] }
 crossbeam-queue.workspace = true
 futures-util.workspace = true
 loom = { workspace = true, features = ["futures"], optional = true }
 parking_lot.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-commonware-utils = { workspace = true, features = ["std"] }
 criterion.workspace = true
 futures.workspace = true
+tracing-core.workspace = true
 
 [features]
 loom = [ "dep:loom" ]

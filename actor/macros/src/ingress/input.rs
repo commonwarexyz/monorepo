@@ -1,0 +1,453 @@
+use proc_macro2::Span;
+use syn::{
+    braced,
+    parse::{Parse, ParseStream},
+    Attribute, Generics, Ident, Result, Token, Type,
+};
+
+mod kw {
+    syn::custom_keyword!(ask);
+    syn::custom_keyword!(custom_policy);
+    syn::custom_keyword!(read_write);
+    syn::custom_keyword!(subscribe);
+    syn::custom_keyword!(tell);
+    syn::custom_keyword!(unreliable);
+}
+
+pub(crate) enum ItemKind {
+    Tell,
+    Request {
+        response: Box<Type>,
+        read_write: bool,
+        await_response: bool,
+    },
+}
+
+/// How a field annotated with `#[span]` is recorded on the enqueue span.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpanRecord {
+    /// Record with the field's `Display` implementation (`#[span]`).
+    Display,
+    /// Record with the field's `Debug` implementation (`#[span(debug)]`).
+    Debug,
+}
+
+pub(crate) struct Field {
+    pub(crate) attrs: Vec<Attribute>,
+    pub(crate) name: Ident,
+    pub(crate) ty: Type,
+    pub(crate) span_record: Option<SpanRecord>,
+}
+
+pub(crate) struct Item {
+    pub(crate) attrs: Vec<Attribute>,
+    pub(crate) name: Ident,
+    pub(crate) fields: Vec<Field>,
+    pub(crate) public_method: bool,
+    pub(crate) kind: ItemKind,
+}
+
+pub(crate) struct Input {
+    pub(crate) unreliable: bool,
+    pub(crate) custom_policy: bool,
+    pub(crate) mailbox: Ident,
+    pub(crate) generics: Generics,
+    pub(crate) items: Vec<Item>,
+}
+
+impl Parse for Field {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let mut attrs = input.call(Attribute::parse_outer)?;
+        let span_record = extract_span_record(&mut attrs)?;
+        let name: Ident = input.parse()?;
+        input.parse::<Token![:]>()?;
+        let ty: Type = input.parse()?;
+        Ok(Self {
+            attrs,
+            name,
+            ty,
+            span_record,
+        })
+    }
+}
+
+/// Remove any `#[span]` / `#[span(debug)]` marker from `attrs` and return
+/// the requested recording mode. Remaining attributes pass through to the
+/// generated enum variant field.
+fn extract_span_record(attrs: &mut Vec<Attribute>) -> Result<Option<SpanRecord>> {
+    let mut record = None;
+    let mut kept = Vec::with_capacity(attrs.len());
+    for attr in attrs.drain(..) {
+        if !attr.path().is_ident("span") {
+            kept.push(attr);
+            continue;
+        }
+        if record.is_some() {
+            return Err(syn::Error::new_spanned(
+                &attr,
+                "duplicate `#[span]` attribute",
+            ));
+        }
+        record = Some(match &attr.meta {
+            syn::Meta::Path(_) => SpanRecord::Display,
+            syn::Meta::List(list) => {
+                let mode: Ident = list.parse_args()?;
+                if mode == "debug" {
+                    SpanRecord::Debug
+                } else if mode == "display" {
+                    SpanRecord::Display
+                } else {
+                    return Err(syn::Error::new(
+                        mode.span(),
+                        "expected `#[span]`, `#[span(display)]`, or `#[span(debug)]`",
+                    ));
+                }
+            }
+            syn::Meta::NameValue(_) => {
+                return Err(syn::Error::new_spanned(
+                    &attr,
+                    "expected `#[span]`, `#[span(display)]`, or `#[span(debug)]`",
+                ));
+            }
+        });
+    }
+    *attrs = kept;
+    Ok(record)
+}
+
+/// Parse the optional `unreliable` and `custom_policy` header flags.
+///
+/// The flags compose: `unreliable custom_policy,` selects an unreliable
+/// mailbox with a hand-written `UnreliablePolicy` implementation.
+fn parse_header_flags(input: ParseStream<'_>) -> Result<(bool, bool)> {
+    let unreliable = if input.peek(kw::unreliable) {
+        input.parse::<kw::unreliable>()?;
+        true
+    } else {
+        false
+    };
+
+    let custom_policy = if input.peek(kw::custom_policy) {
+        input.parse::<kw::custom_policy>()?;
+        true
+    } else {
+        false
+    };
+
+    if unreliable || custom_policy {
+        input.parse::<Token![,]>()?;
+    }
+
+    Ok((unreliable, custom_policy))
+}
+
+fn parse_fields(input: ParseStream<'_>) -> Result<Vec<Field>> {
+    if !input.peek(syn::token::Brace) {
+        return Ok(Vec::new());
+    }
+
+    let content;
+    braced!(content in input);
+    let fields: Vec<_> = content
+        .parse_terminated(Field::parse, Token![,])?
+        .into_iter()
+        .collect();
+    reject_reserved_fields(&fields)?;
+    Ok(fields)
+}
+
+fn reject_reserved_fields(fields: &[Field]) -> Result<()> {
+    for field in fields {
+        let name = field.name.to_string();
+        if name == "response" || name == "span" || name.starts_with("__commonware_actor") {
+            return Err(syn::Error::new(
+                field.name.span(),
+                format!("`{name}` is reserved for fields and bindings generated by ingress!"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_item(input: ParseStream<'_>) -> Result<Item> {
+    let attrs = input.call(Attribute::parse_outer)?;
+    let public_method = if input.peek(Token![pub]) {
+        input.parse::<Token![pub]>()?;
+        true
+    } else {
+        false
+    };
+
+    let kind = if input.peek(kw::tell) {
+        input.parse::<kw::tell>()?;
+        ItemKind::Tell
+    } else if input.peek(kw::ask) || input.peek(kw::subscribe) {
+        let await_response = if input.peek(kw::ask) {
+            input.parse::<kw::ask>()?;
+            true
+        } else {
+            input.parse::<kw::subscribe>()?;
+            false
+        };
+        let read_write = if input.peek(kw::read_write) {
+            input.parse::<kw::read_write>()?;
+            true
+        } else {
+            false
+        };
+        let name: Ident = input.parse()?;
+        let fields = parse_fields(input)?;
+        input.parse::<Token![->]>()?;
+        let response: Type = input.parse()?;
+        input.parse::<Token![;]>()?;
+        return Ok(Item {
+            attrs,
+            name,
+            fields,
+            public_method,
+            kind: ItemKind::Request {
+                response: Box::new(response),
+                read_write,
+                await_response,
+            },
+        });
+    } else {
+        return Err(input.error("expected `tell`, `ask`, or `subscribe` item"));
+    };
+
+    let name: Ident = input.parse()?;
+    let fields = parse_fields(input)?;
+    input.parse::<Token![;]>()?;
+
+    Ok(Item {
+        attrs,
+        name,
+        fields,
+        public_method,
+        kind,
+    })
+}
+
+impl Parse for Input {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let (unreliable, custom_policy) = parse_header_flags(input)?;
+
+        let has_header = !(input.peek(kw::tell)
+            || input.peek(kw::ask)
+            || input.peek(kw::subscribe)
+            || input.peek(Token![pub])
+            || input.peek(Token![#]));
+        let (mailbox, generics) = if has_header {
+            let mailbox: Ident = input.parse()?;
+            let generics = if input.peek(Token![<]) {
+                input.parse()?
+            } else {
+                Generics::default()
+            };
+            if input.peek(Token![where]) {
+                return Err(input.error("where clauses are not supported on ingress! generics; use inline bounds like `<P: Trait>` instead"));
+            }
+            input.parse::<Token![,]>()?;
+            (mailbox, generics)
+        } else {
+            (
+                Ident::new("Mailbox", Span::call_site()),
+                Generics::default(),
+            )
+        };
+
+        let mut items = Vec::new();
+        while !input.is_empty() {
+            items.push(parse_item(input)?);
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for item in &items {
+            if !seen.insert(item.name.to_string()) {
+                return Err(syn::Error::new(
+                    item.name.span(),
+                    format!("duplicate item name `{}`", item.name),
+                ));
+            }
+        }
+
+        if items.is_empty() {
+            return Err(syn::Error::new(
+                mailbox.span(),
+                "ingress! requires at least one `tell`, `ask`, or `subscribe` item",
+            ));
+        }
+
+        Ok(Self {
+            unreliable,
+            custom_policy,
+            mailbox,
+            generics,
+            items,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_custom_policy_header() {
+        let input: Input = syn::parse_str(
+            r#"
+            custom_policy,
+            ApiMailbox,
+            pub tell Ping;
+            "#,
+        )
+        .unwrap();
+
+        assert!(!input.unreliable);
+        assert!(input.custom_policy);
+        assert_eq!(input.mailbox, "ApiMailbox");
+        assert_eq!(input.items.len(), 1);
+    }
+
+    #[test]
+    fn parses_unreliable_header() {
+        let input: Input = syn::parse_str(
+            r#"
+            unreliable,
+            ApiMailbox,
+            pub ask Get -> u64;
+            "#,
+        )
+        .unwrap();
+
+        assert!(input.unreliable);
+        assert!(!input.custom_policy);
+        assert_eq!(input.items.len(), 1);
+    }
+
+    #[test]
+    fn parses_unreliable_custom_policy_header() {
+        let input: Input = syn::parse_str(
+            r#"
+            unreliable custom_policy,
+            ApiMailbox,
+            pub tell Ping;
+            "#,
+        )
+        .unwrap();
+
+        assert!(input.unreliable);
+        assert!(input.custom_policy);
+    }
+
+    #[test]
+    fn parses_span_field_attributes() {
+        let input: Input = syn::parse_str(
+            r#"
+            ApiMailbox,
+            pub tell Vote { #[span] view: u64, #[span(debug)] digest: u64, payload: u64 };
+            "#,
+        )
+        .unwrap();
+
+        let fields = &input.items[0].fields;
+        assert_eq!(fields[0].span_record, Some(SpanRecord::Display));
+        assert_eq!(fields[1].span_record, Some(SpanRecord::Debug));
+        assert_eq!(fields[2].span_record, None);
+        // The marker is stripped so it never reaches the generated variant.
+        assert!(fields.iter().all(|field| field.attrs.is_empty()));
+    }
+
+    #[test]
+    fn parses_read_write_subscribe() {
+        let input: Input = syn::parse_str(
+            r#"
+            ApiMailbox,
+            subscribe read_write Next -> u64;
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            input.items[0].kind,
+            ItemKind::Request {
+                read_write: true,
+                await_response: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_generic_defaults_for_lowering_validation() {
+        let input: Input = syn::parse_str(
+            r#"
+            ApiMailbox<T = u64>,
+            tell Ping { value: T };
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(input.generics.params.len(), 1);
+    }
+
+    #[test]
+    fn rejects_unknown_span_mode() {
+        let result = syn::parse_str::<Input>(
+            r#"
+            ApiMailbox,
+            pub tell Vote { #[span(pretty)] view: u64 };
+            "#,
+        );
+        let Err(err) = result else {
+            panic!("unknown span mode was accepted");
+        };
+
+        assert!(err.to_string().contains("expected"));
+    }
+
+    #[test]
+    fn rejects_duplicate_span_attribute() {
+        let result = syn::parse_str::<Input>(
+            r#"
+            ApiMailbox,
+            pub tell Vote { #[span] #[span(debug)] view: u64 };
+            "#,
+        );
+        let Err(err) = result else {
+            panic!("duplicate span attribute was accepted");
+        };
+
+        assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn rejects_reserved_span_field() {
+        let result = syn::parse_str::<Input>(
+            r#"
+            ApiMailbox,
+            pub tell Ping { span: u64 };
+            "#,
+        );
+        let Err(err) = result else {
+            panic!("reserved span field was accepted");
+        };
+
+        assert!(err.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn rejects_reserved_binding_prefix() {
+        let result = syn::parse_str::<Input>(
+            r#"
+            ApiMailbox,
+            pub tell Ping { __commonware_actor_value: u64 };
+            "#,
+        );
+        let Err(err) = result else {
+            panic!("reserved binding prefix was accepted");
+        };
+
+        assert!(err.to_string().contains("reserved"));
+    }
+}
