@@ -1507,9 +1507,12 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(db, metadata, Vec::new(), |floor, tip, limit, out| {
-            fill_candidates(&db.bitmap, floor, tip, limit, out)
-        })
+        self.merkleize_with_floor_scan(
+            db,
+            metadata,
+            StagedUpdates::<F, update::Unordered<K, V>>::new(),
+            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+        )
         .await
     }
 
@@ -1693,9 +1696,12 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(db, metadata, Vec::new(), |floor, tip, limit, out| {
-            fill_candidates(&db.bitmap, floor, tip, limit, out)
-        })
+        self.merkleize_with_floor_scan(
+            db,
+            metadata,
+            StagedUpdates::<F, update::Ordered<K, V>>::new(),
+            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+        )
         .await
     }
 
