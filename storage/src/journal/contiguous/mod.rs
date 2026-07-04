@@ -184,7 +184,24 @@ pub trait Contiguous: Send + Sync {
         }
     }
 
-    /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    /// Like [`read_many`](Self::read_many), but skips any dedicated synchronous cache pass the
+    /// implementation would otherwise run first. Intended for callers that already served cache
+    /// hits via [`try_read_many_sync`](Self::try_read_many_sync) and are reading the misses.
+    ///
+    /// The default implementation delegates to [`read_many`](Self::read_many), which is correct
+    /// for implementations whose batched read has no dedicated cache pass.
+    fn read_many_direct(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send
+    where
+        Self::Item: Send,
+    {
+        self.read_many(positions)
+    }
+
+    /// Read an item if it can be done synchronously (e.g. without I/O), returning `None`
+    /// otherwise. Decode failures surface as `None` and the async read path reports the error.
     ///
     /// Default implementation always returns `None`.
     fn try_read_sync(&self, _position: u64) -> Option<Self::Item> {
@@ -193,8 +210,8 @@ pub trait Contiguous: Send + Sync {
 
     /// Read multiple items at strictly increasing positions, serving only those that can be
     /// read synchronously (e.g. from a page cache). Returns one entry per position: `Some(item)`
-    /// for sync hits and `None` for positions that require I/O or fail to decode (the async
-    /// read path reports such errors).
+    /// for sync hits and `None` for positions that require I/O, fail to decode, or fall outside
+    /// `bounds()` (the async read path reports such errors).
     ///
     /// Default implementation returns `None` for every position.
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {

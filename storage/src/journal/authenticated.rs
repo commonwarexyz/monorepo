@@ -305,14 +305,15 @@ where
         self.merkle.with_mem(f)
     }
 
-    /// Like [`Contiguous::read_many`], but reads the journal directly, skipping the synchronous
-    /// page-cache pass. Intended for callers that already served cache hits via
+    /// Like [`Contiguous::read_many`], but skips the synchronous page-cache passes: this
+    /// journal's strategy-managed pass and any dedicated pass in the underlying journal.
+    /// Intended for callers that already served cache hits via
     /// [`Contiguous::try_read_many_sync`] and are reading the misses.
     pub(crate) async fn read_many_direct(
         &self,
         positions: &[u64],
     ) -> Result<Vec<C::Item>, JournalError> {
-        self.journal.read_many(positions).await
+        self.journal.read_many_direct(positions).await
     }
 
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.
@@ -749,10 +750,7 @@ where
         // cache-lock acquisition per blob a shard touches). The sortedness assert keeps
         // contract violations deterministic: past it, a non-increasing batch would only trip
         // per-shard validation when an inversion lands inside a single shard.
-        assert!(
-            positions.windows(2).all(|w| w[0] < w[1]),
-            "positions must be strictly increasing"
-        );
+        crate::journal::assert_positions_increasing(positions);
         let strategy = self.strategy();
         let journal = &self.journal;
         let mut results: Vec<Option<C::Item>> = strategy.run(
@@ -777,7 +775,7 @@ where
             .filter_map(|(&pos, r)| r.is_none().then_some(pos))
             .collect();
         if !misses.is_empty() {
-            let read = self.journal.read_many(&misses).await?;
+            let read = self.journal.read_many_direct(&misses).await?;
             let mut read = read.into_iter();
             for r in results.iter_mut().filter(|r| r.is_none()) {
                 *r = Some(read.next().expect("one result per miss"));
@@ -787,6 +785,10 @@ where
             .into_iter()
             .map(|r| r.expect("all positions resolved"))
             .collect())
+    }
+
+    async fn read_many_direct(&self, positions: &[u64]) -> Result<Vec<C::Item>, JournalError> {
+        Self::read_many_direct(self, positions).await
     }
 
     fn try_read_sync(&self, position: u64) -> Option<C::Item> {
@@ -1015,7 +1017,7 @@ mod tests {
     fn test_read_many_shards_across_strategy_pool() {
         deterministic::Runner::default().start(|context| async move {
             // A parallelism > 1 strategy with more positions than the shard threshold
-            // exercises the sharded sync path; the tiny test page cache pushes most
+            // exercises the sharded sync path. The tiny test page cache pushes most
             // positions through the batched miss fallback while the write buffer serves
             // the tail synchronously.
             let strategy = context.create_strategy(NZUsize!(2)).unwrap();

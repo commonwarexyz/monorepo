@@ -511,10 +511,9 @@ pub mod tests {
     use crate::{
         merkle::{self, mmb, mmr},
         qmdb::{
-            self,
             any::{
                 test::colliding_digest,
-                traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+                traits::{trait_write, DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
             verify_proof,
@@ -1632,14 +1631,6 @@ pub mod tests {
 
     fn val(i: u64) -> Digest {
         Sha256::hash(&(i + 10000).to_be_bytes())
-    }
-
-    fn trait_write<B, Db>(batch: B, key: Digest, value: Digest) -> B
-    where
-        B: qmdb::any::traits::UnmerkleizedBatch<Db, K = Digest, V = Digest>,
-        Db: ?Sized,
-    {
-        <B as qmdb::any::traits::UnmerkleizedBatch<Db>>::write(batch, key, Some(value))
     }
 
     async fn mmb_commit(

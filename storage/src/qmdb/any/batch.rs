@@ -2581,13 +2581,7 @@ mod tests {
         Location::new(n)
     }
 
-    fn trait_write<B, Db>(batch: B, key: sha256::Digest, value: sha256::Digest) -> B
-    where
-        B: crate::qmdb::any::traits::UnmerkleizedBatch<Db, K = sha256::Digest, V = sha256::Digest>,
-        Db: ?Sized,
-    {
-        <B as crate::qmdb::any::traits::UnmerkleizedBatch<Db>>::write(batch, key, Some(value))
-    }
+    use crate::qmdb::any::traits::trait_write;
 
     fn shared_with<F>(build: F) -> Shared<BITMAP_CHUNK_BYTES>
     where

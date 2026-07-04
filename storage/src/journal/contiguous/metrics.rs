@@ -13,8 +13,8 @@ use std::{ops::Deref, sync::Arc};
 pub(super) struct CacheMetrics {
     /// Fixed items read without async storage fallback.
     hits: Counter,
-    /// Fixed items not satisfied synchronously: misses from `read` and `read_many`
-    /// plus all `try_read_sync` calls that returned `None`, including invalid or pruned probes.
+    /// Fixed items that fell back to a blob read in `read` and `read_many`. Declined probes
+    /// (`try_read_sync` and `try_read_many_sync`) count hits only, never misses.
     misses: Counter,
 }
 

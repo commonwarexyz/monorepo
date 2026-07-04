@@ -6,6 +6,8 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
+#[cfg(test)]
+use commonware_cryptography::sha256;
 use core::num::NonZeroU64;
 use std::{future::Future, ops::Range};
 
@@ -263,3 +265,14 @@ macro_rules! impl_provable {
 }
 
 pub(crate) use impl_provable;
+
+/// Write `key = Some(value)` through the [`UnmerkleizedBatch`] trait, pinning that trait
+/// dispatch forwards to the batch's inherent write.
+#[cfg(test)]
+pub(crate) fn trait_write<B, Db>(batch: B, key: sha256::Digest, value: sha256::Digest) -> B
+where
+    B: UnmerkleizedBatch<Db, K = sha256::Digest, V = sha256::Digest>,
+    Db: ?Sized,
+{
+    <B as UnmerkleizedBatch<Db>>::write(batch, key, Some(value))
+}

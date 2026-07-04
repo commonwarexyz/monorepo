@@ -516,9 +516,10 @@ mod tests {
         #[case] size: u64,
         #[case] expected: ValidationExpectation,
     ) {
-        // These cases pin the shared batch-read contract used by Writer, Reader, and Sealed:
+        // These cases pin the shared batch-read contract used by Writer and Sealed (through
+        // View):
         // every requested byte must be within the logical blob size, with checked offset
-        // arithmetic. Contract violations (buffer length, unsorted offsets) panic; see the
+        // arithmetic. Contract violations (buffer length, unsorted offsets) panic. See the
         // should_panic tests below.
         let result = validate_read_many_into(buf_len, &offsets, NZUsize!(item_size), size);
 
@@ -549,6 +550,49 @@ mod tests {
     #[should_panic(expected = "offsets must be sorted and non-overlapping")]
     fn test_validate_read_many_into_rejects_unsorted_offsets() {
         let _ = validate_read_many_into(8, &[8, 4], NZUsize!(4), 16);
+    }
+
+    #[rstest]
+    #[case::ok(12, vec![(0, 4), (4, 8)], 16, ValidationExpectation::Ok)]
+    #[case::zero_length_range(4, vec![(0, 0), (0, 4)], 16, ValidationExpectation::Ok)]
+    #[case::offset_overflow(4, vec![(u64::MAX, 4)], 16, ValidationExpectation::OffsetOverflow)]
+    #[case::insufficient_length(4, vec![(14, 4)], 16, ValidationExpectation::BlobInsufficientLength)]
+    #[case::range_may_end_exactly_at_logical_size(4, vec![(12, 4)], 16, ValidationExpectation::Ok)]
+    fn test_validate_read_ranges(
+        #[case] buf_len: usize,
+        #[case] ranges: Vec<(u64, usize)>,
+        #[case] size: u64,
+        #[case] expected: ValidationExpectation,
+    ) {
+        let result = validate_read_ranges(buf_len, &ranges, size);
+
+        match expected {
+            ValidationExpectation::Ok => assert!(result.is_ok()),
+            ValidationExpectation::OffsetOverflow => {
+                assert!(matches!(result, Err(Error::OffsetOverflow)))
+            }
+            ValidationExpectation::BlobInsufficientLength => {
+                assert!(matches!(result, Err(Error::BlobInsufficientLength)))
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "buf must hold one slot per range totaling its length")]
+    fn test_validate_read_ranges_rejects_buffer_len_mismatch() {
+        let _ = validate_read_ranges(7, &[(0, 4), (4, 4)], 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "ranges must be sorted and non-overlapping")]
+    fn test_validate_read_ranges_rejects_overlapping_ranges() {
+        let _ = validate_read_ranges(8, &[(0, 4), (2, 4)], 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "ranges must be sorted and non-overlapping")]
+    fn test_validate_read_ranges_rejects_unsorted_ranges() {
+        let _ = validate_read_ranges(8, &[(8, 4), (4, 4)], 16);
     }
 
     #[test]

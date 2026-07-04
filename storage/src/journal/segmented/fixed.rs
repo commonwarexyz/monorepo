@@ -178,13 +178,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         positions: &[u64],
         buf: &mut [u8],
     ) -> Result<(Vec<A>, usize), Error> {
-        assert!(
-            positions.windows(2).all(|w| w[0] < w[1]),
-            "positions must be strictly increasing"
-        );
+        crate::journal::assert_positions_increasing(positions);
         if positions.is_empty() {
             return Ok((Vec::new(), 0));
         }
+        assert!(
+            buf.len() >= positions.len() * Self::CHUNK_SIZE,
+            "get_many requires buf.len() >= positions.len() * CHUNK_SIZE"
+        );
+        let buf = &mut buf[..positions.len() * Self::CHUNK_SIZE];
         let blob = self
             .manager
             .get(section)?
@@ -212,30 +214,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
     pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
-        let mut buf = vec![0u8; Self::CHUNK_SIZE];
-        self.try_get_sync_into(section, position, &mut buf)
-    }
-
-    /// Get an item synchronously using caller-provided buffer.
-    ///
-    /// `buf` must be at least [Self::CHUNK_SIZE] bytes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `buf` is smaller than [Self::CHUNK_SIZE].
-    pub fn try_get_sync_into(&self, section: u64, position: u64, buf: &mut [u8]) -> Option<A> {
-        assert!(
-            buf.len() >= Self::CHUNK_SIZE,
-            "try_get_sync_into requires buf.len() >= CHUNK_SIZE"
-        );
         let blob = self.manager.get(section).ok()??;
         let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
         let remaining = blob.size().checked_sub(offset)?;
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
-        let buf = &mut buf[..Self::CHUNK_SIZE];
-        if !blob.try_read_sync(offset, buf) {
+        let mut buf = vec![0u8; Self::CHUNK_SIZE];
+        if !blob.try_read_sync_into(&mut buf, offset) {
             return None;
         }
         A::decode(&buf[..]).ok()

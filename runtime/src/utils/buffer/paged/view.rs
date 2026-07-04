@@ -50,7 +50,7 @@ impl<B: Blob> View<'_, B> {
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
     /// `buf.len()` bytes were satisfied from the page cache and/or the in-memory tail. When `false`
     /// is returned, the contents of `buf` are unspecified.
-    pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
+    pub fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
         let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
             return false;
         };
@@ -197,23 +197,25 @@ impl<B: Blob> View<'_, B> {
     /// Like [`Self::read_many_into`], but synchronous and cache-only.
     ///
     /// Items fully served from the in-memory tail and page cache are written to their slots in
-    /// `buf`. Returns the indices of items that require a blob read. Those slots hold
-    /// unspecified bytes.
+    /// `buf`. Returns the indices of items that require a blob read, which is every index when
+    /// the offsets extend past the blob. Those slots hold unspecified bytes.
     pub fn try_read_many_sync_into(
         &self,
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
-    ) -> Result<Vec<usize>, Error> {
-        super::validate_read_many_into(buf.len(), offsets, item_size, self.size)?;
+    ) -> Vec<usize> {
+        if super::validate_read_many_into(buf.len(), offsets, item_size, self.size).is_err() {
+            return (0..offsets.len()).collect();
+        }
         if offsets.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         let mut cache_ranges =
             super::split_read_many(buf, offsets, item_size, self.tail_offset, self.tail);
         if cache_ranges.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
 
@@ -228,25 +230,28 @@ impl<B: Blob> View<'_, B> {
             misses.push(idx);
             idx += 1;
         }
-        Ok(misses)
+        misses
     }
 
     /// Like [`Self::try_read_many_sync_into`], but for variable-length ranges: `buf` holds one
     /// slot per `(offset, len)` range, back to back. Returns the indices of ranges that require
-    /// a blob read. Their slots hold unspecified bytes.
+    /// a blob read, which is every index when the ranges extend past the blob. Their slots hold
+    /// unspecified bytes.
     pub fn try_read_ranges_sync_into(
         &self,
         buf: &mut [u8],
         ranges: &[(u64, usize)],
-    ) -> Result<Vec<usize>, Error> {
-        super::validate_read_ranges(buf.len(), ranges, self.size)?;
+    ) -> Vec<usize> {
+        if super::validate_read_ranges(buf.len(), ranges, self.size).is_err() {
+            return (0..ranges.len()).collect();
+        }
         if ranges.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         let mut cache_ranges = super::split_read_ranges(buf, ranges, self.tail_offset, self.tail);
         if cache_ranges.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
 
@@ -262,7 +267,7 @@ impl<B: Blob> View<'_, B> {
             misses.push(idx);
             idx += 1;
         }
-        Ok(misses)
+        misses
     }
 }
 
@@ -301,7 +306,7 @@ mod tests {
             // Warm the cache for the first page, then read across the page/tail boundary.
             writer.read_at(0, page_size).await.unwrap();
             let mut buf = [0u8; 4];
-            assert!(writer.try_read_sync(page_size as u64 - 2, &mut buf));
+            assert!(writer.try_read_sync_into(&mut buf, page_size as u64 - 2));
             assert_eq!(&buf, &[0xAA, 0xAA, b'T', b'A']);
         });
     }
