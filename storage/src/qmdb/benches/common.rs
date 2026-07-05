@@ -3,7 +3,11 @@
 
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
+use commonware_runtime::{
+    buffer::paged::{CacheRef, ClockCache, PageCache},
+    tokio::Context,
+    BufferPooler, ThreadPooler,
+};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{self, full::Config as MerkleConfig, Family},
@@ -50,7 +54,8 @@ pub const INIT_CACHE_SIZE: Option<NonZeroUsize> = Some(NZUsize!(1 << 18));
 // -- Fixed value (Digest), fixed storage layout --
 
 pub type AnyUFixDb<F> = UFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
-pub type AnyOFixDb<F> = OFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
+pub type AnyOFixDb<F, P = ClockCache> =
+    OFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon, P>;
 /// Ordered "any" DB with a partitioned snapshot index (256 partitions, P=1). Exercises the
 /// partitioned ordered index's cursor (get_mut/find/update) on apply.
 pub type AnyOFixP256Db<F> = OFixP256<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
@@ -97,12 +102,12 @@ const PARTITION_VAR: &str = "bench-variable";
 const PARTITION_KEYLESS: &str = "bench-keyless";
 const PARTITION_IMM: &str = "bench-immutable";
 
-fn merkle_cfg(
+fn merkle_cfg<P: PageCache>(
     suffix: &str,
     ctx: &(impl BufferPooler + ThreadPooler),
-    page_cache: CacheRef,
+    page_cache: CacheRef<P>,
     items_per_blob: NonZeroU64,
-) -> MerkleConfig<Rayon> {
+) -> MerkleConfig<Rayon, P> {
     MerkleConfig {
         journal_partition: format!("journal-{suffix}"),
         metadata_partition: format!("metadata-{suffix}"),
@@ -113,7 +118,11 @@ fn merkle_cfg(
     }
 }
 
-fn fix_log_cfg(suffix: &str, page_cache: CacheRef, items_per_blob: NonZeroU64) -> FConfig {
+fn fix_log_cfg<P: PageCache>(
+    suffix: &str,
+    page_cache: CacheRef<P>,
+    items_per_blob: NonZeroU64,
+) -> FConfig<P> {
     FConfig {
         partition: format!("log-journal-{suffix}"),
         items_per_blob,
@@ -145,11 +154,11 @@ pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<E
 
 /// [any_fix_cfg], with explicit blob sizing and page cache (a database must be reopened with the
 /// page size it was written with).
-pub fn any_fix_cfg_with(
+pub fn any_fix_cfg_with<P: PageCache>(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
-    page_cache: CacheRef,
-) -> AnyFixedConfig<EightCap, Rayon> {
+    page_cache: CacheRef<P>,
+) -> AnyFixedConfig<EightCap, Rayon, P> {
     AnyFixedConfig {
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),

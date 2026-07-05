@@ -109,7 +109,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Writer},
+    buffer::paged::{CacheRef, ClockCache, PageCache, Writer},
     Blob as RBlob, Buf, IoBuf,
 };
 use futures::Stream;
@@ -142,13 +142,13 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
 /// The stream is split into one state per blob so replay can start at a mid-blob pruning boundary,
 /// stop at the journal's logical end, and avoid reading across blob files. `buffer` is a byte
 /// budget for each blob replay, not an item count.
-fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
-    blobs: &Blobs<'a, B>,
+fn replay_stream<'a, B: RBlob, A: CodecFixedShared, P: PageCache>(
+    blobs: &Blobs<'a, B, P>,
     bounds: Range<u64>,
     items_per_blob: NonZeroU64,
     start_pos: u64,
     buffer: NonZeroUsize,
-) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + use<'a, B, A>, Error> {
+) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + use<'a, B, A, P>, Error> {
     if start_pos > bounds.end {
         return Err(Error::ItemOutOfRange(start_pos));
     }
@@ -180,7 +180,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
                 .get(blob)
                 .expect("positions in bounds map to a retained blob");
 
-            states.push(FixedReplayState::<B, A> {
+            states.push(FixedReplayState::<B, A, P> {
                 replay: blob.replay_from(offset, buffer)?,
                 pos: first_pos,
                 end_pos: blob_end,
@@ -194,9 +194,9 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
 }
 
 /// Replay state for one fixed-size blob.
-struct FixedReplayState<'a, B: RBlob, A> {
+struct FixedReplayState<'a, B: RBlob, A, P: PageCache> {
     /// Sequential logical bytes for this blob.
-    replay: BlobReplay<'a, B>,
+    replay: BlobReplay<'a, B, P>,
     /// Next position to yield.
     pos: u64,
     /// Exclusive end position within this blob.
@@ -206,7 +206,9 @@ struct FixedReplayState<'a, B: RBlob, A> {
     _marker: PhantomData<A>,
 }
 
-impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState<'_, B, A> {
+impl<B: RBlob, A: CodecFixedShared, P: PageCache> super::ReplayBatchState
+    for FixedReplayState<'_, B, A, P>
+{
     type Item = A;
 
     /// Decode the next batch of fixed-size items from this blob.
@@ -286,7 +288,7 @@ struct RecoveredBounds {
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<P: PageCache = ClockCache> {
     /// Prefix for the journal partitions.
     ///
     /// Blobs are stored in `partition` (legacy) if it contains data, otherwise in
@@ -301,7 +303,7 @@ pub struct Config {
     pub items_per_blob: NonZeroU64,
 
     /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
+    pub page_cache: CacheRef<P>,
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
@@ -317,9 +319,9 @@ pub struct Config {
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying blob will be truncated to the last valid item). Repair is performed during init.
-pub struct Journal<E: Context, A> {
+pub struct Journal<E: Context, A, P: PageCache = ClockCache> {
     /// The blobs that comprise the journal.
-    blobs: Writable<E>,
+    blobs: Writable<E, P>,
 
     /// The durable recovery checkpoint.
     checkpoint: Checkpoint<E>,
@@ -339,7 +341,7 @@ pub struct Journal<E: Context, A> {
     _phantom: PhantomData<A>,
 }
 
-impl<E: Context, A: CodecFixedShared> Journal<E, A> {
+impl<E: Context, A: CodecFixedShared, P: PageCache> Journal<E, A, P> {
     /// Size of each entry in bytes. Evaluating this rejects zero-size item types at compile
     /// time, which would otherwise divide by zero in the chunk math.
     pub const CHUNK_SIZE: NonZeroUsize = match NonZeroUsize::new(A::SIZE) {
@@ -367,7 +369,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Construct a journal from recovered blobs.
     fn from_blobs(
-        blobs: Writable<E>,
+        blobs: Writable<E, P>,
         checkpoint: Checkpoint<E>,
         bounds: Range<u64>,
         dirty_from_blob: Option<u64>,
@@ -389,7 +391,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
     /// used to iterate over all items in the `Journal`.
-    pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<P>) -> Result<Self, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         Self::init_with_checkpoint(context, cfg, checkpoint).await
     }
@@ -397,7 +399,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Finish initialization using an already-open checkpoint.
     async fn init_with_checkpoint(
         context: E,
-        cfg: Config,
+        cfg: Config<P>,
         mut checkpoint: Checkpoint<E>,
     ) -> Result<Self, Error> {
         // A staged clear intent means all old blob data is about to be discarded. Honor it before
@@ -406,7 +408,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Self::complete_staged_clear(context, cfg, checkpoint, clear_target).await;
         }
 
-        let blob_partition = Partition::select(&context, &cfg.partition).await?;
+        let blob_partition = Partition::<E, P>::select(&context, &cfg.partition).await?;
         let partition = Partition::new(
             context.child("blobs"),
             blob_partition,
@@ -501,14 +503,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// `clear_target`, then finalize the checkpoint the crashed clear left staged.
     async fn complete_staged_clear(
         context: E,
-        cfg: Config,
+        cfg: Config<P>,
         mut checkpoint: Checkpoint<E>,
         clear_target: u64,
     ) -> Result<Self, Error> {
         warn!(clear_target, "crash repair: completing interrupted clear");
         let new_partition = format!("{}-blobs", cfg.partition);
-        Partition::<E>::remove_all(&context, &cfg.partition).await?;
-        Partition::<E>::remove_all(&context, &new_partition).await?;
+        Partition::<E, P>::remove_all(&context, &cfg.partition).await?;
+        Partition::<E, P>::remove_all(&context, &new_partition).await?;
         let partition = Partition::new(
             context.child("blobs"),
             new_partition,
@@ -539,7 +541,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// blob state or a watermark beyond the recovered size is corruption. The caller persists the
     /// checkpoint before applying the returned repair (see comment at the call site).
     fn recover_bounds(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        pending: &BTreeMap<u64, Writer<E::Blob, P>>,
         items_per_blob: u64,
         boundary_hint: Option<u64>,
         watermark_hint: Option<u64>,
@@ -641,7 +643,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Classify a blob's untrusted on-disk length against its capacity. A missing blob counts
     /// as zero length, surfacing as a gap.
     fn classify_fill(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        pending: &BTreeMap<u64, Writer<E::Blob, P>>,
         items_per_blob: u64,
         pruning_boundary: u64,
         blob: u64,
@@ -668,7 +670,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// lengths are untrusted disk state. The returned size is chunk-exact and the retained
     /// prefix is contiguous.
     fn recover_by_walking_lengths(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        pending: &BTreeMap<u64, Writer<E::Blob, P>>,
         items_per_blob: u64,
         pruning_boundary: u64,
     ) -> Result<(u64, Option<u64>), Error> {
@@ -717,9 +719,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `size..size`.
     #[commonware_macros::stability(ALPHA)]
-    pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
+    pub async fn init_at_size(context: E, cfg: Config<P>, size: u64) -> Result<Self, Error> {
         // Fail before writing intent if existing blob partitions are already inconsistent.
-        Partition::select(&context, &cfg.partition).await?;
+        Partition::<E, P>::select(&context, &cfg.partition).await?;
         Self::init_at_size_cleared(context, cfg, size, || async { Ok(()) }).await
     }
 
@@ -732,7 +734,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     #[commonware_macros::stability(ALPHA)]
     pub(in crate::journal::contiguous) async fn init_at_size_cleared<F, Fut>(
         context: E,
-        cfg: Config,
+        cfg: Config<P>,
         size: u64,
         clear_dependents: F,
     ) -> Result<Self, Error>
@@ -762,7 +764,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// staged reset this behaves exactly like [Self::init].
     pub(in crate::journal::contiguous) async fn init_cleared<F, Fut>(
         context: E,
-        cfg: Config,
+        cfg: Config<P>,
         clear_dependents: F,
     ) -> Result<Self, Error>
     where
@@ -820,7 +822,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// If the journal later rewinds or truncates into the returned reader's range, subsequent reads
     /// from that range may observe unspecified contents.
-    pub async fn snapshot(&mut self) -> Result<Reader<'static, E, A>, Error> {
+    pub async fn snapshot(&mut self) -> Result<Reader<'static, E, A, P>, Error> {
         Ok(Reader {
             blobs: self.blobs.snapshot().await?,
             bounds: self.bounds.clone(),
@@ -831,7 +833,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// A reader borrowing the journal's live state.
-    pub(super) fn reader(&self) -> Reader<'_, E, A> {
+    pub(super) fn reader(&self) -> Reader<'_, E, A, P> {
         Reader {
             blobs: self.blobs.reader(),
             bounds: self.bounds.clone(),
@@ -1130,15 +1132,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 }
 
 /// A reader over a fixed journal.
-pub struct Reader<'a, E: Context, A> {
-    blobs: Blobs<'a, E::Blob>,
+pub struct Reader<'a, E: Context, A, P: PageCache = ClockCache> {
+    blobs: Blobs<'a, E::Blob, P>,
     bounds: Range<u64>,
     items_per_blob: NonZeroU64,
     metrics: Arc<Metrics<E>>,
     _phantom: PhantomData<A>,
 }
 
-impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
+impl<E: Context, A: CodecFixedShared, P: PageCache> Reader<'_, E, A, P> {
     /// Validate a position to be read: must lie within `bounds`.
     const fn validate_readable(&self, pos: u64) -> Result<(), Error> {
         if pos >= self.bounds.end {
@@ -1151,7 +1153,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     }
 
     /// Resolve `pos` to its blob and byte offset within the blob.
-    fn locate(&self, pos: u64) -> Result<(Blob<'_, E::Blob>, u64), Error> {
+    fn locate(&self, pos: u64) -> Result<(Blob<'_, E::Blob, P>, u64), Error> {
         self.validate_readable(pos)?;
         let items_per_blob = self.items_per_blob.get();
         let blob = super::position_to_blob(pos, items_per_blob);
@@ -1175,8 +1177,9 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     }
 }
 
-impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
+impl<E: Context, A: CodecFixedShared, P: PageCache> super::Contiguous for Reader<'_, E, A, P> {
     type Item = A;
+    type PageCache = P;
 
     fn bounds(&self) -> Range<u64> {
         self.bounds.clone()
@@ -1290,8 +1293,9 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     }
 }
 
-impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
+impl<E: Context, A: CodecFixedShared, P: PageCache> super::Contiguous for Journal<E, A, P> {
     type Item = A;
+    type PageCache = P;
 
     fn bounds(&self) -> Range<u64> {
         self.bounds.clone()
@@ -1325,7 +1329,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     }
 }
 
-impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
+impl<E: Context, A: CodecFixedShared, P: PageCache> Mutable for Journal<E, A, P> {
     async fn append(&mut self, item: &Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
@@ -1356,8 +1360,8 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<E: Context, A: CodecFixedShared> authenticated::Inner<E> for Journal<E, A> {
-    type Config = Config;
+impl<E: Context, A: CodecFixedShared, P: PageCache> authenticated::Inner<E> for Journal<E, A, P> {
+    type Config = Config<P>;
 
     async fn init<
         F: merkle::Family,
@@ -1365,7 +1369,7 @@ impl<E: Context, A: CodecFixedShared> authenticated::Inner<E> for Journal<E, A> 
         S: commonware_parallel::Strategy,
     >(
         context: E,
-        merkle_cfg: merkle::full::Config<S>,
+        merkle_cfg: merkle::full::Config<S, P>,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&A) -> bool,
         bagging: merkle::Bagging,

@@ -6,17 +6,17 @@
 //! to a blob read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in
 //! exactly one place.
 
-use super::CacheRef;
+use super::{CacheRef, PageCache};
 use crate::{Blob, Error, IoBufMut, IoBufs};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::num::NonZeroUsize;
 
 /// A borrowed view over a paged blob.
-pub struct View<'a, B: Blob> {
+pub struct View<'a, B: Blob, P: PageCache> {
     /// Underlying blob, used for bytes below `tail_offset` not resident in the cache.
     pub(super) blob: &'a B,
     /// Page cache used for bytes below `tail_offset`.
-    pub(super) cache_ref: &'a CacheRef,
+    pub(super) cache_ref: &'a CacheRef<P>,
     /// Page-cache id of the originating blob.
     pub(super) id: u64,
     /// Size of the blob, in bytes.
@@ -27,15 +27,15 @@ pub struct View<'a, B: Blob> {
     pub(super) tail: &'a [u8],
 }
 
-impl<B: Blob> Clone for View<'_, B> {
+impl<B: Blob, P: PageCache> Clone for View<'_, B, P> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<B: Blob> Copy for View<'_, B> {}
+impl<B: Blob, P: PageCache> Copy for View<'_, B, P> {}
 
-impl<B: Blob> View<'_, B> {
+impl<B: Blob, P: PageCache> View<'_, B, P> {
     /// Copy any in-memory tail overlap into `buf`, returning the remaining prefix length.
     fn copy_tail_overlap(&self, buf: &mut [u8], offset: u64) -> usize {
         let tail_start = self.tail_offset.max(offset);

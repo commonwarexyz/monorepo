@@ -17,6 +17,7 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::buffer::paged::{ClockCache, PageCache};
 use commonware_utils::Array;
 
 pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
@@ -24,10 +25,10 @@ pub type Operation<F, K, V> = ordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T, S> = super::Db<
+pub type Db<F, E, K, V, H, T, S, P = ClockCache> = super::Db<
     F,
     E,
-    Journal<E, Operation<F, K, V>>,
+    Journal<E, Operation<F, K, V>, P>,
     Index<T, Location<F>>,
     H,
     Update<K, V>,
@@ -35,12 +36,20 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
+impl<
+        F: Family,
+        E: Context,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        S: Strategy,
+        P: PageCache,
+    > Db<F, E, K, V, H, T, S, P>
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
+    pub async fn init(context: E, cfg: Config<T, S, P>) -> Result<Self, Error<F>> {
         crate::qmdb::any::init(context, cfg).await
     }
 }

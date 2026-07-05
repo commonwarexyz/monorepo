@@ -55,7 +55,7 @@ pub(crate) mod tests;
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, C, T, S>(
     context: E,
-    merkle_config: full::Config<S>,
+    merkle_config: full::Config<S, C::PageCache>,
     log: C,
     translator: T,
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -76,7 +76,7 @@ where
 {
     let hasher = qmdb::hasher::<H>();
 
-    let merkle = full::Merkle::<F, _, _, S>::init_sync(
+    let merkle = full::Merkle::<F, _, _, S, _>::init_sync(
         context.child("merkle"),
         full::SyncConfig {
             config: merkle_config,

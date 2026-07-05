@@ -25,7 +25,10 @@ use crate::{
 use commonware_codec::{DecodeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{
+    buffer::paged::{CacheRef, ClockCache, PageCache},
+    Clock, Metrics, Storage as RStorage,
+};
 use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
 use std::{
     collections::BTreeMap,
@@ -94,7 +97,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
 /// Configuration for a journal-backed Merkle structure.
 #[derive(Clone)]
-pub struct Config<S: Strategy> {
+pub struct Config<S: Strategy, P: PageCache = ClockCache> {
     /// The name of the `commonware-runtime::Storage` storage partition used for the journal storing
     /// the nodes.
     pub journal_partition: String,
@@ -114,7 +117,7 @@ pub struct Config<S: Strategy> {
     pub strategy: S,
 
     /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
+    pub page_cache: CacheRef<P>,
 }
 
 /// Configuration for initializing a full Merkle structure for synchronization.
@@ -123,9 +126,9 @@ pub struct Config<S: Strategy> {
 /// - **Fresh Start**: Existing data < range start -> discard and start fresh
 /// - **Prune and Reuse**: range contains existing data -> prune and reuse
 /// - **Error**: existing data > range end
-pub struct SyncConfig<F: Family, D: Digest, S: Strategy> {
+pub struct SyncConfig<F: Family, D: Digest, S: Strategy, P: PageCache = ClockCache> {
     /// Base configuration (journal, metadata, etc.)
-    pub config: Config<S>,
+    pub config: Config<S, P>,
 
     /// Sync range expressed as leaf-aligned bounds.
     pub range: NonEmptyRange<Location<F>>,
@@ -137,7 +140,13 @@ pub struct SyncConfig<F: Family, D: Digest, S: Strategy> {
 }
 
 /// A Merkle structure backed by a fixed-item-length journal.
-pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> {
+pub struct Merkle<
+    F: Family,
+    E: RStorage + Clock + Metrics,
+    D: Digest,
+    S: Strategy,
+    P: PageCache = ClockCache,
+> {
     /// A memory resident Merkle structure used to build the structure and cache updates. It caches
     /// all un-synced nodes, and the pinned node set as derived from both its own pruning boundary
     /// and the full structure's pruning boundary.
@@ -148,7 +157,7 @@ pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strate
     pub(crate) pruned_to_pos: Position<F>,
 
     /// Stores all unpruned nodes.
-    pub(crate) journal: Journal<E, D>,
+    pub(crate) journal: Journal<E, D, P>,
 
     /// Stores the pinned nodes for the current pruning boundary, and the corresponding pruning
     /// boundary used to generate them. The metadata remains empty until pruning is invoked, and its
@@ -168,7 +177,9 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the pruning boundary (as a leaf index) in the metadata.
 pub(crate) const PRUNED_TO_PREFIX: u8 = 1;
 
-impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F, E, D, S> {
+impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy, P: PageCache>
+    Merkle<F, E, D, S, P>
+{
     /// Return the total number of nodes in the structure, irrespective of any pruning. The next
     /// added element's position will have this value.
     pub fn size(&self) -> Position<F> {
@@ -185,7 +196,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     /// error otherwise.
     async fn get_from_metadata_or_journal(
         metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, D>,
+        journal: &Journal<E, D, P>,
         pos: Position<F>,
     ) -> Result<D, Error<F>> {
         if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
@@ -227,7 +238,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     async fn add_extra_pinned_nodes(
         mem: &mut Mem<F, D>,
         metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, D>,
+        journal: &Journal<E, D, P>,
         prune_pos: Position<F>,
     ) -> Result<(), Error<F>> {
         let prune_loc = Location::try_from(prune_pos).expect("valid prune_pos");
@@ -245,7 +256,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     pub async fn init(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,
-        cfg: Config<S>,
+        cfg: Config<S, P>,
     ) -> Result<Self, Error<F>> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
@@ -254,7 +265,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             write_buffer: cfg.write_buffer,
         };
         let mut journal =
-            Journal::<E, D>::init(context.child("merkle_journal"), journal_cfg).await?;
+            Journal::<E, D, P>::init(context.child("merkle_journal"), journal_cfg).await?;
         let mut journal_size = Position::<F>::new(journal.size());
 
         let metadata_cfg = MConfig {
@@ -424,7 +435,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     ///
     /// 3. **Error**: existing_size > range.end
     ///    - Returns [crate::journal::Error::ItemOutOfRange]
-    pub async fn init_sync(context: E, cfg: SyncConfig<F, D, S>) -> Result<Self, Error<F>> {
+    pub async fn init_sync(context: E, cfg: SyncConfig<F, D, S, P>) -> Result<Self, Error<F>> {
         let prune_pos = Position::try_from(cfg.range.start())?;
         let end_pos = Position::try_from(cfg.range.end())?;
         let journal_cfg = JConfig {
@@ -435,7 +446,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         };
 
         // Open the journal, performing a rewind if necessary for crash recovery.
-        let mut journal: Journal<E, D> =
+        let mut journal: Journal<E, D, P> =
             Journal::init(context.child("merkle_journal"), journal_cfg).await?;
         let mut journal_size = Position::<F>::new(journal.size());
 
@@ -896,8 +907,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Readable
     }
 }
 
-impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest, S: Strategy>
-    crate::merkle::storage::Storage<F> for Merkle<F, E, D, S>
+impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest, S: Strategy, P: PageCache>
+    crate::merkle::storage::Storage<F> for Merkle<F, E, D, S, P>
 {
     type Digest = D;
 
@@ -910,7 +921,9 @@ impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest, S: Strategy>
     }
 }
 
-impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F, E, D, S> {
+impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy, P: PageCache>
+    Merkle<F, E, D, S, P>
+{
     /// Return an inclusion proof for the element at the location `loc` against a historical
     /// state with `leaves` leaves.
     ///

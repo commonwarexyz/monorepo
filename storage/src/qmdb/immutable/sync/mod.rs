@@ -39,7 +39,7 @@ where
     type Op = Operation<F, K, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, C::Config, S>;
+    type Config = immutable::Config<T, C::Config, S, C::PageCache>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -70,7 +70,7 @@ where
         let hasher = qmdb::hasher::<H>();
 
         // Initialize Merkle structure for sync
-        let merkle = Merkle::<F, _, _, S>::init_sync(
+        let merkle = Merkle::<F, _, _, S, _>::init_sync(
             context.child("merkle"),
             full::SyncConfig {
                 config: db_config.merkle_config.clone(),

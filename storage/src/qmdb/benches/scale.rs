@@ -38,9 +38,9 @@
 //! the OS page cache in-process (init's replay warms it) and runs a cold pass of `num_gets`
 //! uniform-random gets across that many spawned reader tasks, followed by a warm pass over the same
 //! keys as a control. Keys are sampled the same way `generate` derives them (`Sha256(index)` over
-//! the keyspace), so nearly all gets hit a live key. By default this mode uses a passthrough page
-//! cache (no in-process caching) so reads always reach the storage layer; pass a non-zero
-//! `cache_pages` to measure through an in-process cache of that many pages instead.
+//! the keyspace), so nearly all gets hit a live key. By default this mode uses `NoCache` (no
+//! in-process caching) so reads always reach the storage layer; pass a non-zero `cache_pages` to
+//! measure through an in-process cache of that many pages instead.
 
 #[allow(dead_code, unused_imports, unused_macros)]
 #[path = "common.rs"]
@@ -49,7 +49,7 @@ mod common;
 use common::{any_fix_cfg_with, gen_random_kv, make_fixed_value, AnyOFixDb, PAGE_SIZE};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
-    buffer::paged::CacheRef,
+    buffer::paged::{CacheRef, PageCache},
     tokio::{Config, Context, Runner},
     Runner as _, Spawner as _, Supervisor as _,
 };
@@ -86,7 +86,7 @@ const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [page_size]   build a database (omit exponent => zipf 1.0; 0 => uniform; page_size = logical bytes, default 16384)\n  init     <folder> [page_size]  reopen + time init at cache off / R/4 / R (page_size must match generate)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,<concurrency>...] [page_size] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, 0/omitted = passthrough)\n  destroy  <folder>              delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [page_size]   build a database (omit exponent => zipf 1.0; 0 => uniform; page_size = logical bytes, default 16384)\n  init     <folder> [page_size]  reopen + time init at cache off / R/4 / R (page_size must match generate)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,<concurrency>...] [page_size] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, 0/omitted = no caching)\n  destroy  <folder>              delete the database"
     );
 }
 
@@ -150,8 +150,8 @@ fn main() {
                     usage();
                     return;
                 };
-                // Optional in-process page cache size (7th arg): omitted or `0` selects a
-                // passthrough (no caching), so reads always reach the storage layer.
+                // Optional in-process page cache size (7th arg): omitted or `0` selects
+                // `NoCache`, so reads always reach the storage layer.
                 let cache_pages = match argv.get(6).map(|a| a.parse::<usize>()) {
                     None => None,
                     Some(Ok(n)) => NonZeroUsize::new(n),
@@ -296,27 +296,47 @@ fn get_bench(
         );
         return;
     }
+    // `NoCache` by default so point reads reach the storage layer instead of the in-process
+    // cache, which is what the cold-read measurement is about. The cache implementation is a
+    // type parameter, so each choice instantiates its own database type.
+    match cache_pages {
+        None => run_get_bench(
+            folder,
+            keyspace,
+            num_gets,
+            concurrencies,
+            page_size,
+            move |ctx: &Context| CacheRef::no_cache_from_pooler(ctx, page_size),
+            "none".to_string(),
+        ),
+        Some(pages) => run_get_bench(
+            folder,
+            keyspace,
+            num_gets,
+            concurrencies,
+            page_size,
+            move |ctx: &Context| CacheRef::from_pooler(ctx, page_size, pages),
+            format!("{pages} pages"),
+        ),
+    }
+}
+
+/// [get_bench], instantiated for one [PageCache] implementation.
+#[allow(clippy::too_many_arguments)]
+fn run_get_bench<P: PageCache>(
+    folder: &str,
+    keyspace: u64,
+    num_gets: u64,
+    concurrencies: Vec<u64>,
+    page_size: NonZeroU16,
+    make_cache: impl FnOnce(&Context) -> CacheRef<P> + Send + 'static,
+    cache_mode: String,
+) {
     let cfg = Config::default().with_storage_directory(folder);
     Runner::new(cfg).start(|ctx| async move {
-        // Passthrough by default so point reads reach the storage layer instead of the
-        // in-process cache, which is what the cold-read measurement is about.
-        let (page_cache, cache_mode) = cache_pages.map_or_else(
-            || {
-                (
-                    CacheRef::passthrough_from_pooler(&ctx, page_size),
-                    "passthrough".to_string(),
-                )
-            },
-            |pages| {
-                (
-                    CacheRef::from_pooler(&ctx, page_size, pages),
-                    format!("{pages} pages"),
-                )
-            },
-        );
-        let config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, page_cache);
+        let config = any_fix_cfg_with(&ctx, ITEMS_PER_BLOB, make_cache(&ctx));
         let open_start = Instant::now();
-        let db = AnyOFixDb::<Mmr>::init(ctx.child("storage"), config)
+        let db = AnyOFixDb::<Mmr, P>::init(ctx.child("storage"), config)
             .await
             .unwrap();
         let opened = open_start.elapsed();
@@ -355,9 +375,9 @@ fn get_bench(
 /// reader tasks (the first `num_gets % concurrency` readers take one extra), each consuming its
 /// own deterministic key stream (so a repeat pass replays the same keys). Returns the elapsed
 /// time, the number of gets issued, and how many found a value.
-async fn run_gets(
+async fn run_gets<P: PageCache>(
     ctx: &Context,
-    db: Arc<AnyOFixDb<Mmr>>,
+    db: Arc<AnyOFixDb<Mmr, P>>,
     keyspace: u64,
     num_gets: u64,
     concurrency: u64,

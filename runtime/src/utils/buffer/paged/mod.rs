@@ -34,7 +34,7 @@ mod sealed;
 mod view;
 mod writer;
 
-pub use cache::CacheRef;
+pub use cache::{CacheRef, ClockCache, NoCache, PageCache, PageFetchFuture};
 pub use read::Replay;
 pub use sealed::Sealed;
 use tracing::{debug, error};

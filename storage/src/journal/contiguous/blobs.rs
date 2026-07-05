@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
+    buffer::paged::{CacheRef, PageCache, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
     Blob as RBlob, Buf, Error as RError, IoBufMut, IoBufs,
 };
@@ -31,19 +31,22 @@ impl Metrics {
     }
 }
 
+/// A shared snapshot of a journal's sealed blobs.
+type SealedSnapshot<B, P> = Arc<[Sealed<B, P>]>;
+
 /// A storage partition holding blobs.
-pub(super) struct Partition<E: Context> {
+pub(super) struct Partition<E: Context, P: PageCache> {
     context: E,
     name: String,
-    page_cache: CacheRef,
+    page_cache: CacheRef<P>,
     write_buffer: NonZeroUsize,
 }
 
-impl<E: Context> Partition<E> {
+impl<E: Context, P: PageCache> Partition<E, P> {
     pub(super) const fn new(
         context: E,
         name: String,
-        page_cache: CacheRef,
+        page_cache: CacheRef<P>,
         write_buffer: NonZeroUsize,
     ) -> Self {
         Self {
@@ -55,7 +58,7 @@ impl<E: Context> Partition<E> {
     }
 
     /// Open the given blob as a [`Writer`], creating it if it does not exist.
-    pub(super) async fn open(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
+    pub(super) async fn open(&self, blob: u64) -> Result<Writer<E::Blob, P>, Error> {
         let name = blob.to_be_bytes();
         let (blob, size) = self
             .context
@@ -77,7 +80,7 @@ impl<E: Context> Partition<E> {
     }
 
     /// Scan the partition and open every existing blob as a [`Writer`], keyed by blob index.
-    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
+    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob, P>>, Error> {
         let stored = Self::scan_names(&self.context, &self.name).await?;
 
         let mut blobs = BTreeMap::new();
@@ -134,24 +137,24 @@ impl<E: Context> Partition<E> {
 }
 
 /// A journal's blobs: contiguous sealed blobs ending in one writable tail.
-pub(super) struct Writable<E: Context> {
-    partition: Partition<E>,
+pub(super) struct Writable<E: Context, P: PageCache> {
+    partition: Partition<E, P>,
     metrics: Metrics,
 
     /// The writable tail.
-    tail: Writer<E::Blob>,
+    tail: Writer<E::Blob, P>,
 
     /// Index of the first blob in [Self::sealed].
     oldest_blob_index: u64,
 
     /// Sealed historical blobs.
-    sealed: Vec<Sealed<E::Blob>>,
+    sealed: Vec<Sealed<E::Blob, P>>,
 
     /// Cached owned snapshot of [Self::sealed].
-    sealed_snapshot: Option<Arc<[Sealed<E::Blob>]>>,
+    sealed_snapshot: Option<SealedSnapshot<E::Blob, P>>,
 }
 
-impl<E: Context> Writable<E> {
+impl<E: Context, P: PageCache> Writable<E, P> {
     /// Build from recovered writers: seal every blob below `tail_blob` and install the tail,
     /// opening an empty one if absent.
     ///
@@ -161,8 +164,8 @@ impl<E: Context> Writable<E> {
     /// - No blob may exceed `tail_blob`.
     /// - Any blobs present must end at `tail_blob`.
     pub(super) async fn recover(
-        partition: Partition<E>,
-        pending: BTreeMap<u64, Writer<E::Blob>>,
+        partition: Partition<E, P>,
+        pending: BTreeMap<u64, Writer<E::Blob, P>>,
         tail_blob: u64,
     ) -> Result<Self, Error> {
         if let Some(&newest) = pending.keys().next_back() {
@@ -174,7 +177,7 @@ impl<E: Context> Writable<E> {
         }
         let oldest = pending.keys().next().copied();
         let mut sealed = Vec::with_capacity(pending.len());
-        let mut tail: Option<Writer<E::Blob>> = None;
+        let mut tail: Option<Writer<E::Blob, P>> = None;
         let mut expected = oldest;
         for (blob, writer) in pending {
             if expected != Some(blob) {
@@ -226,12 +229,12 @@ impl<E: Context> Writable<E> {
     }
 
     /// A write handle for the tail.
-    pub(super) const fn tail_writer(&mut self) -> &mut Writer<E::Blob> {
+    pub(super) const fn tail_writer(&mut self) -> &mut Writer<E::Blob, P> {
         &mut self.tail
     }
 
     /// Borrow the current blobs for a live reader.
-    pub(super) fn reader(&self) -> Blobs<'_, E::Blob> {
+    pub(super) fn reader(&self) -> Blobs<'_, E::Blob, P> {
         Blobs {
             oldest_blob_index: self.oldest_blob_index,
             sealed: SealedBlobs::Borrowed(&self.sealed),
@@ -240,11 +243,11 @@ impl<E: Context> Writable<E> {
     }
 
     /// Capture owned blob handles for a snapshot reader.
-    pub(super) async fn snapshot(&mut self) -> Result<Blobs<'static, E::Blob>, Error> {
+    pub(super) async fn snapshot(&mut self) -> Result<Blobs<'static, E::Blob, P>, Error> {
         let sealed = match &self.sealed_snapshot {
             Some(sealed) => sealed.clone(),
             None => {
-                let sealed: Arc<[Sealed<E::Blob>]> = self.sealed.clone().into();
+                let sealed: SealedSnapshot<E::Blob, P> = self.sealed.clone().into();
                 self.sealed_snapshot = Some(sealed.clone());
                 sealed
             }
@@ -403,32 +406,32 @@ impl<E: Context> Writable<E> {
         for blob in self.oldest_blob_index..=tail_blob {
             self.partition.remove(blob).await?;
         }
-        Partition::remove_all(&self.partition.context, &self.partition.name).await
+        Partition::<E, P>::remove_all(&self.partition.context, &self.partition.name).await
     }
 }
 
 /// Blob handles for a contiguous journal view.
 ///
 /// Stores sealed history separately from the tail because the tail can use a different read path.
-pub(super) struct Blobs<'a, B: RBlob> {
+pub(super) struct Blobs<'a, B: RBlob, P: PageCache> {
     /// Index of the first sealed blob.
     oldest_blob_index: u64,
     /// Sealed historical blobs.
-    sealed: SealedBlobs<'a, B>,
+    sealed: SealedBlobs<'a, B, P>,
     /// Tail blob.
-    tail: Blob<'a, B>,
+    tail: Blob<'a, B, P>,
 }
 
 /// Storage for the sealed history slice.
-enum SealedBlobs<'a, B: RBlob> {
+enum SealedBlobs<'a, B: RBlob, P: PageCache> {
     /// Borrowed sealed slice.
-    Borrowed(&'a [Sealed<B>]),
+    Borrowed(&'a [Sealed<B, P>]),
     /// Owned sealed slice.
-    Owned(Arc<[Sealed<B>]>),
+    Owned(Arc<[Sealed<B, P>]>),
 }
 
-impl<B: RBlob> SealedBlobs<'_, B> {
-    fn as_slice(&self) -> &[Sealed<B>] {
+impl<B: RBlob, P: PageCache> SealedBlobs<'_, B, P> {
+    fn as_slice(&self) -> &[Sealed<B, P>] {
         match self {
             Self::Borrowed(sealed) => sealed,
             Self::Owned(sealed) => sealed,
@@ -437,14 +440,14 @@ impl<B: RBlob> SealedBlobs<'_, B> {
 }
 
 /// A read handle for one journal blob.
-pub(super) enum Blob<'a, B: RBlob> {
+pub(super) enum Blob<'a, B: RBlob, P: PageCache> {
     /// Writable tail, read through the writer's cache-aware logical view.
-    Writer(&'a Writer<B>),
+    Writer(&'a Writer<B, P>),
     /// Immutable historical blob.
-    Sealed(Sealed<B>),
+    Sealed(Sealed<B, P>),
 }
 
-impl<B: RBlob> Clone for Blob<'_, B> {
+impl<B: RBlob, P: PageCache> Clone for Blob<'_, B, P> {
     fn clone(&self) -> Self {
         match self {
             Self::Writer(writer) => Self::Writer(writer),
@@ -453,7 +456,7 @@ impl<B: RBlob> Clone for Blob<'_, B> {
     }
 }
 
-impl<'a, B: RBlob> Blob<'a, B> {
+impl<'a, B: RBlob, P: PageCache> Blob<'a, B, P> {
     /// Return the blob's logical size.
     pub(super) fn size(&self) -> u64 {
         match self {
@@ -509,7 +512,7 @@ impl<'a, B: RBlob> Blob<'a, B> {
         self,
         offset: u64,
         buffer_size: NonZeroUsize,
-    ) -> Result<Replay<'a, B>, Error> {
+    ) -> Result<Replay<'a, B, P>, Error> {
         match self {
             Self::Writer(writer) => Replay::view(Self::Writer(writer), offset, buffer_size),
             Self::Sealed(sealed) => {
@@ -540,7 +543,7 @@ impl<'a, B: RBlob> Blob<'a, B> {
     }
 }
 
-impl<B: RBlob> FrameReader for Blob<'_, B> {
+impl<B: RBlob, P: PageCache> FrameReader for Blob<'_, B, P> {
     async fn read_up_to(
         &self,
         offset: u64,
@@ -556,19 +559,19 @@ impl<B: RBlob> FrameReader for Blob<'_, B> {
 }
 
 /// Sequential replay over either a sealed paged blob or a live writer view.
-pub(super) struct Replay<'a, B: RBlob> {
-    inner: ReplayInner<'a, B>,
+pub(super) struct Replay<'a, B: RBlob, P: PageCache> {
+    inner: ReplayInner<'a, B, P>,
 }
 
 /// Backing strategy for sequential blob replay.
-enum ReplayInner<'a, B: RBlob> {
+enum ReplayInner<'a, B: RBlob, P: PageCache> {
     /// Paged replay over sealed data. CRC bytes are validated and skipped by the runtime buffer.
     Paged(PagedReplay<B>),
     /// Logical replay over a live writer or any other blob view.
-    View(ViewReplay<'a, B>),
+    View(ViewReplay<'a, B, P>),
 }
 
-impl<'a, B: RBlob> Replay<'a, B> {
+impl<'a, B: RBlob, P: PageCache> Replay<'a, B, P> {
     /// Wrap a paged replay handle.
     const fn paged(replay: PagedReplay<B>) -> Self {
         Self {
@@ -577,7 +580,7 @@ impl<'a, B: RBlob> Replay<'a, B> {
     }
 
     /// Build a replay handle over a logical blob view.
-    fn view(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
+    fn view(blob: Blob<'a, B, P>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
         Ok(Self {
             inner: ReplayInner::View(ViewReplay::new(blob, offset, buffer_size)?),
         })
@@ -602,7 +605,7 @@ impl<'a, B: RBlob> Replay<'a, B> {
     }
 }
 
-impl<B: RBlob> Buf for Replay<'_, B> {
+impl<B: RBlob, P: PageCache> Buf for Replay<'_, B, P> {
     fn remaining(&self) -> usize {
         match &self.inner {
             ReplayInner::Paged(replay) => replay.remaining(),
@@ -626,9 +629,9 @@ impl<B: RBlob> Buf for Replay<'_, B> {
 }
 
 /// Sequential read buffer over a live journal blob view.
-struct ViewReplay<'a, B: RBlob> {
+struct ViewReplay<'a, B: RBlob, P: PageCache> {
     /// The source blob view.
-    blob: Blob<'a, B>,
+    blob: Blob<'a, B, P>,
     /// Next logical offset to read from `blob`.
     offset: u64,
     /// Minimum read size when more bytes are needed.
@@ -641,9 +644,9 @@ struct ViewReplay<'a, B: RBlob> {
     exhausted: bool,
 }
 
-impl<'a, B: RBlob> ViewReplay<'a, B> {
+impl<'a, B: RBlob, P: PageCache> ViewReplay<'a, B, P> {
     /// Create a view replay positioned at `offset`.
-    fn new(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
+    fn new(blob: Blob<'a, B, P>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
         if offset > blob.size() {
             return Err(Error::Runtime(RError::BlobInsufficientLength));
         }
@@ -716,7 +719,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
     }
 }
 
-impl<B: RBlob> Buf for ViewReplay<'_, B> {
+impl<B: RBlob, P: PageCache> Buf for ViewReplay<'_, B, P> {
     fn remaining(&self) -> usize {
         self.buf.len() - self.cursor
     }
@@ -734,14 +737,14 @@ impl<B: RBlob> Buf for ViewReplay<'_, B> {
     }
 }
 
-impl<'a, B: RBlob> Blobs<'a, B> {
+impl<'a, B: RBlob, P: PageCache> Blobs<'a, B, P> {
     /// Index of the newest blob (the tail).
     pub(super) fn tail_blob_index(&self) -> u64 {
         self.oldest_blob_index + self.sealed.as_slice().len() as u64
     }
 
     /// Resolve a blob, if retained.
-    pub(super) fn get(&self, blob: u64) -> Option<Blob<'a, B>> {
+    pub(super) fn get(&self, blob: u64) -> Option<Blob<'a, B, P>> {
         if blob == self.tail_blob_index() {
             return Some(self.tail.clone());
         }
@@ -766,10 +769,10 @@ mod tests {
         ));
     }
 
-    impl<E: Context> Writable<E> {
+    impl<E: Context, P: PageCache> Writable<E, P> {
         /// Open `blob` as an independent writer, outside this journal's tracking
         /// (simulates a crash-artifact blob).
-        pub(crate) async fn open_blob(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
+        pub(crate) async fn open_blob(&self, blob: u64) -> Result<Writer<E::Blob, P>, Error> {
             self.partition.open(blob).await
         }
 

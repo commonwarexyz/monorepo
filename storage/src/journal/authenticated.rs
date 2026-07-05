@@ -24,6 +24,7 @@ use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::buffer::paged::PageCache;
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -243,7 +244,7 @@ where
 {
     /// Merkle structure where each leaf is an item digest.
     /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) merkle: Merkle<F, E, H::Digest, S>,
+    pub(crate) merkle: Merkle<F, E, H::Digest, S, C::PageCache>,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the Merkle structure.
@@ -354,7 +355,7 @@ where
     /// Create a new [Journal] from the given components after aligning the Merkle structure with
     /// the journal.
     pub async fn from_components(
-        mut merkle: Merkle<F, E, H::Digest, S>,
+        mut merkle: Merkle<F, E, H::Digest, S, C::PageCache>,
         journal: C,
         hasher: StandardHasher<H>,
         apply_batch_size: u64,
@@ -378,7 +379,7 @@ where
     /// memory use: each batch's items are buffered in memory so their leaves can be hashed
     /// across the strategy.
     async fn align(
-        merkle: &mut Merkle<F, E, H::Digest, S>,
+        merkle: &mut Merkle<F, E, H::Digest, S, C::PageCache>,
         journal: &C,
         hasher: &StandardHasher<H>,
         apply_batch_size: u64,
@@ -666,13 +667,14 @@ const APPLY_BATCH_SIZE: u64 = 1 << 16;
 /// journal type.
 macro_rules! impl_journal_new {
     ($journal_mod:ident, $cfg_ty:ty, $codec_bound:path) => {
-        impl<F, E, O, H, S> Journal<F, E, $journal_mod::Journal<E, O>, H, S>
+        impl<F, E, O, H, S, P> Journal<F, E, $journal_mod::Journal<E, O, P>, H, S>
         where
             F: Family,
             E: Context,
             O: $codec_bound,
             H: Hasher,
             S: Strategy,
+            P: PageCache,
         {
             /// Create a new authenticated [Journal].
             ///
@@ -681,7 +683,7 @@ macro_rules! impl_journal_new {
             #[boxed]
             pub async fn new(
                 context: E,
-                merkle_cfg: merkle::full::Config<S>,
+                merkle_cfg: merkle::full::Config<S, P>,
                 journal_cfg: $cfg_ty,
                 rewind_predicate: fn(&O) -> bool,
                 bagging: merkle::Bagging,
@@ -707,8 +709,8 @@ macro_rules! impl_journal_new {
     };
 }
 
-impl_journal_new!(fixed, fixed::Config, CodecFixedShared);
-impl_journal_new!(variable, variable::Config<O::Cfg>, CodecShared);
+impl_journal_new!(fixed, fixed::Config<P>, CodecFixedShared);
+impl_journal_new!(variable, variable::Config<O::Cfg, P>, CodecShared);
 
 impl<F, E, C, H, S> Contiguous for Journal<F, E, C, H, S>
 where
@@ -718,6 +720,7 @@ where
     H: Hasher,
     S: Strategy,
 {
+    type PageCache = C::PageCache;
     type Item = C::Item;
 
     fn bounds(&self) -> Range<u64> {
@@ -797,7 +800,7 @@ pub trait Inner<E: Context>: Mutable {
     /// Initialize an authenticated [Journal] backed by this journal type.
     fn init<F: Family, H: Hasher, S: Strategy>(
         context: E,
-        merkle_cfg: merkle::full::Config<S>,
+        merkle_cfg: merkle::full::Config<S, Self::PageCache>,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&Self::Item) -> bool,
         bagging: merkle::Bagging,

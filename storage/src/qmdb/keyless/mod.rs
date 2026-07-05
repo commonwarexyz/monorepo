@@ -61,6 +61,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::buffer::paged::{ClockCache, PageCache};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
@@ -100,9 +101,9 @@ pub use operation::Operation;
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
-pub struct Config<J, S: Strategy> {
+pub struct Config<J, S: Strategy, P: PageCache = ClockCache> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle: MerkleConfig<S>,
+    pub merkle: MerkleConfig<S, P>,
 
     /// Configuration for the operations log journal.
     pub log: J,
