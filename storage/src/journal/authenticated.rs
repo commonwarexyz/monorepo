@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, Many, Mutable},
+        contiguous::{fixed, variable, Contiguous, Many, Mutable, Probed},
         Error as JournalError,
     },
     merkle::{
@@ -303,17 +303,6 @@ where
     /// Borrow the committed Mem through the read lock.
     pub(crate) fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, H::Digest>) -> R) -> R {
         self.merkle.with_mem(f)
-    }
-
-    /// Like [`Contiguous::read_many`], but skips the synchronous page-cache passes: this
-    /// journal's strategy-managed pass and any dedicated pass in the underlying journal.
-    /// Intended for callers that already served cache hits via
-    /// [`Contiguous::try_read_many_sync`] and are reading the misses.
-    pub(crate) async fn read_many_direct(
-        &self,
-        positions: &[u64],
-    ) -> Result<Vec<C::Item>, JournalError> {
-        self.journal.read_many_direct(positions).await
     }
 
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.
@@ -731,6 +720,11 @@ where
 {
     type Item = C::Item;
 
+    type Probed<'a>
+        = C::Probed<'a>
+    where
+        Self: 'a;
+
     fn bounds(&self) -> Range<u64> {
         self.journal.bounds()
     }
@@ -744,58 +738,36 @@ where
             return Ok(Vec::new());
         }
 
-        // Serve page-cache hits synchronously and fall back to a single batched read for the
-        // misses. The strategy policy decides per batch size whether the sync pass runs on the
-        // calling thread or sharded across the pool (one scratch buffer per shard and one
-        // cache-lock acquisition per blob a shard touches). The sortedness assert keeps
-        // contract violations deterministic: past it, a non-increasing batch would only trip
-        // per-shard validation when an inversion lands inside a single shard.
+        // Probe page-cache hits synchronously and complete the misses with one batched read.
+        // The strategy policy decides per batch size whether the probe runs on the calling
+        // thread or sharded across the pool (one scratch buffer per shard and one cache-lock
+        // acquisition per blob a shard touches). The sortedness assert keeps contract
+        // violations deterministic: past it, a non-increasing batch would only trip per-shard
+        // validation when an inversion lands inside a single shard.
         crate::journal::assert_positions_increasing(positions);
         let strategy = self.strategy();
         let journal = &self.journal;
-        let mut results: Vec<Option<C::Item>> = strategy.run(
+        let probed = strategy.run(
             positions.len(),
             || journal.try_read_many_sync(positions),
             || {
                 let manual = strategy.manual();
                 let shard = positions.len().div_ceil(manual.parallelism_hint());
-                manual
-                    .map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
+                Probed::merge(
+                    manual.map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
                         journal.try_read_many_sync(shard)
-                    })
-                    .into_iter()
-                    .flatten()
-                    .collect()
+                    }),
+                )
             },
         );
-        assert_eq!(results.len(), positions.len());
-        let misses: Vec<u64> = positions
-            .iter()
-            .zip(&results)
-            .filter_map(|(&pos, r)| r.is_none().then_some(pos))
-            .collect();
-        if !misses.is_empty() {
-            let read = self.journal.read_many_direct(&misses).await?;
-            let mut read = read.into_iter();
-            for r in results.iter_mut().filter(|r| r.is_none()) {
-                *r = Some(read.next().expect("one result per miss"));
-            }
-        }
-        Ok(results
-            .into_iter()
-            .map(|r| r.expect("all positions resolved"))
-            .collect())
-    }
-
-    async fn read_many_direct(&self, positions: &[u64]) -> Result<Vec<C::Item>, JournalError> {
-        Self::read_many_direct(self, positions).await
+        probed.fetch().await
     }
 
     fn try_read_sync(&self, position: u64) -> Option<C::Item> {
         self.journal.try_read_sync(position)
     }
 
-    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<C::Item>> {
+    fn try_read_many_sync(&self, positions: &[u64]) -> Self::Probed<'_> {
         self.journal.try_read_many_sync(positions)
     }
 

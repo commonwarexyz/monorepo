@@ -768,7 +768,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 _ => {}
             }
         }
-        let offsets = self.offsets.try_read_many_sync(&lookups);
+        let offsets_probe = self.offsets.try_read_many_sync(&lookups);
+        let offsets = super::Probed::items(&offsets_probe);
 
         // Split queried frames into known extents (served below by one batched cache read per
         // data blob) and unknown extents (the last frame of a blob or of the journal, served by
@@ -876,8 +877,184 @@ fn offsets_corruption(e: Error) -> Error {
     }
 }
 
-impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
+impl<E: Context, V: CodecShared> Clone for Reader<'_, E, V> {
+    fn clone(&self) -> Self {
+        Self {
+            data: self.data.clone(),
+            bounds: self.bounds.clone(),
+            offsets: self.offsets.clone(),
+            items_per_blob: self.items_per_blob,
+            codec_config: self.codec_config.clone(),
+            compressed: self.compressed,
+            metrics: self.metrics.clone(),
+        }
+    }
+}
+
+/// A position the probe could not serve, carrying the frame offset the probe resolved from the
+/// offsets journal along the way (when it did).
+#[derive(Clone, Copy)]
+struct Miss {
+    position: u64,
+    offset: Option<u64>,
+}
+
+/// See [`super::Probed`]: a probe over one variable journal view. Each miss carries the frame
+/// offset the probe already resolved, so completion consults the offsets journal only for
+/// offsets that missed its cache.
+pub struct Probed<'a, E: Context, V: CodecShared> {
+    reader: Reader<'a, E, V>,
+    items: Vec<Option<V>>,
+    misses: Vec<Miss>,
+}
+
+impl<'a, E: Context, V: CodecShared> Probed<'a, E, V> {
+    /// Probe `positions` (strictly increasing) against `reader`'s page caches.
+    fn probe(reader: Reader<'a, E, V>, positions: &[u64]) -> Self {
+        crate::journal::assert_positions_increasing(positions);
+        let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
+        let resolved = reader.read_many_sync_pass(positions, &mut items);
+        let misses = positions
+            .iter()
+            .zip(&items)
+            .zip(resolved)
+            .filter_map(|((&position, item), offset)| {
+                item.is_none().then_some(Miss { position, offset })
+            })
+            .collect();
+        Self {
+            reader,
+            items,
+            misses,
+        }
+    }
+}
+
+impl<E: Context, V: CodecShared> super::Probed for Probed<'_, E, V> {
     type Item = V;
+
+    fn items(&self) -> &[Option<V>] {
+        &self.items
+    }
+
+    fn merge(shards: Vec<Self>) -> Self {
+        let mut shards = shards.into_iter();
+        let mut merged = shards.next().expect("merge requires at least one probe");
+        for shard in shards {
+            merged.items.extend(shard.items);
+            merged.misses.extend(shard.misses);
+        }
+        merged
+    }
+
+    async fn fetch(self) -> Result<Vec<V>, Error> {
+        let Self {
+            reader,
+            items,
+            misses,
+        } = self;
+        let _timer = reader.metrics.read_many_timer();
+        reader.metrics.read_many_calls.inc();
+        if misses.is_empty() {
+            return Ok(items
+                .into_iter()
+                .map(|item| item.expect("complete probe has no misses"))
+                .collect());
+        }
+
+        let fetched = reader.fetch_misses(&misses).await?;
+        let mut fetched = fetched.into_iter();
+        Ok(items
+            .into_iter()
+            .map(|item| item.unwrap_or_else(|| fetched.next().expect("one fetched item per miss")))
+            .collect())
+    }
+
+    async fn fetch_missing(self) -> Result<(Vec<u64>, Vec<V>), Error> {
+        let Self {
+            reader,
+            items: _,
+            mut misses,
+        } = self;
+        let _timer = reader.metrics.read_many_timer();
+        reader.metrics.read_many_calls.inc();
+        if !misses.windows(2).all(|w| w[0].position < w[1].position) {
+            misses.sort_by_key(|miss| miss.position);
+            // Duplicates come from merged key-sharded probes. Their offsets can only differ
+            // as resolved vs unresolved (offsets are immutable under a shared borrow), so
+            // keep the resolved one.
+            misses.dedup_by(|next, kept| {
+                if next.position != kept.position {
+                    return false;
+                }
+                if kept.offset.is_none() {
+                    kept.offset = next.offset;
+                }
+                true
+            });
+        }
+        let positions = misses.iter().map(|miss| miss.position).collect();
+        let items = reader.fetch_misses(&misses).await?;
+        Ok((positions, items))
+    }
+}
+
+impl<E: Context, V: CodecShared> Reader<'_, E, V> {
+    /// Complete probe misses (strictly increasing by position): resolve outstanding offsets
+    /// without the offsets journal's cache pass (those positions just missed it) and read the
+    /// frames with one batched pass per blob run. Returns one item per miss, in order.
+    async fn fetch_misses(&self, misses: &[Miss]) -> Result<Vec<V>, Error> {
+        if misses.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Validate before consulting the offsets journal so a probe-declined out-of-bounds
+        // position surfaces as a range error rather than corruption.
+        for miss in misses {
+            self.validate_readable(miss.position)?;
+        }
+
+        let unresolved: Vec<u64> = misses
+            .iter()
+            .filter(|miss| miss.offset.is_none())
+            .map(|miss| miss.position)
+            .collect();
+        let fetched = self
+            .offsets
+            .read_direct(&unresolved)
+            .await
+            .map_err(offsets_corruption)?;
+        let mut fetched = fetched.into_iter();
+        let offsets: Vec<u64> = misses
+            .iter()
+            .map(|miss| {
+                miss.offset.unwrap_or_else(|| {
+                    fetched
+                        .next()
+                        .expect("one fetched offset per unresolved miss")
+                })
+            })
+            .collect();
+        let positions: Vec<u64> = misses.iter().map(|miss| miss.position).collect();
+
+        let mut result: Vec<Option<V>> = (0..misses.len()).map(|_| None).collect();
+        self.read_misses(&mut result, None, &positions, &offsets)
+            .await?;
+        self.metrics.items_read.inc_by(positions.len() as u64);
+        Ok(result
+            .into_iter()
+            .map(|item| item.expect("read_misses fills every slot"))
+            .collect())
+    }
+}
+
+impl<'r, E: Context, V: CodecShared> super::Contiguous for Reader<'r, E, V> {
+    type Item = V;
+
+    type Probed<'a>
+        = Probed<'r, E, V>
+    where
+        Self: 'a;
 
     fn bounds(&self) -> Range<u64> {
         self.bounds.clone()
@@ -917,85 +1094,8 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
-        let _timer = self.metrics.read_many_timer();
-        self.metrics.read_many_calls.inc();
         self.validate_read_many(positions)?;
-
-        // Serve page-cache hits with one batched pass (which counts them against items_read),
-        // then read only the misses. Offsets the pass resolved for frames whose data missed
-        // are reused below so the offsets journal is not consulted twice.
-        let mut result: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
-        let resolved = self.read_many_sync_pass(positions, &mut result);
-        let mut miss_indices = Vec::with_capacity(positions.len());
-        let mut miss_positions = Vec::with_capacity(positions.len());
-        let mut miss_offsets = Vec::with_capacity(positions.len());
-        let mut unresolved = Vec::new();
-        for (i, item) in result.iter().enumerate() {
-            if item.is_some() {
-                continue;
-            }
-            miss_indices.push(i);
-            miss_positions.push(positions[i]);
-            miss_offsets.push(resolved[i]);
-            if resolved[i].is_none() {
-                unresolved.push(positions[i]);
-            }
-        }
-        if miss_positions.is_empty() {
-            return Ok(result.into_iter().map(|r| r.unwrap()).collect());
-        }
-
-        // Read the offsets the sync pass could not resolve. Their positions just missed the
-        // offsets journal's cache, so the read skips its dedicated cache pass.
-        let fetched = self
-            .offsets
-            .read_many_direct(&unresolved)
-            .await
-            .map_err(offsets_corruption)?;
-        let mut fetched = fetched.into_iter();
-        let miss_offsets: Vec<u64> = miss_offsets
-            .into_iter()
-            .map(|offset| {
-                offset.unwrap_or_else(|| {
-                    fetched
-                        .next()
-                        .expect("one fetched offset per unresolved miss")
-                })
-            })
-            .collect();
-
-        self.read_misses(
-            &mut result,
-            Some(&miss_indices),
-            &miss_positions,
-            &miss_offsets,
-        )
-        .await?;
-        self.metrics.items_read.inc_by(miss_positions.len() as u64);
-        Ok(result.into_iter().map(|r| r.unwrap()).collect())
-    }
-
-    async fn read_many_direct(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
-        if positions.is_empty() {
-            return Ok(Vec::new());
-        }
-        let _timer = self.metrics.read_many_timer();
-        self.metrics.read_many_calls.inc();
-        self.validate_read_many(positions)?;
-
-        // Skip the synchronous cache pass: the caller already served its hits. The offsets
-        // journal is still read through its cache because the caller's pass does not retain
-        // the offsets it resolved.
-        let mut result: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
-        let miss_offsets = self
-            .offsets
-            .read_many(positions)
-            .await
-            .map_err(offsets_corruption)?;
-        self.read_misses(&mut result, None, positions, &miss_offsets)
-            .await?;
-        self.metrics.items_read.inc_by(positions.len() as u64);
-        Ok(result.into_iter().map(|r| r.unwrap()).collect())
+        super::Probed::fetch(self.try_read_many_sync(positions)).await
     }
 
     fn try_read_sync(&self, position: u64) -> Option<V> {
@@ -1007,11 +1107,8 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         Some(item)
     }
 
-    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
-        crate::journal::assert_positions_increasing(positions);
-        let mut out: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
-        self.read_many_sync_pass(positions, &mut out);
-        out
+    fn try_read_many_sync(&self, positions: &[u64]) -> Self::Probed<'_> {
+        Probed::probe(self.clone(), positions)
     }
 
     async fn replay(
@@ -2074,6 +2171,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
+    type Probed<'a>
+        = Probed<'a, E, V>
+    where
+        Self: 'a;
+
     fn bounds(&self) -> Range<u64> {
         self.bounds.clone()
     }
@@ -2086,16 +2188,12 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         self.reader().read_many(positions).await
     }
 
-    async fn read_many_direct(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
-        self.reader().read_many_direct(positions).await
-    }
-
     fn try_read_sync(&self, position: u64) -> Option<V> {
         self.reader().try_read_sync(position)
     }
 
-    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
-        self.reader().try_read_many_sync(positions)
+    fn try_read_many_sync(&self, positions: &[u64]) -> Self::Probed<'_> {
+        Probed::probe(self.reader(), positions)
     }
 
     async fn replay(
@@ -2255,7 +2353,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::tests::run_contiguous_tests;
+    use crate::journal::contiguous::{tests::run_contiguous_tests, Probed as _};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::{CacheRef, Writer},
@@ -2512,17 +2610,18 @@ mod tests {
             // served synchronously.
             let expected = reader.read_many(&positions).await.unwrap();
             let served = reader.try_read_many_sync(&positions);
-            assert_eq!(served.len(), positions.len());
-            for (item, expected) in served.into_iter().zip(&expected) {
-                assert_eq!(item.expect("cached position is served"), *expected);
+            assert_eq!(served.items().len(), positions.len());
+            for (item, expected) in served.items().iter().zip(&expected) {
+                assert_eq!(item.as_ref().expect("cached position is served"), expected);
             }
 
             // An out-of-range position is a miss, not an error. Positions grouped with it
             // (same offsets blob) are unaffected: validation trims the out-of-range suffix
             // instead of poisoning the group.
             let served = reader.try_read_many_sync(&[9, 13]);
-            assert!(served[0].is_some());
-            assert!(served[1].is_none());
+            assert!(served.items()[0].is_some());
+            assert!(served.items()[1].is_none());
+            drop(served);
             drop(reader);
 
             journal.destroy().await.unwrap();
@@ -2583,12 +2682,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_read_many_direct_matches_read_many() {
-        // The probe-free direct path returns the same items as read_many, cold and warm.
+    fn test_variable_probe_fetch_matches_read_many() {
+        // Completing a probe returns the same items as read_many, cold and warm, reusing the
+        // offsets the probe already resolved.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "read-many-direct".into(),
+                partition: "read-many-probe-fetch".into(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2604,11 +2704,34 @@ mod tests {
             journal.sync().await.unwrap();
 
             let positions: Vec<u64> = (0..12).collect();
+            let expected: Vec<u64> = (0..12).map(|i| i * 100).collect();
             let reader = journal.snapshot().await.unwrap();
-            let direct = reader.read_many_direct(&positions).await.unwrap();
-            assert_eq!(direct, (0..12).map(|i| i * 100).collect::<Vec<_>>());
+            let cold = reader.try_read_many_sync(&positions).fetch().await.unwrap();
+            assert_eq!(cold, expected);
             let read = reader.read_many(&positions).await.unwrap();
-            assert_eq!(direct, read);
+            assert_eq!(cold, read);
+
+            // Probes of disjoint shards of one request merge into a single completion.
+            let (left, right) = positions.split_at(5);
+            let merged = Probed::merge(vec![
+                reader.try_read_many_sync(left),
+                reader.try_read_many_sync(right),
+            ]);
+            assert_eq!(merged.fetch().await.unwrap(), expected);
+
+            // Key-sharded probes may overlap in position space; fetch_missing reads each
+            // distinct missed position once.
+            let (missed_positions, missed) = Probed::merge(vec![
+                reader.try_read_many_sync(&[0, 7]),
+                reader.try_read_many_sync(&[7, 11]),
+            ])
+            .fetch_missing()
+            .await
+            .unwrap();
+            crate::journal::assert_positions_increasing(&missed_positions);
+            for (pos, item) in missed_positions.iter().zip(&missed) {
+                assert_eq!(item, &expected[*pos as usize]);
+            }
             drop(reader);
 
             journal.destroy().await.unwrap();

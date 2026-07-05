@@ -148,6 +148,51 @@ where
     .flat_map(stream::iter)
 }
 
+/// The outcome of a [`Contiguous::try_read_many_sync`] probe: items served synchronously from
+/// the cache plus typed misses that complete with one batched read.
+///
+/// A probe borrows the journal that minted it, so misses can only be completed against the
+/// journal state that declined them, and any resolution work the probe already performed
+/// (e.g. frame offsets) is reused by the completion instead of being recomputed.
+pub trait Probed: Sized + Send {
+    /// The type of items read.
+    type Item: Send;
+
+    /// Items served synchronously, one slot per probed position (`None` = miss).
+    fn items(&self) -> &[Option<Self::Item>];
+
+    /// Combine probes of shards of one batched read request into a single probe.
+    ///
+    /// Item slots concatenate in shard order. Probes of disjoint shards of one strictly
+    /// increasing position list complete with [`fetch`](Self::fetch). Key-sharded probes may
+    /// overlap in position space (two shards can probe the same position) and complete with
+    /// [`fetch_missing`](Self::fetch_missing).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `shards` is empty.
+    fn merge(shards: Vec<Self>) -> Self;
+
+    /// Complete the probe: read every missed position with one batched read and return one
+    /// item per probed slot, in slot order. The sole error authority for the probe: misses
+    /// are validated against `bounds()` before any read and read errors surface here.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the probe's missed positions are not strictly increasing (probes merged
+    /// across overlapping shards must use [`fetch_missing`](Self::fetch_missing) instead).
+    fn fetch(self) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send;
+
+    /// Complete only the misses: one batched read over the deduplicated missed positions,
+    /// returning `(positions, items)` sorted by strictly increasing position. Intended for
+    /// callers that already consumed hits via [`items`](Self::items) and match items back by
+    /// position, e.g. across merged key-sharded probes with overlapping positions.
+    #[allow(clippy::type_complexity)]
+    fn fetch_missing(
+        self,
+    ) -> impl Future<Output = Result<(Vec<u64>, Vec<Self::Item>), Error>> + Send;
+}
+
 /// A read-only, position-based view of a contiguous journal.
 ///
 /// Maintains a monotonically increasing position counter where each appended item receives a unique
@@ -155,6 +200,12 @@ where
 pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item: Send;
+
+    /// The probe minted by [`try_read_many_sync`](Self::try_read_many_sync), borrowing this
+    /// journal.
+    type Probed<'a>: Probed<Item = Self::Item> + 'a
+    where
+        Self: 'a;
 
     /// Returns [start, end) with a guaranteed stable pruning boundary.
     fn bounds(&self) -> Range<u64>;
@@ -165,17 +216,10 @@ pub trait Contiguous: Send + Sync {
     fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send + Sync;
 
     /// Read multiple items at the given positions, which must be strictly increasing.
+    ///
+    /// Equivalent to completing [`try_read_many_sync`](Self::try_read_many_sync) with
+    /// [`Probed::fetch`]. Implementations may fuse the two passes.
     fn read_many(
-        &self,
-        positions: &[u64],
-    ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send
-    where
-        Self::Item: Send;
-
-    /// Like [`read_many`](Self::read_many), but skips any dedicated synchronous cache pass the
-    /// implementation would otherwise run first. Intended for callers that already served cache
-    /// hits via [`try_read_many_sync`](Self::try_read_many_sync) and are reading the misses.
-    fn read_many_direct(
         &self,
         positions: &[u64],
     ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send
@@ -186,11 +230,11 @@ pub trait Contiguous: Send + Sync {
     /// otherwise. Decode failures surface as `None` and the async read path reports the error.
     fn try_read_sync(&self, position: u64) -> Option<Self::Item>;
 
-    /// Read multiple items at strictly increasing positions, serving only those that can be
-    /// read synchronously (e.g. from a page cache). Returns one entry per position: `Some(item)`
-    /// for sync hits and `None` for positions that require I/O, fail to decode, or fall outside
-    /// `bounds()` (the async read path reports such errors).
-    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
+    /// Probe multiple strictly increasing positions, serving those that can be read
+    /// synchronously (e.g. from a page cache). Positions that require I/O, fail to decode, or
+    /// fall outside `bounds()` decline into the probe's misses, reported when the returned
+    /// [`Probed`] is completed.
+    fn try_read_many_sync(&self, positions: &[u64]) -> Self::Probed<'_>;
 
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///

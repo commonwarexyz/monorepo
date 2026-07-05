@@ -7,7 +7,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Probed},
         Error as JournalError,
     },
     merkle::{Family, Location, Proof},
@@ -30,7 +30,11 @@ use std::{collections::HashMap, sync::Arc};
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
 /// keys and `(global key index, position)` pairs for page-cache misses.
-type ShardReads<T> = (Vec<Option<T>>, Vec<(usize, u64)>);
+type ShardReads<'a, T, L> = (
+    Vec<Option<T>>,
+    Vec<(usize, u64)>,
+    <L as Contiguous>::Probed<'a>,
+);
 
 /// Metrics for Any QMDBs.
 pub(crate) struct Metrics<E: Context> {
@@ -254,36 +258,38 @@ where
         // misses. The strategy policy decides per batch size whether the pass runs on the
         // calling thread or sharded across the pool.
         let strategy = self.strategy();
-        let (mut results, mut misses) = strategy.run(
+        let (mut results, mut misses, probed) = strategy.run(
             keys.len(),
             || self.resolve_cached(keys, &map, 0),
             || {
                 let manual = strategy.manual();
                 let chunk = keys.len().div_ceil(manual.parallelism_hint());
-                let shards: Vec<ShardReads<T>> = manual.map_collect_vec(
+                let shards = manual.map_collect_vec(
                     keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
                     |(ci, shard_keys)| self.resolve_cached(shard_keys, &map, ci * chunk),
                 );
                 let mut results = Vec::with_capacity(keys.len());
                 let mut misses = Vec::new();
-                for (shard_results, shard_misses) in shards {
+                let mut probes = Vec::with_capacity(shards.len());
+                for (shard_results, shard_misses, shard_probed) in shards {
                     results.extend(shard_results);
                     misses.extend(shard_misses);
+                    probes.push(shard_probed);
                 }
-                (results, misses)
+                (results, misses, Probed::merge(probes))
             },
         );
         if misses.is_empty() {
             return Ok(results);
         }
 
-        // Fallback: one batched read for positions the page cache could not serve, which also
-        // validates them: every candidate position is decoded by exactly one of the two passes,
-        // so corruption detection does not depend on cache state. Skip the log's synchronous
-        // cache pass: these positions just missed it.
+        // Fallback: complete the probe with one batched read, which also validates the missed
+        // positions: every candidate position is decoded by exactly one of the two passes, so
+        // corruption detection does not depend on cache state. The probe carries the missed
+        // positions and any resolution work it already performed, so nothing that just missed
+        // the cache is re-probed.
         misses.sort_unstable_by_key(|&(_, pos)| pos);
-        let positions = Self::dedup_positions(&misses);
-        let ops = self.log.read_many_direct(&positions).await?;
+        let (positions, ops) = probed.fetch_missing().await?;
         Self::match_read_ops(
             keys,
             &misses,
@@ -291,21 +297,22 @@ where
             |i| Some(&ops[i]),
             &map,
             &mut results,
-            |_, pos| unreachable!("read_many_direct returns one operation per position, pos={pos}"),
+            |_, pos| unreachable!("fetch_missing returns one operation per position, pos={pos}"),
         );
         Ok(results)
     }
 
     /// Probe the index for `keys`, serve page-cache hits synchronously, and match them back to
-    /// keys. Returns per-key results plus `(base + key index, position)` pairs for positions
-    /// the cache could not serve. A miss is recorded even when its key already resolved so the
-    /// fallback read still validates the position.
-    fn resolve_cached<T: Send>(
-        &self,
+    /// keys. Returns per-key results, `(base + key index, position)` pairs for positions the
+    /// cache could not serve, and the probe carrying those misses for completion. A miss is
+    /// recorded even when its key already resolved so the fallback read still validates the
+    /// position.
+    fn resolve_cached<'s, T: Send>(
+        &'s self,
         keys: &[&U::Key],
         map: &(impl Fn(&U, Location<F>) -> T + Send + Sync),
         base: usize,
-    ) -> ShardReads<T> {
+    ) -> ShardReads<'s, T, AuthenticatedLog<F, E, C, H, S>> {
         // Probe the in-memory index. Each key may map to multiple locations due to hash
         // collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
@@ -316,19 +323,19 @@ where
         candidates.sort_unstable_by_key(|&(_, pos)| pos);
         let positions = Self::dedup_positions(&candidates);
 
-        let ops = self.log.try_read_many_sync(&positions);
+        let probed = self.log.try_read_many_sync(&positions);
         let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
         let mut misses: Vec<(usize, u64)> = Vec::new();
         Self::match_read_ops(
             keys,
             &candidates,
             &positions,
-            |i| ops[i].as_ref(),
+            |i| probed.items()[i].as_ref(),
             map,
             &mut results,
             |key_idx, pos| misses.push((base + key_idx, pos)),
         );
-        (results, misses)
+        (results, misses, probed)
     }
 
     /// Collapse position-sorted `(key index, position)` candidates into deduplicated positions.
