@@ -163,10 +163,11 @@ pub trait Probed: Sized + Send {
 
     /// Combine probes of shards of one batched read request into a single probe.
     ///
-    /// Item slots concatenate in shard order. Probes of disjoint shards of one strictly
-    /// increasing position list complete with [`fetch`](Self::fetch). Key-sharded probes may
-    /// overlap in position space (two shards can probe the same position) and complete with
-    /// [`fetch_missing`](Self::fetch_missing).
+    /// All shards must be minted by the same journal view: the merged probe completes every
+    /// shard's misses against one view. Item slots concatenate in shard order. Probes of
+    /// disjoint shards of one strictly increasing position list complete with
+    /// [`fetch`](Self::fetch). Key-sharded probes may overlap in position space (two shards
+    /// can probe the same position) and complete with [`fetch_missing`](Self::fetch_missing).
     ///
     /// # Panics
     ///

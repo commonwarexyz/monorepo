@@ -163,15 +163,13 @@ impl<B: Blob> Sealed<B> {
     /// Like [`Self::read_many_into`], but skips the dedicated page-cache pass. Intended for
     /// callers that already probed the cache via [`Self::try_read_many_sync_into`] and are
     /// reading the misses.
-    pub async fn read_many_direct_into(
+    pub async fn read_misses_into(
         &self,
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        self.view()
-            .read_many_direct_into(buf, offsets, item_size)
-            .await
+        self.view().read_misses_into(buf, offsets, item_size).await
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of

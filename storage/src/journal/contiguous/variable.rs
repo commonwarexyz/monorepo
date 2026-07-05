@@ -768,8 +768,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 _ => {}
             }
         }
-        let offsets_probe = self.offsets.try_read_many_sync(&lookups);
-        let offsets = super::Probed::items(&offsets_probe);
+        let offsets = self.offsets.probe_items(&lookups);
 
         // Split queried frames into known extents (served below by one batched cache read per
         // data blob) and unknown extents (the last frame of a blob or of the journal, served by
@@ -912,16 +911,7 @@ impl<'a, E: Context, V: CodecShared> Probed<'a, E, V> {
     /// Probe `positions` (strictly increasing) against `reader`'s page caches.
     fn probe(reader: Reader<'a, E, V>, positions: &[u64]) -> Self {
         crate::journal::assert_positions_increasing(positions);
-        let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
-        let resolved = reader.read_many_sync_pass(positions, &mut items);
-        let misses = positions
-            .iter()
-            .zip(&items)
-            .zip(resolved)
-            .filter_map(|((&position, item), offset)| {
-                item.is_none().then_some(Miss { position, offset })
-            })
-            .collect();
+        let (items, misses) = reader.probe_parts(positions);
         Self {
             reader,
             items,
@@ -953,21 +943,13 @@ impl<E: Context, V: CodecShared> super::Probed for Probed<'_, E, V> {
             items,
             misses,
         } = self;
+        assert!(
+            misses.windows(2).all(|w| w[0].position < w[1].position),
+            "positions must be strictly increasing"
+        );
         let _timer = reader.metrics.read_many_timer();
         reader.metrics.read_many_calls.inc();
-        if misses.is_empty() {
-            return Ok(items
-                .into_iter()
-                .map(|item| item.expect("complete probe has no misses"))
-                .collect());
-        }
-
-        let fetched = reader.fetch_misses(&misses).await?;
-        let mut fetched = fetched.into_iter();
-        Ok(items
-            .into_iter()
-            .map(|item| item.unwrap_or_else(|| fetched.next().expect("one fetched item per miss")))
-            .collect())
+        complete(&reader, items, misses).await
     }
 
     async fn fetch_missing(self) -> Result<(Vec<u64>, Vec<V>), Error> {
@@ -999,7 +981,45 @@ impl<E: Context, V: CodecShared> super::Probed for Probed<'_, E, V> {
     }
 }
 
+/// Complete a probe's item slots: read `misses` (the positions of the `None` slots, in order)
+/// and fill each slot with its item.
+async fn complete<E: Context, V: CodecShared>(
+    reader: &Reader<'_, E, V>,
+    items: Vec<Option<V>>,
+    misses: Vec<Miss>,
+) -> Result<Vec<V>, Error> {
+    if misses.is_empty() {
+        return Ok(items
+            .into_iter()
+            .map(|item| item.expect("complete probe has no misses"))
+            .collect());
+    }
+
+    let fetched = reader.fetch_misses(&misses).await?;
+    let mut fetched = fetched.into_iter();
+    Ok(items
+        .into_iter()
+        .map(|item| item.unwrap_or_else(|| fetched.next().expect("one fetched item per miss")))
+        .collect())
+}
+
 impl<E: Context, V: CodecShared> Reader<'_, E, V> {
+    /// One probe pass over strictly increasing `positions`: one item slot per position plus
+    /// the misses, each carrying any frame offset the pass resolved.
+    fn probe_parts(&self, positions: &[u64]) -> (Vec<Option<V>>, Vec<Miss>) {
+        let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
+        let resolved = self.read_many_sync_pass(positions, &mut items);
+        let misses = positions
+            .iter()
+            .zip(&items)
+            .zip(resolved)
+            .filter_map(|((&position, item), offset)| {
+                item.is_none().then_some(Miss { position, offset })
+            })
+            .collect();
+        (items, misses)
+    }
+
     /// Complete probe misses (strictly increasing by position): resolve outstanding offsets
     /// without the offsets journal's cache pass (those positions just missed it) and read the
     /// frames with one batched pass per blob run. Returns one item per miss, in order.
@@ -1021,7 +1041,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             .collect();
         let fetched = self
             .offsets
-            .read_direct(&unresolved)
+            .fetch_misses(&unresolved)
             .await
             .map_err(offsets_corruption)?;
         let mut fetched = fetched.into_iter();
@@ -1094,8 +1114,11 @@ impl<'r, E: Context, V: CodecShared> super::Contiguous for Reader<'r, E, V> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
+        let _timer = self.metrics.read_many_timer();
+        self.metrics.read_many_calls.inc();
         self.validate_read_many(positions)?;
-        super::Probed::fetch(self.try_read_many_sync(positions)).await
+        let (items, misses) = self.probe_parts(positions);
+        complete(self, items, misses).await
     }
 
     fn try_read_sync(&self, position: u64) -> Option<V> {

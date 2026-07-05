@@ -29,7 +29,8 @@ use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
-/// keys and `(global key index, position)` pairs for page-cache misses.
+/// keys, `(global key index, position)` pairs for page-cache misses, and the probe carrying
+/// those misses for completion.
 type ShardReads<'a, T, L> = (
     Vec<Option<T>>,
     Vec<(usize, u64)>,

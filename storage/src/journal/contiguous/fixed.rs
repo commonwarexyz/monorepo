@@ -1163,10 +1163,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok((blob, offsets))
     }
 
-    /// Shared body of [`super::Contiguous::read_many`] and the probe completion engine:
-    /// `direct` skips the dedicated page-cache pass on each blob group (used for positions that
-    /// just missed a probe).
-    async fn read_many_impl(&self, positions: &[u64], direct: bool) -> Result<Vec<A>, Error> {
+    /// Shared body of [`super::Contiguous::read_many`] and [`Self::fetch_misses`]:
+    /// `cache_pass` controls the dedicated page-cache pass on each blob group (skipped for
+    /// positions that just missed a probe).
+    async fn read_many_impl(&self, positions: &[u64], cache_pass: bool) -> Result<Vec<A>, Error> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
@@ -1195,11 +1195,11 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                 .get(blob_num)
                 .expect("positions in bounds map to a retained blob");
             let buf = &mut reusable_buf[..group.len() * chunk_size];
-            let group_hits = if direct {
-                blob.read_many_direct_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+            let group_hits = if cache_pass {
+                blob.read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
                     .await?
             } else {
-                blob.read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+                blob.read_misses_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
                     .await?
             };
             hits += group_hits as u64;
@@ -1233,14 +1233,14 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     /// Read strictly increasing `positions` without the dedicated page-cache pass. The probe
     /// completion engine: intended for positions that just missed a probe (of this journal or,
     /// for the variable journal's offsets, an enclosing one).
-    pub(super) async fn read_direct(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
-        self.read_many_impl(positions, true).await
+    pub(super) async fn fetch_misses(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        self.read_many_impl(positions, false).await
     }
 
     /// Probe `positions` (strictly increasing) against the page cache, returning one slot per
     /// position: `Some(item)` for sync hits and `None` for positions that require I/O, fail to
     /// decode, or fall outside `bounds()`.
-    fn probe_items(&self, positions: &[u64]) -> Vec<Option<A>> {
+    pub(super) fn probe_items(&self, positions: &[u64]) -> Vec<Option<A>> {
         crate::journal::assert_positions_increasing(positions);
         let chunk_size = A::SIZE;
         let mut out: Vec<Option<A>> = (0..positions.len()).map(|_| None).collect();
@@ -1363,7 +1363,7 @@ impl<E: Context, A: CodecFixedShared> super::Probed for Probed<'_, E, A> {
                 .collect());
         }
 
-        let fetched = reader.read_direct(&misses).await?;
+        let fetched = reader.fetch_misses(&misses).await?;
         let mut fetched = fetched.into_iter();
         Ok(items
             .into_iter()
@@ -1383,7 +1383,7 @@ impl<E: Context, A: CodecFixedShared> super::Probed for Probed<'_, E, A> {
             misses.sort_unstable();
             misses.dedup();
         }
-        let items = reader.read_direct(&misses).await?;
+        let items = reader.fetch_misses(&misses).await?;
         Ok((misses, items))
     }
 }
@@ -1423,7 +1423,7 @@ impl<'r, E: Context, A: CodecFixedShared> super::Contiguous for Reader<'r, E, A>
         }
         let _timer = self.metrics.read_many_timer();
         self.metrics.read_many_calls.inc();
-        self.read_many_impl(positions, false).await
+        self.read_many_impl(positions, true).await
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {

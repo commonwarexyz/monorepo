@@ -172,7 +172,7 @@ impl<B: Blob> View<'_, B> {
     /// callers that already probed the cache via [`Self::try_read_many_sync_into`] and are
     /// reading the misses. Items in the in-memory tail are still served from memory, and blob
     /// reads still populate the page cache.
-    pub async fn read_many_direct_into(
+    pub async fn read_misses_into(
         &self,
         buf: &mut [u8],
         offsets: &[u64],
@@ -182,7 +182,7 @@ impl<B: Blob> View<'_, B> {
             .await
     }
 
-    /// Shared body of [`Self::read_many_into`] and [`Self::read_many_direct_into`]:
+    /// Shared body of [`Self::read_many_into`] and [`Self::read_misses_into`]:
     /// `cache_pass` controls the dedicated page-cache pass over all items.
     async fn read_many_into_inner(
         &self,
