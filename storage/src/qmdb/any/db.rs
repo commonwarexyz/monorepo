@@ -284,7 +284,15 @@ where
         misses.sort_unstable_by_key(|&(_, pos)| pos);
         let positions = Self::dedup_positions(&misses);
         let ops = self.log.read_many_direct(&positions).await?;
-        Self::match_read_ops(keys, &misses, &positions, &ops, &map, &mut results);
+        Self::match_read_ops(
+            keys,
+            &misses,
+            &positions,
+            |i| Some(&ops[i]),
+            &map,
+            &mut results,
+            |_, pos| unreachable!("read_many_direct returns one operation per position, pos={pos}"),
+        );
         Ok(results)
     }
 
@@ -311,21 +319,15 @@ where
         let ops = self.log.try_read_many_sync(&positions);
         let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
         let mut misses: Vec<(usize, u64)> = Vec::new();
-        let mut op_idx = 0;
-        for &(key_idx, pos) in &candidates {
-            while positions[op_idx] < pos {
-                op_idx += 1;
-            }
-            match &ops[op_idx] {
-                Some(Operation::Update(data)) => {
-                    if results[key_idx].is_none() && data.key() == keys[key_idx] {
-                        results[key_idx] = Some(map(data, Location::new(pos)));
-                    }
-                }
-                Some(_) => panic!("location does not reference update operation. loc={pos}"),
-                None => misses.push((base + key_idx, pos)),
-            }
-        }
+        Self::match_read_ops(
+            keys,
+            &candidates,
+            &positions,
+            |i| ops[i].as_ref(),
+            map,
+            &mut results,
+            |key_idx, pos| misses.push((base + key_idx, pos)),
+        );
         (results, misses)
     }
 
@@ -341,28 +343,35 @@ where
     }
 
     /// Match operations read for deduplicated `positions` back to their position-sorted
-    /// candidates, filling each unresolved key slot whose operation carries its exact key.
-    fn match_read_ops<T>(
+    /// `(key index, position)` candidates, filling each unresolved key slot whose operation
+    /// carries its exact key. `op` returns the operation read for a deduplicated position
+    /// index, or `None` when the page cache could not serve it, which is reported to `on_miss`
+    /// with the candidate's key index and position.
+    fn match_read_ops<'o, T>(
         keys: &[&U::Key],
         candidates: &[(usize, u64)],
         positions: &[u64],
-        ops: &[Operation<F, U>],
+        op: impl Fn(usize) -> Option<&'o Operation<F, U>>,
         map: &impl Fn(&U, Location<F>) -> T,
         results: &mut [Option<T>],
-    ) {
+        mut on_miss: impl FnMut(usize, u64),
+    ) where
+        F: 'o,
+        U: 'o,
+    {
         let mut op_idx = 0;
         for &(key_idx, pos) in candidates {
-            if results[key_idx].is_some() {
-                continue;
-            }
             while positions[op_idx] < pos {
                 op_idx += 1;
             }
-            let Operation::Update(data) = &ops[op_idx] else {
-                panic!("location does not reference update operation. loc={pos}");
-            };
-            if data.key() == keys[key_idx] {
-                results[key_idx] = Some(map(data, Location::new(pos)));
+            match op(op_idx) {
+                Some(Operation::Update(data)) => {
+                    if results[key_idx].is_none() && data.key() == keys[key_idx] {
+                        results[key_idx] = Some(map(data, Location::new(pos)));
+                    }
+                }
+                Some(_) => panic!("location does not reference update operation. loc={pos}"),
+                None => on_miss(key_idx, pos),
             }
         }
     }

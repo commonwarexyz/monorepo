@@ -3130,268 +3130,168 @@ mod tests {
         });
     }
 
-    #[test]
-    fn unordered_bulk_update_paths_match_explicit_writes() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            type TestDb = UnorderedFixedDb<
-                mmr::Family,
-                deterministic::Context,
-                sha256::Digest,
-                sha256::Digest,
-                Sha256,
-                OneCap,
-                Sequential,
-            >;
+    /// Instantiate the staged-vs-explicit bulk-update parity test for one `any` DB kind.
+    ///
+    /// The staged path (`stage` + `Staged::merkleize`) must produce a byte-identical root to an
+    /// explicit `get_many` + `write` + `merkleize` applying the same logical writes in the same
+    /// order (updates by read-slot key, then upserts), while skipping the journal re-read for
+    /// committed-resolved updated keys. `$shift` offsets the colliding-digest prefixes so each
+    /// instantiation uses disjoint key material.
+    macro_rules! bulk_update_paths_match_explicit_writes_test {
+        ($name:ident, $db:ident, $partition:literal, $shift:literal) => {
+            #[test]
+            fn $name() {
+                let runner = deterministic::Runner::default();
+                runner.start(|context| async move {
+                    type TestDb = $db<
+                        mmr::Family,
+                        deterministic::Context,
+                        sha256::Digest,
+                        sha256::Digest,
+                        Sha256,
+                        OneCap,
+                        Sequential,
+                    >;
 
-            let config = fixed_db_config::<OneCap>("unordered-bulk-load-update", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
+                    let config = fixed_db_config::<OneCap>($partition, &context);
+                    let mut db = TestDb::init(context, config).await.unwrap();
 
-            let k0 = colliding_digest(0x40, 0);
-            let k1 = colliding_digest(0x40, 1);
-            let k2 = colliding_digest(0x41, 0);
-            let missing = colliding_digest(0x40, 9);
-            let read_only = colliding_digest(0x41, 1);
-            let unread_existing = colliding_digest(0x41, 2);
-            let unread_missing = colliding_digest(0x40, 10);
-            let del_read = colliding_digest(0x41, 3);
-            let del_unread = colliding_digest(0x41, 4);
-            let v0 = colliding_digest(0x50, 0);
-            let v1 = colliding_digest(0x50, 1);
-            let v2 = colliding_digest(0x51, 0);
-            let read_only_value = colliding_digest(0x51, 1);
-            let unread_existing_value = colliding_digest(0x51, 2);
-            let del_read_value = colliding_digest(0x51, 3);
-            let del_unread_value = colliding_digest(0x51, 4);
+                    let k0 = colliding_digest(0x40 + $shift, 0);
+                    let k1 = colliding_digest(0x40 + $shift, 1);
+                    let k2 = colliding_digest(0x41 + $shift, 0);
+                    let missing = colliding_digest(0x40 + $shift, 9);
+                    let read_only = colliding_digest(0x41 + $shift, 1);
+                    let unread_existing = colliding_digest(0x41 + $shift, 2);
+                    let unread_missing = colliding_digest(0x40 + $shift, 10);
+                    let del_read = colliding_digest(0x41 + $shift, 3);
+                    let del_unread = colliding_digest(0x41 + $shift, 4);
+                    let v0 = colliding_digest(0x50 + $shift, 0);
+                    let v1 = colliding_digest(0x50 + $shift, 1);
+                    let v2 = colliding_digest(0x51 + $shift, 0);
+                    let read_only_value = colliding_digest(0x51 + $shift, 1);
+                    let unread_existing_value = colliding_digest(0x51 + $shift, 2);
+                    let del_read_value = colliding_digest(0x51 + $shift, 3);
+                    let del_unread_value = colliding_digest(0x51 + $shift, 4);
 
-            let seed = db
-                .new_batch()
-                .write(k0, Some(v0))
-                .write(k1, Some(v1))
-                .write(k2, Some(v2))
-                .write(read_only, Some(read_only_value))
-                .write(unread_existing, Some(unread_existing_value))
-                .write(del_read, Some(del_read_value))
-                .write(del_unread, Some(del_unread_value))
-                .merkleize(&db, None)
-                .await
-                .unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
+                    let seed = db
+                        .new_batch()
+                        .write(k0, Some(v0))
+                        .write(k1, Some(v1))
+                        .write(k2, Some(v2))
+                        .write(read_only, Some(read_only_value))
+                        .write(unread_existing, Some(unread_existing_value))
+                        .write(del_read, Some(del_read_value))
+                        .write(del_unread, Some(del_unread_value))
+                        .merkleize(&db, None)
+                        .await
+                        .unwrap();
+                    db.apply_batch(seed).await.unwrap();
+                    db.commit().await.unwrap();
 
-            // Read set with duplicate slots for k0 (0,4) and missing (2,5), plus del_read at 7.
-            let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
-            let keys: Vec<_> = read_keys.iter().collect();
-            // (read_slot, Some=upsert | None=delete). Slot 7 deletes a committed-resolved read
-            // key. Duplicate slots exercise last-write-wins by update order.
-            let indexed_updates = vec![
-                (0, Some(colliding_digest(0x60, 0))),
-                (2, Some(colliding_digest(0x60, 1))),
-                (3, Some(colliding_digest(0x60, 2))),
-                (4, Some(colliding_digest(0x60, 3))),
-                (5, Some(colliding_digest(0x60, 4))),
-                (6, Some(colliding_digest(0x60, 5))),
-                (7, None),
-            ];
-            // Upserts for unread keys: set two, override k0 (overlaps slots 0/4), delete one.
-            let upserts = vec![
-                (unread_existing, Some(colliding_digest(0x60, 6))),
-                (unread_missing, Some(colliding_digest(0x60, 7))),
-                (k0, Some(colliding_digest(0x60, 8))),
-                (del_unread, None),
-            ];
-            let loaded_values = vec![
-                Some(v0),
-                Some(read_only_value),
-                None,
-                Some(v1),
-                Some(v0),
-                None,
-                Some(v2),
-                Some(del_read_value),
-            ];
+                    // Read set with duplicate slots for k0 (0,4) and missing (2,5), plus del_read at 7.
+                    let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
+                    let keys: Vec<_> = read_keys.iter().collect();
+                    // (read_slot, Some=upsert | None=delete). Slot 7 deletes a committed-resolved read
+                    // key. Duplicate slots exercise last-write-wins by update order. For the
+                    // ordered kind a staged delete must fall back to a normal mutation (the deleted
+                    // key's predecessor is rewritten via a snapshot-bucket scan the cached location
+                    // cannot skip), exercised alongside staged updates that share del_read's
+                    // collision bucket.
+                    let indexed_updates = vec![
+                        (0, Some(colliding_digest(0x60 + $shift, 0))),
+                        (2, Some(colliding_digest(0x60 + $shift, 1))),
+                        (3, Some(colliding_digest(0x60 + $shift, 2))),
+                        (4, Some(colliding_digest(0x60 + $shift, 3))),
+                        (5, Some(colliding_digest(0x60 + $shift, 4))),
+                        (6, Some(colliding_digest(0x60 + $shift, 5))),
+                        (7, None),
+                    ];
+                    // Upserts for unread keys: set two, override k0 (overlaps slots 0/4), delete one.
+                    let upserts = vec![
+                        (unread_existing, Some(colliding_digest(0x60 + $shift, 6))),
+                        (unread_missing, Some(colliding_digest(0x60 + $shift, 7))),
+                        (k0, Some(colliding_digest(0x60 + $shift, 8))),
+                        (del_unread, None),
+                    ];
+                    let loaded_values = vec![
+                        Some(v0),
+                        Some(read_only_value),
+                        None,
+                        Some(v1),
+                        Some(v0),
+                        None,
+                        Some(v2),
+                        Some(del_read_value),
+                    ];
 
-            // Explicit path: read, then apply the same logical writes in the same order (updates
-            // by read-slot key, then upserts). Must produce a byte-identical root to the staged
-            // path, which skips the journal re-read for committed-resolved updated keys.
-            let mut explicit = db.new_batch();
-            let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
-            for (slot, value) in &indexed_updates {
-                explicit = explicit.write(read_keys[*slot], *value);
+                    // Explicit path: read, then apply the same logical writes in the same order (updates
+                    // by read-slot key, then upserts). Must produce a byte-identical root to the staged
+                    // path, which skips the journal re-read for committed-resolved updated keys.
+                    let mut explicit = db.new_batch();
+                    let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
+                    for (slot, value) in &indexed_updates {
+                        explicit = explicit.write(read_keys[*slot], *value);
+                    }
+                    for (key, value) in &upserts {
+                        explicit = explicit.write(*key, *value);
+                    }
+                    let explicit = explicit.merkleize(&db, None).await.unwrap();
+
+                    let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+                    let staged_merkleized = staged
+                        .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
+                        .await
+                        .unwrap();
+
+                    let split = 3;
+                    let (mut expanded_values, staged) =
+                        db.new_batch().stage(&keys[..split], &db).await.unwrap();
+                    let (range, suffix_values, staged) =
+                        staged.expand(&keys[split..], &db).await.unwrap();
+                    assert_eq!(range, split..keys.len());
+                    expanded_values.extend(suffix_values);
+                    let expanded = staged
+                        .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
+                        .await
+                        .unwrap();
+
+                    assert_eq!(explicit_values, loaded_values);
+                    assert_eq!(explicit_values, staged_values);
+                    assert_eq!(explicit_values, expanded_values);
+
+                    assert_eq!(explicit.root(), staged_merkleized.root());
+                    assert_eq!(explicit.root(), expanded.root());
+
+                    db.apply_batch(expanded).await.unwrap();
+                    assert_eq!(db.get(&k0).await.unwrap(), upserts[2].1);
+                    assert_eq!(db.get(&missing).await.unwrap(), indexed_updates[4].1);
+                    assert_eq!(db.get(&k1).await.unwrap(), indexed_updates[2].1);
+                    assert_eq!(db.get(&k2).await.unwrap(), indexed_updates[5].1);
+                    assert_eq!(db.get(&read_only).await.unwrap(), Some(read_only_value));
+                    assert_eq!(db.get(&unread_existing).await.unwrap(), upserts[0].1);
+                    assert_eq!(db.get(&unread_missing).await.unwrap(), upserts[1].1);
+                    assert_eq!(db.get(&del_read).await.unwrap(), None);
+                    assert_eq!(db.get(&del_unread).await.unwrap(), None);
+
+                    db.destroy().await.unwrap();
+                });
             }
-            for (key, value) in &upserts {
-                explicit = explicit.write(*key, *value);
-            }
-            let explicit = explicit.merkleize(&db, None).await.unwrap();
-
-            let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
-            let staged_merkleized = staged
-                .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
-                .await
-                .unwrap();
-
-            let split = 3;
-            let (mut expanded_values, staged) =
-                db.new_batch().stage(&keys[..split], &db).await.unwrap();
-            let (range, suffix_values, staged) = staged.expand(&keys[split..], &db).await.unwrap();
-            assert_eq!(range, split..keys.len());
-            expanded_values.extend(suffix_values);
-            let expanded = staged
-                .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
-                .await
-                .unwrap();
-
-            assert_eq!(explicit_values, loaded_values);
-            assert_eq!(explicit_values, staged_values);
-            assert_eq!(explicit_values, expanded_values);
-
-            assert_eq!(explicit.root(), staged_merkleized.root());
-            assert_eq!(explicit.root(), expanded.root());
-
-            db.apply_batch(expanded).await.unwrap();
-            assert_eq!(db.get(&k0).await.unwrap(), upserts[2].1);
-            assert_eq!(db.get(&missing).await.unwrap(), indexed_updates[4].1);
-            assert_eq!(db.get(&k1).await.unwrap(), indexed_updates[2].1);
-            assert_eq!(db.get(&k2).await.unwrap(), indexed_updates[5].1);
-            assert_eq!(db.get(&read_only).await.unwrap(), Some(read_only_value));
-            assert_eq!(db.get(&unread_existing).await.unwrap(), upserts[0].1);
-            assert_eq!(db.get(&unread_missing).await.unwrap(), upserts[1].1);
-            assert_eq!(db.get(&del_read).await.unwrap(), None);
-            assert_eq!(db.get(&del_unread).await.unwrap(), None);
-
-            db.destroy().await.unwrap();
-        });
+        };
     }
 
-    #[test]
-    fn ordered_bulk_update_paths_match_explicit_writes() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            type TestDb = OrderedFixedDb<
-                mmr::Family,
-                deterministic::Context,
-                sha256::Digest,
-                sha256::Digest,
-                Sha256,
-                OneCap,
-                Sequential,
-            >;
+    bulk_update_paths_match_explicit_writes_test!(
+        unordered_bulk_update_paths_match_explicit_writes,
+        UnorderedFixedDb,
+        "unordered-bulk-load-update",
+        0
+    );
 
-            let config = fixed_db_config::<OneCap>("ordered-bulk-load-update", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
-
-            let k0 = colliding_digest(0x42, 0);
-            let k1 = colliding_digest(0x42, 1);
-            let k2 = colliding_digest(0x43, 0);
-            let missing = colliding_digest(0x42, 9);
-            let read_only = colliding_digest(0x43, 1);
-            let unread_existing = colliding_digest(0x43, 2);
-            let unread_missing = colliding_digest(0x42, 10);
-            let del_read = colliding_digest(0x43, 3);
-            let del_unread = colliding_digest(0x43, 4);
-            let v0 = colliding_digest(0x52, 0);
-            let v1 = colliding_digest(0x52, 1);
-            let v2 = colliding_digest(0x53, 0);
-            let read_only_value = colliding_digest(0x53, 1);
-            let unread_existing_value = colliding_digest(0x53, 2);
-            let del_read_value = colliding_digest(0x53, 3);
-            let del_unread_value = colliding_digest(0x53, 4);
-
-            let seed = db
-                .new_batch()
-                .write(k0, Some(v0))
-                .write(k1, Some(v1))
-                .write(k2, Some(v2))
-                .write(read_only, Some(read_only_value))
-                .write(unread_existing, Some(unread_existing_value))
-                .write(del_read, Some(del_read_value))
-                .write(del_unread, Some(del_unread_value))
-                .merkleize(&db, None)
-                .await
-                .unwrap();
-            db.apply_batch(seed).await.unwrap();
-            db.commit().await.unwrap();
-
-            // Read set with duplicate slots for k0 (0,4) and missing (2,5), plus del_read at 7.
-            let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
-            let keys: Vec<_> = read_keys.iter().collect();
-            // Slot 7 deletes a committed-resolved read key. For the ordered path a staged delete
-            // must fall back to a normal mutation (the deleted key's predecessor is rewritten via
-            // a snapshot-bucket scan the cached location cannot skip), exercised here alongside
-            // staged updates that share del_read's collision bucket.
-            let indexed_updates = vec![
-                (0, Some(colliding_digest(0x62, 0))),
-                (2, Some(colliding_digest(0x62, 1))),
-                (3, Some(colliding_digest(0x62, 2))),
-                (4, Some(colliding_digest(0x62, 3))),
-                (5, Some(colliding_digest(0x62, 4))),
-                (6, Some(colliding_digest(0x62, 5))),
-                (7, None),
-            ];
-            let upserts = vec![
-                (unread_existing, Some(colliding_digest(0x62, 6))),
-                (unread_missing, Some(colliding_digest(0x62, 7))),
-                (k0, Some(colliding_digest(0x62, 8))),
-                (del_unread, None),
-            ];
-            let loaded_values = vec![
-                Some(v0),
-                Some(read_only_value),
-                None,
-                Some(v1),
-                Some(v0),
-                None,
-                Some(v2),
-                Some(del_read_value),
-            ];
-            let mut explicit = db.new_batch();
-            let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
-            for (slot, value) in &indexed_updates {
-                explicit = explicit.write(read_keys[*slot], *value);
-            }
-            for (key, value) in &upserts {
-                explicit = explicit.write(*key, *value);
-            }
-            let explicit = explicit.merkleize(&db, None).await.unwrap();
-
-            let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
-            let staged_merkleized = staged
-                .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
-                .await
-                .unwrap();
-
-            let split = 3;
-            let (mut expanded_values, staged) =
-                db.new_batch().stage(&keys[..split], &db).await.unwrap();
-            let (range, suffix_values, staged) = staged.expand(&keys[split..], &db).await.unwrap();
-            assert_eq!(range, split..keys.len());
-            expanded_values.extend(suffix_values);
-            let expanded = staged
-                .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
-                .await
-                .unwrap();
-
-            assert_eq!(explicit_values, loaded_values);
-            assert_eq!(explicit_values, staged_values);
-            assert_eq!(explicit_values, expanded_values);
-
-            assert_eq!(explicit.root(), staged_merkleized.root());
-            assert_eq!(explicit.root(), expanded.root());
-
-            db.apply_batch(expanded).await.unwrap();
-            assert_eq!(db.get(&k0).await.unwrap(), upserts[2].1);
-            assert_eq!(db.get(&missing).await.unwrap(), indexed_updates[4].1);
-            assert_eq!(db.get(&k1).await.unwrap(), indexed_updates[2].1);
-            assert_eq!(db.get(&k2).await.unwrap(), indexed_updates[5].1);
-            assert_eq!(db.get(&read_only).await.unwrap(), Some(read_only_value));
-            assert_eq!(db.get(&unread_existing).await.unwrap(), upserts[0].1);
-            assert_eq!(db.get(&unread_missing).await.unwrap(), upserts[1].1);
-            assert_eq!(db.get(&del_read).await.unwrap(), None);
-            assert_eq!(db.get(&del_unread).await.unwrap(), None);
-
-            db.destroy().await.unwrap();
-        });
-    }
+    bulk_update_paths_match_explicit_writes_test!(
+        ordered_bulk_update_paths_match_explicit_writes,
+        OrderedFixedDb,
+        "ordered-bulk-load-update",
+        2
+    );
 
     #[test]
     fn unordered_staged_resolve_updates_collapses_duplicates_before_sorting() {
@@ -3613,233 +3513,153 @@ mod tests {
         });
     }
 
-    #[test]
-    fn unordered_staged_updates_survive_ancestor_commit() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            type TestDb = UnorderedFixedDb<
-                mmr::Family,
-                deterministic::Context,
-                sha256::Digest,
-                sha256::Digest,
-                Sha256,
-                OneCap,
-                Sequential,
-            >;
+    /// Instantiate the staged-updates-survive-ancestor-commit test for one `any` DB kind.
+    ///
+    /// One staged handle stages a prefix before an ancestor batch commits and expands with the
+    /// rest after it, so the handle holds cache entries resolved against both committed
+    /// snapshots. Merkleizing its updates must produce the same root and final state as explicit
+    /// writes. `$key_prefix`/`$val_prefix` pick disjoint colliding-digest key material per
+    /// instantiation, and `$read_label`/`$write_label` isolate each variant's storage.
+    macro_rules! staged_updates_survive_ancestor_commit_test {
+        (
+            $name:ident, $db:ident, $key_prefix:literal, $val_prefix:literal,
+            $read_label:literal, $write_label:literal
+        ) => {
+            #[test]
+            fn $name() {
+                let runner = deterministic::Runner::default();
+                runner.start(|context| async move {
+                    type TestDb = $db<
+                        mmr::Family,
+                        deterministic::Context,
+                        sha256::Digest,
+                        sha256::Digest,
+                        Sha256,
+                        OneCap,
+                        Sequential,
+                    >;
 
-            let key = |i| colliding_digest(0x80, i);
-            let val = |i| colliding_digest(0x81, i);
-            // Slots 0..9 are grandparent-touched keys, 9..19 are committed-only keys, and the
-            // final slot revisits a grandparent-touched key so the post-commit expansion below
-            // reads it from the freshly committed state.
-            let suffixes: Vec<u64> = (1..10).chain(20..30).chain([0]).collect();
-            let indexed_updates: Vec<_> = suffixes
-                .iter()
-                .enumerate()
-                .map(|(slot, suffix)| (slot, Some(val(suffix + 3_000))))
-                .collect();
-            let mut roots = Vec::new();
+                    let key = |i| colliding_digest($key_prefix, i);
+                    let val = |i| colliding_digest($val_prefix, i);
+                    // Slots 0..9 are grandparent-touched keys, 9..19 are committed-only keys, and the
+                    // final slot revisits a grandparent-touched key so the post-commit expansion below
+                    // reads it from the freshly committed state.
+                    let suffixes: Vec<u64> = (1..10).chain(20..30).chain([0]).collect();
+                    let indexed_updates: Vec<_> = suffixes
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, suffix)| (slot, Some(val(suffix + 3_000))))
+                        .collect();
+                    let mut roots = Vec::new();
 
-            for staged_read in [false, true] {
-                let label = if staged_read {
-                    "unordered_staged_ancestor_read"
-                } else {
-                    "unordered_staged_ancestor_write"
-                };
-                let context = context.child(label);
-                let config = fixed_db_config::<OneCap>(label, &context);
-                let mut db = TestDb::init(context, config).await.unwrap();
-
-                let mut seed = db.new_batch();
-                for i in 0..100u64 {
-                    seed = seed.write(key(i), Some(val(i)));
-                }
-                let seed = seed.merkleize(&db, None).await.unwrap();
-                db.apply_batch(seed).await.unwrap();
-                db.commit().await.unwrap();
-
-                let mut grandparent = db.new_batch();
-                for i in 0..10u64 {
-                    grandparent = grandparent.write(key(i), Some(val(i + 1_000)));
-                }
-                let grandparent = grandparent.merkleize(&db, None).await.unwrap();
-
-                let mut parent = grandparent.new_batch::<Sha256>();
-                for i in 50..60u64 {
-                    parent = parent.write(key(i), Some(val(i + 2_000)));
-                }
-                let parent = parent.merkleize(&db, None).await.unwrap();
-
-                let child = if staged_read {
-                    let read_keys: Vec<_> = suffixes.iter().map(|suffix| key(*suffix)).collect();
-                    let keys: Vec<_> = read_keys.iter().collect();
-                    let child = parent.new_batch::<Sha256>();
-                    // Stage a prefix before the ancestor commit and expand with the rest after
-                    // it, so one staged handle holds cache entries resolved against both
-                    // committed snapshots.
-                    let split = 15;
-                    let (mut values, staged) = child.stage(&keys[..split], &db).await.unwrap();
-
-                    db.apply_batch(grandparent).await.unwrap();
-                    db.commit().await.unwrap();
-
-                    let (range, suffix_values, staged) =
-                        staged.expand(&keys[split..], &db).await.unwrap();
-                    assert_eq!(range, split..keys.len());
-                    values.extend(suffix_values);
-                    for (slot, suffix) in suffixes.iter().enumerate() {
-                        let expected = if *suffix < 10 {
-                            val(suffix + 1_000)
+                    for staged_read in [false, true] {
+                        let label = if staged_read {
+                            $read_label
                         } else {
-                            val(*suffix)
+                            $write_label
                         };
-                        assert_eq!(values[slot], Some(expected));
-                    }
-                    staged
-                        .merkleize(indexed_updates.clone(), Vec::new(), None, &db)
-                        .await
-                        .unwrap()
-                } else {
-                    let mut child = parent.new_batch::<Sha256>();
-                    db.apply_batch(grandparent).await.unwrap();
-                    db.commit().await.unwrap();
-                    for suffix in &suffixes {
-                        child = child.write(key(*suffix), Some(val(suffix + 3_000)));
-                    }
-                    child.merkleize(&db, None).await.unwrap()
-                };
+                        let context = context.child(label);
+                        let config = fixed_db_config::<OneCap>(label, &context);
+                        let mut db = TestDb::init(context, config).await.unwrap();
 
-                db.apply_batch(parent).await.unwrap();
-                db.apply_batch(child).await.unwrap();
-                db.commit().await.unwrap();
+                        let mut seed = db.new_batch();
+                        for i in 0..100u64 {
+                            seed = seed.write(key(i), Some(val(i)));
+                        }
+                        let seed = seed.merkleize(&db, None).await.unwrap();
+                        db.apply_batch(seed).await.unwrap();
+                        db.commit().await.unwrap();
 
-                for suffix in &suffixes {
-                    assert_eq!(
-                        db.get(&key(*suffix)).await.unwrap(),
-                        Some(val(suffix + 3_000))
-                    );
-                }
-                roots.push(db.root());
-                db.destroy().await.unwrap();
+                        let mut grandparent = db.new_batch();
+                        for i in 0..10u64 {
+                            grandparent = grandparent.write(key(i), Some(val(i + 1_000)));
+                        }
+                        let grandparent = grandparent.merkleize(&db, None).await.unwrap();
+
+                        let mut parent = grandparent.new_batch::<Sha256>();
+                        for i in 50..60u64 {
+                            parent = parent.write(key(i), Some(val(i + 2_000)));
+                        }
+                        let parent = parent.merkleize(&db, None).await.unwrap();
+
+                        let child = if staged_read {
+                            let read_keys: Vec<_> =
+                                suffixes.iter().map(|suffix| key(*suffix)).collect();
+                            let keys: Vec<_> = read_keys.iter().collect();
+                            let child = parent.new_batch::<Sha256>();
+                            // Stage a prefix before the ancestor commit and expand with the rest after
+                            // it, so one staged handle holds cache entries resolved against both
+                            // committed snapshots.
+                            let split = 15;
+                            let (mut values, staged) =
+                                child.stage(&keys[..split], &db).await.unwrap();
+
+                            db.apply_batch(grandparent).await.unwrap();
+                            db.commit().await.unwrap();
+
+                            let (range, suffix_values, staged) =
+                                staged.expand(&keys[split..], &db).await.unwrap();
+                            assert_eq!(range, split..keys.len());
+                            values.extend(suffix_values);
+                            for (slot, suffix) in suffixes.iter().enumerate() {
+                                let expected = if *suffix < 10 {
+                                    val(suffix + 1_000)
+                                } else {
+                                    val(*suffix)
+                                };
+                                assert_eq!(values[slot], Some(expected));
+                            }
+                            staged
+                                .merkleize(indexed_updates.clone(), Vec::new(), None, &db)
+                                .await
+                                .unwrap()
+                        } else {
+                            let mut child = parent.new_batch::<Sha256>();
+                            db.apply_batch(grandparent).await.unwrap();
+                            db.commit().await.unwrap();
+                            for suffix in &suffixes {
+                                child = child.write(key(*suffix), Some(val(suffix + 3_000)));
+                            }
+                            child.merkleize(&db, None).await.unwrap()
+                        };
+
+                        db.apply_batch(parent).await.unwrap();
+                        db.apply_batch(child).await.unwrap();
+                        db.commit().await.unwrap();
+
+                        for suffix in &suffixes {
+                            assert_eq!(
+                                db.get(&key(*suffix)).await.unwrap(),
+                                Some(val(suffix + 3_000))
+                            );
+                        }
+                        roots.push(db.root());
+                        db.destroy().await.unwrap();
+                    }
+
+                    assert_eq!(roots[0], roots[1]);
+                });
             }
-
-            assert_eq!(roots[0], roots[1]);
-        });
+        };
     }
 
-    #[test]
-    fn ordered_staged_updates_survive_ancestor_commit() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            type TestDb = OrderedFixedDb<
-                mmr::Family,
-                deterministic::Context,
-                sha256::Digest,
-                sha256::Digest,
-                Sha256,
-                OneCap,
-                Sequential,
-            >;
+    staged_updates_survive_ancestor_commit_test!(
+        unordered_staged_updates_survive_ancestor_commit,
+        UnorderedFixedDb,
+        0x80,
+        0x81,
+        "unordered_staged_ancestor_read",
+        "unordered_staged_ancestor_write"
+    );
 
-            let key = |i| colliding_digest(0x82, i);
-            let val = |i| colliding_digest(0x83, i);
-            // Slots 0..9 are grandparent-touched keys, 9..19 are committed-only keys, and the
-            // final slot revisits a grandparent-touched key so the post-commit expansion below
-            // reads it from the freshly committed state.
-            let suffixes: Vec<u64> = (1..10).chain(20..30).chain([0]).collect();
-            let indexed_updates: Vec<_> = suffixes
-                .iter()
-                .enumerate()
-                .map(|(slot, suffix)| (slot, Some(val(suffix + 3_000))))
-                .collect();
-            let mut roots = Vec::new();
-
-            for staged_read in [false, true] {
-                let label = if staged_read {
-                    "ordered_staged_ancestor_read"
-                } else {
-                    "ordered_staged_ancestor_write"
-                };
-                let context = context.child(label);
-                let config = fixed_db_config::<OneCap>(label, &context);
-                let mut db = TestDb::init(context, config).await.unwrap();
-
-                let mut seed = db.new_batch();
-                for i in 0..100u64 {
-                    seed = seed.write(key(i), Some(val(i)));
-                }
-                let seed = seed.merkleize(&db, None).await.unwrap();
-                db.apply_batch(seed).await.unwrap();
-                db.commit().await.unwrap();
-
-                let mut grandparent = db.new_batch();
-                for i in 0..10u64 {
-                    grandparent = grandparent.write(key(i), Some(val(i + 1_000)));
-                }
-                let grandparent = grandparent.merkleize(&db, None).await.unwrap();
-
-                let mut parent = grandparent.new_batch::<Sha256>();
-                for i in 50..60u64 {
-                    parent = parent.write(key(i), Some(val(i + 2_000)));
-                }
-                let parent = parent.merkleize(&db, None).await.unwrap();
-
-                let child = if staged_read {
-                    let read_keys: Vec<_> = suffixes.iter().map(|suffix| key(*suffix)).collect();
-                    let keys: Vec<_> = read_keys.iter().collect();
-                    let child = parent.new_batch::<Sha256>();
-                    // Stage a prefix before the ancestor commit and expand with the rest after
-                    // it, so one staged handle holds cache entries resolved against both
-                    // committed snapshots.
-                    let split = 15;
-                    let (mut values, staged) = child.stage(&keys[..split], &db).await.unwrap();
-
-                    db.apply_batch(grandparent).await.unwrap();
-                    db.commit().await.unwrap();
-
-                    let (range, suffix_values, staged) =
-                        staged.expand(&keys[split..], &db).await.unwrap();
-                    assert_eq!(range, split..keys.len());
-                    values.extend(suffix_values);
-                    for (slot, suffix) in suffixes.iter().enumerate() {
-                        let expected = if *suffix < 10 {
-                            val(suffix + 1_000)
-                        } else {
-                            val(*suffix)
-                        };
-                        assert_eq!(values[slot], Some(expected));
-                    }
-                    staged
-                        .merkleize(indexed_updates.clone(), Vec::new(), None, &db)
-                        .await
-                        .unwrap()
-                } else {
-                    let mut child = parent.new_batch::<Sha256>();
-                    db.apply_batch(grandparent).await.unwrap();
-                    db.commit().await.unwrap();
-                    for suffix in &suffixes {
-                        child = child.write(key(*suffix), Some(val(suffix + 3_000)));
-                    }
-                    child.merkleize(&db, None).await.unwrap()
-                };
-
-                db.apply_batch(parent).await.unwrap();
-                db.apply_batch(child).await.unwrap();
-                db.commit().await.unwrap();
-
-                for suffix in &suffixes {
-                    assert_eq!(
-                        db.get(&key(*suffix)).await.unwrap(),
-                        Some(val(suffix + 3_000))
-                    );
-                }
-                roots.push(db.root());
-                db.destroy().await.unwrap();
-            }
-
-            assert_eq!(roots[0], roots[1]);
-        });
-    }
+    staged_updates_survive_ancestor_commit_test!(
+        ordered_staged_updates_survive_ancestor_commit,
+        OrderedFixedDb,
+        0x82,
+        0x83,
+        "ordered_staged_ancestor_read",
+        "ordered_staged_ancestor_write"
+    );
 
     #[test]
     fn read_ops_resolves_committed_ancestor_and_current_sources() {

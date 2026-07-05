@@ -164,6 +164,33 @@ impl<B: Blob> View<'_, B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
+        self.read_many_into_inner(buf, offsets, item_size, true)
+            .await
+    }
+
+    /// Like [`Self::read_many_into`], but skips the dedicated page-cache pass. Intended for
+    /// callers that already probed the cache via [`Self::try_read_many_sync_into`] and are
+    /// reading the misses. Items in the in-memory tail are still served from memory, and blob
+    /// reads still populate the page cache.
+    pub async fn read_many_direct_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<usize, Error> {
+        self.read_many_into_inner(buf, offsets, item_size, false)
+            .await
+    }
+
+    /// Shared body of [`Self::read_many_into`] and [`Self::read_many_direct_into`]:
+    /// `cache_pass` controls the dedicated page-cache pass over all items.
+    async fn read_many_into_inner(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+        cache_pass: bool,
+    ) -> Result<usize, Error> {
         super::validate_read_many_into(buf.len(), offsets, item_size, self.size)?;
         if offsets.is_empty() {
             return Ok(0);
@@ -171,12 +198,10 @@ impl<B: Blob> View<'_, B> {
 
         let mut cache_ranges =
             super::split_read_many(buf, offsets, item_size, self.tail_offset, self.tail);
-        if cache_ranges.is_empty() {
-            return Ok(offsets.len());
+        if cache_pass {
+            // Fast path: try the page cache for all ranges in a single lock acquisition.
+            self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
         }
-
-        // Fast path: try the page cache for all ranges in a single lock acquisition.
-        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
         let blob_reads = cache_ranges.len();
         if cache_ranges.is_empty() {
             return Ok(offsets.len());
@@ -218,19 +243,7 @@ impl<B: Blob> View<'_, B> {
             return Vec::new();
         }
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
-
-        // Map missed ranges back to item indices: each remaining range starts at its item's
-        // offset, and both lists are sorted.
-        let mut misses = Vec::with_capacity(cache_ranges.len());
-        let mut idx = 0;
-        for (_, offset) in cache_ranges {
-            while offsets[idx] != offset {
-                idx += 1;
-            }
-            misses.push(idx);
-            idx += 1;
-        }
-        misses
+        map_misses(cache_ranges, |idx| (offsets[idx], item_size.get()))
     }
 
     /// Like [`Self::try_read_many_sync_into`], but for variable-length ranges: `buf` holds one
@@ -238,33 +251,44 @@ impl<B: Blob> View<'_, B> {
     /// a blob read, which is every index when the ranges extend past the blob. Their slots hold
     /// unspecified bytes.
     pub fn try_read_ranges_sync_into(&self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
-        if super::validate_read_ranges(buf.len(), ranges, self.size).is_err() {
+        if super::validate_read_ranges(buf.len(), ranges.iter().copied(), self.size).is_err() {
             return (0..ranges.len()).collect();
         }
         if ranges.is_empty() {
             return Vec::new();
         }
 
-        let mut cache_ranges = super::split_read_ranges(buf, ranges, self.tail_offset, self.tail);
+        let mut cache_ranges =
+            super::split_read_ranges(buf, ranges.iter().copied(), self.tail_offset, self.tail);
         if cache_ranges.is_empty() {
             return Vec::new();
         }
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        map_misses(cache_ranges, |idx| ranges[idx])
+    }
+}
 
-        // Map missed reads back to range indices: each remaining read starts at its range's
-        // offset, and both lists are sorted. Zero-length ranges never miss but may share an
-        // offset with the range that follows them, so they are skipped.
-        let mut misses = Vec::with_capacity(cache_ranges.len());
-        let mut idx = 0;
-        for (_, offset) in cache_ranges {
-            while ranges[idx].1 == 0 || ranges[idx].0 != offset {
-                idx += 1;
+/// Map missed cache reads back to their originating slot indices: each missed read starts at
+/// its slot's `(offset, len)` range, and both lists are sorted. Zero-length slots never miss
+/// but may share an offset with the slot that follows them, so they are skipped.
+fn map_misses(
+    missed: Vec<(&mut [u8], u64)>,
+    mut slot: impl FnMut(usize) -> (u64, usize),
+) -> Vec<usize> {
+    let mut misses = Vec::with_capacity(missed.len());
+    let mut idx = 0;
+    for (_, offset) in missed {
+        loop {
+            let (slot_offset, slot_len) = slot(idx);
+            if slot_len != 0 && slot_offset == offset {
+                break;
             }
-            misses.push(idx);
             idx += 1;
         }
-        misses
+        misses.push(idx);
+        idx += 1;
     }
+    misses
 }
 
 #[cfg(test)]

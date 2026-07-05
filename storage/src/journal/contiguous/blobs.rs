@@ -539,6 +539,27 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
+    /// Like [`Self::read_many_into`], but skips the dedicated page-cache pass. Intended for
+    /// callers that already probed the cache via [`Self::try_read_many_sync_into`] and are
+    /// reading the misses.
+    pub(super) async fn read_many_direct_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<usize, Error> {
+        match self {
+            Self::Writer(writer) => writer
+                .read_many_direct_into(buf, offsets, item_size)
+                .await
+                .map_err(Error::Runtime),
+            Self::Sealed(sealed) => sealed
+                .read_many_direct_into(buf, offsets, item_size)
+                .await
+                .map_err(Error::Runtime),
+        }
+    }
+
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
     /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub(super) fn try_read_many_sync_into(

@@ -822,6 +822,35 @@ where
         Ok(*res)
     }
 
+    async fn append_many<'a>(
+        &'a mut self,
+        items: Many<'a, Self::Item>,
+    ) -> Result<u64, JournalError> {
+        if items.is_empty() {
+            return Err(JournalError::EmptyAppend);
+        }
+
+        // Every append must also update the Merkle structure, so items append one at a time.
+        // Batched appends of already-merkleized items go through `apply_batch`, which batches
+        // the inner journal writes instead.
+        let mut last_pos = self.journal.bounds().end;
+        match items {
+            Many::Flat(items) => {
+                for item in items {
+                    last_pos = Mutable::append(self, item).await?;
+                }
+            }
+            Many::Nested(nested_items) => {
+                for items in nested_items {
+                    for item in *items {
+                        last_pos = Mutable::append(self, item).await?;
+                    }
+                }
+            }
+        }
+        Ok(last_pos)
+    }
+
     async fn prune(&mut self, min_position: u64) -> Result<bool, JournalError> {
         let prune_to = {
             let bounds = self.journal.bounds();

@@ -75,6 +75,10 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(())
     }
 
+    async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     async fn sync_target(&self) -> Self::SyncTarget {
         0
     }

@@ -89,28 +89,27 @@ where
     metadata: Option<U::Value>,
 }
 
-/// Key-value operations for the `any` unordered update kind.
-impl<F, E, C, I, H, K, V, S> AnyUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, S>
+/// Key-value operations shared by both `any` update kinds.
+impl<F, E, C, I, H, U, S> AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
-    Operation<F, unordered::Update<K, V>>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Set commit metadata included in the next
     /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
-    pub fn with_metadata(mut self, metadata: V::Value) -> Self {
+    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
     /// Read a value by key, falling back to committed state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
+    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &*db).await
     }
@@ -118,7 +117,7 @@ where
     /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &*db).await
     }
@@ -128,14 +127,8 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn stage(
         self,
-        keys: &[&K],
-    ) -> Result<
-        (
-            Vec<Option<V::Value>>,
-            AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>,
-        ),
-        Error<F>,
-    > {
+        keys: &[&U::Key],
+    ) -> Result<(Vec<Option<U::Value>>, AnyStaged<F, E, C, I, H, U, S>), Error<F>> {
         let Self {
             batch,
             db,
@@ -156,7 +149,7 @@ where
     }
 
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.
-    pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
+    pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
     }
@@ -354,79 +347,6 @@ where
                 .await?
         };
         Ok(AnyMerkleized { inner, db })
-    }
-}
-
-/// Key-value operations for the `any` ordered update kind.
-impl<F, E, C, I, H, K, V, S> AnyUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, S>
-where
-    F: Family,
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
-    I: OrderedIndex<Value = Location<F>> + 'static,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, ordered::Update<K, V>>: Codec,
-{
-    /// Set commit metadata included in the next
-    /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
-    pub fn with_metadata(mut self, metadata: V::Value) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
-
-    /// Read a value by key, falling back to committed state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = self.db.read().await;
-        self.batch.get(key, &*db).await
-    }
-
-    /// Read multiple values by key, falling back to committed state.
-    ///
-    /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = self.db.read().await;
-        self.batch.get_many(keys, &*db).await
-    }
-
-    /// Read multiple values and return a staged batch for the same keys.
-    ///
-    /// Returns results in the same order as the input keys.
-    pub async fn stage(
-        self,
-        keys: &[&K],
-    ) -> Result<
-        (
-            Vec<Option<V::Value>>,
-            AnyStaged<F, E, C, I, H, ordered::Update<K, V>, S>,
-        ),
-        Error<F>,
-    > {
-        let Self {
-            batch,
-            db,
-            metadata,
-        } = self;
-        let (values, staged) = {
-            let guard = db.read().await;
-            batch.stage(keys, &*guard).await?
-        };
-        Ok((
-            values,
-            AnyStaged {
-                staged,
-                db,
-                metadata,
-            },
-        ))
-    }
-
-    /// Record a mutation. `Some(value)` for upsert, `None` for delete.
-    pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
-        self.batch = self.batch.write(key, value);
-        self
     }
 }
 

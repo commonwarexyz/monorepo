@@ -689,26 +689,16 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         Ok(())
     }
 
-    /// Read `miss_positions` from storage and fill their slots in `result`, where
-    /// `miss_indices[i]` is the `result` slot for `miss_positions[i]`.
+    /// Read `miss_positions` from storage and fill their slots in `result`. `miss_offsets[i]`
+    /// is the byte offset of `miss_positions[i]`'s frame, and `miss_indices[i]` is the `result`
+    /// slot for `miss_positions[i]` (identity when `None`).
     async fn read_misses(
         &self,
         result: &mut [Option<V>],
-        miss_indices: &[usize],
+        miss_indices: Option<&[usize]>,
         miss_positions: &[u64],
+        miss_offsets: &[u64],
     ) -> Result<(), Error> {
-        // Read the offsets of all items that were not found in the cache.
-        let miss_offsets = self
-            .offsets
-            .read_many(miss_positions)
-            .await
-            .map_err(|e| match e {
-                Error::ItemOutOfRange(e) | Error::ItemPruned(e) => {
-                    Error::Corruption(format!("blob/item should be found, but got: {e}"))
-                }
-                other => other,
-            })?;
-
         // Group runs of consecutive positions that fall into the same blob and perform a consecutive
         // read for each run.
         let items_per_blob = self.items_per_blob.get();
@@ -741,8 +731,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                     .read_consecutive(&blob_handle, blob, &miss_offsets[run_start..run_end])
                     .await?;
 
-                for (item, &miss_idx) in items.into_iter().zip(&miss_indices[run_start..run_end]) {
-                    result[miss_idx] = Some(item);
+                for (k, item) in items.into_iter().enumerate() {
+                    let slot = miss_indices.map_or(run_start + k, |indices| indices[run_start + k]);
+                    result[slot] = Some(item);
                 }
                 run_start = run_end;
             }
@@ -751,104 +742,16 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
         Ok(())
     }
-}
 
-impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
-    type Item = V;
-
-    fn bounds(&self) -> Range<u64> {
-        self.bounds.clone()
-    }
-
-    async fn read(&self, position: u64) -> Result<V, Error> {
-        self.metrics.read_calls.inc();
-        self.validate_readable(position)?;
-
-        // Probe the offsets journal once, serving from the page cache synchronously when
-        // possible. On a data-frame miss the resolved offset is reused by the async path so the
-        // offsets journal is not consulted twice.
-        let cached_offset = self.offsets.try_read_sync(position);
-        if let Some(offset) = cached_offset {
-            let mut buf = Vec::new();
-            if let Some(item) = self.try_read_frame_sync(position, offset, &mut buf) {
-                self.metrics.items_read.inc();
-                return Ok(item);
-            }
-        }
-
-        let _timer = self.metrics.read_timer();
-        let offset = match cached_offset {
-            Some(offset) => offset,
-            None => self.offsets.read(position).await?,
-        };
-        let blob = self
-            .data
-            .get(position_to_blob(position, self.items_per_blob.get()))
-            .expect("position in bounds maps to a retained blob");
-        let item = self.read_at_offset(&blob, offset).await?;
-        self.metrics.items_read.inc();
-        Ok(item)
-    }
-
-    async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
+    /// One synchronous batched pass over `positions`, filling `out[i]` for every frame served
+    /// entirely from the page cache. Returns the per-position frame offsets resolved along the
+    /// way: `Some(offset)` whenever the offsets journal served position `i` synchronously, even
+    /// if the data frame itself missed (callers reuse these offsets so the offsets journal is
+    /// not consulted twice).
+    fn read_many_sync_pass(&self, positions: &[u64], out: &mut [Option<V>]) -> Vec<Option<u64>> {
+        let mut resolved: Vec<Option<u64>> = vec![None; positions.len()];
         if positions.is_empty() {
-            return Ok(Vec::new());
-        }
-        let _timer = self.metrics.read_many_timer();
-        self.metrics.read_many_calls.inc();
-        self.validate_read_many(positions)?;
-
-        // Serve page-cache hits with one batched pass (which counts them against items_read),
-        // then read only the misses.
-        let mut result = self.try_read_many_sync(positions);
-        let mut miss_indices = Vec::with_capacity(positions.len());
-        let mut miss_positions = Vec::with_capacity(positions.len());
-        for (i, item) in result.iter().enumerate() {
-            if item.is_none() {
-                miss_indices.push(i);
-                miss_positions.push(positions[i]);
-            }
-        }
-        if miss_positions.is_empty() {
-            return Ok(result.into_iter().map(|r| r.unwrap()).collect());
-        }
-
-        self.read_misses(&mut result, &miss_indices, &miss_positions)
-            .await?;
-        self.metrics.items_read.inc_by(miss_positions.len() as u64);
-        Ok(result.into_iter().map(|r| r.unwrap()).collect())
-    }
-
-    async fn read_many_direct(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
-        if positions.is_empty() {
-            return Ok(Vec::new());
-        }
-        let _timer = self.metrics.read_many_timer();
-        self.metrics.read_many_calls.inc();
-        self.validate_read_many(positions)?;
-
-        // Skip the synchronous cache pass: the caller already served its hits.
-        let mut result: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
-        let miss_indices: Vec<usize> = (0..positions.len()).collect();
-        self.read_misses(&mut result, &miss_indices, positions)
-            .await?;
-        self.metrics.items_read.inc_by(positions.len() as u64);
-        Ok(result.into_iter().map(|r| r.unwrap()).collect())
-    }
-
-    fn try_read_sync(&self, position: u64) -> Option<V> {
-        self.validate_readable(position).ok()?;
-        let offset = self.offsets.try_read_sync(position)?;
-        let mut buf = Vec::new();
-        let item = self.try_read_frame_sync(position, offset, &mut buf)?;
-        self.metrics.items_read.inc();
-        Some(item)
-    }
-
-    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
-        let mut out: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
-        if positions.is_empty() {
-            return out;
+            return resolved;
         }
 
         // A frame at position p spans [off(p), off(p + 1)), so one batched pass over the
@@ -884,6 +787,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
             let Some(offset) = offsets[lookup_idx] else {
                 continue;
             };
+            resolved[idx] = Some(offset);
             // The successor lookup is adjacent in `lookups` whenever it was pushed (in
             // bounds). A cross-blob successor's offset is in a different data blob and does
             // not bound this frame.
@@ -957,6 +861,156 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
             }
         }
         self.metrics.items_read.inc_by(hits);
+        resolved
+    }
+}
+
+/// Map offsets-journal range errors to corruption: the caller has already validated the
+/// positions against `bounds`, so the offsets journal must have them.
+fn offsets_corruption(e: Error) -> Error {
+    match e {
+        Error::ItemOutOfRange(e) | Error::ItemPruned(e) => {
+            Error::Corruption(format!("blob/item should be found, but got: {e}"))
+        }
+        other => other,
+    }
+}
+
+impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
+    type Item = V;
+
+    fn bounds(&self) -> Range<u64> {
+        self.bounds.clone()
+    }
+
+    async fn read(&self, position: u64) -> Result<V, Error> {
+        self.metrics.read_calls.inc();
+        self.validate_readable(position)?;
+
+        // Probe the offsets journal once, serving from the page cache synchronously when
+        // possible. On a data-frame miss the resolved offset is reused by the async path so the
+        // offsets journal is not consulted twice.
+        let cached_offset = self.offsets.try_read_sync(position);
+        if let Some(offset) = cached_offset {
+            let mut buf = Vec::new();
+            if let Some(item) = self.try_read_frame_sync(position, offset, &mut buf) {
+                self.metrics.items_read.inc();
+                return Ok(item);
+            }
+        }
+
+        let _timer = self.metrics.read_timer();
+        let offset = match cached_offset {
+            Some(offset) => offset,
+            None => self.offsets.read(position).await?,
+        };
+        let blob = self
+            .data
+            .get(position_to_blob(position, self.items_per_blob.get()))
+            .expect("position in bounds maps to a retained blob");
+        let item = self.read_at_offset(&blob, offset).await?;
+        self.metrics.items_read.inc();
+        Ok(item)
+    }
+
+    async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _timer = self.metrics.read_many_timer();
+        self.metrics.read_many_calls.inc();
+        self.validate_read_many(positions)?;
+
+        // Serve page-cache hits with one batched pass (which counts them against items_read),
+        // then read only the misses. Offsets the pass resolved for frames whose data missed
+        // are reused below so the offsets journal is not consulted twice.
+        let mut result: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
+        let resolved = self.read_many_sync_pass(positions, &mut result);
+        let mut miss_indices = Vec::with_capacity(positions.len());
+        let mut miss_positions = Vec::with_capacity(positions.len());
+        let mut miss_offsets = Vec::with_capacity(positions.len());
+        let mut unresolved = Vec::new();
+        for (i, item) in result.iter().enumerate() {
+            if item.is_some() {
+                continue;
+            }
+            miss_indices.push(i);
+            miss_positions.push(positions[i]);
+            miss_offsets.push(resolved[i]);
+            if resolved[i].is_none() {
+                unresolved.push(positions[i]);
+            }
+        }
+        if miss_positions.is_empty() {
+            return Ok(result.into_iter().map(|r| r.unwrap()).collect());
+        }
+
+        // Read the offsets the sync pass could not resolve. Their positions just missed the
+        // offsets journal's cache, so the read skips its dedicated cache pass.
+        let fetched = self
+            .offsets
+            .read_many_direct(&unresolved)
+            .await
+            .map_err(offsets_corruption)?;
+        let mut fetched = fetched.into_iter();
+        let miss_offsets: Vec<u64> = miss_offsets
+            .into_iter()
+            .map(|offset| {
+                offset.unwrap_or_else(|| {
+                    fetched
+                        .next()
+                        .expect("one fetched offset per unresolved miss")
+                })
+            })
+            .collect();
+
+        self.read_misses(
+            &mut result,
+            Some(&miss_indices),
+            &miss_positions,
+            &miss_offsets,
+        )
+        .await?;
+        self.metrics.items_read.inc_by(miss_positions.len() as u64);
+        Ok(result.into_iter().map(|r| r.unwrap()).collect())
+    }
+
+    async fn read_many_direct(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _timer = self.metrics.read_many_timer();
+        self.metrics.read_many_calls.inc();
+        self.validate_read_many(positions)?;
+
+        // Skip the synchronous cache pass: the caller already served its hits. The offsets
+        // journal is still read through its cache because the caller's pass does not retain
+        // the offsets it resolved.
+        let mut result: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
+        let miss_offsets = self
+            .offsets
+            .read_many(positions)
+            .await
+            .map_err(offsets_corruption)?;
+        self.read_misses(&mut result, None, positions, &miss_offsets)
+            .await?;
+        self.metrics.items_read.inc_by(positions.len() as u64);
+        Ok(result.into_iter().map(|r| r.unwrap()).collect())
+    }
+
+    fn try_read_sync(&self, position: u64) -> Option<V> {
+        self.validate_readable(position).ok()?;
+        let offset = self.offsets.try_read_sync(position)?;
+        let mut buf = Vec::new();
+        let item = self.try_read_frame_sync(position, offset, &mut buf)?;
+        self.metrics.items_read.inc();
+        Some(item)
+    }
+
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
+        crate::journal::assert_positions_increasing(positions);
+        let mut out: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
+        self.read_many_sync_pass(positions, &mut out);
         out
     }
 

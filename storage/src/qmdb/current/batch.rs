@@ -18,7 +18,10 @@ use crate::{
         },
         batch_chain::Bounds,
         bitmap::Shared,
-        current::{db::compute_db_root, grafting},
+        current::{
+            db::{compute_db_root, compute_grafted_leaves},
+            grafting,
+        },
         operation::Key,
         Error,
     },
@@ -30,7 +33,6 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap::{self, Readable as _};
 use core::ops::Range;
-use futures::future::try_join_all;
 use std::sync::Arc;
 
 /// Speculative chunk-level bitmap overlay.
@@ -105,67 +107,6 @@ impl<const N: usize> ChunkOverlay<N> {
     pub(crate) const fn complete_chunks(&self) -> usize {
         (self.len / Self::CHUNK_BITS) as usize
     }
-}
-
-/// Compute grafted leaf digests for dirty graftable chunks against a speculative ops batch.
-///
-/// The ops tree is a batch layered over a base tree. New h=G subtree roots may already exist in the
-/// batch, while unchanged roots still live in the base tree. Each returned pair is
-/// `(chunk_idx, hash(chunk || ops_h_G_node))`, with the zero-chunk identity preserving the ops
-/// digest directly.
-async fn compute_grafted_leaves_from_batch<F, H, R, B, S, const N: usize>(
-    ops_tree: &BatchStorageAdapter<'_, F, H::Digest, R, B>,
-    chunks: impl IntoIterator<Item = (usize, [u8; N])>,
-    strategy: &S,
-) -> Result<Vec<(usize, H::Digest)>, Error<F>>
-where
-    F: Graftable,
-    H: Hasher,
-    R: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
-    B: MerkleStorage<F, Digest = H::Digest>,
-    S: Strategy,
-{
-    let grafting_height = grafting::height::<N>();
-    let mut inputs = Vec::new();
-    let mut misses = Vec::new();
-
-    // First resolve h=G ops nodes from the speculative batch. Preserve input order by recording
-    // each base-tree miss at the index where its digest belongs.
-    for (chunk_idx, chunk) in chunks {
-        let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
-        let pos = F::subtree_root_position(leaf_start, grafting_height);
-        if let Some(chunk_ops_digest) = ops_tree.batch.get_node(pos) {
-            inputs.push((chunk_idx, Some(chunk_ops_digest), chunk));
-        } else {
-            misses.push((inputs.len(), pos));
-            inputs.push((chunk_idx, None, chunk));
-        }
-    }
-
-    // Fill batch misses from the base ops tree. Missing base nodes indicate the caller passed a
-    // chunk that is not graftable for this batch/base snapshot.
-    let base = ops_tree.base;
-    for (input_idx, digest) in try_join_all(misses.into_iter().map(|(input_idx, pos)| async move {
-        let digest = base
-            .get_node(pos)
-            .await?
-            .ok_or(merkle::Error::<F>::MissingGraftedLeaf(pos))?;
-        Ok::<_, Error<F>>((input_idx, digest))
-    }))
-    .await?
-    {
-        inputs[input_idx].1 = Some(digest);
-    }
-
-    // Every input now carries its resolved h=G ops digest.
-    let inputs = inputs
-        .into_iter()
-        .map(|(chunk_idx, chunk_ops_digest, chunk)| {
-            let chunk_ops_digest = chunk_ops_digest.expect("all grafted leaves should be resolved");
-            (chunk_idx, chunk_ops_digest, chunk)
-        })
-        .collect();
-    Ok(grafting::graft_chunk_digests::<H, _, N>(strategy, inputs))
 }
 
 /// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Skips locations where the
@@ -426,6 +367,67 @@ where
         self.inner = self.inner.write(key, value);
         self
     }
+
+    /// Read through: mutations -> ancestor diffs -> committed DB.
+    pub async fn get<E, C, I>(
+        &self,
+        key: &U::Key,
+        db: &super::db::Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Option<U::Value>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        self.inner.get(key, &db.any).await
+    }
+
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many<E, C, I>(
+        &self,
+        keys: &[&U::Key],
+        db: &super::db::Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Vec<Option<U::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        self.inner.get_many(keys, &db.any).await
+    }
+
+    /// Batch read multiple keys and return a staged batch for the same keys.
+    ///
+    /// Returns results in the same order as the input keys. The staged batch records updates by
+    /// read index: the initial keys occupy `0..keys.len()`, and each [`expand`](Staged::expand)
+    /// appends another index range.
+    pub async fn stage<E, C, I>(
+        self,
+        keys: &[&U::Key],
+        db: &super::db::Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<(Vec<Option<U::Value>>, Staged<F, H, U, N, S>), Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        let (values, inner) = inner.stage(keys, &db.any).await?;
+        Ok((
+            values,
+            Staged {
+                inner,
+                grafted_parent,
+                bitmap_parent,
+            },
+        ))
+    }
 }
 
 impl<F, H, U, const N: usize, S: Strategy> Staged<F, H, U, N, S>
@@ -585,7 +587,7 @@ where
     }
 }
 
-// Unordered get + merkleize.
+// Unordered merkleize.
 impl<F, K, V, H, const N: usize, S: Strategy> UnmerkleizedBatch<F, H, update::Unordered<K, V>, N, S>
 where
     F: Graftable,
@@ -594,73 +596,6 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Read through: mutations -> ancestor diffs -> committed DB.
-    pub async fn get<E, C, I>(
-        &self,
-        key: &K,
-        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-    ) -> Result<Option<V::Value>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        self.inner.get(key, &db.any).await
-    }
-
-    /// Batch read multiple keys.
-    ///
-    /// Returns results in the same order as the input keys.
-    pub async fn get_many<E, C, I>(
-        &self,
-        keys: &[&K],
-        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-    ) -> Result<Vec<Option<V::Value>>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        self.inner.get_many(keys, &db.any).await
-    }
-
-    /// Batch read multiple keys and return a staged batch for the same keys.
-    ///
-    /// Returns results in the same order as the input keys. The staged batch records updates by
-    /// read index: the initial keys occupy `0..keys.len()`, and each [`expand`](Staged::expand)
-    /// appends another index range.
-    pub async fn stage<E, C, I>(
-        self,
-        keys: &[&K],
-        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-    ) -> Result<
-        (
-            Vec<Option<V::Value>>,
-            Staged<F, H, update::Unordered<K, V>, N, S>,
-        ),
-        Error<F>,
-    >
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        let Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        } = self;
-        let (values, inner) = inner.stage(keys, &db.any).await?;
-        Ok((
-            values,
-            Staged {
-                inner,
-                grafted_parent,
-                bitmap_parent,
-            },
-        ))
-    }
-
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -696,7 +631,7 @@ where
     }
 }
 
-// Ordered get + merkleize.
+// Ordered merkleize.
 impl<F, K, V, H, const N: usize, S: Strategy> UnmerkleizedBatch<F, H, update::Ordered<K, V>, N, S>
 where
     F: Graftable,
@@ -705,73 +640,6 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Read through: mutations -> ancestor diffs -> committed DB.
-    pub async fn get<E, C, I>(
-        &self,
-        key: &K,
-        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-    ) -> Result<Option<V::Value>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location<F>> + 'static,
-    {
-        self.inner.get(key, &db.any).await
-    }
-
-    /// Batch read multiple keys.
-    ///
-    /// Returns results in the same order as the input keys.
-    pub async fn get_many<E, C, I>(
-        &self,
-        keys: &[&K],
-        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-    ) -> Result<Vec<Option<V::Value>>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location<F>> + 'static,
-    {
-        self.inner.get_many(keys, &db.any).await
-    }
-
-    /// Batch read multiple keys and return a staged batch for the same keys.
-    ///
-    /// Returns results in the same order as the input keys. The staged batch records updates by
-    /// read index: the initial keys occupy `0..keys.len()`, and each [`expand`](Staged::expand)
-    /// appends another index range.
-    pub async fn stage<E, C, I>(
-        self,
-        keys: &[&K],
-        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-    ) -> Result<
-        (
-            Vec<Option<V::Value>>,
-            Staged<F, H, update::Ordered<K, V>, N, S>,
-        ),
-        Error<F>,
-    >
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location<F>> + 'static,
-    {
-        let Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        } = self;
-        let (values, inner) = inner.stage(keys, &db.any).await?;
-        Ok((
-            values,
-            Staged {
-                inner,
-                grafted_parent,
-                bitmap_parent,
-            },
-        ))
-    }
-
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -953,7 +821,7 @@ where
         (idx, chunk)
     });
 
-    let new_leaves = compute_grafted_leaves_from_batch::<F, H, _, _, S, N>(
+    let new_leaves = compute_grafted_leaves::<F, H, S, N>(
         &ops_tree_adapter,
         chunks_to_update,
         &current_db.strategy,

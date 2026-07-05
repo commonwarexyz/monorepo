@@ -1163,6 +1163,61 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok((blob, offsets))
     }
 
+    /// Shared body of [`super::Contiguous::read_many`] and
+    /// [`super::Contiguous::read_many_direct`]: `direct` skips the dedicated page-cache pass on
+    /// each blob group.
+    async fn read_many_impl(&self, positions: &[u64], direct: bool) -> Result<Vec<A>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _timer = self.metrics.read_many_timer();
+        self.metrics.read_many_calls.inc();
+        crate::journal::assert_positions_increasing(positions);
+        for &pos in positions {
+            self.validate_readable(pos)?;
+        }
+
+        let items_per_blob = self.items_per_blob.get();
+        let chunk_size = A::SIZE;
+
+        // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
+        // maximal runs that share one blob. Each group goes through the blob's batched read,
+        // which serves page-cache and tip-buffer hits under a single lock acquisition and reads only
+        // true misses from the blob (concurrently).
+        let mut result: Vec<A> = Vec::with_capacity(positions.len());
+        let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
+        let mut hits = 0u64;
+        for group in positions.chunk_by(|a, b| {
+            super::position_to_blob(*a, items_per_blob)
+                == super::position_to_blob(*b, items_per_blob)
+        }) {
+            let (blob_num, blob_offsets) = self.locate_group(group)?;
+            let blob = self
+                .blobs
+                .get(blob_num)
+                .expect("positions in bounds map to a retained blob");
+            let buf = &mut reusable_buf[..group.len() * chunk_size];
+            let group_hits = if direct {
+                blob.read_many_direct_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+                    .await?
+            } else {
+                blob.read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+                    .await?
+            };
+            hits += group_hits as u64;
+
+            for slice in buf.chunks_exact(chunk_size) {
+                result.push(A::decode(slice).map_err(Error::Codec)?);
+            }
+        }
+
+        self.metrics.record_cache_hits(hits);
+        self.metrics
+            .record_cache_misses(positions.len() as u64 - hits);
+        self.metrics.items_read.inc_by(positions.len() as u64);
+        Ok(result)
+    }
+
     /// Resolve `pos` to its blob and byte offset within the blob.
     fn locate(&self, pos: u64) -> Result<(Blob<'_, E::Blob>, u64), Error> {
         self.validate_readable(pos)?;
@@ -1203,51 +1258,11 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
-        if positions.is_empty() {
-            return Ok(Vec::new());
-        }
-        let _timer = self.metrics.read_many_timer();
-        self.metrics.read_many_calls.inc();
-        crate::journal::assert_positions_increasing(positions);
-        for &pos in positions {
-            self.validate_readable(pos)?;
-        }
+        self.read_many_impl(positions, false).await
+    }
 
-        let items_per_blob = self.items_per_blob.get();
-        let chunk_size = A::SIZE;
-
-        // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
-        // maximal runs that share one blob. Each group goes through the blob's batched read,
-        // which serves page-cache and tip-buffer hits under a single lock acquisition and reads only
-        // true misses from the blob (concurrently).
-        let mut result: Vec<A> = Vec::with_capacity(positions.len());
-        let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
-        let mut hits = 0u64;
-        for group in positions.chunk_by(|a, b| {
-            super::position_to_blob(*a, items_per_blob)
-                == super::position_to_blob(*b, items_per_blob)
-        }) {
-            let (blob_num, blob_offsets) = self.locate_group(group)?;
-            let blob = self
-                .blobs
-                .get(blob_num)
-                .expect("positions in bounds map to a retained blob");
-            let buf = &mut reusable_buf[..group.len() * chunk_size];
-            let group_hits = blob
-                .read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
-                .await?;
-            hits += group_hits as u64;
-
-            for slice in buf.chunks_exact(chunk_size) {
-                result.push(A::decode(slice).map_err(Error::Codec)?);
-            }
-        }
-
-        self.metrics.record_cache_hits(hits);
-        self.metrics
-            .record_cache_misses(positions.len() as u64 - hits);
-        self.metrics.items_read.inc_by(positions.len() as u64);
-        Ok(result)
+    async fn read_many_direct(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        self.read_many_impl(positions, true).await
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
@@ -1266,6 +1281,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     }
 
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
+        crate::journal::assert_positions_increasing(positions);
         let chunk_size = A::SIZE;
         let mut out: Vec<Option<A>> = (0..positions.len()).map(|_| None).collect();
 
@@ -1345,6 +1361,10 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
         self.reader().read_many(positions).await
+    }
+
+    async fn read_many_direct(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        self.reader().read_many_direct(positions).await
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
@@ -4720,6 +4740,34 @@ mod tests {
             let served = reader.try_read_many_sync(&[3, 9]);
             assert!(served[0].is_none());
             assert!(served[1].is_some());
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_direct_matches_read_many() {
+        // The probe-free direct path returns the same items as read_many, cold and warm.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(4));
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
+
+            for i in 0..20u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let positions: Vec<u64> = (0..20).collect();
+            let reader = journal.snapshot().await.unwrap();
+            let direct = reader.read_many_direct(&positions).await.unwrap();
+            let expected: Vec<_> = (0..20).map(test_digest).collect();
+            assert_eq!(direct, expected);
+            let read = reader.read_many(&positions).await.unwrap();
+            assert_eq!(direct, read);
+            let warm = reader.read_many_direct(&positions).await.unwrap();
+            assert_eq!(warm, expected);
             drop(reader);
 
             journal.destroy().await.unwrap();

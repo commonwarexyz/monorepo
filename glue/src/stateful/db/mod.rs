@@ -206,15 +206,13 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Prune the database to a previously finalized sync target.
     ///
-    /// Databases that do not retain pruneable operation history may keep the
-    /// default no-op implementation. This call makes changes durable and
-    /// ensures they will be present on startup without replay.
+    /// Databases that do not retain pruneable operation history implement this
+    /// as a no-op. This call makes changes durable and ensures they will be
+    /// present on startup without replay.
     fn prune(
         &mut self,
-        _target: &Self::SyncTarget,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        async { Ok(()) }
-    }
+        target: &Self::SyncTarget,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Return the sync target for this database's current committed state.
     fn sync_target(&self) -> impl Future<Output = Self::SyncTarget> + Send;
@@ -1539,6 +1537,10 @@ mod tests {
             Ok(())
         }
 
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         async fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -1566,6 +1568,10 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1708,6 +1714,10 @@ mod tests {
             Err(TestFinalizeError)
         }
 
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         async fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -1796,6 +1806,10 @@ mod tests {
             Ok(())
         }
 
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         async fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -1823,6 +1837,10 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1860,6 +1878,10 @@ mod tests {
             Ok(())
         }
 
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         async fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
@@ -1889,6 +1911,10 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1924,6 +1950,10 @@ mod tests {
             Ok(())
         }
 
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         async fn sync_target(&self) -> Self::SyncTarget {
             0
         }
@@ -1953,6 +1983,10 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1988,6 +2022,10 @@ mod tests {
             Ok(())
         }
 
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         async fn sync_target(&self) -> Self::SyncTarget {
             0
         }
@@ -2017,6 +2055,10 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2052,6 +2094,10 @@ mod tests {
             Ok(())
         }
 
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         async fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
@@ -2081,6 +2127,10 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2115,6 +2165,10 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2256,6 +2310,10 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
 
