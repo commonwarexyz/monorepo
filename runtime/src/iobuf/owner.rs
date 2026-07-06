@@ -642,6 +642,22 @@ impl OwnerRef {
         // SAFETY: non-empty owners have a valid refcount.
         Some(unsafe { self.refs() }.load(Ordering::Acquire))
     }
+
+    /// Loom-only Relaxed refcount probe.
+    ///
+    /// Models spin on this (with yields) to observe another handle's
+    /// decrement without creating a happens-before edge: the probe must not
+    /// synchronize, or it would mask a weakened ordering in the drop path
+    /// under test.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be non-empty with a live reference owned by the caller.
+    #[cfg(feature = "loom")]
+    pub(crate) unsafe fn refcount_relaxed(self) -> usize {
+        // SAFETY: non-empty owners have a valid refcount.
+        unsafe { self.refs() }.load(Ordering::Relaxed)
+    }
 }
 
 /// Header for heap allocations.
@@ -1741,6 +1757,131 @@ mod loom_tests {
                 thread::yield_now();
             }
             // SAFETY: the main thread owns the remaining reference.
+            unsafe { owner.drop_shared() };
+            t1.join().unwrap();
+
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    /// Tracked stand-in for the payload state the freeing side touches
+    /// (deallocation or reuse).
+    struct PayloadCell(UnsafeCell<usize>);
+
+    // SAFETY: cross-thread access is what the cell exists to check; loom
+    // tracks every access made through `UnsafeCell::with`/`with_mut`.
+    unsafe impl Send for PayloadCell {}
+    // SAFETY: as above.
+    unsafe impl Sync for PayloadCell {}
+
+    // Payload whose release reads the tracked cell. The reader is whichever
+    // thread performs the final release, so the read is race-free only if
+    // every other handle's payload writes happen-before that release:
+    // exactly the edges the drop-side Acquire load and the race-final Acquire
+    // fence provide.
+    struct TrackedPayload {
+        payload: Arc<PayloadCell>,
+        released: Arc<AtomicUsize>,
+    }
+
+    impl Drop for TrackedPayload {
+        fn drop(&mut self) {
+            self.payload.0.with(|cell| {
+                // SAFETY: the refcount protocol grants the final release
+                // exclusive payload access; loom reports a data race here if
+                // a weakened ordering lets the release run unsynchronized
+                // with another handle's write.
+                assert_eq!(unsafe { *cell }, 1);
+            });
+            self.released.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl AsRef<[u8]> for TrackedPayload {
+        fn as_ref(&self) -> &[u8] {
+            &[1, 2, 3]
+        }
+    }
+
+    #[test]
+    fn payload_writes_happen_before_race_final_release() {
+        loom::model(|| {
+            let released = Arc::new(AtomicUsize::new(0));
+            let payload = Arc::new(PayloadCell(UnsafeCell::new(0)));
+            let bytes = Bytes::from_owner(TrackedPayload {
+                payload: payload.clone(),
+                released: released.clone(),
+            });
+            let (_, _, owner) = OwnerRef::from_bytes(bytes);
+
+            // Two handles: the spawned thread writes the payload through its
+            // handle and drops; the main thread only drops. In the explored
+            // executions where the decrements race (both fast-path loads see
+            // a shared count and the main thread's decrement lands last), the
+            // main thread frees through `drop_shared_race_final`, and the
+            // tracked read inside TrackedPayload::drop must be ordered after
+            // the writer's access. Weakening the race-final Acquire fence
+            // makes loom report a data race on the payload cell. (The
+            // cross-thread fast path is not explorable here: loom does not
+            // advance a single load past a causally-unseen decrement, so that
+            // edge is pinned by the probe-driven model below.)
+            // SAFETY: `owner` is live with one reference owned here.
+            unsafe { owner.clone_shared() };
+            let t1 = thread::spawn({
+                let payload = payload.clone();
+                move || {
+                    // SAFETY: this thread's handle keeps the payload alive;
+                    // the write is sequenced before its drop.
+                    payload.0.with_mut(|cell| unsafe { *cell = 1 });
+                    // SAFETY: this thread owns one reference.
+                    unsafe { owner.drop_shared() };
+                }
+            });
+            // SAFETY: the main thread owns the remaining reference.
+            unsafe { owner.drop_shared() };
+            t1.join().unwrap();
+
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn payload_writes_happen_before_fast_path_release() {
+        loom::model(|| {
+            let released = Arc::new(AtomicUsize::new(0));
+            let payload = Arc::new(PayloadCell(UnsafeCell::new(0)));
+            let bytes = Bytes::from_owner(TrackedPayload {
+                payload: payload.clone(),
+                released: released.clone(),
+            });
+            let (_, _, owner) = OwnerRef::from_bytes(bytes);
+
+            // Two handles: the spawned thread writes the payload through its
+            // handle and drops; the main thread waits until the decrement is
+            // visible through a Relaxed probe (no happens-before edge; the
+            // yields let loom advance the probe past stale values), so its
+            // drop deterministically takes the fast path and frees. The only
+            // ordering protecting the tracked read inside TrackedPayload::drop
+            // is then the fast-path Acquire load: downgrading it to Relaxed
+            // makes loom report a data race on the payload cell.
+            // SAFETY: `owner` is live with one reference owned here.
+            unsafe { owner.clone_shared() };
+            let t1 = thread::spawn({
+                let payload = payload.clone();
+                move || {
+                    // SAFETY: this thread's handle keeps the payload alive;
+                    // the write is sequenced before its drop.
+                    payload.0.with_mut(|cell| unsafe { *cell = 1 });
+                    // SAFETY: this thread owns one reference.
+                    unsafe { owner.drop_shared() };
+                }
+            });
+            // SAFETY: the main thread owns the remaining reference.
+            while unsafe { owner.refcount_relaxed() } != 1 {
+                thread::yield_now();
+            }
+            // SAFETY: as above; observing 1 makes this the final owner, and
+            // per-location coherence keeps the fast-path load at 1.
             unsafe { owner.drop_shared() };
             t1.join().unwrap();
 

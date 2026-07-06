@@ -3443,9 +3443,12 @@ mod loom_tests {
     // drop (which drains the global freelist and then releases the pool-owned
     // class reference). Whichever release is last drops the SizeClass and its
     // freelist. Parking strictly before releasing is what keeps the freelist
-    // alive for the return-path fetch_or: with the loom-tracked class strong
-    // count, swapping that order would free the freelist's loom-tracked state
-    // while the returning thread still targets it, which loom reports.
+    // alive for the return-path fetch_or. Loom performs no liveness check
+    // when tracked state is dropped, so swapping that order manifests as a
+    // use-after-free of the freed bitmap that corrupts loom's internal object
+    // state (caught by its internal asserts in practice, not by a designed
+    // race report); the loom-tracked class strong count still verifies the
+    // release accounting itself.
     #[test]
     fn final_drop_races_pool_teardown() {
         loom::model(|| {
