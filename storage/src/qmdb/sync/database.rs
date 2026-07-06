@@ -5,7 +5,6 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::paged::PageCache;
 use commonware_utils::range::NonEmptyRange;
 use std::future::Future;
 
@@ -14,9 +13,7 @@ pub trait Config {
     fn journal_config(&self) -> Self::JournalConfig;
 }
 
-impl<T: Translator, J: Clone, S: Strategy, P: PageCache> Config
-    for crate::qmdb::any::Config<T, J, S, P>
-{
+impl<T: Translator, J: Clone, S: Strategy> Config for crate::qmdb::any::Config<T, J, S> {
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -24,9 +21,7 @@ impl<T: Translator, J: Clone, S: Strategy, P: PageCache> Config
     }
 }
 
-impl<T: Translator, C: Clone, S: Strategy, P: PageCache> Config
-    for crate::qmdb::immutable::Config<T, C, S, P>
-{
+impl<T: Translator, C: Clone, S: Strategy> Config for crate::qmdb::immutable::Config<T, C, S> {
     type JournalConfig = C;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -34,7 +29,7 @@ impl<T: Translator, C: Clone, S: Strategy, P: PageCache> Config
     }
 }
 
-impl<J: Clone, S: Strategy, P: PageCache> Config for crate::qmdb::keyless::Config<J, S, P> {
+impl<J: Clone, S: Strategy> Config for crate::qmdb::keyless::Config<J, S> {
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {

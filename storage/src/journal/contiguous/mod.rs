@@ -8,7 +8,6 @@
 //! leave its in-memory state inconsistent with the underlying storage.
 
 use super::Error;
-use commonware_runtime::buffer::paged::PageCache;
 use futures::{stream, Stream, StreamExt as _};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
@@ -156,9 +155,6 @@ where
 pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item: Send;
-
-    /// The page cache implementation this journal reads through.
-    type PageCache: PageCache;
 
     /// Returns [start, end) with a guaranteed stable pruning boundary.
     fn bounds(&self) -> Range<u64>;

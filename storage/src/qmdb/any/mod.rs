@@ -83,7 +83,6 @@ use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::paged::{ClockCache, PageCache};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::warn;
@@ -103,9 +102,9 @@ pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy, P: PageCache = ClockCache> {
+pub struct Config<T: Translator, J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig<S, P>,
+    pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
     pub journal_config: J,
@@ -119,15 +118,15 @@ pub struct Config<T: Translator, J, S: Strategy, P: PageCache = ClockCache> {
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
-pub type FixedConfig<T, S, P = ClockCache> = Config<T, FConfig<P>, S, P>;
+pub type FixedConfig<T, S> = Config<T, FConfig, S>;
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
-pub type VariableConfig<T, C, S, P = ClockCache> = Config<T, VConfig<C, P>, S, P>;
+pub type VariableConfig<T, C, S> = Config<T, VConfig<C>, S>;
 
 /// Initialize an `Any` authenticated db from the given config.
 pub async fn init<F, E, U, H, T, I, J, S>(
     context: E,
-    cfg: Config<T, J::Config, S, J::PageCache>,
+    cfg: Config<T, J::Config, S>,
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -148,7 +147,7 @@ where
 #[boxed]
 pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<T, J::Config, S, J::PageCache>,
+    cfg: Config<T, J::Config, S>,
     bitmap: Option<Arc<Shared<N>>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where

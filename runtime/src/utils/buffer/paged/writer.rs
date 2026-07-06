@@ -36,7 +36,6 @@
 //! invalidate checksum recovery.
 
 use super::{
-    cache::{ClockCache, PageCache},
     read::{PageReader, Replay},
     view::View,
 };
@@ -94,7 +93,7 @@ const fn too_big_for_buffer(
 }
 
 /// Unique writer to a cache-wrapped [Blob].
-pub struct Writer<B: Blob, P: PageCache = ClockCache> {
+pub struct Writer<B: Blob> {
     /// The underlying blob being wrapped.
     blob: B,
 
@@ -112,14 +111,14 @@ pub struct Writer<B: Blob, P: PageCache = ClockCache> {
     id: u64,
 
     /// A reference to the page cache that manages read caching for this blob.
-    cache_ref: CacheRef<P>,
+    cache_ref: CacheRef,
 
     /// The write buffer containing any logical bytes following the last full page boundary in the
     /// underlying blob.
     buffer: Buffer,
 }
 
-impl<B: Blob, P: PageCache> Writer<B, P> {
+impl<B: Blob> Writer<B> {
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.sync_state.write_at(&self.blob, offset, bufs).await
@@ -160,7 +159,7 @@ impl<B: Blob, P: PageCache> Writer<B, P> {
         blob: B,
         original_blob_size: u64,
         capacity: usize,
-        cache_ref: CacheRef<P>,
+        cache_ref: CacheRef,
     ) -> Result<Self, Error> {
         let (partial_page_state, pages, invalid_data_found) =
             Self::read_last_valid_page(&blob, original_blob_size, cache_ref.page_size()).await?;
@@ -574,7 +573,7 @@ impl<B: Blob, P: PageCache> Writer<B, P> {
     }
 
     /// Returns a borrowed view over this blob.
-    fn view(&self) -> View<'_, B, P> {
+    fn view(&self) -> View<'_, B> {
         View {
             blob: &self.blob,
             cache_ref: &self.cache_ref,
@@ -914,7 +913,7 @@ impl<B: Blob, P: PageCache> Writer<B, P> {
     ///
     /// If this writer later rewinds or truncates into the returned handle's range, reads from that
     /// handle may observe unspecified contents.
-    pub async fn snapshot(&mut self) -> Result<super::Sealed<B, P>, Error> {
+    pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.cache_ref.next_id()))
     }
@@ -1093,7 +1092,7 @@ impl<B: Blob, P: PageCache> Writer<B, P> {
     }
 
     /// Construct an immutable read handle for the current blob state.
-    fn sealed_handle(&self, id: u64) -> super::Sealed<B, P> {
+    fn sealed_handle(&self, id: u64) -> super::Sealed<B> {
         let logical_page_size = self.cache_ref.page_size();
         let full_pages = self.current_page;
         assert_eq!(
@@ -1121,7 +1120,7 @@ impl<B: Blob, P: PageCache> Writer<B, P> {
     /// Buffered bytes (full and partial pages) are written to the underlying blob, but the blob is
     /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
     /// [`super::Sealed::sync`].
-    pub async fn seal(mut self) -> Result<super::Sealed<B, P>, Error> {
+    pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
         self.sync_state.wait_for_pending().await?;
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.id))

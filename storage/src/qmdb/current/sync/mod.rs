@@ -70,7 +70,6 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::paged::PageCache;
 use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
@@ -78,7 +77,7 @@ use std::sync::Arc;
 #[cfg(test)]
 pub(crate) mod tests;
 
-impl<T: Translator, J: Clone, S: Strategy, P: PageCache> Config for super::Config<T, J, S, P> {
+impl<T: Translator, J: Clone, S: Strategy> Config for super::Config<T, J, S> {
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -96,7 +95,7 @@ impl<T: Translator, J: Clone, S: Strategy, P: PageCache> Config for super::Confi
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     context: E,
-    merkle_config: full::Config<S, J::PageCache>,
+    merkle_config: full::Config<S>,
     log: J,
     translator: T,
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -118,7 +117,7 @@ where
     Operation<F, U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
-    let merkle = Merkle::<F, _, _, S, _>::init_sync(
+    let merkle = Merkle::<F, _, _, S>::init_sync(
         context.child("merkle"),
         full::SyncConfig {
             config: merkle_config,
@@ -310,7 +309,7 @@ macro_rules! impl_current_sync_database {
                 .await?;
 
                 let hasher = qmdb::hasher::<H>();
-                let merkle = Merkle::<F, _, _, S, _>::init(
+                let merkle = Merkle::<F, _, _, S>::init(
                     context.child("local_boundary_merkle"),
                     &hasher,
                     config.merkle_config.clone(),

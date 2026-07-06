@@ -35,7 +35,7 @@ where
     type Op = Operation<F, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = super::Config<C::Config, S, C::PageCache>;
+    type Config = super::Config<C::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -64,7 +64,7 @@ where
     ) -> Result<Self, qmdb::Error<F>> {
         let hasher = qmdb::hasher::<H>();
 
-        let merkle = Merkle::<F, _, _, S, _>::init_sync(
+        let merkle = Merkle::<F, _, _, S>::init_sync(
             context.child("merkle"),
             full::SyncConfig {
                 config: config.merkle.clone(),

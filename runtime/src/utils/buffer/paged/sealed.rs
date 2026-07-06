@@ -15,7 +15,7 @@
 //! any lock; they share the underlying [`Blob`] handle (which provides its own synchronization)
 //! and the page cache.
 
-use super::{read::PageReader, view::View, CacheRef, ClockCache, PageCache, Replay, CHECKSUM_SIZE};
+use super::{read::PageReader, view::View, CacheRef, Replay, CHECKSUM_SIZE};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
@@ -24,11 +24,11 @@ use std::{
 
 /// An immutable, page-cache-backed read handle for a [Blob]. The read-only counterpart to
 /// [`super::Writer`].
-pub struct Sealed<B: Blob, P: PageCache = ClockCache> {
-    inner: Arc<SealedInner<B, P>>,
+pub struct Sealed<B: Blob> {
+    inner: Arc<SealedInner<B>>,
 }
 
-impl<B: Blob, P: PageCache> Clone for Sealed<B, P> {
+impl<B: Blob> Clone for Sealed<B> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -36,7 +36,7 @@ impl<B: Blob, P: PageCache> Clone for Sealed<B, P> {
     }
 }
 
-struct SealedInner<B: Blob, P: PageCache> {
+struct SealedInner<B: Blob> {
     /// The underlying blob being wrapped.
     blob: B,
 
@@ -49,7 +49,7 @@ struct SealedInner<B: Blob, P: PageCache> {
     partial_page: Option<IoBuf>,
 
     /// Reference to the page cache used for reads of full pages.
-    cache_ref: CacheRef<P>,
+    cache_ref: CacheRef,
 
     /// Page-cache id. [`super::Writer::seal`] preserves the writer id so hot full pages remain
     /// valid across the transition. [`super::Writer::snapshot`] uses a fresh id because the writer
@@ -57,13 +57,13 @@ struct SealedInner<B: Blob, P: PageCache> {
     id: u64,
 }
 
-impl<B: Blob, P: PageCache> Sealed<B, P> {
+impl<B: Blob> Sealed<B> {
     /// Construct a [`Sealed`] from already-validated parts. Invoked by [`super::Writer::seal`].
     pub(super) fn new(
         blob: B,
         size: u64,
         partial_page: Option<IoBuf>,
-        cache_ref: CacheRef<P>,
+        cache_ref: CacheRef,
         id: u64,
     ) -> Self {
         Self {
@@ -99,7 +99,7 @@ impl<B: Blob, P: PageCache> Sealed<B, P> {
     }
 
     /// Returns a borrowed view over this blob.
-    fn view(&self) -> View<'_, B, P> {
+    fn view(&self) -> View<'_, B> {
         View {
             blob: &self.inner.blob,
             cache_ref: &self.inner.cache_ref,

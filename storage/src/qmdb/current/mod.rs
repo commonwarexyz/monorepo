@@ -347,7 +347,6 @@ use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::paged::{ClockCache, PageCache};
 use commonware_utils::bitmap::Prunable as BitMap;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
@@ -365,9 +364,9 @@ use self::db::Metrics;
 
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy, P: PageCache = ClockCache> {
+pub struct Config<T: Translator, J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig<S, P>,
+    pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
     pub journal_config: J,
@@ -383,10 +382,8 @@ pub struct Config<T: Translator, J, S: Strategy, P: PageCache = ClockCache> {
     pub init_cache_size: Option<NonZeroUsize>,
 }
 
-impl<T: Translator, J, S: Strategy, P: PageCache> From<Config<T, J, S, P>>
-    for AnyConfig<T, J, S, P>
-{
-    fn from(cfg: Config<T, J, S, P>) -> Self {
+impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
+    fn from(cfg: Config<T, J, S>) -> Self {
         Self {
             merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
@@ -406,7 +403,7 @@ pub type VariableConfig<T, C, S> = Config<T, VConfig<C>, S>;
 #[boxed]
 pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
     context: E,
-    config: Config<T, J::Config, S, J::PageCache>,
+    config: Config<T, J::Config, S>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: merkle::Graftable,
