@@ -125,13 +125,20 @@ fn block_available(
 /// Queue the acks orphaned by a same-segment floor install so the strict
 /// segment-ordering check ignores them.
 ///
-/// When marshal ingests a floor anchor mid-segment it clears its pending-ack
-/// waiters and re-dispatches from the floor (`ingest` -> `pending_acks.clear`).
-/// Every ready height at or above the reinstalled floor is therefore delivered
-/// twice within the same mailbox drain: once before the clear (now orphaned,
-/// its waiter gone exactly like a restart-stale ack) and once after. The
-/// pre-clear copies are dispatched first, so queue them as stale in ascending
-/// order; only the live post-clear deliveries remain for the in-order check.
+/// Only for a floor install that shares a mailbox drain with an independent
+/// dispatch pass (the `MailboxBurst` event, which enqueues many actions at
+/// once). There, marshal first dispatches the ready heights above the floor,
+/// then the floor anchor's `ingest` clears its pending-ack waiters and
+/// re-dispatches from the floor (`ingest` -> `pending_acks.clear`). Each ready
+/// height at or above the reinstalled floor is delivered twice in that drain:
+/// once before the clear (now orphaned, its waiter gone exactly like a
+/// restart-stale ack) and once after. The pre-clear copies are dispatched
+/// first, so queue them as stale in ascending order; only the live post-clear
+/// deliveries remain for the in-order check.
+///
+/// A standalone `SetFloor` posts a single `set_floor` message: marshal ingests
+/// once and dispatches each ready height once (no pre-clear pass), so that path
+/// must NOT call this or it would mark the sole live delivery stale.
 ///
 /// The orphaned heights are `floor_height..=ready_prefix`: `ready_prefix` is
 /// the contiguous finalized prefix, so those are exactly the heights marshal
@@ -1075,10 +1082,6 @@ where
                         stale_to_skip.extend(live_pending_acks.iter().copied());
                         pending_floor = Some(h);
                         if block_available(&durable_available, &variant_available, h) {
-                            // Heights already ready above this floor are
-                            // re-dispatched after marshal clears its ack
-                            // waiters; their pre-clear deliveries are stale.
-                            queue_floor_orphaned_acks(&mut stale_to_skip, h, ready_prefix);
                             repair_wake |= apply_pending_floor(
                                 &mut pending_floor,
                                 height,
