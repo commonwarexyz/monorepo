@@ -50,7 +50,7 @@ struct PageFetchEntry {
 ///
 /// Must be a power of two. The actual shard count is reduced for small caches so every shard
 /// holds at least one page.
-const MAX_SHARDS: usize = 64;
+const MAX_SHARDS: usize = 16;
 
 /// Number of consecutive pages that map to the same shard.
 ///
