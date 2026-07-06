@@ -223,8 +223,7 @@ impl CacheRef {
         // stalling each lookup behind the previous range's copy.
         let mut srcs: Vec<Option<&[u8]>> = Vec::with_capacity(ranges.len());
         for (buf, offset) in ranges.iter() {
-            let (page_num, offset_in_page) =
-                Cache::offset_to_page(page_size as u64, *offset);
+            let (page_num, offset_in_page) = Cache::offset_to_page(page_size as u64, *offset);
             let offset_in_page = offset_in_page as usize;
             let seg = std::cmp::min(buf.len(), page_size - offset_in_page);
             srcs.push(

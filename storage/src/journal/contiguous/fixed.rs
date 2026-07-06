@@ -112,8 +112,8 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Writer},
     Blob as RBlob, Buf, IoBuf,
 };
-use futures::Stream;
 use commonware_utils::Cached;
+use futures::Stream;
 use std::{
     collections::BTreeMap,
     future::Future,

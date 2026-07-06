@@ -3440,9 +3440,8 @@ mod tests {
                 staged.resolve_updates(updates, vec![(overlapped, Some(upsert))]);
 
             let mut expected = vec![(staged_newer, loc(501), (), Some(staged_new))];
-            expected.extend(
-                (0..n).map(|i| (keys[i], loc(1_000 + i as u64), (), Some(new_values[i]))),
-            );
+            expected
+                .extend((0..n).map(|i| (keys[i], loc(1_000 + i as u64), (), Some(new_values[i]))));
             assert_eq!(staged_updates, expected);
             assert_eq!(batch.mutations.len(), 2);
             assert_eq!(batch.mutations.get(&mut_newer), Some(&Some(mut_new)));
