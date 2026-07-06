@@ -1610,6 +1610,7 @@ where
     (participants, schemes)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_recovery<P: simplex::Simplex>(
     checkpoint: deterministic::Checkpoint,
     participants: Vec<PublicKeyOf<P>>,
