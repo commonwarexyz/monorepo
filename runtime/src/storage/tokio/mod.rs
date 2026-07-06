@@ -172,7 +172,6 @@ pub struct Storage {
     /// background. Keeping it here lets the next operation wait for it, so an orphaned
     /// unlink can never delete a recreated blob and an orphaned create can never resurrect
     /// a removed name (the ordering contract on [crate::Storage::remove]).
-    ///
     inflight: Arc<Mutex<Option<task::JoinHandle<()>>>>,
     cfg: Config,
     pool: BufferPool,
