@@ -184,6 +184,13 @@ pub trait PageCache: Clone + Send + Sync + 'static {
 /// Pages are partitioned across independent lock-protected shards, so concurrent readers and
 /// writers of different pages contend only when their pages share a shard. Eviction is
 /// per-shard.
+///
+/// # Locking discipline
+///
+/// Shard locks are leaf locks: while holding a shard guard, code must not acquire any other
+/// lock (including another shard's), await, or call back into methods that lock. A task that
+/// needs a different shard drops the held guard first, so every wait happens with no lock
+/// held.
 #[derive(Clone)]
 pub struct ClockCache {
     /// Page-cache shards. Each `(blob_id, page_num)` is owned by exactly one shard (see
@@ -234,11 +241,14 @@ impl PageCache for ClockCache {
         let mut offset_in_page = (offset % self.page_size) as usize;
 
         // Hold one shard's read lock at a time, re-acquiring only when the next page belongs
-        // to a different shard.
+        // to a different shard. The held guard is dropped before waiting on the next shard so
+        // no task ever waits on one shard while holding another (which could deadlock against
+        // writers making the opposite transition).
         let mut held: Option<(usize, RwLockReadGuard<'_, Cache>)> = None;
         while !buf.is_empty() {
             let s = shard_index(self.shards.len(), blob_id, page_num);
             if held.as_ref().map(|(held_s, _)| *held_s) != Some(s) {
+                drop(held.take());
                 held = Some((s, self.shards[s].read()));
             }
             let cache = &held.as_ref().expect("guard held").1;
@@ -288,6 +298,7 @@ impl PageCache for ClockCache {
         }
 
         let mut complete = vec![false; ranges.len()];
+        let mut crossers: Vec<u32> = Vec::new();
         let mut pos = 0;
         for (s, count) in counts.iter().enumerate().take(shard_count) {
             let end = pos + count;
@@ -302,19 +313,14 @@ impl PageCache for ClockCache {
                 let mut offset_in_page = (*logical_offset % self.page_size) as usize;
                 let mut dst = 0;
                 while remaining > 0 {
-                    // A range that crosses a block boundary continues in another shard; take
-                    // that shard's lock just for the pages that live there.
-                    let idx = shard_index(shard_count, blob_id, page_num);
-                    let read = if idx == s {
-                        cache.read_page(blob_id, page_num, offset_in_page, &mut buf[dst..])
-                    } else {
-                        self.shards[idx].read().read_page(
-                            blob_id,
-                            page_num,
-                            offset_in_page,
-                            &mut buf[dst..],
-                        )
-                    };
+                    // A range that crosses a block boundary continues in another shard. Finish
+                    // it after this bucket's guard is released: no task ever waits on one
+                    // shard while holding another.
+                    if shard_index(shard_count, blob_id, page_num) != s {
+                        crossers.push(i);
+                        break;
+                    }
+                    let read = cache.read_page(blob_id, page_num, offset_in_page, &mut buf[dst..]);
                     if read == 0 {
                         break;
                     }
@@ -331,6 +337,13 @@ impl PageCache for ClockCache {
             pos = end;
         }
 
+        // Finish ranges that crossed out of their bucket's shard, re-reading from the start
+        // with one guard held at a time. Crossing ranges are rare (one per block boundary).
+        for &i in &crossers {
+            let (buf, logical_offset) = &mut ranges[i as usize];
+            complete[i as usize] = self.read_at(blob_id, buf, *logical_offset) == buf.len();
+        }
+
         // Keep cache misses in `ranges`; drop fully-cached entries.
         let mut idx = 0;
         ranges.retain(|_| {
@@ -342,11 +355,14 @@ impl PageCache for ClockCache {
 
     fn cache(&self, blob_id: u64, page_size: usize, mut buf: &[u8], mut first_page: u64) {
         // Hold one shard's write lock at a time, re-acquiring at block boundaries, so a
-        // multi-page insert never blocks readers of other shards for the whole batch.
+        // multi-page insert never blocks readers of other shards for the whole batch. The held
+        // guard is dropped before waiting on the next shard so no task ever waits on one shard
+        // while holding another.
         let mut held: Option<(usize, RwLockWriteGuard<'_, Cache>)> = None;
         while buf.len() >= page_size {
             let s = shard_index(self.shards.len(), blob_id, first_page);
             if held.as_ref().map(|(held_s, _)| *held_s) != Some(s) {
+                drop(held.take());
                 held = Some((s, self.shards[s].write()));
             }
             let cache = &mut held.as_mut().expect("guard held").1;
@@ -1611,6 +1627,51 @@ mod tests {
         assert!(buf2 == page2);
         // Missed page's buffer should be untouched (still zeroed).
         assert!(buf1.iter().all(|b| *b == 0));
+    }
+
+    #[test_traced]
+    fn test_multi_shard_block_boundary_reads() {
+        // Capacity 256 yields 16 shards of 16 pages (8-page blocks), so these reads exercise
+        // shard routing, guard hand-off at block boundaries, and the read_cached_many
+        // crosser path.
+        let pool = test_pool();
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(256));
+        let blob_id = cache_ref.next_id();
+        let page_size = PAGE_SIZE.get() as usize;
+
+        // Populate pages 0..64, spanning eight shard blocks.
+        for page in 0..64u64 {
+            let data = vec![page as u8 + 1; page_size];
+            assert_eq!(cache_ref.cache(blob_id, &data, page * PAGE_SIZE_U64), 0);
+        }
+
+        // A single read crossing the block boundary between pages 7 and 8 (different shards).
+        let mut buf = vec![0u8; page_size];
+        let offset = 7 * PAGE_SIZE_U64 + PAGE_SIZE_U64 / 2;
+        assert_eq!(cache_ref.read_cached(blob_id, &mut buf, offset), page_size);
+        assert!(buf[..page_size / 2].iter().all(|b| *b == 8));
+        assert!(buf[page_size / 2..].iter().all(|b| *b == 9));
+
+        // Batched reads spread across shards: one per distant shard, one crossing the block
+        // boundary between pages 15 and 16, and one miss (page 80 was never cached).
+        let mut buf0 = vec![0u8; page_size];
+        let mut buf1 = vec![0u8; page_size];
+        let mut buf2 = vec![0u8; page_size];
+        let mut buf3 = vec![0u8; page_size];
+        let mut ranges: Vec<(&mut [u8], u64)> = vec![
+            (&mut buf0, 0),
+            (&mut buf1, 15 * PAGE_SIZE_U64 + PAGE_SIZE_U64 / 2),
+            (&mut buf2, 20 * PAGE_SIZE_U64),
+            (&mut buf3, 80 * PAGE_SIZE_U64),
+        ];
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].1, 80 * PAGE_SIZE_U64);
+        drop(ranges);
+        assert!(buf0.iter().all(|b| *b == 1));
+        assert!(buf1[..page_size / 2].iter().all(|b| *b == 16));
+        assert!(buf1[page_size / 2..].iter().all(|b| *b == 17));
+        assert!(buf2.iter().all(|b| *b == 21));
     }
 
     #[rstest]
