@@ -35,10 +35,7 @@ use commonware_runtime::{
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{channel::oneshot, futures::AbortablePool};
 use core::{future::Future, panic};
-use futures::{
-    future::{ready, Either},
-    pin_mut, StreamExt,
-};
+use futures::{pin_mut, StreamExt};
 use rand_core::CryptoRngCore;
 use std::{
     num::NonZeroUsize,
@@ -1030,7 +1027,11 @@ impl<
         select_loop! {
             self.context,
             on_start => {
-                // Drop any pending items if we have moved to a new view
+                // Drop any pending items if we have moved to a new view. A view
+                // is exited only on successful certification, nullification, or
+                // finalization. Nullification does not cancel certification work
+                // for the exited view, so the automaton must tolerate a dropped
+                // verify receiver while certify still wants the result.
                 if let Some(ref pp) = pending_propose {
                     if pp.view() != self.state.current_view() {
                         pending_propose = None;
@@ -1053,7 +1054,11 @@ impl<
                 }
 
                 // Attempt to certify any views that we have notarizations for.
-                for (proposal, is_local) in self.state.certify_candidates() {
+                //
+                // Even our own proposals are certified through the automaton: that
+                // is the durability barrier that makes a block recoverable before
+                // we cast a finalize vote for it.
+                for proposal in self.state.certify_candidates() {
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
@@ -1063,17 +1068,11 @@ impl<
                         epoch = round.epoch().traced(),
                         view = view.traced()
                     );
-                    let result = if is_local {
-                        Either::Left(ready(Ok(true)))
-                    } else {
-                        #[allow(clippy::async_yields_async)]
-                        let receiver =
-                            async { self.automaton.certify(round, proposal.payload).await }
-                                .instrument(span.clone())
-                                .await;
-                        Either::Right(receiver)
-                    };
-                    let handle = certify_pool.push(async move { (round, span, result.await) });
+                    #[allow(clippy::async_yields_async)]
+                    let receiver = async { self.automaton.certify(round, proposal.payload).await }
+                        .instrument(span.clone())
+                        .await;
+                    let handle = certify_pool.push(async move { (round, span, receiver.await) });
                     self.state.set_certify_handle(view, handle);
                 }
 
