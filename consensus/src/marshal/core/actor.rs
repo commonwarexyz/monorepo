@@ -2,6 +2,7 @@ use super::{
     acks::{PendingAck, PendingAcks},
     cache,
     delivery::PendingVerification,
+    durability::Durable as _,
     floor::Floor,
     mailbox::{CommitmentFallback, Mailbox, Message},
     stream::Stream,
@@ -45,10 +46,13 @@ use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
-    futures::AbortablePool,
+    futures::{AbortablePool, Pool},
     Acknowledgement, BoxedError,
 };
-use futures::{future::join_all, try_join};
+use futures::{
+    future::{join, join_all},
+    try_join,
+};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::{debug, info_span, warn, Instrument as _, Span};
@@ -351,6 +355,12 @@ where
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
 
+        // Observe durable syncs that no consensus caller awaits (the notarization
+        // path). A flush failure inside `start_sync` is reported only through the
+        // returned handle, so every handle must be observed to apply the fatal
+        // policy; this pool does so without blocking the actor on fsync.
+        let mut syncs = Pool::<bool>::default();
+
         // Anchor all startup work under a single root span. Tip recovery, floor
         // installation, gap repair, and the initial dispatch all run before any
         // mailbox message arrives, so without this root their work would emit as
@@ -404,6 +414,9 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
             },
+            // Drive durability syncs: a real sync failure panics inside the
+            // pooled future (the fatal policy), aborting the actor.
+            _ = syncs.next_completed() => {},
             // Handle waiter completions first
             Ok(completion) = waiters.next_completed() else continue => match completion {
                 Ok(block) => {
@@ -447,6 +460,7 @@ where
                     message,
                     &mut resolver,
                     &mut waiters,
+                    &mut syncs,
                     &mut buffer,
                     &mut application,
                 )
@@ -527,6 +541,7 @@ where
         message: Message<P::Scheme, V>,
         resolver: &mut R,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
+        syncs: &mut Pool<bool>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
@@ -595,13 +610,16 @@ where
                 round, block, ack, ..
             } => {
                 self.ingest(&block, buffer, application, resolver).await;
+                let digest = block.digest();
 
                 // If the round has already been pruned by tip advancement,
                 // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
-                // to make progress).
-                self.cache
-                    .put_verified(round, block.digest(), block.clone().into())
+                // to make progress). A duplicate delivery is also a no-op, with
+                // the handle still covering the original write's durability.
+                let handle = self
+                    .cache
+                    .put_verified(round, digest, block.clone().into())
                     .await;
 
                 // Retain the block in memory so the subsequent `Forward` can
@@ -609,52 +627,80 @@ where
                 // proposal (if any) is overwritten.
                 let commitment = V::commitment(&block);
                 self.last_proposed_block = Some((round, commitment, block));
-                ack.expect("durable ack present").send_lossy(());
+                ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Verified {
                 round, block, ack, ..
             } => {
                 self.ingest(&block, buffer, application, resolver).await;
+                let digest = block.digest();
 
                 // If the round has already been pruned by tip advancement,
                 // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
-                // to make progress).
-                self.cache
-                    .put_verified(round, block.digest(), block.into())
-                    .await;
-                ack.expect("durable ack present").send_lossy(());
+                // to make progress). A duplicate delivery is also a no-op, with
+                // the handle still covering the original write's durability.
+                let handle = self.cache.put_verified(round, digest, block.into()).await;
+                ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Certified {
                 round, block, ack, ..
             } => {
                 self.ingest(&block, buffer, application, resolver).await;
+                let digest = block.digest();
 
-                // If the round has already been pruned by tip advancement,
-                // `put_block` is a no-op because the round is below
-                // the retention floor (and no longer is required by consensus
-                // to make progress).
-                self.cache
-                    .put_block(round, block.digest(), block.into())
-                    .await;
-                ack.expect("durable ack present").send_lossy(());
+                // A block the verified archive already holds needs no second copy:
+                // the verified archive's covering sync handle vouches for it. At
+                // most one notarization exists per round, so the notarized slot can
+                // never belong to a different payload: a duplicate put is a no-op
+                // whose handle still covers the original write. If the round has
+                // already been pruned by tip advancement, both writes are no-ops
+                // because the round is below the retention floor.
+                let block_sync = if self.cache.has_verified(round, &digest).await {
+                    debug!(?round, "certified block covered by verified write");
+                    self.cache.start_sync_verified(round).await
+                } else {
+                    self.cache.put_notarized(round, digest, block.into()).await
+                };
+
+                // Hold the certify barrier until the round's notarization
+                // certificate (when one was accepted before this message) is
+                // durable alongside the block.
+                let notarization_sync = self.cache.start_sync_notarizations(round).await;
+                let handle = Handle::from_future(async move {
+                    let (notarization, block) = join(notarization_sync, block_sync).await;
+                    notarization.and(block)
+                });
+                ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
                 let commitment = notarization.proposal.payload;
                 let digest = V::commitment_to_inner(commitment);
 
-                // Cache notarization by round.
-                self.cache
+                // Persist the notarization; the certify barrier folds in its
+                // durability via `start_sync_notarizations`. The archive keeps a
+                // single notarization per round, so a re-delivery is a no-op whose
+                // handle still covers the original write. No consensus caller
+                // awaits this handle, so the pool observes it (applying the fatal
+                // policy) without blocking the actor.
+                let handle = self
+                    .cache
                     .put_notarization(round, digest, notarization)
                     .await;
+                syncs.push(handle.durable(round, "notarization"));
 
                 // A notarization alone is not enough to fetch missing proposal
                 // data. If the block is not locally available, remember the
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     self.ingest(&block, buffer, application, resolver).await;
-                    self.cache.put_block(round, digest, block.into()).await;
+                    if self.cache.has_verified(round, &digest).await {
+                        debug!(?round, "notarized block covered by verified write");
+                    } else {
+                        let handle = self.cache.put_notarized(round, digest, block.into()).await;
+                        syncs.push(handle.durable(round, "notarized"));
+                    }
                 } else {
                     debug!(?round, "notarized block unavailable locally");
                 }
@@ -1526,14 +1572,23 @@ where
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");
 
-                    // Cache the notarization and block.
+                    // Cache the notarization and block, blocking until both are
+                    // durable (or the runtime is shutting down) so the repair
+                    // bookkeeping below never runs ahead of storage.
                     let height = block.height();
-                    self.cache
-                        .put_block(round, digest, block.clone().into())
+                    let block_sync = self
+                        .cache
+                        .put_notarized(round, digest, block.clone().into())
                         .await;
-                    self.cache
+                    let notarization_sync = self
+                        .cache
                         .put_notarization(round, digest, notarization)
                         .await;
+                    join(
+                        block_sync.durable(round, "notarized"),
+                        notarization_sync.durable(round, "notarization"),
+                    )
+                    .await;
 
                     // A notarized delivery can carry the pending floor block
                     // after the finalization is cached.
@@ -1844,7 +1899,7 @@ where
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
         // Check verified / notarized blocks via cache manager.
-        if let Some(block) = self.cache.find_block(digest).await {
+        if let Some(block) = self.cache.find_block_matching(digest, |_| true).await {
             return Some(block.into());
         }
         // Check finalized blocks.

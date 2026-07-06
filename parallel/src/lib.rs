@@ -844,9 +844,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// A parallel execution strategy backed by a rayon thread pool.
     ///
     /// This strategy adaptively executes collection operations serially or across multiple
-    /// threads. It records estimated worker time by callsite, input-size bucket, and thread count so
-    /// small inputs can avoid rayon scheduling overhead without disabling parallelism for larger
-    /// inputs.
+    /// threads. It records wall-clock estimates by callsite, input-size and work-size buckets, and
+    /// thread count so small inputs can avoid rayon scheduling overhead without disabling
+    /// parallelism for larger inputs.
     ///
     /// # Thread Pool Ownership
     ///

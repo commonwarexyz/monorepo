@@ -170,6 +170,16 @@ pub trait MultiArchive: Archive {
         index: u64,
     ) -> impl Future<Output = Result<Option<Vec<Self::Value>>, Error>> + Send + use<'_, Self>;
 
+    /// Check whether `key` is stored at `index`.
+    ///
+    /// Unlike [Archive::has] with [Identifier::Key], the check is scoped to a
+    /// single index. Unlike [MultiArchive::get_all], no values are fetched.
+    fn has_at<'a>(
+        &'a self,
+        index: u64,
+        key: &'a Self::Key,
+    ) -> impl Future<Output = Result<bool, Error>> + Send + use<'a, Self>;
+
     /// Store an item, allowing multiple items at the same index.
     ///
     /// Multiple items may share the same `index`. If the same key is stored at

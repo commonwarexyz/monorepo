@@ -50,7 +50,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn fuzz(input: FuzzInput) {
     let mut rng = StdRng::seed_from_u64(input.rng_seed);
 
-    let mut ed25519_batch = Ed25519Batch::new();
+    let mut ed25519_batch = Ed25519Batch::new(0);
     let mut expected_ed25519_result = true;
 
     for op in input.operations {
@@ -109,7 +109,7 @@ fn fuzz(input: FuzzInput) {
                 );
 
                 // Reset batch and expectation after verification
-                ed25519_batch = Ed25519Batch::new();
+                ed25519_batch = Ed25519Batch::new(0);
                 expected_ed25519_result = true;
             }
         }
