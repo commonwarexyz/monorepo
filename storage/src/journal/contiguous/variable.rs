@@ -29,7 +29,7 @@ use commonware_runtime::{
     Blob as RBlob, Buf, IoBuf,
 };
 use commonware_utils::NZUsize;
-use futures::Stream;
+use futures::{future::try_join_all, Stream};
 use std::{
     collections::BTreeMap,
     io::Cursor,
@@ -740,9 +740,11 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 other => other,
             })?;
 
-        // Group runs of consecutive positions that fall into the same blob and perform a consecutive
-        // read for each run.
+        // Group runs of consecutive positions that fall into the same blob, then read all runs
+        // concurrently: uniform access makes most runs a single item, so reading them
+        // sequentially would serialize one I/O per miss.
         let items_per_blob = self.items_per_blob.get();
+        let mut runs = Vec::new();
         let mut group_start = 0;
         while group_start < miss_positions.len() {
             let blob = position_to_blob(miss_positions[group_start], items_per_blob);
@@ -767,17 +769,20 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 {
                     run_end += 1;
                 }
-
-                let items = self
-                    .read_consecutive(&blob_handle, blob, &miss_offsets[run_start..run_end])
-                    .await?;
-
-                for (item, &miss_idx) in items.into_iter().zip(&miss_indices[run_start..run_end]) {
-                    result[miss_idx] = Some(item);
-                }
+                runs.push((run_start, run_end, blob, blob_handle.clone()));
                 run_start = run_end;
             }
             group_start = group_end;
+        }
+
+        let run_items = try_join_all(runs.iter().map(|(run_start, run_end, blob, handle)| {
+            self.read_consecutive(handle, *blob, &miss_offsets[*run_start..*run_end])
+        }))
+        .await?;
+        for ((run_start, run_end, _, _), items) in runs.iter().zip(run_items) {
+            for (item, &miss_idx) in items.into_iter().zip(&miss_indices[*run_start..*run_end]) {
+                result[miss_idx] = Some(item);
+            }
         }
 
         self.metrics.items_read.inc_by(positions.len() as u64);
