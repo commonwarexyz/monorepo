@@ -26,7 +26,6 @@
 use crate::{Blob, Buf, BufMut, Error, IoBuf};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{crc32, Crc32};
-use std::num::NonZeroUsize;
 
 mod cache;
 mod read;
@@ -44,41 +43,6 @@ pub use writer::Writer;
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 const CHECKSUM_SLOT_LEN_SIZE: usize = u16::SIZE;
 const CHECKSUM_SLOT_SIZE: usize = CHECKSUM_SLOT_LEN_SIZE + crc32::Digest::SIZE;
-
-/// Ensure every requested item lies within the blob's size.
-///
-/// # Panics
-///
-/// Panics if `buf` is not exactly one `item_size` slot per offset, or if offsets are not sorted
-/// and non-overlapping.
-fn validate_read_many_into(
-    buf_len: usize,
-    offsets: &[u64],
-    item_size: NonZeroUsize,
-    size: u64,
-) -> Result<(), Error> {
-    validate_read_ranges(buf_len, offsets.iter().map(|&o| (o, item_size.get())), size)
-}
-
-/// Partition a batch read into items copied from in-memory tail bytes and items that need
-/// cache/blob reads.
-///
-/// A fixed-slot batch is the [split_read_ranges] case with a constant per-range length. `buf`
-/// holds one `item_size` slot per offset (validated by [validate_read_many_into]).
-fn split_read_many<'a>(
-    buf: &'a mut [u8],
-    offsets: &[u64],
-    item_size: NonZeroUsize,
-    tail_offset: u64,
-    tail: &[u8],
-) -> Vec<(&'a mut [u8], u64)> {
-    split_read_ranges(
-        buf,
-        offsets.iter().map(|&o| (o, item_size.get())),
-        tail_offset,
-        tail,
-    )
-}
 
 /// Ensure every requested range lies within the blob's size.
 ///
@@ -450,7 +414,6 @@ impl arbitrary::Arbitrary<'_> for Checksum {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::NZUsize;
     use rstest::rstest;
 
     enum ValidationExpectation {
@@ -460,60 +423,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case::empty_offsets_are_a_noop(0, vec![], 4, 0, ValidationExpectation::Ok)]
-    #[case::offset_plus_item_size_must_not_overflow(
-        4,
-        vec![u64::MAX - 1],
-        4,
-        u64::MAX,
-        ValidationExpectation::OffsetOverflow
-    )]
-    #[case::range_must_stay_within_logical_size(
-        4,
-        vec![8],
-        4,
-        10,
-        ValidationExpectation::BlobInsufficientLength
-    )]
-    #[case::range_may_end_exactly_at_logical_size(2, vec![8], 2, 10, ValidationExpectation::Ok)]
-    fn test_validate_read_many_into(
-        #[case] buf_len: usize,
-        #[case] offsets: Vec<u64>,
-        #[case] item_size: usize,
-        #[case] size: u64,
-        #[case] expected: ValidationExpectation,
-    ) {
-        // These cases pin the fixed-slot adapter over the shared range contract used by Writer
-        // and Sealed (through View): every requested byte must be within the logical blob size,
-        // with checked offset arithmetic. Contract violations (buffer length, unsorted offsets)
-        // panic. See the should_panic tests below.
-        let result = validate_read_many_into(buf_len, &offsets, NZUsize!(item_size), size);
-
-        match expected {
-            ValidationExpectation::Ok => assert!(result.is_ok()),
-            ValidationExpectation::OffsetOverflow => {
-                assert!(matches!(result, Err(Error::OffsetOverflow)))
-            }
-            ValidationExpectation::BlobInsufficientLength => {
-                assert!(matches!(result, Err(Error::BlobInsufficientLength)))
-            }
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "buf must hold one slot per range totaling its length")]
-    fn test_validate_read_many_into_rejects_buffer_len_mismatch() {
-        let _ = validate_read_many_into(7, &[0, 4], NZUsize!(4), 16);
-    }
-
-    #[test]
-    #[should_panic(expected = "ranges must be sorted and non-overlapping")]
-    fn test_validate_read_many_into_rejects_unsorted_offsets() {
-        let _ = validate_read_many_into(8, &[8, 4], NZUsize!(4), 16);
-    }
-
-    #[rstest]
     #[case::ok(12, vec![(0, 4), (4, 8)], 16, ValidationExpectation::Ok)]
+    #[case::empty_ranges_are_a_noop(0, vec![], 0, ValidationExpectation::Ok)]
     #[case::zero_length_range(4, vec![(0, 0), (0, 4)], 16, ValidationExpectation::Ok)]
     #[case::offset_overflow(4, vec![(u64::MAX, 4)], 16, ValidationExpectation::OffsetOverflow)]
     #[case::insufficient_length(4, vec![(14, 4)], 16, ValidationExpectation::BlobInsufficientLength)]

@@ -191,13 +191,13 @@ impl<B: Blob> View<'_, B> {
         item_size: NonZeroUsize,
         cache_pass: bool,
     ) -> Result<usize, Error> {
-        super::validate_read_many_into(buf.len(), offsets, item_size, self.size)?;
+        let ranges = || offsets.iter().map(|&o| (o, item_size.get()));
+        super::validate_read_ranges(buf.len(), ranges(), self.size)?;
         if offsets.is_empty() {
             return Ok(0);
         }
 
-        let mut cache_ranges =
-            super::split_read_many(buf, offsets, item_size, self.tail_offset, self.tail);
+        let mut cache_ranges = super::split_read_ranges(buf, ranges(), self.tail_offset, self.tail);
         if cache_pass {
             // Fast path: try the page cache for all ranges in a single lock acquisition.
             self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
@@ -230,15 +230,15 @@ impl<B: Blob> View<'_, B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Vec<usize> {
-        if super::validate_read_many_into(buf.len(), offsets, item_size, self.size).is_err() {
+        let ranges = || offsets.iter().map(|&o| (o, item_size.get()));
+        if super::validate_read_ranges(buf.len(), ranges(), self.size).is_err() {
             return (0..offsets.len()).collect();
         }
         if offsets.is_empty() {
             return Vec::new();
         }
 
-        let mut cache_ranges =
-            super::split_read_many(buf, offsets, item_size, self.tail_offset, self.tail);
+        let mut cache_ranges = super::split_read_ranges(buf, ranges(), self.tail_offset, self.tail);
         if cache_ranges.is_empty() {
             return Vec::new();
         }

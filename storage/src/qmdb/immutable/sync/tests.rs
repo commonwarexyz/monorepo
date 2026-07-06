@@ -28,6 +28,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64};
+use harnesses::VariableMmrHarness as H;
 use rand::RngCore as _;
 use std::{
     collections::{HashMap, VecDeque},
@@ -1149,8 +1150,6 @@ sync_tests_for_harness!(harnesses::VariableMmbHarness, variable_mmb);
 /// while a matching target serves the boundary nodes locally.
 #[commonware_macros::test_traced]
 fn test_immutable_local_boundary_nodes_rejects_target_before_local_lower_bound() {
-    use harnesses::VariableMmrHarness as H;
-
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let suffix = context.next_u64().to_string();

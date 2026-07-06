@@ -788,6 +788,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 continue;
             };
             resolved[idx] = Some(offset);
+
             // The successor lookup is adjacent in `lookups` whenever it was pushed (in
             // bounds). A cross-blob successor's offset is in a different data blob and does
             // not bound this frame.
@@ -862,17 +863,6 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
         self.metrics.items_read.inc_by(hits);
         resolved
-    }
-}
-
-/// Map offsets-journal range errors to corruption: the caller has already validated the
-/// positions against `bounds`, so the offsets journal must have them.
-fn offsets_corruption(e: Error) -> Error {
-    match e {
-        Error::ItemOutOfRange(e) | Error::ItemPruned(e) => {
-            Error::Corruption(format!("blob/item should be found, but got: {e}"))
-        }
-        other => other,
     }
 }
 
@@ -960,6 +950,10 @@ impl<E: Context, V: CodecShared> super::Probed for Probed<'_, E, V> {
         } = self;
         let _timer = reader.metrics.read_many_timer();
         reader.metrics.read_many_calls.inc();
+
+        // A single probe's misses are already strictly increasing (asserted by `probe`). Only
+        // `merge` can break that, by concatenating key-sharded probes whose position ranges
+        // interleave or repeat.
         if !misses.windows(2).all(|w| w[0].position < w[1].position) {
             misses.sort_by_key(|miss| miss.position);
             // Duplicates come from merged key-sharded probes. Their offsets can only differ
@@ -1039,11 +1033,19 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             .filter(|miss| miss.offset.is_none())
             .map(|miss| miss.position)
             .collect();
+
+        // Range errors from the offsets journal are corruption: the positions were already
+        // validated against `bounds`, so the offsets journal must have them.
         let fetched = self
             .offsets
             .fetch_misses(&unresolved)
             .await
-            .map_err(offsets_corruption)?;
+            .map_err(|e| match e {
+                Error::ItemOutOfRange(e) | Error::ItemPruned(e) => {
+                    Error::Corruption(format!("blob/item should be found, but got: {e}"))
+                }
+                other => other,
+            })?;
         let mut fetched = fetched.into_iter();
         let offsets: Vec<u64> = misses
             .iter()

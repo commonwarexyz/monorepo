@@ -1111,6 +1111,12 @@ where
     /// Values the caller has computed for earlier staged slots are not visible until they are passed
     /// to [`merkleize`](Staged::merkleize). Callers that need speculative read-your-writes behavior
     /// should maintain their own overlay while deciding which staged slots to update.
+    #[tracing::instrument(
+        name = "qmdb.any.batch.expand",
+        level = "info",
+        skip_all,
+        fields(keys = keys.len() as u64, staged = self.keys.len() as u64),
+    )]
     pub async fn expand<E, C, I, const N: usize>(
         mut self,
         keys: &[&U::Key],
@@ -1421,6 +1427,12 @@ where
     /// [`expand`](Staged::expand) appends another index range. Unlike
     /// [`get_many`](Self::get_many), the resolved locations are reused at merkleize, so keys
     /// that are read and then written skip the index re-probe and journal re-read.
+    #[tracing::instrument(
+        name = "qmdb.any.batch.stage",
+        level = "info",
+        skip_all,
+        fields(keys = keys.len() as u64),
+    )]
     pub async fn stage<E, C, I, const N: usize>(
         self,
         keys: &[&U::Key],
@@ -1542,18 +1554,15 @@ where
     {
         let (mut mutations, m) = self.into_parts();
 
-        // `value` is `Some` for a staged update and `None` for a staged delete. The
-        // location-ordered merge below emits each as an `Update`/`Delete` at the cached location.
-        let cached = staged_updates;
-
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false);
         let results = m.read_ops(&locations, &[], &db.log).await?;
 
         // Generate user mutation operations.
         let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
-            Vec::with_capacity(mutations.len() + cached.len() + 1);
-        let mut diff: DiffVec<K, F, V::Value> = Vec::with_capacity(mutations.len() + cached.len());
+            Vec::with_capacity(mutations.len() + staged_updates.len() + 1);
+        let mut diff: DiffVec<K, F, V::Value> =
+            Vec::with_capacity(mutations.len() + staged_updates.len());
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
 
@@ -1585,10 +1594,11 @@ where
             user_steps += 1;
         };
 
-        // Process updates/deletes of existing keys in location order, merging cached entries
+        // Process updates/deletes of existing keys in location order, merging staged entries
         // into the read results. This includes keys from both the committed snapshot and ancestor
-        // diffs.
-        let mut cached = cached.into_iter().peekable();
+        // diffs. A staged entry's `value` is `Some` for an update and `None` for a delete, and
+        // `emit` writes it as an `Update`/`Delete` at the staged location.
+        let mut cached = staged_updates.into_iter().peekable();
         for (op, &old_loc) in results.iter().zip(&locations) {
             while cached.peek().is_some_and(|&(_, loc, (), _)| loc < old_loc) {
                 let (key, loc, (), mutation) = cached.next().expect("peeked entry exists");
@@ -1732,11 +1742,6 @@ where
     {
         let (mut mutations, m) = self.into_parts();
 
-        // Staged updates skip the index probe and journal re-read, and their old op's next key
-        // feeds the candidate sets directly. The ordered path never stages deletes (see
-        // `Staged::resolve_updates`), so every staged entry carries a value.
-        let cached = staged_updates;
-
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);
 
@@ -1781,11 +1786,13 @@ where
             }
         }
 
-        // Merge staged-resolved updates: their old op's next_key and (key, loc) feed the
-        // candidate sets exactly as the skipped journal read would have. No prev-candidate
-        // value is stored: it is only consumed when the predecessor-rewrite loop emits an op
-        // for the key, and that loop skips every key present in `updated`.
-        for (key, loc, old_next, value) in cached {
+        // Merge staged-resolved updates: they skip the index probe and journal re-read, and
+        // their old op's next_key and (key, loc) feed the candidate sets exactly as the skipped
+        // journal read would have. No prev-candidate value is stored: it is only consumed when
+        // the predecessor-rewrite loop emits an op for the key, and that loop skips every key
+        // present in `updated`. The ordered path never stages deletes (see
+        // `Staged::resolve_updates`), so every staged entry carries a value.
+        for (key, loc, old_next, value) in staged_updates {
             let value = value.expect("ordered path never stages deletes");
             next_candidates.push(old_next);
             prev_candidates.push((key.clone(), (None, loc)));
