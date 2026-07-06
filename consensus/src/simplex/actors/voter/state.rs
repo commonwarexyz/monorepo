@@ -620,15 +620,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.outstanding_certifications.insert(view);
     }
 
-    /// Takes all certification candidates and returns proposals ready for
-    /// certification, along with whether the proposal was built locally.
-    ///
-    /// Certification may be inferred only when we have explicit evidence that we
-    /// proposed this exact payload for the round, either in the current process
-    /// or via replay of our durable local vote. In certain cases for Byzantine nodes,
-    /// it is possible that a certificate is received for a proposal that we did not propose (although
-    /// we are the leader).
-    pub fn certify_candidates(&mut self) -> Vec<(Proposal<D>, bool)> {
+    /// Takes all certification candidates and returns proposals ready for certification.
+    pub fn certify_candidates(&mut self) -> Vec<Proposal<D>> {
         let candidates = take(&mut self.certification_candidates);
         candidates
             .into_iter()
@@ -1924,8 +1917,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), view);
-            assert!(candidates[0].1);
+            assert_eq!(candidates[0].round.view(), view);
         });
     }
 
@@ -1976,12 +1968,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            let (candidate, is_local) = &candidates[0];
-            assert_eq!(*candidate, proposal);
-            assert!(
-                !*is_local,
-                "leader-owned recovered proposal must not inherit local certification"
-            );
+            assert_eq!(candidates[0], proposal);
         });
     }
 
@@ -2114,7 +2101,6 @@ mod tests {
             // All 6 views should be candidates
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 6);
-            assert!(candidates.iter().all(|(_, is_local)| !is_local));
 
             // Set certify handles for views 3, 4, 5, 7 (NOT 6 or 8)
             for i in [3u64, 4, 5, 7] {
@@ -2154,8 +2140,7 @@ mod tests {
             state.add_notarization(make_notarization(View::new(9)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), View::new(9));
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), View::new(9));
 
             // Set handle for view 9, add view 10
             let handle9 = pool.push(futures::future::pending());
@@ -2165,8 +2150,7 @@ mod tests {
             // View 10 returned (view 9 has handle)
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), View::new(10));
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), View::new(10));
 
             // Finalize view 9 - aborts view 9's handle
             state.add_finalization(make_finalization(View::new(9)));
@@ -2176,8 +2160,7 @@ mod tests {
             state.add_notarization(make_notarization(View::new(11)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), View::new(11));
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), View::new(11));
         });
     }
 
@@ -2249,8 +2232,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), live_view);
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), live_view);
         });
     }
 
@@ -2305,8 +2287,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), view);
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), view);
         });
     }
 
@@ -2350,8 +2331,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), view);
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), view);
 
             let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());

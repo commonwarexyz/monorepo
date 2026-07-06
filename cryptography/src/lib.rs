@@ -155,8 +155,11 @@ commonware_macros::stability_scope!(BETA {
         /// The type of public keys that this verifier can accept.
         type PublicKey: PublicKey;
 
-        /// Create a new batch verifier.
-        fn new() -> Self;
+        /// Create a new batch verifier with capacity for at least `capacity` items.
+        ///
+        /// The capacity is a hint: more than `capacity` items may be added, and
+        /// implementations may ignore it.
+        fn new(capacity: usize) -> Self;
 
         /// Append item to the batch.
         ///
