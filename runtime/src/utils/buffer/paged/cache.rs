@@ -50,7 +50,7 @@ struct PageFetchEntry {
 ///
 /// Must be a power of two. The actual shard count is reduced for small caches so every shard
 /// holds at least one page.
-const MAX_SHARDS: usize = 16;
+const MAX_SHARDS: usize = 64;
 
 /// Number of consecutive pages that map to the same shard.
 ///
@@ -200,9 +200,11 @@ impl ClockCache {
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let capacity = capacity.get();
 
-        // Largest power of two <= min(MAX_SHARDS, capacity), so every shard gets at least one
-        // page and the shard index is a mask.
-        let shard_count = 1usize << MAX_SHARDS.min(capacity).ilog2();
+        // Largest power of two <= min(MAX_SHARDS, capacity / SHARD_BLOCK_PAGES), so every
+        // shard can hold at least one full block of consecutive pages and the shard index is
+        // a mask. Caches smaller than a block use a single shard.
+        let max_shards = MAX_SHARDS.min(capacity / SHARD_BLOCK_PAGES as usize).max(1);
+        let shard_count = 1usize << max_shards.ilog2();
         let base = capacity / shard_count;
         let rem = capacity % shard_count;
         let shards: Arc<[RwLock<Cache>]> = (0..shard_count)
@@ -226,24 +228,30 @@ impl ClockCache {
 }
 
 impl PageCache for ClockCache {
-    fn read_at(&self, blob_id: u64, mut buf: &mut [u8], mut offset: u64) -> usize {
+    fn read_at(&self, blob_id: u64, mut buf: &mut [u8], offset: u64) -> usize {
         let original_len = buf.len();
+        let mut page_num = offset / self.page_size;
+        let mut offset_in_page = (offset % self.page_size) as usize;
 
         // Hold one shard's read lock at a time, re-acquiring only when the next page belongs
         // to a different shard.
         let mut held: Option<(usize, RwLockReadGuard<'_, Cache>)> = None;
         while !buf.is_empty() {
-            let s = shard_index(self.shards.len(), blob_id, offset / self.page_size);
+            let s = shard_index(self.shards.len(), blob_id, page_num);
             if held.as_ref().map(|(held_s, _)| *held_s) != Some(s) {
                 held = Some((s, self.shards[s].read()));
             }
             let cache = &held.as_ref().expect("guard held").1;
-            let count = cache.read_at(blob_id, buf, offset);
+            let count = cache.read_page(blob_id, page_num, offset_in_page, buf);
             if count == 0 {
                 break;
             }
-            offset += count as u64;
             buf = &mut buf[count..];
+            page_num = match page_num.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
+            offset_in_page = 0;
         }
         original_len - buf.len()
     }
@@ -290,25 +298,33 @@ impl PageCache for ClockCache {
             for &i in &order[pos..end] {
                 let (buf, logical_offset) = &mut ranges[i as usize];
                 let mut remaining = buf.len();
-                let mut offset = *logical_offset;
+                let mut page_num = *logical_offset / self.page_size;
+                let mut offset_in_page = (*logical_offset % self.page_size) as usize;
                 let mut dst = 0;
                 while remaining > 0 {
                     // A range that crosses a block boundary continues in another shard; take
                     // that shard's lock just for the pages that live there.
-                    let idx = shard_index(shard_count, blob_id, offset / self.page_size);
+                    let idx = shard_index(shard_count, blob_id, page_num);
                     let read = if idx == s {
-                        cache.read_at(blob_id, &mut buf[dst..], offset)
+                        cache.read_page(blob_id, page_num, offset_in_page, &mut buf[dst..])
                     } else {
-                        self.shards[idx]
-                            .read()
-                            .read_at(blob_id, &mut buf[dst..], offset)
+                        self.shards[idx].read().read_page(
+                            blob_id,
+                            page_num,
+                            offset_in_page,
+                            &mut buf[dst..],
+                        )
                     };
                     if read == 0 {
                         break;
                     }
-                    offset += read as u64;
                     dst += read;
                     remaining -= read;
+                    page_num = match page_num.checked_add(1) {
+                        Some(next) => next,
+                        None => break,
+                    };
+                    offset_in_page = 0;
                 }
                 complete[i as usize] = remaining == 0;
             }
@@ -704,12 +720,23 @@ impl Cache {
     fn read_at(&self, blob_id: u64, buf: &mut [u8], logical_offset: u64) -> usize {
         let (page_num, offset_in_page) =
             Self::offset_to_page(self.page_size as u64, logical_offset);
+        self.read_page(blob_id, page_num, offset_in_page as usize, buf)
+    }
+
+    /// Copy up to a page of cached bytes for `(blob_id, page_num)` starting at
+    /// `offset_in_page` into `buf`, returning the number of bytes copied (0 on a miss).
+    fn read_page(
+        &self,
+        blob_id: u64,
+        page_num: u64,
+        offset_in_page: usize,
+        buf: &mut [u8],
+    ) -> usize {
         let Some(page) = self.cache.get(&(blob_id, page_num)) else {
             return 0;
         };
         let page = page.as_ref();
 
-        let offset_in_page = offset_in_page as usize;
         let bytes_to_copy = std::cmp::min(buf.len(), self.page_size - offset_in_page);
         buf[..bytes_to_copy].copy_from_slice(&page[offset_in_page..offset_in_page + bytes_to_copy]);
 
