@@ -1415,6 +1415,8 @@ mod tests {
         let (_, len, owner) = OwnerRef::from_vec(Vec::new());
         assert_eq!(len, 0);
         assert!(owner.is_empty());
+        // SAFETY: empty owners have no refcount to read.
+        assert_eq!(unsafe { owner.refcount() }, None);
     }
 
     #[test]
@@ -1472,23 +1474,42 @@ mod tests {
 
     #[test]
     fn test_vec_adoption_boundary_matches_placement_rule() {
-        // Walk spare capacities around the header size and check the adopt
-        // versus external decision matches the placement rule exactly. The
-        // exact threshold depends on the runtime base address, so the rule is
-        // recomputed per vec rather than hardcoded.
+        // Walk spare capacities around the header size. The placement helper
+        // is not used as its own oracle: adopted cases assert the invariants
+        // the header placement must uphold, and every case reads the payload
+        // back through the returned view to prove the header write did not
+        // clobber it.
         for spare in 0..(size_of::<HeapOwner>() + 2 * align_of::<HeapOwner>()) {
             let len = 16;
             let mut vec = Vec::with_capacity(len + spare);
             vec.extend_from_slice(&[9u8; 16]);
             let base_addr = vec.as_ptr() as usize;
             let cap = vec.capacity();
-            let fits = HeapOwner::vec_adoption_header_offset(base_addr, len, cap).is_some();
-            let (_, _, owner) = OwnerRef::from_vec(vec);
-            assert_eq!(
-                owner.is_external(),
-                !fits,
-                "spare={spare} cap={cap} base={base_addr:#x}"
-            );
+            let (ptr, out_len, owner) = OwnerRef::from_vec(vec);
+            assert_eq!(out_len, len, "spare={spare} cap={cap}");
+
+            if owner.is_external() {
+                // Declined: the header genuinely does not fit past the
+                // readable bytes.
+                assert!(
+                    HeapOwner::vec_adoption_header_offset(base_addr, len, cap).is_none(),
+                    "spare={spare} cap={cap} base={base_addr:#x}"
+                );
+            } else {
+                // Adopted: the header must start at or past the readable
+                // bytes, header-aligned, and end within the allocation.
+                // SAFETY: owner is unique and live.
+                let header_offset = unsafe { owner.usable_capacity() };
+                assert!(header_offset >= len, "spare={spare} cap={cap}");
+                assert!(header_offset.is_multiple_of(align_of::<HeapOwner>()));
+                assert!(header_offset + size_of::<HeapOwner>() <= cap);
+                assert_eq!(ptr.as_ptr() as usize, base_addr);
+            }
+
+            // SAFETY: ptr points at `out_len` readable bytes kept alive by
+            // the owner.
+            let payload = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), out_len) };
+            assert_eq!(payload, &[9u8; 16], "spare={spare} cap={cap}");
             // SAFETY: final drop releases the owner.
             unsafe { owner.drop_shared() };
         }

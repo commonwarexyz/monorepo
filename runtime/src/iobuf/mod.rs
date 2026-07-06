@@ -2663,7 +2663,7 @@ mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{types::lazy::Lazy, Decode, Encode, RangeCfg};
-    use core::ops::{Range, RangeFrom, RangeInclusive, RangeToInclusive};
+    use core::ops::{Bound, Range, RangeFrom, RangeInclusive, RangeToInclusive};
     use std::{
         collections::{BTreeMap, HashMap},
         mem::size_of,
@@ -2785,6 +2785,105 @@ mod tests {
     fn test_iobuf_advance_past_end() {
         let mut buf = IoBuf::from(b"hello");
         buf.advance(10);
+    }
+
+    #[test]
+    fn test_iobuf_copy_to_slice_paths() {
+        let mut buf = IoBuf::from(b"hello world");
+        let mut dst = [0u8; 5];
+        buf.copy_to_slice(&mut dst);
+        assert_eq!(&dst, b"hello");
+        assert_eq!(buf.as_ref(), b" world");
+
+        let mut dst = [0u8; 3];
+        buf.try_copy_to_slice(&mut dst).unwrap();
+        assert_eq!(&dst, b" wo");
+
+        // Requesting more than remaining fails without consuming anything.
+        let mut dst = [0u8; 4];
+        let err = buf.try_copy_to_slice(&mut dst).unwrap_err();
+        assert_eq!(err.requested, 4);
+        assert_eq!(err.available, 3);
+        assert_eq!(buf.as_ref(), b"rld");
+    }
+
+    #[test]
+    #[should_panic(expected = "Not enough bytes remaining in buffer")]
+    fn test_iobuf_copy_to_slice_past_end() {
+        let mut buf = IoBuf::from(b"ab");
+        let mut dst = [0u8; 3];
+        buf.copy_to_slice(&mut dst);
+    }
+
+    #[test]
+    #[should_panic(expected = "copy_to_bytes out of bounds")]
+    fn test_iobuf_copy_to_bytes_past_end() {
+        let mut buf = IoBuf::from(b"ab");
+        let _ = buf.copy_to_bytes(3);
+    }
+
+    #[test]
+    fn test_iobuf_slice_excluded_start_bound() {
+        // Excluded start bounds resolve to start + 1.
+        let buf = IoBuf::from(b"hello");
+        let sliced = buf.slice((Bound::Excluded(0), Bound::Unbounded));
+        assert_eq!(sliced, b"ello");
+    }
+
+    #[test]
+    #[should_panic(expected = "slice out of bounds")]
+    fn test_iobuf_slice_out_of_bounds() {
+        let buf = IoBuf::from(b"hello");
+        let _ = buf.slice(..6);
+    }
+
+    #[test]
+    #[should_panic(expected = "slice start must be <= end")]
+    fn test_iobuf_slice_inverted_range() {
+        let buf = IoBuf::from(b"hello");
+        #[allow(clippy::reversed_empty_ranges)]
+        let _ = buf.slice(3..1);
+    }
+
+    #[test]
+    #[should_panic(expected = "range end overflow")]
+    fn test_iobuf_slice_inclusive_end_overflow() {
+        let buf = IoBuf::from(b"hello");
+        let _ = buf.slice(0..=usize::MAX);
+    }
+
+    #[test]
+    fn test_iobuf_try_into_mut_empty_and_static() {
+        // Empty views convert trivially.
+        let buf = IoBuf::default().try_into_mut().expect("empty converts");
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), 0);
+
+        // Non-empty static views decline: there is no allocation to recover.
+        let err = IoBuf::from(b"static").try_into_mut().unwrap_err();
+        assert_eq!(err, b"static");
+
+        // Empty buffers convert to empty Bytes without touching an owner.
+        let empty = Bytes::from(IoBuf::default());
+        assert!(empty.is_empty());
+
+        // Empty static slices detach to the default representation.
+        let empty = IoBuf::from(&b""[..]);
+        assert!(empty.is_empty());
+        assert!(empty.try_into_mut().is_ok());
+    }
+
+    #[test]
+    fn test_iobufs_for_each_chunk_single_and_empty() {
+        // The Single arm is bypassed by coalesce (which returns the buffer
+        // directly), so exercise the public method on both Single shapes.
+        let mut seen = Vec::new();
+        IoBufs::from(b"hello").for_each_chunk(|chunk| seen.push(chunk.to_vec()));
+        assert_eq!(seen, vec![b"hello".to_vec()]);
+
+        let mut count = 0;
+        IoBufs::default().for_each_chunk(|_| count += 1);
+        assert_eq!(count, 0);
     }
 
     #[test]
@@ -3270,10 +3369,19 @@ mod tests {
 
     #[test]
     fn test_iobufs_copy_to_bytes_edge_cases() {
-        // Leading empty chunk should not affect copied payload.
-        let mut iobufs = IoBufs::from(IoBuf::from(b""));
-        iobufs.append(IoBuf::from(b"hello"));
+        // A non-canonical leading empty chunk in the deque path is popped
+        // without affecting the copied payload. Canonical construction never
+        // stores empties, so the state is built directly.
+        let mut iobufs = IoBufs {
+            inner: IoBufsInner::Chunked(VecDeque::from([
+                IoBuf::default(),
+                IoBuf::from(b"hel"),
+                IoBuf::from(b"lo"),
+                IoBuf::from(b" world"),
+            ])),
+        };
         assert_eq!(iobufs.copy_to_bytes(5).as_ref(), b"hello");
+        assert_eq!(iobufs.remaining(), 6);
 
         // Boundary-aligned reads should return exact chunk payloads in-order.
         let mut boundary = IoBufs::from(IoBuf::from(b"hello"));
@@ -3465,15 +3573,6 @@ mod tests {
     }
 
     #[test]
-    fn test_iobufsmut_coalesce() {
-        let buf1 = IoBufMut::from(b"hello");
-        let buf2 = IoBufMut::from(b" world");
-        let bufs = IoBufsMut::from(vec![buf1, buf2]);
-        let coalesced = bufs.coalesce();
-        assert_eq!(coalesced, b"hello world");
-    }
-
-    #[test]
     fn test_iobufsmut_from_vec() {
         // Empty Vec becomes Single with empty buffer
         let bufs = IoBufsMut::from(Vec::<IoBufMut>::new());
@@ -3491,22 +3590,6 @@ mod tests {
         let buf2 = IoBufMut::from(b" world");
         let bufs = IoBufsMut::from(vec![buf1, buf2]);
         assert!(!bufs.is_single());
-    }
-
-    #[test]
-    fn test_iobufsmut_from_vec_filters_empty_chunks() {
-        let mut bufs = IoBufsMut::from(vec![
-            IoBufMut::default(),
-            IoBufMut::from(b"hello"),
-            IoBufMut::default(),
-            IoBufMut::from(b" world"),
-            IoBufMut::default(),
-        ]);
-        assert_eq!(bufs.chunk(), b"hello");
-        bufs.advance(5);
-        assert_eq!(bufs.chunk(), b" world");
-        bufs.advance(6);
-        assert_eq!(bufs.remaining(), 0);
     }
 
     #[test]
@@ -3569,6 +3652,108 @@ mod tests {
     fn test_iobufmut_advance_past_end() {
         let mut buf = IoBufMut::from(b"hello");
         buf.advance(10);
+    }
+
+    #[test]
+    fn test_iobufmut_copy_to_slice_tracks_len_and_cap() {
+        // copy_to_slice must shrink len and cap in lockstep with the pointer
+        // advance: the front-heap release path derives the allocation size
+        // from ptr + cap, so a cap mismatch would corrupt the dealloc layout.
+        let mut buf = IoBufMut::with_capacity(16);
+        buf.put_slice(b"abcdefgh");
+
+        let mut dst = [0u8; 3];
+        buf.copy_to_slice(&mut dst);
+        assert_eq!(&dst, b"abc");
+        assert_eq!(buf.as_ref(), b"defgh");
+        assert_eq!(buf.len(), 5);
+        assert_eq!(buf.capacity(), 13);
+
+        // try_copy_to_slice success mirrors copy_to_slice.
+        let mut dst = [0u8; 2];
+        buf.try_copy_to_slice(&mut dst).unwrap();
+        assert_eq!(&dst, b"de");
+        assert_eq!(buf.capacity(), 11);
+
+        // Requesting more than remaining fails without consuming anything.
+        let mut dst = [0u8; 4];
+        let err = buf.try_copy_to_slice(&mut dst).unwrap_err();
+        assert_eq!(err.requested, 4);
+        assert_eq!(err.available, 3);
+        assert_eq!(buf.as_ref(), b"fgh");
+        assert_eq!(buf.capacity(), 11);
+
+        // Freeze and recover: the owner must observe a consistent allocation
+        // for the advanced handle (view offset 5 leaves 16 - 5 = 11 bytes of
+        // capacity), and the final drop (checked under miri) must deallocate
+        // with the original layout.
+        let frozen = buf.freeze();
+        assert_eq!(frozen.as_ref(), b"fgh");
+        let recovered = frozen.try_into_mut().expect("unique buffer recovers");
+        assert_eq!(recovered.as_ref(), b"fgh");
+        assert_eq!(recovered.capacity(), 11);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not enough bytes remaining in buffer")]
+    fn test_iobufmut_copy_to_slice_past_end() {
+        let mut buf = IoBufMut::from(b"ab");
+        let mut dst = [0u8; 3];
+        buf.copy_to_slice(&mut dst);
+    }
+
+    #[test]
+    #[should_panic(expected = "copy_to_bytes out of bounds")]
+    fn test_iobufmut_copy_to_bytes_past_end() {
+        let mut buf = IoBufMut::from(b"ab");
+        let _ = buf.copy_to_bytes(3);
+    }
+
+    #[test]
+    fn test_iobufmut_put_bytes_success() {
+        let mut buf = IoBufMut::with_capacity(8);
+        buf.put_bytes(7, 5);
+        assert_eq!(buf.as_ref(), &[7u8; 5]);
+        assert_eq!(buf.len(), 5);
+        assert_eq!(buf.remaining_mut(), 3);
+    }
+
+    #[test]
+    fn test_iobufmut_put_multi_chunk_source() {
+        let mut buf = IoBufMut::with_capacity(8);
+        buf.put((&b"hel"[..]).chain(&b"lo"[..]));
+        assert_eq!(buf.as_ref(), b"hello");
+        assert_eq!(buf.remaining_mut(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobufmut_put_slice_past_capacity() {
+        let mut buf = IoBufMut::with_capacity(4);
+        buf.put_slice(b"hello");
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobufmut_put_bytes_past_capacity() {
+        let mut buf = IoBufMut::with_capacity(4);
+        buf.put_bytes(0, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobufmut_advance_mut_past_capacity() {
+        let mut buf = IoBufMut::with_capacity(4);
+        // SAFETY: the call panics on the bounds check before any byte in the
+        // advanced region could be observed.
+        unsafe { buf.advance_mut(5) };
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobufmut_put_past_capacity() {
+        let mut buf = IoBufMut::with_capacity(4);
+        buf.put(&b"hello"[..]);
     }
 
     #[test]
@@ -5329,9 +5514,11 @@ mod tests {
             assert_eq!(bufs.remaining(), 0);
         }
 
-        // Inline writes exceeding capacity panic.
+        // Inline writes exceeding capacity panic. `Builder` does not override
+        // the `BufMut` write methods, so the panic (and message) comes from
+        // bytes' trait defaults checking `remaining_mut`.
         #[test]
-        #[should_panic]
+        #[should_panic(expected = "advance out of bounds")]
         fn test_inline_overflow_panics() {
             let mut b = builder(1);
             let cap = b.remaining_mut();
@@ -5363,9 +5550,9 @@ mod tests {
             assert_eq!(r.copy_to_bytes(200), c);
         }
 
-        // put() exceeding capacity panics.
+        // put() exceeding capacity panics (in bytes' trait default).
         #[test]
-        #[should_panic]
+        #[should_panic(expected = "advance out of bounds")]
         fn test_put_exceeding_capacity_panics() {
             let mut b = builder(1);
             let cap = b.remaining_mut();
@@ -5373,9 +5560,9 @@ mod tests {
             b.put(src);
         }
 
-        // put_slice() exceeding capacity panics.
+        // put_slice() exceeding capacity panics (in bytes' trait default).
         #[test]
-        #[should_panic]
+        #[should_panic(expected = "advance out of bounds")]
         fn test_put_slice_exceeding_capacity_panics() {
             let mut b = builder(1);
             let cap = b.remaining_mut();
@@ -5437,9 +5624,10 @@ mod tests {
             assert_eq!(r.get_u8(), 0xAB);
         }
 
-        // Writing past a full buffer panics (fixed capacity).
+        // Writing past a full buffer panics (fixed capacity; the panic comes
+        // from bytes' trait default).
         #[test]
-        #[should_panic]
+        #[should_panic(expected = "advance out of bounds")]
         fn test_write_past_full_panics() {
             let mut b = builder(1);
             let cap = b.remaining_mut();

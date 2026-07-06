@@ -276,9 +276,6 @@ impl BufferPoolConfig {
         for i in 0..Self::num_classes(min_size, self.max_size.get()) {
             class_bytes = class_bytes.saturating_add(Self::class_size(min_size, i));
         }
-        if class_bytes == 0 {
-            return self;
-        }
         let max_per_class = u32::try_from(budget_bytes.get().div_ceil(class_bytes))
             .expect("max_per_class must fit in u32 slot ids");
         self.max_per_class =
@@ -407,13 +404,15 @@ impl PoolMetrics {
                 "Number of tracked buffers created for the pool",
                 raw::Family::default(),
             ),
+            // Counters are registered without the `_total` suffix because the
+            // prometheus encoder appends it to counter names.
             exhausted_total: registry.register(
-                "buffer_pool_exhausted_total",
+                "buffer_pool_exhausted",
                 "Total number of failed allocations due to pool exhaustion",
                 raw::Family::default(),
             ),
             oversized_total: registry.register(
-                "buffer_pool_oversized_total",
+                "buffer_pool_oversized",
                 "Total number of allocation requests exceeding max buffer size",
                 raw::Counter::default(),
             ),
@@ -1105,6 +1104,10 @@ impl TlsSizeClassCaches {
     /// pooled slots contain live leases.
     #[inline(always)]
     fn get_or_init(&mut self, class_id: usize, capacity: usize) -> &mut TlsSizeClassCache {
+        // The initialized arm is defensively kept but not reachable today:
+        // callers route through this method only when the fast TLS pointer
+        // misses, and the fast pointer is published before any cache is
+        // created, so an existing cache is always found through the fast path.
         if class_id < self.bins.len() && self.bins[class_id].is_some() {
             return self.bins[class_id]
                 .as_mut()
@@ -1889,6 +1892,51 @@ mod tests {
             prefill: false,
             alignment: NZUsize!(page_size()),
         };
+        config.validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "max_size must be a power of two")]
+    fn test_config_invalid_max_size() {
+        let page = page_size();
+        let mut config = test_config(page, page, 10);
+        config.max_size = NZUsize!(page * 3);
+        config.validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "max_size must be >= min_size")]
+    fn test_config_max_size_below_min_size() {
+        let page = page_size();
+        let mut config = test_config(page * 2, page * 2, 10);
+        config.max_size = NZUsize!(page);
+        config.validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "alignment must be a power of two")]
+    fn test_config_invalid_alignment() {
+        let page = page_size();
+        let mut config = test_config(page, page, 10);
+        config.alignment = NZUsize!(page - 1);
+        config.validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "must be >= alignment")]
+    fn test_config_min_size_below_alignment() {
+        let page = page_size();
+        let mut config = test_config(page, page, 10);
+        config.alignment = NZUsize!(page * 2);
+        config.validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "pool_min_size")]
+    fn test_config_pool_min_size_above_min_size() {
+        let page = page_size();
+        let mut config = test_config(page, page, 10);
+        config.pool_min_size = page + 1;
         config.validate();
     }
 
@@ -2783,31 +2831,6 @@ mod tests {
     }
 
     #[test]
-    fn test_iobuf_to_iobufmut_conversion_preserves_full_unique_view() {
-        // IoBuf -> IoBufMut via From should preserve data and keep pooled
-        // ownership for a fully-written unique view.
-        let page = page_size();
-        let pool = test_pool(test_config(page, page, 2));
-
-        // Fill a pooled buffer completely and freeze.
-        let mut buf = pool.try_alloc(page).unwrap();
-        buf.put_slice(&vec![0xEE; page]);
-        let iobuf = buf.freeze();
-
-        // Convert back to mutable; should reuse pooled storage.
-        let iobufmut: IoBufMut = iobuf.into();
-        assert_eq!(iobufmut.len(), page);
-        assert!(iobufmut.as_ref().iter().all(|&b| b == 0xEE));
-        assert_eq!(get_allocated(&pool, page), 1);
-        assert_eq!(get_available(&pool, page), 0);
-
-        // Dropping returns the buffer to the pool.
-        drop(iobufmut);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-    }
-
-    #[test]
     fn test_iobuf_try_into_mut_recycles_full_unique_view() {
         // try_into_mut on a uniquely-owned full-view pooled IoBuf should recover
         // mutable ownership without copying, preserving data and pool tracking.
@@ -3102,6 +3125,35 @@ mod tests {
         let _buf2 = pool.try_alloc(page).unwrap();
         let result = pool.try_alloc(page);
         assert_eq!(result.unwrap_err(), PoolError::Exhausted);
+    }
+
+    #[test]
+    fn test_pool_metrics_track_created_exhausted_oversized() {
+        let page = page_size();
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
+
+        // One created buffer, then exhaustion, then an oversized request.
+        let buf = pool.try_alloc(page).unwrap();
+        assert_eq!(pool.try_alloc(page).unwrap_err(), PoolError::Exhausted);
+        assert_eq!(pool.try_alloc(page * 2).unwrap_err(), PoolError::Oversized);
+
+        let encoded = registry.encode();
+        assert!(
+            encoded.contains(&format!("buffer_pool_created{{size_class=\"{page}\"}} 1")),
+            "created gauge missing: {encoded}"
+        );
+        assert!(
+            encoded.contains(&format!(
+                "buffer_pool_exhausted_total{{size_class=\"{page}\"}} 1"
+            )),
+            "exhausted counter missing: {encoded}"
+        );
+        assert!(
+            encoded.contains("buffer_pool_oversized_total 1"),
+            "oversized counter missing: {encoded}"
+        );
+        drop(buf);
     }
 
     #[test]

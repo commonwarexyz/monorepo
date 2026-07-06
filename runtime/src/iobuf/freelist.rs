@@ -804,6 +804,9 @@ pub(super) mod tests {
         assert_eq!(buffer0.slot(), 0);
         assert_eq!(buffer1.slot(), 1);
         assert_eq!(created(&set), 2);
+        let debug = format!("{buffer0:?}");
+        assert!(debug.contains("PooledBuffer"));
+        assert!(debug.contains("slot: 0"));
 
         // Slot reservation is bounded by capacity, even if the created
         // buffers have not yet been returned to the freelist.
@@ -822,6 +825,19 @@ pub(super) mod tests {
         let prefilled = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, true);
         assert_eq!(created(&prefilled), 2);
         assert_eq!(len(&prefilled), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "returned slot must not already be marked free")]
+    fn test_freelist_put_rejects_double_return() {
+        let set = Freelist::new(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false);
+        let buffer = set.try_create(false).expect("slot available");
+        // SAFETY: the duplicate handle exists only to drive the double-return
+        // assert; the second put panics before it is used further, and drain
+        // deallocates the slot exactly once afterwards.
+        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) };
+        set.put(buffer);
+        set.put(duplicate);
     }
 
     #[test]
