@@ -127,27 +127,29 @@ fn block_available(
 ///
 /// Only for a floor install that shares a mailbox drain with an independent
 /// dispatch pass (the `MailboxBurst` event, which enqueues many actions at
-/// once). There, marshal first dispatches the ready heights above the floor,
-/// then the floor anchor's `ingest` clears its pending-ack waiters and
-/// re-dispatches from the floor (`ingest` -> `pending_acks.clear`). Each ready
+/// once). There, heights already dispatchable before this event are dispatched
+/// in the drain, then the floor anchor's `ingest` clears its pending-ack waiters
+/// and re-dispatches from the floor (`ingest` -> `pending_acks.clear`). Each such
 /// height at or above the reinstalled floor is delivered twice in that drain:
 /// once before the clear (now orphaned, its waiter gone exactly like a
-/// restart-stale ack) and once after. The pre-clear copies are dispatched
-/// first, so queue them as stale in ascending order; only the live post-clear
-/// deliveries remain for the in-order check.
+/// restart-stale ack) and once after. The pre-clear copies are dispatched first,
+/// so queue them as stale in ascending order; only the live post-clear deliveries
+/// remain for the in-order check.
 ///
 /// A standalone `SetFloor` posts a single `set_floor` message: marshal ingests
 /// once and dispatches each ready height once (no pre-clear pass), so that path
 /// must NOT call this or it would mark the sole live delivery stale.
 ///
-/// The orphaned heights are `floor_height..=ready_prefix`: `ready_prefix` is
-/// the contiguous finalized prefix after all same-event floor and repair shadow
-/// updates, so those are exactly the heights marshal can dispatch above the
-/// floor. The caller's `current_segment_empty` / `only_genesis_pending` guards
-/// ensure none of them were dispatched before this event, so each is orphaned
-/// in this drain rather than pre-existing.
-/// When `ready_prefix < floor_height` nothing is ready above the floor and the
-/// range is empty (no duplicate dispatch occurs).
+/// The orphaned heights are `floor_height..=ready_prefix`, where `ready_prefix`
+/// is the contiguous finalized prefix as of the END of the previous event (the
+/// pre-event value), NOT the post-floor/post-repair value. Only heights already
+/// dispatchable before this event get a pre-clear copy; heights the floor
+/// install itself makes ready are dispatched once (live) and must not be marked
+/// stale. The caller's `current_segment_empty` / `only_genesis_pending` guards
+/// ensure none of the pre-event-ready heights were dispatched before this event,
+/// so each is orphaned in this drain rather than pre-existing. When the pre-event
+/// `ready_prefix < floor_height` nothing above the floor was ready and the range
+/// is empty (single live dispatch, no orphans).
 fn queue_floor_orphaned_acks(
     stale_to_skip: &mut VecDeque<Height>,
     floor_height: u64,
@@ -524,6 +526,11 @@ where
             // store_finalization's return value.
             let mut repair_wake = false;
             let mut floor_orphaned_from = None;
+            // Ready prefix as of the end of the previous event. A same-event floor
+            // install only orphans heights that were ALREADY dispatchable (pre-clear
+            // pass); heights the floor itself makes ready are dispatched once (live),
+            // so the orphan set must use this pre-event value, not the post-repair one.
+            let ready_prefix_before = ready_prefix;
             match event {
                 MarshalEvent::Propose { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
@@ -1291,11 +1298,12 @@ where
             }
 
             if let Some(floor_height) = floor_orphaned_from {
-                // A MailboxBurst floor shares a drain with earlier dispatches.
-                // The same event can then apply the floor and repair gaps before
-                // marshal settles, so queue stale pre-clear copies using the final
-                // ready prefix for this event.
-                queue_floor_orphaned_acks(&mut stale_to_skip, floor_height, ready_prefix);
+                // A MailboxBurst floor shares a drain with earlier dispatches. Only
+                // heights already dispatchable before this event get a pre-clear copy
+                // (orphaned); heights the floor newly makes ready are dispatched once
+                // (live). Bound the orphan set by the pre-event ready prefix so the
+                // floor's own newly-ready heights are not marked stale.
+                queue_floor_orphaned_acks(&mut stale_to_skip, floor_height, ready_prefix_before);
             }
 
             context.sleep(EVENT_SETTLE).await;
