@@ -13,8 +13,9 @@ use std::{ops::Deref, sync::Arc};
 pub(super) struct CacheMetrics {
     /// Fixed items read without async storage fallback.
     hits: Counter,
-    /// Fixed items that fell back to a blob read in `read` and `read_many`. Declined probes
-    /// (`try_read_sync` and `try_read_many_sync`) count hits only, never misses.
+    /// Fixed items that fell back to a blob read in `read`, `read_many`, and probe completion
+    /// (`Probed::fetch` and `Probed::fetch_missing`). Declined probes (`try_read_sync` and
+    /// `try_read_many_sync`) count hits only, never misses.
     misses: Counter,
 }
 
@@ -54,11 +55,13 @@ pub(super) struct CommonMetrics<E: Clock> {
     pub read_calls: Counter,
     /// Duration of single-item read calls that miss the page cache.
     read_duration: Timed,
-    /// Non-empty batch async read calls.
+    /// Non-empty batch async read calls (`read_many` and probe completion via `Probed::fetch`
+    /// or `Probed::fetch_missing`).
     pub read_many_calls: Counter,
     /// Duration of non-empty batch read calls.
     read_many_duration: Timed,
-    /// Items returned by read, read_many, try_read_many_sync, and try_read_sync.
+    /// Items returned by read, read_many, try_read_many_sync, try_read_sync, and probe
+    /// completion. Probes count their sync hits; completion counts the fetched misses.
     pub items_read: Counter,
     /// Full sync calls.
     pub sync_calls: Counter,
@@ -124,7 +127,7 @@ impl<E: RuntimeMetrics + Clock> CommonMetrics<E> {
         );
         let items_read = context.as_ref().counter(
             "items_read",
-            "Number of items returned by read, read_many, try_read_many_sync, and try_read_sync",
+            "Number of items returned by point reads, batch reads, sync probes, and probe completion",
         );
         let sync_calls = context
             .as_ref()
