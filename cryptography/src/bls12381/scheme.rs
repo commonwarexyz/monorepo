@@ -372,11 +372,11 @@ pub struct Batch {
 impl BatchVerifier for Batch {
     type PublicKey = PublicKey;
 
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
-            publics: Vec::new(),
-            hms: Vec::new(),
-            signatures: Vec::new(),
+            publics: Vec::with_capacity(capacity),
+            hms: Vec::with_capacity(capacity),
+            signatures: Vec::with_capacity(capacity),
         }
     }
 
@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn batch_verify_empty() {
-        let batch = Batch::new();
+        let batch = Batch::new(0);
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 

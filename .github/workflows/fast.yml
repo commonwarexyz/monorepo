@@ -43,6 +43,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
+        components: clippy
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-components: ${{ matrix.os == 'ubuntu-latest' && matrix.flags == '' && 'rustfmt,rustc-dev,llvm-tools-preview' || 'rustfmt' }}
         additional-cache-key: ${{ matrix.flags || 'default' }}
@@ -103,7 +104,8 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: ${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
+        additional-cache-key: ${{ matrix.flags || 'default' }}
+        rust-cache-save: ${{ matrix.partition == 1 }}
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -158,7 +160,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: stability-${{ matrix.level }}
+        additional-cache-key: ${{ matrix.level }}
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -179,7 +181,6 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        additional-cache-key: unstable-public
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -238,6 +239,8 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        rust-cache-enabled: false
     - name: Install just & cargo-cooldown
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -323,6 +326,8 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        rust-cache-enabled: false
     - name: Check no_std compatibility
       run: ./.github/scripts/check_no_std.sh
 
@@ -351,6 +356,8 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        rust-cache-enabled: false
     - name: Check publish order
       run: python3 .github/scripts/check_publish_order.py
 
@@ -398,7 +405,6 @@ jobs:
         uses: ./.github/actions/setup
         with:
           toolchain: ${{ steps.toolchain.outputs.version }}
-          additional-cache-key: toolchain-${{ matrix.toolchain }}
       - name: Install just & cargo-hack
         uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
         with:

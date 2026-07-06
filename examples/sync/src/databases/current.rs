@@ -7,7 +7,7 @@
 //! documentation for more details.
 //!
 //! For sync, the engine targets the **ops root** (not the canonical root). The operations and proof
-//! format are identical to `any`; direct proof verifiers should use `qmdb::hasher`. The bitmap is
+//! format are identical to `any`; verify proofs directly with `qmdb::verify_proof`. The bitmap is
 //! reconstructed deterministically from the operations after sync completes. See the
 //! [Root structure](commonware_storage::qmdb::current) module documentation for details.
 //!

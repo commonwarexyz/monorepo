@@ -1355,6 +1355,7 @@ dependencies = [
 name = "commonware-cryptography"
 version = "2026.5.0"
 dependencies = [
+ "ahash",
  "anyhow",
  "arbitrary",
  "aws-lc-rs",
@@ -1380,6 +1381,7 @@ dependencies = [
  "ecdsa",
  "fixedbitset",
  "getrandom 0.2.16",
+ "hashbrown 0.16.1",
  "num-rational",
  "num-traits",
  "once_cell",
