@@ -273,6 +273,8 @@ impl Freelist {
     /// finally dropped, otherwise the buffer leaks.
     #[inline(always)]
     pub(super) fn try_create(&self, zeroed: bool) -> Option<(u32, PooledBuffer)> {
+        // TODO: migrate to `try_update` once MSRV is >= 1.95
+        #[allow(deprecated)]
         let slot = self
             .created
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
