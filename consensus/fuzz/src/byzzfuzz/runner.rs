@@ -258,6 +258,8 @@ where
             relay.clone(),
             Duration::from_secs(1),
             Duration::from_secs(2),
+            input.mailbox_size,
+            input.fetch_concurrent,
             input.forwarding,
             (vote_primary, vote_receiver),
             (cert_primary, cert_receiver),
