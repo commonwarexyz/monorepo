@@ -9,11 +9,13 @@
 //! IoBufMut = ptr, len, cap, owner   (32 bytes on 64-bit)
 //! ```
 //!
-//! `bytes::Buf` and `bytes::BufMut` methods read only those handle fields. They
-//! do not match on allocation kind and do not dispatch through a vtable. The
-//! allocation kind is needed only for lifecycle operations such as clone, drop,
-//! `freeze`, and `try_into_mut`, so that metadata is stored in an owner header
-//! outside the hot cursor arithmetic.
+//! The `bytes::Buf` and `bytes::BufMut` cursor methods (`remaining`, `chunk`,
+//! `advance`, `copy_to_slice`, and the write-side equivalents) read only those
+//! handle fields; they do not match on allocation kind and do not dispatch
+//! through a vtable. The allocation kind is needed only for lifecycle and
+//! ownership-transferring operations such as clone, drop, `freeze`,
+//! `copy_to_bytes`, and `try_into_mut`, so that metadata is stored in an owner
+//! header outside the hot cursor arithmetic.
 //!
 //! # Owner model
 //!
@@ -23,8 +25,9 @@
 //!
 //! ```text
 //! 0 (entire value)        EMPTY     no owner; empty views and 'static slices
-//! header ptr | 0b01       HEAP      HeapOwner; native aligned allocations,
-//!                                   adopted vecs, and front-block mutables
+//! header ptr | 0b01       HEAP      HeapOwner; tail-header aligned
+//!                                   allocations, adopted vecs, and
+//!                                   front-block mutables
 //! slot ptr   | 0b10       POOLED    PooledOwner side-table entry
 //! owner ptr  | 0b11       EXTERNAL  boxed ExternalOwner holding a Bytes
 //! ```
@@ -67,8 +70,8 @@
 //! entry is the single state record for refcounting, class liveness, data
 //! pointer, and return routing.
 //!
-//! Low-alignment mutable heap allocations use the v2 front-block layout
-//! instead:
+//! Returning to heap allocations: low-alignment mutable buffers use the
+//! front-block layout instead of the tail layout above:
 //!
 //! ```text
 //! [ reserved HeapOwner ][ usable data bytes ............ ]
@@ -115,9 +118,10 @@
 //! ^ OwnerRef target        ^ kept alive by the inner Bytes
 //! ```
 //!
-//! The inner `Bytes` refcount is touched exactly twice in the buffer's life:
-//! moved in at construction and dropped at final release. Clones, slices, and
-//! drops of the `IoBuf` touch only our refcount.
+//! Clones, slices, and drops of the `IoBuf` touch only our refcount; the
+//! inner `Bytes` refcount is touched at construction, at final release, and
+//! by the `slice_ref` fast paths (partial `copy_to_bytes` drains and
+//! `Bytes::from(IoBuf)` conversions of external-backed views).
 //!
 //! # Refcount state machine
 //!
@@ -612,9 +616,9 @@ impl OwnerRef {
     /// base to the header. For canonical heap allocations this is the requested
     /// capacity rounded up to header alignment; the at most `ALIGN - 1` padding
     /// bytes precede the header and are genuinely writable. For adopted vecs it
-    /// is the spare-capacity prefix below the header. For initialized
-    /// front-header heap owners, capacity is the allocation size minus the
-    /// leading header reservation.
+    /// is the prefix below the header (readable bytes plus spare capacity).
+    /// For initialized front-header heap owners, capacity is the allocation
+    /// size minus the leading header reservation.
     ///
     /// # Safety
     ///
@@ -859,7 +863,6 @@ impl PooledBuffer {
     /// The slot is initialized once when the owning freelist creates this
     /// buffer and is needed only when the buffer returns to the global
     /// freelist.
-    ///
     #[inline(always)]
     pub(crate) const fn slot(&self) -> u32 {
         // SAFETY: `PooledBuffer` is constructed only for created slots, whose

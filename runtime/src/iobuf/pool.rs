@@ -21,7 +21,7 @@
 //! - Requests smaller than [`BufferPoolConfig::pool_min_size`] bypass pooling
 //!   entirely and return untracked aligned allocations from both
 //!   [`BufferPool::try_alloc`] and [`BufferPool::alloc`].
-//! - Dropping [`BufferPool`] drains only the shared global freelists, pooled
+//! - Dropping [`BufferPool`] drains only the shared global freelists; pooled
 //!   views and buffers cached in a live thread's local cache can keep their
 //!   size class alive until they are dropped or the thread exits.
 //!
@@ -834,9 +834,9 @@ impl TlsSizeClassCacheEntry {
 ///
 /// Each instance is stored in [`TlsSizeClassCaches`] under one global
 /// [`SizeClass::class_id`], so all entries in the cache belong to the same size
-/// class. The cache owns full [`PooledBuffer`] values while they are local,
-/// returning them to the global freelist happens only on miss refill, overflow,
-/// explicit flush, or thread exit.
+/// class. The cache owns full [`PooledBuffer`] values while they are local;
+/// interaction with the global freelist happens only on miss refill (take),
+/// overflow spill, explicit flush, or thread exit (return).
 ///
 /// When `len > 0`, each initialized entry in `entries[..len]` owns one live
 /// slot lease, which keeps the pointed-to class alive. An empty cache owns no
@@ -1024,8 +1024,8 @@ impl TlsSizeClassCache {
     /// leases are the last references, releasing first would drop the
     /// freelist before the buffers returned to it.
     ///
-    /// The caller must have already lowered `len` below `start`, transferring
-    /// ownership of the entries in `start..end` to this function.
+    /// The caller must have already lowered `len` to at most `start`,
+    /// transferring ownership of the entries in `start..end` to this function.
     #[inline(never)]
     fn return_global_batch(&mut self, start: usize, end: usize) {
         assert!(start < end && end <= self.capacity);
@@ -1386,9 +1386,9 @@ impl Drop for BufferPoolInner {
     fn drop(&mut self) {
         // The public pool is going away. Drain globally parked buffers while
         // the pool-owned class handles are still live. Pooled views and live
-        // TLS cache entries own their own size-class references, if they return
-        // later, they will park their buffer and release the reference that kept
-        // the class alive.
+        // TLS cache entries own their own size-class references; if they
+        // return later, they park their buffer and release the reference that
+        // kept the class alive.
         for class in &self.classes {
             class.global.drain();
         }
@@ -1659,6 +1659,23 @@ impl BufferPool {
     ///
     /// The returned buffer contains **uninitialized memory**. Do not read from
     /// it until data has been written.
+    ///
+    /// # Examples
+    ///
+    /// Pools are owned by the runtime and reached through
+    /// [`BufferPooler`](crate::BufferPooler):
+    ///
+    /// ```
+    /// use commonware_runtime::{deterministic, BufMut, BufferPooler, Runner};
+    ///
+    /// let executor = deterministic::Runner::default();
+    /// executor.start(|context| async move {
+    ///     let mut buf = context.storage_buffer_pool().alloc(1024);
+    ///     assert!(buf.is_pooled());
+    ///     buf.put_slice(b"payload");
+    ///     drop(buf); // the buffer returns to the pool for reuse
+    /// });
+    /// ```
     #[inline]
     pub fn alloc(&self, capacity: usize) -> IoBufMut {
         self.try_alloc(capacity).unwrap_or_else(|_| {

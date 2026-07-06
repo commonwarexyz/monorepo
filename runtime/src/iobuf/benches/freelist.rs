@@ -315,7 +315,9 @@ impl FreelistImplementation for Freelist {
             self.put(buffer);
             return;
         }
-        // unique and each is returned exactly once; the drain iterator cannot panic.
+        // Every held buffer was taken from this freelist by a distinct take,
+        // so slots are unique and each is returned exactly once; the drain
+        // iterator cannot panic.
         self.put_batch(buffers.drain(..));
     }
 }

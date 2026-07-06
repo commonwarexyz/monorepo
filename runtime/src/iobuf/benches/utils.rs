@@ -118,9 +118,10 @@ pub fn measure<T>(
 
                     if matches!(pattern, Pattern::Staggered) {
                         // Desynchronize threads so they don't all hit the
-                        // allocator at once. This spreads access times apart
-                        // without adding enough delay to dominate the
-                        // measurement.
+                        // allocator at once. The spins run inside the timed
+                        // loop and their cost is included in the reported
+                        // time; see the module doc for how staggered numbers
+                        // may be compared.
                         let spins = (iter as usize).wrapping_add(1).wrapping_mul(
                             thread_id
                                 .wrapping_mul(MAX_BENCH_THREADS - 1)
