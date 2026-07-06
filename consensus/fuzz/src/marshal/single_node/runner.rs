@@ -141,10 +141,11 @@ fn block_available(
 /// must NOT call this or it would mark the sole live delivery stale.
 ///
 /// The orphaned heights are `floor_height..=ready_prefix`: `ready_prefix` is
-/// the contiguous finalized prefix, so those are exactly the heights marshal
-/// can dispatch above the floor. The caller's `current_segment_empty` /
-/// `only_genesis_pending` guards ensure none of them were dispatched before
-/// this event, so each is orphaned in this drain rather than pre-existing.
+/// the contiguous finalized prefix after all same-event floor and repair shadow
+/// updates, so those are exactly the heights marshal can dispatch above the
+/// floor. The caller's `current_segment_empty` / `only_genesis_pending` guards
+/// ensure none of them were dispatched before this event, so each is orphaned
+/// in this drain rather than pre-existing.
 /// When `ready_prefix < floor_height` nothing is ready above the floor and the
 /// range is empty (no duplicate dispatch occurs).
 fn queue_floor_orphaned_acks(
@@ -522,6 +523,7 @@ where
             // This mirrors actor.rs gating try_repair_gaps on
             // store_finalization's return value.
             let mut repair_wake = false;
+            let mut floor_orphaned_from = None;
             match event {
                 MarshalEvent::Propose { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
@@ -1036,14 +1038,7 @@ where
                             });
                         }
                         durable_available.insert(floor_height.get());
-                        // Any height already ready above the reinstalled floor
-                        // was dispatched before marshal's floor ingest cleared
-                        // its ack waiters; those pre-clear deliveries are stale.
-                        queue_floor_orphaned_acks(
-                            &mut stale_to_skip,
-                            floor_height.get(),
-                            ready_prefix,
-                        );
+                        floor_orphaned_from = Some(floor_height.get());
                         repair_wake |= apply_pending_floor(
                             &mut pending_floor,
                             floor_height,
@@ -1293,6 +1288,14 @@ where
                     &mut finalized_available,
                     &mut ready_prefix,
                 );
+            }
+
+            if let Some(floor_height) = floor_orphaned_from {
+                // A MailboxBurst floor shares a drain with earlier dispatches.
+                // The same event can then apply the floor and repair gaps before
+                // marshal settles, so queue stale pre-clear copies using the final
+                // ready prefix for this event.
+                queue_floor_orphaned_acks(&mut stale_to_skip, floor_height, ready_prefix);
             }
 
             context.sleep(EVENT_SETTLE).await;
