@@ -429,6 +429,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "marshal_inline"
+path = "fuzz_targets/marshal_inline.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_store"
+path = "fuzz_targets/marshal_store.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "marshal_liveness_standard"
 path = "fuzz_targets/marshal_liveness_standard.rs"
 test = false
