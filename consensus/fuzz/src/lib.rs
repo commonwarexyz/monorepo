@@ -116,6 +116,31 @@ pub(crate) const FAULT_PHASE: Duration = Duration::from_secs(30);
 pub(crate) const POST_GST_WINDOW: Duration = Duration::from_secs(360);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
+const DEFAULT_MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
+const DEFAULT_FETCH_CONCURRENT: NonZeroUsize = NZUsize!(1);
+
+pub(crate) fn fuzz_mailbox_size(
+    u: &mut arbitrary::Unstructured<'_>,
+) -> arbitrary::Result<NonZeroUsize> {
+    Ok(match u.int_in_range(0..=99)? {
+        0..=49 => DEFAULT_MAILBOX_SIZE,
+        50..=74 => NZUsize!(1),
+        75..=89 => NZUsize!(2),
+        90..=96 => NZUsize!(4),
+        _ => NZUsize!(8),
+    })
+}
+
+pub(crate) fn fuzz_fetch_concurrent(
+    u: &mut arbitrary::Unstructured<'_>,
+) -> arbitrary::Result<NonZeroUsize> {
+    Ok(match u.int_in_range(0..=99)? {
+        0..=49 => DEFAULT_FETCH_CONCURRENT,
+        50..=74 => NZUsize!(2),
+        75..=89 => NZUsize!(4),
+        _ => NZUsize!(8),
+    })
+}
 
 /// Network configuration for fuzz testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +328,8 @@ impl fmt::Debug for FuzzInputDebug<'_> {
             .field("partition", &input.partition)
             .field("strategy", &input.strategy)
             .field("messaging_faults", &input.messaging_faults)
+            .field("mailbox_size", &input.mailbox_size)
+            .field("fetch_concurrent", &input.fetch_concurrent)
             .field("forwarding", &input.forwarding)
             .field("certify", &input.certify)
             .field("reporting", &input.reporting)
@@ -318,6 +345,8 @@ impl fmt::Debug for NodeFuzzInputDebug<'_> {
         f.debug_struct("NodeFuzzInput")
             .field("raw_bytes_len", &input.raw_bytes.len())
             .field("events", &input.events)
+            .field("mailbox_size", &input.mailbox_size)
+            .field("fetch_concurrent", &input.fetch_concurrent)
             .field("forwarding", &input.forwarding)
             .field("certify", &input.certify)
             .field("reporting", &input.reporting)
@@ -356,6 +385,10 @@ pub struct FuzzInput {
     /// `rate%` honest-message drop while the reference reporter is in `view`;
     /// the rate reverts to 0 outside scheduled views.
     pub messaging_faults: Vec<(View, u8)>,
+    /// Per-iteration mailbox capacity threaded into every honest engine.
+    pub mailbox_size: NonZeroUsize,
+    /// Per-iteration resolver fetch concurrency threaded into every honest engine.
+    pub fetch_concurrent: NonZeroUsize,
     /// Per-iteration forwarding policy threaded into every engine the harness
     /// spawns. Sampling lets the fuzzer drive coverage of all three arms of
     /// `batcher::forward_targets` instead of pinning to `Disabled`.
@@ -435,6 +468,9 @@ impl Arbitrary<'_> for FuzzInput {
 
         let reporting = ReporterWiring::arbitrary(u)?;
 
+        let mailbox_size = fuzz_mailbox_size(u)?;
+        let fetch_concurrent = fuzz_fetch_concurrent(u)?;
+
         // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
@@ -451,6 +487,8 @@ impl Arbitrary<'_> for FuzzInput {
             required_containers,
             strategy,
             messaging_faults: Vec::new(),
+            mailbox_size,
+            fetch_concurrent,
             forwarding,
             certify,
             reporting,
@@ -675,6 +713,8 @@ pub(crate) fn spawn_honest_validator<
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     leader_timeout: Duration,
     certification_timeout: Duration,
+    mailbox_size: NonZeroUsize,
+    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
@@ -728,7 +768,7 @@ where
         relay: application.clone(),
         reporter: wiring.wire(reporter.clone()),
         partition: validator.to_string(),
-        mailbox_size: NZUsize!(1024),
+        mailbox_size,
         epoch: Epoch::new(EPOCH),
         floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
         leader_timeout,
@@ -737,7 +777,7 @@ where
         fetch_timeout: Duration::from_secs(1),
         activity_timeout: Delta::new(10),
         skip_timeout: Delta::new(5),
-        fetch_concurrent: NZUsize!(1),
+        fetch_concurrent,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -765,6 +805,8 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     leader_timeout: Duration,
     certification_timeout: Duration,
+    mailbox_size: NonZeroUsize,
+    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     channels: NetworkChannels<PublicKeyOf<P>>,
     certify: CertifyChoice,
@@ -807,6 +849,8 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
         relay,
         leader_timeout,
         certification_timeout,
+        mailbox_size,
+        fetch_concurrent,
         forwarding,
         (vote_sender, vote_receiver),
         (certificate_sender, certificate_receiver),
@@ -1135,6 +1179,8 @@ fn run_standard_once<P: simplex::Simplex>(
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
+                input.mailbox_size,
+                input.fetch_concurrent,
                 input.forwarding,
                 pending,
                 recovered,
@@ -1290,6 +1336,8 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
+                input.mailbox_size,
+                input.fetch_concurrent,
                 input.forwarding,
                 channels,
                 input.certify,
@@ -1600,7 +1648,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     partition: format!("twin_{idx}_primary"),
-                    mailbox_size: NZUsize!(1024),
+                    mailbox_size: input.mailbox_size,
                     epoch: Epoch::new(EPOCH),
                     floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
                     leader_timeout: Duration::from_secs(1),
@@ -1609,7 +1657,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout: Delta::new(10),
                     skip_timeout: Delta::new(5),
-                    fetch_concurrent: NZUsize!(1),
+                    fetch_concurrent: input.fetch_concurrent,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1685,7 +1733,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
                             relay: secondary_application.clone(),
                             reporter: secondary_reporter,
                             partition: secondary_label,
-                            mailbox_size: NZUsize!(1024),
+                            mailbox_size: input.mailbox_size,
                             epoch: Epoch::new(EPOCH),
                             floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(
                                 EPOCH,
@@ -1696,7 +1744,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
                             fetch_timeout: Duration::from_secs(1),
                             activity_timeout: Delta::new(10),
                             skip_timeout: Delta::new(5),
-                            fetch_concurrent: NZUsize!(1),
+                            fetch_concurrent: input.fetch_concurrent,
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(
@@ -1743,6 +1791,8 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_millis(1_500),
+                    input.mailbox_size,
+                    input.fetch_concurrent,
                     input.forwarding,
                     pending,
                     recovered,
@@ -1834,6 +1884,8 @@ where
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
+    let mailbox_size = input.mailbox_size;
+    let fetch_concurrent = input.fetch_concurrent;
     let forwarding = input.forwarding;
     let certify = input.certify;
     let reporting = input.reporting;
@@ -1853,6 +1905,8 @@ where
                 checkpoint,
                 participants,
                 schemes,
+                mailbox_size,
+                fetch_concurrent,
                 forwarding,
                 certify,
                 reporting,
@@ -2119,6 +2173,8 @@ mod tests {
             partition: Partition::Connected,
             strategy: StrategyChoice::AnyScope,
             messaging_faults: Vec::new(),
+            mailbox_size: DEFAULT_MAILBOX_SIZE,
+            fetch_concurrent: DEFAULT_FETCH_CONCURRENT,
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
             reporting: ReporterWiring::Solo,

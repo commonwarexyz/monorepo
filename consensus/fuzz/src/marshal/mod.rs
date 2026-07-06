@@ -1,17 +1,24 @@
 //! Fuzz harnesses for the marshal mechanism.
 //!
-//! Two complementary methods, each generic over the marshal variant
-//! (`StandardHarness` / `CodingHarness`), mirroring how marshal itself splits
-//! into `standard` and `coding`:
+//! Each driver is its own libFuzzer target so a single mode's input format
+//! owns its whole byte tape and its own corpus (no top-level enum splitting
+//! bytes across modes). The drivers:
 //!
 //! - [`single_node`]: drives one marshal actor in isolation by synthesizing
 //!   every input it would receive (blocks, notarizations, finalizations,
-//!   restarts) and asserting per-actor delivery invariants.
+//!   restarts) and asserting per-actor delivery invariants. Generic over the
+//!   marshal variant (`StandardHarness` / `CodingHarness`), mirroring how
+//!   marshal itself splits into `standard` and `coding`. Targets:
+//!   `marshal_standard`, `marshal_coding`.
 //! - [`multi_node`]: runs a live `N4F1C3` cluster (three honest nodes
 //!   plus one byzantine `Disrupter`) wired to real simplex consensus, and
 //!   checks marshal liveness (every honest node delivers a target number of
 //!   ordered finalized blocks sampled within a single-epoch bound) plus
-//!   cross-node agreement.
+//!   cross-node agreement. Also per-variant. Targets:
+//!   `marshal_liveness_standard`, `marshal_liveness_coding`.
+//! - [`inline`]: drives the standard inline block path. Target: `marshal_inline`.
+//! - [`store`]: drives the marshal block/certificate store directly. Target:
+//!   `marshal_store`.
 //!
 //! # Goals, pros, and cons
 //!
@@ -26,9 +33,6 @@
 //!   - Con: heavier (fewer iterations) and only valid
 //!     consensus orderings.
 
-use arbitrary::Arbitrary;
-use commonware_consensus::marshal::mocks::harness::StandardHarness;
-
 pub mod inline;
 pub mod multi_node;
 pub mod single_node;
@@ -38,28 +42,3 @@ pub use inline::{fuzz_marshal_inline, MarshalInlineInput};
 pub use multi_node::{fuzz_marshal_liveness, MarshalLivenessInput};
 pub use single_node::{fuzz_marshal, MarshalEvent, MarshalFuzzInput, VariantPublish};
 pub use store::{fuzz_marshal_store, MarshalStoreInput};
-
-#[derive(Debug, Clone)]
-pub enum MarshalStandardInput {
-    Actor(MarshalFuzzInput),
-    Inline(MarshalInlineInput),
-    Store(MarshalStoreInput),
-}
-
-impl Arbitrary<'_> for MarshalStandardInput {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(match u.int_in_range(0..=99)? {
-            0..=69 => Self::Actor(MarshalFuzzInput::arbitrary(u)?),
-            70..=89 => Self::Inline(MarshalInlineInput::arbitrary(u)?),
-            _ => Self::Store(MarshalStoreInput::arbitrary(u)?),
-        })
-    }
-}
-
-pub fn fuzz_marshal_standard(input: MarshalStandardInput) {
-    match input {
-        MarshalStandardInput::Actor(input) => fuzz_marshal::<StandardHarness>(input),
-        MarshalStandardInput::Inline(input) => fuzz_marshal_inline(input),
-        MarshalStandardInput::Store(input) => fuzz_marshal_store(input),
-    }
-}

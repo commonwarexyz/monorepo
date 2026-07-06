@@ -29,6 +29,7 @@ use futures::FutureExt;
 use rand::Rng;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    num::NonZeroUsize,
     time::Duration,
 };
 
@@ -66,6 +67,8 @@ pub struct NodeEvent {
 pub struct NodeFuzzInput {
     pub raw_bytes: Vec<u8>,
     pub events: Vec<NodeEvent>,
+    pub mailbox_size: NonZeroUsize,
+    pub fetch_concurrent: NonZeroUsize,
     pub forwarding: ForwardingPolicy,
     pub certify: crate::CertifyChoice,
     pub reporting: crate::ReporterWiring,
@@ -92,6 +95,8 @@ impl Arbitrary<'_> for NodeFuzzInput {
         let certify = crate::CertifyChoice::Always;
 
         let reporting = crate::ReporterWiring::arbitrary(u)?;
+        let mailbox_size = crate::fuzz_mailbox_size(u)?;
+        let fetch_concurrent = crate::fuzz_fetch_concurrent(u)?;
 
         let remaining = u.len().min(crate::MAX_RAW_BYTES);
         let raw_bytes = if remaining == 0 {
@@ -103,6 +108,8 @@ impl Arbitrary<'_> for NodeFuzzInput {
         Ok(Self {
             raw_bytes,
             events,
+            mailbox_size,
+            fetch_concurrent,
             forwarding,
             certify,
             reporting,
@@ -1507,6 +1514,8 @@ where
             fault_rounds_bound: 1,
         },
         messaging_faults: Vec::new(),
+        mailbox_size: input.mailbox_size,
+        fetch_concurrent: input.fetch_concurrent,
         forwarding: input.forwarding,
         certify: input.certify,
         reporting: input.reporting,
@@ -1561,6 +1570,8 @@ where
         relay.clone(),
         Duration::from_secs(1),
         Duration::from_secs(2),
+        input.mailbox_size,
+        input.fetch_concurrent,
         base.forwarding,
         pending,
         recovered,
@@ -1599,10 +1610,13 @@ where
     (participants, schemes)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_recovery<P: simplex::Simplex>(
     checkpoint: deterministic::Checkpoint,
     participants: Vec<PublicKeyOf<P>>,
     schemes: Vec<P::Scheme>,
+    mailbox_size: NonZeroUsize,
+    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     certify: crate::CertifyChoice,
     wiring: crate::ReporterWiring,
@@ -1638,6 +1652,8 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             relay,
             Duration::from_secs(1),
             Duration::from_secs(2),
+            mailbox_size,
+            fetch_concurrent,
             forwarding,
             pending,
             recovered,
@@ -1676,6 +1692,8 @@ mod tests {
                     event: Event::OnFinalization,
                 },
             ],
+            mailbox_size: NZUsize!(1024),
+            fetch_concurrent: NZUsize!(1),
             forwarding: ForwardingPolicy::Disabled,
             certify: crate::CertifyChoice::Always,
             reporting: crate::ReporterWiring::Solo,
@@ -1702,6 +1720,8 @@ mod tests {
                     event: Event::OnFinalization,
                 },
             ],
+            mailbox_size: NZUsize!(1024),
+            fetch_concurrent: NZUsize!(1),
             forwarding: ForwardingPolicy::Disabled,
             certify: crate::CertifyChoice::Always,
             reporting: crate::ReporterWiring::Solo,
