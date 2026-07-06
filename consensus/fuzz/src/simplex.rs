@@ -304,6 +304,8 @@ mod tests {
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
             messaging_faults: Vec::new(),
+            mailbox_size: crate::DEFAULT_MAILBOX_SIZE,
+            fetch_concurrent: crate::DEFAULT_FETCH_CONCURRENT,
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
             reporting: ReporterWiring::Solo,
