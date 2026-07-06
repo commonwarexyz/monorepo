@@ -134,8 +134,9 @@ runs:
     # compiler outputs. That makes it useful when the target cache is missing,
     # stale, cleaned, or split across many CI partitions. It can also hit for
     # unchanged crates when rust-cache misses its coarser key after Cargo.lock
-    # or workflow matrix changes. Only main writes to the compiler cache; pull
-    # requests read from it without replacing shared entries.
+    # or workflow matrix changes. The same jobs allowed to save rust-cache on
+    # main write to the compiler cache; all other jobs read without replacing
+    # shared entries.
     - name: Setup sccache
       if: inputs.rust-cache-enabled == 'true'
       uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
@@ -143,7 +144,7 @@ runs:
       if: inputs.rust-cache-enabled == 'true'
       shell: bash
       run: |
-        if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+        if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "${{ inputs.rust-cache-save }}" = "true" ]; then
           sccache_rw_mode="READ_WRITE"
         else
           sccache_rw_mode="READ_ONLY"
