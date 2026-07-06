@@ -3362,6 +3362,97 @@ mod tests {
     }
 
     #[test]
+    fn unordered_staged_resolve_updates_collapses_duplicates_at_scale() {
+        // The small collapse test above sits under the sort's insertion-sort threshold. This
+        // one pins the same semantics at a size that exercises the real sort machinery: every
+        // key written twice through duplicate slots (last write must win), a key whose newest
+        // write is unresolved (the mutation must win over an older staged occurrence), a key
+        // whose newest write is staged (the staged update must win and clear the older
+        // mutation), and an upsert overlapping a staged key (the upsert must win).
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            type TestUpdate = update::Unordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
+
+            let config =
+                fixed_db_config::<OneCap>("unordered-staged-resolve-updates-scale", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let n: usize = 512;
+            let keys: Vec<_> = (0..n).map(|i| colliding_digest(0xA0, i as u64)).collect();
+            let old_values: Vec<_> = (0..n).map(|i| colliding_digest(0xB0, i as u64)).collect();
+            let new_values: Vec<_> = (0..n).map(|i| colliding_digest(0xB1, i as u64)).collect();
+            let mut_newer = colliding_digest(0xB2, 0);
+            let staged_newer = colliding_digest(0xB2, 1);
+            let overlapped = colliding_digest(0xB2, 2);
+            let mut_old = colliding_digest(0xB3, 0);
+            let mut_new = colliding_digest(0xB3, 1);
+            let staged_old = colliding_digest(0xB3, 2);
+            let staged_new = colliding_digest(0xB3, 3);
+            let overlapped_write = colliding_digest(0xB3, 4);
+            let upsert = colliding_digest(0xB3, 5);
+
+            // Each key occupies two slots carrying the same resolution. The three special keys
+            // append after them: `mut_newer` resolved at slot 2n and unresolved at 2n+1,
+            // `staged_newer` unresolved at 2n+2 and resolved at 2n+3, `overlapped` resolved at
+            // 2n+4.
+            let mut staged_keys = keys.clone();
+            staged_keys.extend(keys.iter().cloned());
+            staged_keys.extend([mut_newer, mut_newer, staged_newer, staged_newer, overlapped]);
+            let mut resolutions: Vec<Option<(Location<mmr::Family>, ())>> = (0..2 * n)
+                .map(|slot| Some((loc(1_000 + (slot % n) as u64), ())))
+                .collect();
+            resolutions.extend([
+                Some((loc(500), ())),
+                None,
+                None,
+                Some((loc(501), ())),
+                Some((loc(502), ())),
+            ]);
+
+            let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
+                batch: db.new_batch(),
+                keys: staged_keys,
+                resolutions,
+            };
+
+            // Update order is oldest first: the resolved `mut_newer` write and the unresolved
+            // `staged_newer` write come first so newer writes through the other arm must beat
+            // them, then every key's old value, the overlapped write, every key's new value,
+            // and finally the unresolved `mut_newer` write and the resolved `staged_newer`
+            // write.
+            let mut updates: Vec<(usize, Option<sha256::Digest>)> =
+                vec![(2 * n, Some(mut_old)), (2 * n + 2, Some(staged_old))];
+            updates.extend((0..n).map(|i| (i, Some(old_values[i]))));
+            updates.push((2 * n + 4, Some(overlapped_write)));
+            updates.extend((0..n).map(|i| (n + i, Some(new_values[i]))));
+            updates.extend([(2 * n + 1, Some(mut_new)), (2 * n + 3, Some(staged_new))]);
+
+            let (batch, staged_updates) =
+                staged.resolve_updates(updates, vec![(overlapped, Some(upsert))]);
+
+            let mut expected = vec![(staged_newer, loc(501), (), Some(staged_new))];
+            expected.extend(
+                (0..n).map(|i| (keys[i], loc(1_000 + i as u64), (), Some(new_values[i]))),
+            );
+            assert_eq!(staged_updates, expected);
+            assert_eq!(batch.mutations.len(), 2);
+            assert_eq!(batch.mutations.get(&mut_newer), Some(&Some(mut_new)));
+            assert_eq!(batch.mutations.get(&overlapped), Some(&Some(upsert)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
     fn unordered_staged_merkleize_discards_prior_mutation_for_cached_update() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {

@@ -216,22 +216,48 @@ impl CacheRef {
     /// blob.
     pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut Vec<(&mut [u8], u64)>) {
         let page_cache = self.cache.read();
-        ranges.retain_mut(|(buf, logical_offset)| {
-            let mut remaining = buf.len();
-            let mut offset = *logical_offset;
-            let mut dst = 0;
-            while remaining > 0 {
-                let count = page_cache.read_at(blob_id, &mut buf[dst..], offset);
-                if count == 0 {
-                    break;
-                }
-                offset += count as u64;
-                dst += count;
-                remaining -= count;
-            }
+        let page_size = page_cache.page_size;
 
-            // Keep cache misses in `ranges`; drop fully-cached entries.
-            remaining > 0
+        // Resolve every range's first page before copying any data. The lookups are
+        // independent, so batching them lets the core overlap their memory latency instead of
+        // stalling each lookup behind the previous range's copy.
+        let mut srcs: Vec<Option<&[u8]>> = Vec::with_capacity(ranges.len());
+        for (buf, offset) in ranges.iter() {
+            let (page_num, offset_in_page) =
+                Cache::offset_to_page(page_size as u64, *offset);
+            let offset_in_page = offset_in_page as usize;
+            let seg = std::cmp::min(buf.len(), page_size - offset_in_page);
+            srcs.push(
+                page_cache
+                    .cache
+                    .get(&(blob_id, page_num))
+                    .map(|page| &page.as_ref()[offset_in_page..offset_in_page + seg]),
+            );
+        }
+
+        // Copy resolved pages, dropping fully-cached ranges and keeping misses. A range whose
+        // first page missed is kept untouched, and one that continues past its first page reads
+        // the rest page by page, staying a miss if any later page faults.
+        let mut next = 0;
+        ranges.retain_mut(|(buf, offset)| {
+            let src = srcs[next];
+            next += 1;
+            if buf.is_empty() {
+                return false;
+            }
+            let Some(src) = src else {
+                return true;
+            };
+            buf[..src.len()].copy_from_slice(src);
+            let mut done = src.len();
+            while done < buf.len() {
+                let count = page_cache.read_at(blob_id, &mut buf[done..], *offset + done as u64);
+                if count == 0 {
+                    return true;
+                }
+                done += count;
+            }
+            false
         });
     }
 

@@ -259,9 +259,12 @@ where
         // misses. The strategy policy decides per batch size whether the pass runs on the
         // calling thread or sharded across the pool.
         let strategy = self.strategy();
-        let (mut results, mut misses, probed) = strategy.run(
+        let (mut results, mut misses, probes) = strategy.run(
             keys.len(),
-            || self.resolve_cached(keys, &map, 0),
+            || {
+                let (results, misses, probed) = self.resolve_cached(keys, &map, 0);
+                (results, misses, vec![probed])
+            },
             || {
                 let manual = strategy.manual();
                 let chunk = keys.len().div_ceil(manual.parallelism_hint());
@@ -277,18 +280,21 @@ where
                     misses.extend(shard_misses);
                     probes.push(shard_probed);
                 }
-                (results, misses, Probed::merge(probes))
+                (results, misses, probes)
             },
         );
         if misses.is_empty() {
             return Ok(results);
         }
 
-        // Fallback: complete the probe with one batched read, which also validates the missed
-        // positions: every candidate position is decoded by exactly one of the two passes, so
-        // corruption detection does not depend on cache state. The probe carries the missed
-        // positions and any resolution work it already performed, so nothing that just missed
-        // the cache is re-probed.
+        // Fallback: merge the shard probes and complete them with one batched read, which also
+        // validates the missed positions: every candidate position is decoded by exactly one of
+        // the two passes, so corruption detection does not depend on cache state. The probes
+        // carry the missed positions and any resolution work they already performed, so nothing
+        // that just missed the cache is re-probed. Merging waits until misses are known to
+        // exist because completion never reads the merged hit slots, so a fully served batch
+        // skips the concatenation entirely.
+        let probed = Probed::merge(probes);
         misses.sort_unstable_by_key(|&(_, pos)| pos);
         let (positions, ops) = probed.fetch_missing().await?;
         Self::match_read_ops(

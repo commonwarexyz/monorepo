@@ -7,7 +7,7 @@
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads]
+//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads] [page_cache]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
 //!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
@@ -21,6 +21,8 @@
 //! - read_chunks: split reads into `stage` + `expand` chunks (default 1)
 //! - updates: keys written per batch (default 32,768)
 //! - threads: strategy pool threads (default 8)
+//! - page_cache: page cache capacity in 4096-byte pages (default 131,072 = 512MiB, enough
+//!   to hold the default working set; shrink it to measure miss-heavy regimes)
 
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
@@ -307,6 +309,10 @@ fn main() {
         .get(8)
         .and_then(|s| s.parse().ok())
         .unwrap_or(NZUsize!(8));
+    let page_cache: NonZeroUsize = raw
+        .get(9)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(PAGE_CACHE_PAGES);
     assert!(
         matches!(
             db_kind.as_str(),
@@ -328,12 +334,12 @@ fn main() {
     assert!(args.read_chunks > 0, "read_chunks must be non-zero");
 
     eprintln!(
-        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads}",
+        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads} page_cache={page_cache}",
         args.depth, args.iters, args.num_keys, args.num_reads, args.read_chunks, args.num_updates
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
-        let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_PAGES);
+        let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, page_cache);
         let pc_var = pc.clone();
         let merkle_config = full::Config {
             journal_partition: "constantinople-merkle-journal".into(),

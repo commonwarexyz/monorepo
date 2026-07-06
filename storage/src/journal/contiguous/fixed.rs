@@ -113,6 +113,7 @@ use commonware_runtime::{
     Blob as RBlob, Buf, IoBuf,
 };
 use futures::Stream;
+use commonware_utils::Cached;
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -122,6 +123,11 @@ use std::{
     sync::Arc,
 };
 use tracing::warn;
+
+// Reusable scratch for [`Reader::probe_items`], grown to the largest probe served on the
+// thread. Probes run per shard on the hot read path, where a fresh zeroed allocation per call
+// contends under the pool's fan-out.
+commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
@@ -1255,8 +1261,16 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             return out;
         }
 
+        // Serve the probe from the per-thread scratch buffer. Stale bytes from a previous probe
+        // are harmless: slots the cache cannot serve are reported as misses and never decoded.
         let items_per_blob = self.items_per_blob.get();
-        let mut buf = vec![0u8; valid.len() * chunk_size];
+        let mut scratch =
+            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        let need = valid.len() * chunk_size;
+        if scratch.len() < need {
+            scratch.resize(need, 0);
+        }
+        let buf = &mut scratch[..need];
         let mut hits = 0u64;
         let mut group_base = start;
         for group in valid.chunk_by(|a, b| {
