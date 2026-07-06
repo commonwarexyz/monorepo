@@ -2,12 +2,15 @@
 //!
 //! `IoBuf` and `IoBufMut` store readable/writable cursor state directly in the
 //! public handle. Allocation ownership lives in a compact tagged owner
-//! reference: runtime-owned aligned and pooled buffers keep a header in the
-//! tail of their own allocation, caller-supplied `Vec<u8>` values are adopted
-//! into that native form when their spare capacity allows, and caller-supplied
-//! [`Bytes`] values are held zero-copy by a small external owner. This keeps
-//! `bytes::Buf` and `bytes::BufMut` hot paths as simple pointer/length
-//! arithmetic; `owner.rs` documents the owner model.
+//! reference: runtime-owned heap buffers keep a header inside their own
+//! allocation (in front of the data for low-alignment mutable buffers, at the
+//! tail for high-alignment ones and adopted vecs), pooled buffers keep their
+//! owner record in a per-slot side table owned by the size class,
+//! caller-supplied `Vec<u8>` values are adopted into the native heap form when
+//! their spare capacity allows, and caller-supplied [`Bytes`] values are held
+//! zero-copy by a small external owner. This keeps `bytes::Buf` and
+//! `bytes::BufMut` hot paths as simple pointer/length arithmetic; `owner.rs`
+//! documents the owner model.
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
@@ -15,6 +18,7 @@
 //! - [`IoBufs`]: Container for one or more immutable buffers
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
 //! - [`BufferPool`]: Pool of reusable, aligned buffers
+//! - [`Builder`]: Assembles [`IoBufs`] from inline writes and zero-copy pieces
 
 mod freelist;
 mod owner;
@@ -62,6 +66,15 @@ pub const fn cache_line_size() -> usize {
     align_of::<CachePadded<u8>>()
 }
 
+/// Benchmark-only re-exports of internal pool machinery.
+///
+/// This is not a supported public API: the exported types carry ownership
+/// contracts (documented on their methods) that the pool normally enforces
+/// internally, and misusing them corrupts memory (for example, returning a
+/// buffer to a freelist that did not create it deallocates with the wrong
+/// layout). The surface exists solely so `benches/` can drive the freelist
+/// directly.
+#[doc(hidden)]
 #[cfg(feature = "bench")]
 pub mod bench {
     pub use super::{
@@ -104,10 +117,11 @@ unsafe impl Send for IoBuf {}
 // SAFETY: shared access is read-only and lifecycle state is atomic.
 unsafe impl Sync for IoBuf {}
 
+// Debug intentionally omits the data pointer: raw addresses differ across
+// identically-seeded deterministic runs and would leak heap layout into logs.
 impl std::fmt::Debug for IoBuf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IoBuf")
-            .field("ptr", &self.ptr)
             .field("len", &self.len)
             .field("pooled", &self.is_pooled())
             .finish()
@@ -192,6 +206,11 @@ impl IoBuf {
     ///
     /// Empty ranges return a detached empty buffer so pooled allocations are
     /// not pinned by empty views.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range is out of bounds of the readable bytes, if its
+    /// start is greater than its end, or if an inclusive bound overflows.
     #[inline]
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
         let (start, end) = resolve_range(self.len, range);
@@ -562,9 +581,11 @@ impl Read for IoBuf {
 
     /// Reads a length-prefixed buffer.
     ///
-    /// Zero payload copies: `copy_to_bytes` extracts owned [`Bytes`] from the
-    /// source (zero-copy for `IoBuf`, `IoBufs`, and `Bytes` sources) and
-    /// `Self::from` wraps them zero-copy.
+    /// Zero payload copies when the payload is contiguous in the source:
+    /// `copy_to_bytes` extracts owned [`Bytes`] without copying from `IoBuf`,
+    /// `Bytes`, and single-chunk `IoBufs` sources, and `Self::from` wraps them
+    /// zero-copy. A payload that spans chunks in a multi-chunk source is
+    /// copied into one contiguous allocation.
     #[inline]
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
@@ -601,6 +622,15 @@ impl arbitrary::Arbitrary<'_> for IoBuf {
 ///
 /// `advance` moves `ptr` forward and shrinks both `len` and `cap`. `BufMut`
 /// writes always begin at `ptr + len`.
+///
+/// # Capacity
+///
+/// The capacity is fixed at construction: unlike [`BytesMut`], the buffer
+/// never grows, and every write past `capacity()` panics (including through
+/// [`BufMut`] methods such as `put_slice`). [`Self::default`] and zero-sized
+/// constructions own no storage, so any write to them panics; allocate the
+/// full expected size up front. `remaining_mut()` reports the actual writable
+/// tail rather than `usize::MAX`.
 pub struct IoBufMut {
     ptr: NonNull<u8>,
     len: usize,
@@ -615,10 +645,11 @@ unsafe impl Send for IoBufMut {}
 // `&mut self`.
 unsafe impl Sync for IoBufMut {}
 
+// Debug intentionally omits the data pointer: raw addresses differ across
+// identically-seeded deterministic runs and would leak heap layout into logs.
 impl std::fmt::Debug for IoBufMut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IoBufMut")
-            .field("ptr", &self.ptr)
             .field("len", &self.len)
             .field("cap", &self.cap)
             .field("pooled", &self.is_pooled())
@@ -649,6 +680,9 @@ impl Default for IoBufMut {
 
 impl IoBufMut {
     /// Create a buffer with the given capacity.
+    ///
+    /// The capacity is exact and fixed; writes past it panic (see the
+    /// [capacity](Self#capacity) section).
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         Self::with_alignment(capacity, NonZeroUsize::MIN)
@@ -757,9 +791,11 @@ impl IoBufMut {
 
     /// Freeze into immutable [`IoBuf`].
     ///
-    /// Free: the owner word moves to the immutable handle without touching
-    /// the refcount. Freezing an empty buffer releases the allocation
-    /// immediately so empty immutable views never pin pool memory.
+    /// Free: the owner word moves to the immutable handle without a refcount
+    /// operation (a reserved front heap header is initialized, including its
+    /// refcount sentinel, before the owner is shared). Freezing an empty
+    /// buffer releases the allocation immediately so empty immutable views
+    /// never pin pool memory.
     #[inline]
     pub fn freeze(self) -> IoBuf {
         let mut me = ManuallyDrop::new(self);
@@ -1742,15 +1778,19 @@ pub struct IoBufsMut {
 ///
 /// Construction and canonicalization keep every chunk that still owns
 /// storage (`capacity() > 0`), readable or not, so caller-reserved write
-/// capacity survives read operations. Only fully-drained chunks (capacity
-/// consumed by `advance`) and empty defaults are removed as the shape
-/// collapses.
+/// capacity generally survives read operations. Only fully-drained chunks
+/// (capacity consumed by `advance`) and empty defaults are removed as the
+/// shape collapses.
 ///
-/// Limitation: the deque-backed read paths (four or more chunks) skip past
-/// a chunk with no readable bytes by popping it, so a never-filled chunk
-/// ordered before readable data loses its capacity when a read crosses it.
-/// Fills are front-to-back in practice (`set_len`, `read_at_buf`), which
-/// does not produce that ordering.
+/// Known limitations, acceptable because fills are front-to-back in practice
+/// (`set_len`, `read_at_buf`) and readers do not reuse spare capacity behind
+/// the cursor:
+/// - The deque-backed read paths (four or more chunks) skip past a chunk
+///   with no readable bytes by popping it, so a never-filled chunk ordered
+///   before readable data loses its capacity when a read crosses it.
+/// - A full-length `copy_to_bytes` on the Single shape consumes the whole
+///   handle (see [`IoBufMut`]'s `copy_to_bytes` doc), so spare capacity
+///   behind a fully-drained single chunk is released rather than retained.
 #[derive(Debug)]
 enum IoBufsMutInner {
     /// Single buffer (common case, no allocation).
@@ -1831,8 +1871,9 @@ impl IoBufsMut {
     /// Re-establish canonical mutable representation invariants.
     ///
     /// Uses the same storage-keeping filter as construction: read operations
-    /// must not change `remaining_mut()`, so chunks that were drained of
-    /// readable bytes but still own writable capacity survive.
+    /// should not change `remaining_mut()` (see the [`IoBufsMutInner`] doc
+    /// for the accepted exceptions), so chunks that were drained of readable
+    /// bytes but still own writable capacity survive.
     fn canonicalize(&mut self) {
         let inner = std::mem::replace(&mut self.inner, IoBufsMutInner::Single(IoBufMut::default()));
         self.inner = match inner {
@@ -2055,7 +2096,9 @@ impl IoBufsMut {
         self.for_each_chunk_mut(|buf| {
             let cap = buf.capacity();
             let to_set = remaining.min(cap);
-            buf.set_len(to_set);
+            // SAFETY: forwarded from this method's contract; the caller
+            // initializes all `len` bytes before any read.
+            unsafe { buf.set_len(to_set) };
             remaining -= to_set;
         });
     }

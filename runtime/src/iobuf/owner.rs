@@ -1602,7 +1602,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn loom_shared_clone_drop_releases_exactly_once() {
+    fn shared_clone_drop_releases_exactly_once() {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
@@ -1635,7 +1635,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn loom_clone_races_concurrent_drop() {
+    fn clone_races_concurrent_drop() {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
@@ -1664,7 +1664,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn loom_is_unique_races_final_drop() {
+    fn is_unique_races_final_drop() {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));

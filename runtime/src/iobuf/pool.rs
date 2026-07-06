@@ -65,6 +65,7 @@ use std::{
         Arc,
     },
 };
+use thiserror::Error;
 
 /// Minimum thread-local cache capacity required before refill/spill batches.
 ///
@@ -74,24 +75,15 @@ use std::{
 const MIN_TLS_BATCH_CAPACITY: usize = 4;
 
 /// Error returned when buffer pool allocation fails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolError {
     /// The requested capacity exceeds the maximum buffer size.
+    #[error("requested capacity exceeds maximum buffer size")]
     Oversized,
     /// The pool is exhausted for the required size class.
+    #[error("pool exhausted for required size class")]
     Exhausted,
 }
-
-impl std::fmt::Display for PoolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Oversized => write!(f, "requested capacity exceeds maximum buffer size"),
-            Self::Exhausted => write!(f, "pool exhausted for required size class"),
-        }
-    }
-}
-
-impl std::error::Error for PoolError {}
 
 /// Policy for sizing each thread's cache within a buffer pool size class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -493,7 +485,21 @@ unsafe impl Sync for SizeClass {}
 /// Moving a buffer from the global freelist to pooled view or TLS state retains
 /// one class reference. Moving it back to the global freelist releases that
 /// reference. Moving between pooled view and TLS state transfers the same
-/// reference without touching the refcount.
+/// reference without touching the refcount:
+///
+/// ```text
+///                      lease_into: retain class ref into slot lease
+/// +-------------------+ --------------------------> +-----------------+
+/// | parked in global  |                             | checked out     |
+/// | freelist          |                             | (pooled view)   |
+/// | (no per-buffer    |                             +-----------------+
+/// | ref; the pool's   |                       cache pop ^   | move buffer;
+/// | SizeClassHandle   |                                 |   v lease stays
+/// | keeps class       |                             +-----------------+
+/// | alive)            | <-------------------------- | parked in TLS   |
+/// +-------------------+  return_global[_batch]:     | cache           |
+///                        park, THEN release lease   +-----------------+
+/// ```
 ///
 /// Dropping the public [`BufferPool`] drains globally parked buffers, then
 /// drops its `SizeClassHandle`s. Pooled views and non-empty TLS caches may keep
@@ -3327,7 +3333,7 @@ mod loom_tests {
     // the loom-modeled global freelist rather than OS thread-local state,
     // which loom cannot reset between interleavings.
     #[test]
-    fn loom_freeze_clone_cross_thread_drop_then_reuse() {
+    fn freeze_clone_cross_thread_drop_then_reuse() {
         loom::model(|| {
             let mut registry = Registry::default();
             let config = BufferPoolConfig {
@@ -3374,7 +3380,7 @@ mod loom_tests {
     // count, swapping that order would free the freelist's loom-tracked state
     // while the returning thread still targets it, which loom reports.
     #[test]
-    fn loom_final_drop_races_pool_teardown() {
+    fn final_drop_races_pool_teardown() {
         loom::model(|| {
             let mut registry = Registry::default();
             let config = BufferPoolConfig {
@@ -3406,7 +3412,7 @@ mod loom_tests {
     // observe that restored sentinel (asserted in Freelist::buffer under
     // loom) before handing the slot to a new mutable handle.
     #[test]
-    fn loom_final_drop_races_recheckout() {
+    fn final_drop_races_recheckout() {
         loom::model(|| {
             let mut registry = Registry::default();
             let config = BufferPoolConfig {
