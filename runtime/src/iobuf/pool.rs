@@ -1667,6 +1667,7 @@ impl BufferPool {
     ///
     /// The returned buffer contains **uninitialized memory**. Do not read from
     /// it until data has been written.
+    #[inline]
     pub fn alloc(&self, capacity: usize) -> IoBufMut {
         self.try_alloc(capacity).unwrap_or_else(|_| {
             let size = capacity.max(self.inner.config.min_size.get());

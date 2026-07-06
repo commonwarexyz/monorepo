@@ -9,7 +9,10 @@
 //!   - `Lockstep`: all workers enter the hot path together, maximizing
 //!     contention.
 //!   - `Staggered`: workers add a small variable spin delay between iterations
-//!     to decorrelate access timing.
+//!     to decorrelate access timing. The delay executes inside the timed
+//!     loop, so staggered results include its cost; for operations measured
+//!     in nanoseconds it can dominate. Compare staggered numbers against
+//!     other staggered numbers, not against lockstep or single-threaded ones.
 //! - [`measure`] runs the benchmark body under those presets, including the
 //!   barrier synchronization used by the multi-threaded cases.
 //!

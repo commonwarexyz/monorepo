@@ -129,6 +129,9 @@ impl Clone for IoBuf {
 }
 
 impl Drop for IoBuf {
+    // Inlined so consumer crates (which build without LTO) keep the drop on
+    // the handle hot path instead of an outlined cross-crate call.
+    #[inline]
     fn drop(&mut self) {
         // SAFETY: dropping an immutable view releases exactly one shared owner
         // reference. Static/empty views have no owner.
@@ -624,6 +627,9 @@ impl std::fmt::Debug for IoBufMut {
 }
 
 impl Drop for IoBufMut {
+    // Inlined so consumer crates (which build without LTO) keep the drop on
+    // the handle hot path instead of an outlined cross-crate call.
+    #[inline]
     fn drop(&mut self) {
         // SAFETY: mutable buffers uniquely own their allocation.
         unsafe { self.owner.release_unique_mut_at(self.ptr, self.cap) };
@@ -1555,6 +1561,7 @@ impl IoBufs {
 }
 
 impl Buf for IoBufs {
+    #[inline]
     fn remaining(&self) -> usize {
         match &self.inner {
             IoBufsInner::Single(buf) => buf.remaining(),
@@ -1570,6 +1577,7 @@ impl Buf for IoBufs {
         }
     }
 
+    #[inline]
     fn chunk(&self) -> &[u8] {
         match &self.inner {
             IoBufsInner::Single(buf) => buf.chunk(),
@@ -1604,6 +1612,7 @@ impl Buf for IoBufs {
         }
     }
 
+    #[inline]
     fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
         if dst.is_empty() {
             return 0;
@@ -1628,6 +1637,7 @@ impl Buf for IoBufs {
         }
     }
 
+    #[inline]
     fn advance(&mut self, cnt: usize) {
         let should_canonicalize = match &mut self.inner {
             IoBufsInner::Single(buf) => {
@@ -1647,6 +1657,7 @@ impl Buf for IoBufs {
         }
     }
 
+    #[inline]
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         let (result, needs_canonicalize) = match &mut self.inner {
             IoBufsInner::Single(buf) => return buf.copy_to_bytes(len),
@@ -2068,6 +2079,7 @@ impl IoBufsMut {
 }
 
 impl Buf for IoBufsMut {
+    #[inline]
     fn remaining(&self) -> usize {
         match &self.inner {
             IoBufsMutInner::Single(buf) => buf.remaining(),
@@ -2083,6 +2095,7 @@ impl Buf for IoBufsMut {
         }
     }
 
+    #[inline]
     fn chunk(&self) -> &[u8] {
         match &self.inner {
             IoBufsMutInner::Single(buf) => buf.chunk(),
@@ -2117,6 +2130,7 @@ impl Buf for IoBufsMut {
         }
     }
 
+    #[inline]
     fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
         if dst.is_empty() {
             return 0;
@@ -2141,6 +2155,7 @@ impl Buf for IoBufsMut {
         }
     }
 
+    #[inline]
     fn advance(&mut self, cnt: usize) {
         let should_canonicalize = match &mut self.inner {
             IoBufsMutInner::Single(buf) => {
@@ -2160,6 +2175,7 @@ impl Buf for IoBufsMut {
         }
     }
 
+    #[inline]
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         // Zero-length drains must not disturb chunk state: the deque-backed
         // path skips readable-empty chunks by popping them, which would

@@ -37,8 +37,22 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZUsize, NZU32};
 use criterion::Criterion;
-use std::{hint::black_box, num::NonZeroUsize};
+use crossbeam_queue::ArrayQueue;
+use std::{
+    hint::{black_box, spin_loop},
+    num::NonZeroUsize,
+    sync::{Arc, Barrier},
+    thread,
+    time::Instant,
+};
+
 const SIZES: &[usize] = &[256, 1024, 4096, 65536, 1024 * 1024, 8 * 1024 * 1024];
+
+/// Buffers in flight between the ping-pong producer and consumer.
+///
+/// Kept small so the pool (sized at `threads * 4` buffers per class) cannot
+/// exhaust even in the minimum two-thread configuration.
+const PINGPONG_QUEUE_DEPTH: usize = 4;
 
 #[derive(Clone, Copy)]
 enum Allocation {
@@ -67,6 +81,8 @@ pub fn bench(c: &mut Criterion) {
     for &size in SIZES {
         let pool = build_pool(size, threads);
         let alignment = pool.config().alignment.get();
+
+        bench_cross_thread(c, &pool, size);
 
         for threading in threadings {
             for touch in [false, true] {
@@ -142,6 +158,82 @@ fn bench_case(
             });
         }
     }
+}
+
+/// Measures the cross-thread buffer lifecycle: allocate on one thread, drop
+/// on another.
+///
+/// This is the shape of completion-driven I/O (a buffer allocated by the
+/// submitting thread and released by the completion handler), which the
+/// symmetric per-thread cases never exercise: their buffers return to the
+/// allocating thread's local cache. Here every buffer is returned by the
+/// consumer thread, so steady state continuously moves buffers from the
+/// consumer's cache through the global freelist back to the producer.
+fn bench_cross_thread(c: &mut Criterion, pool: &BufferPool, size: usize) {
+    let name = format!(
+        "{}/allocation=pooled touch=false size={size} threads=2 pattern=pingpong",
+        module_path!(),
+    );
+    c.bench_function(&name, |b| {
+        b.iter_custom(|iters| {
+            let queue = Arc::new(ArrayQueue::<IoBufMut>::new(PINGPONG_QUEUE_DEPTH));
+            let ready = Arc::new(Barrier::new(3));
+            let launch = Arc::new(Barrier::new(3));
+
+            let start = thread::scope(|scope| {
+                scope.spawn({
+                    let pool = pool.clone();
+                    let queue = queue.clone();
+                    let ready = ready.clone();
+                    let launch = launch.clone();
+                    move || {
+                        ready.wait();
+                        launch.wait();
+                        for _ in 0..iters {
+                            let mut buffer = pool
+                                .try_alloc(size)
+                                .expect("buffer pool exhausted during benchmark");
+                            loop {
+                                match queue.push(buffer) {
+                                    Ok(()) => break,
+                                    Err(back) => {
+                                        buffer = back;
+                                        spin_loop();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+
+                scope.spawn({
+                    let queue = queue.clone();
+                    let ready = ready.clone();
+                    let launch = launch.clone();
+                    move || {
+                        ready.wait();
+                        launch.wait();
+                        for _ in 0..iters {
+                            loop {
+                                if let Some(buffer) = queue.pop() {
+                                    drop(black_box(buffer));
+                                    break;
+                                }
+                                spin_loop();
+                            }
+                        }
+                    }
+                });
+
+                ready.wait();
+                let start = Instant::now();
+                launch.wait();
+                start
+            });
+
+            start.elapsed()
+        });
+    });
 }
 
 #[inline]

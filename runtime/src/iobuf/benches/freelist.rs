@@ -5,7 +5,7 @@
 //! thread-local caches.
 //!
 //! This module benchmarks that global freelist directly and compares three
-//! implementations behind the same batch-oriented slot-id interface:
+//! implementations behind the same batch-oriented take/put interface:
 //!
 //! - [`Freelist`]: a striped atomic bitmap freelist
 //! - `Mutex<Vec<_>>`: a simple locked batched baseline
