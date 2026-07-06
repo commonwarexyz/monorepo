@@ -11,12 +11,11 @@ use std::ops::{Bound, RangeBounds};
 ///
 /// - Backing storage starts detached in [Self::new] and is allocated on first write.
 /// - Logical data length is tracked separately from backing view length.
-/// - Draining paths ([Self::take]) hand buffered bytes to the caller and reset the tip to a
-///   detached empty state.
+/// - To flush, callers write a [Self::slice] view of the buffered bytes to the blob and call
+///   [Self::advance] only after the write succeeds. The buffer keeps the bytes until then, so
+///   a dropped or failed write loses nothing and a retry re-flushes them.
 /// - Subsequent writes are copy-on-write: [Self::writable] recovers mutable ownership when
 ///   backing is unique, otherwise allocates from the pool and copies existing bytes.
-/// - Prefix drains in [Self::drop_prefix] update the logical view and preserve backing whenever
-///   possible.
 pub(super) struct Buffer {
     /// The data to be written to the blob.
     ///
@@ -135,28 +134,6 @@ impl Buffer {
         }
     }
 
-    /// Returns the buffered data and its blob offset, or returns `None` if the buffer is already
-    /// empty.
-    ///
-    /// This hands ownership of the buffered bytes to the caller, resets the tip to empty, and
-    /// advances offset to the end of the drained range.
-    pub(super) fn take(&mut self) -> Option<(IoBuf, u64)> {
-        if self.is_empty() {
-            return None;
-        }
-
-        // Clear the logical length up front so the tip is empty even if the returned buffer
-        // still aliases the old backing.
-        let len = std::mem::take(&mut self.len);
-        let offset = self.offset;
-        self.offset += len as u64;
-
-        // Hand the buffered prefix to the caller without copying. If `data` retained extra
-        // capacity or trailing bytes, `split_to` leaves them behind in the discarded remainder.
-        let mut data = std::mem::take(&mut self.data);
-        Some((data.split_to(len), offset))
-    }
-
     /// Returns a mutable tip buffer with capacity for at least `needed` bytes.
     ///
     /// This consumes current backing and preserves existing contents.
@@ -229,8 +206,8 @@ impl Buffer {
     /// Appends the provided `data` to the buffer, and returns `true` if the buffer is over capacity
     /// after the append.
     ///
-    /// If the buffer is above capacity, the caller is responsible for using `take` to bring it back
-    /// under. Further appends are safe, but will continue growing the buffer beyond its capacity.
+    /// If the buffer is above capacity, the caller is responsible for flushing. Further appends
+    /// are safe, but will continue growing the buffer beyond its capacity.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
         let end = self.len + data.len();
         let mut writable = self.writable(end);
@@ -239,27 +216,6 @@ impl Buffer {
         self.len = writable.len();
         self.data = writable.freeze();
         over_capacity
-    }
-
-    /// Removes `len` leading bytes from the buffered data while preserving the remaining suffix.
-    ///
-    /// The remaining suffix stays as a logical prefix in the updated view.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `len` exceeds current buffer length.
-    pub(super) fn drop_prefix(&mut self, len: usize) {
-        assert!(len <= self.len);
-        if len == 0 {
-            return;
-        }
-        let current_len = self.len;
-        if len == current_len {
-            self.len = 0;
-            return;
-        }
-        self.data = self.data.slice(len..current_len);
-        self.len = current_len - len;
     }
 
     /// Clears buffered data while preserving offset.
@@ -292,19 +248,18 @@ mod tests {
         let mut buffer = Buffer::new(50, 100, pool);
         assert_eq!(buffer.size(), 50);
         assert!(buffer.is_empty());
-        assert!(buffer.take().is_none());
 
         // Add some data to the buffer.
         assert!(!buffer.append(&[1, 2, 3]));
         assert_eq!(buffer.size(), 53);
         assert!(!buffer.is_empty());
 
-        // Confirm `take()` works as intended.
-        let taken = buffer.take().unwrap();
-        assert_eq!(taken.0.as_ref(), &[1, 2, 3]);
-        assert_eq!(taken.1, 50);
+        // Confirm advancing past flushed bytes empties the buffer.
+        let flushed = buffer.slice(..);
+        assert_eq!(flushed.as_ref(), &[1, 2, 3]);
+        buffer.advance(3);
         assert_eq!(buffer.size(), 53);
-        assert!(buffer.take().is_none());
+        assert!(buffer.is_empty());
 
         // Fill the buffer to capacity.
         let mut buf = vec![42; 100];
@@ -315,9 +270,11 @@ mod tests {
         assert!(buffer.append(&[43]));
         assert_eq!(buffer.size(), 154);
         buf.push(43);
-        let taken = buffer.take().unwrap();
-        assert_eq!(taken.0.as_ref(), buf.as_slice());
-        assert_eq!(taken.1, 53);
+        let flushed = buffer.slice(..);
+        assert_eq!(flushed.as_ref(), buf.as_slice());
+        buffer.advance(buf.len());
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.size(), 154);
     }
 
     #[test]
@@ -330,9 +287,8 @@ mod tests {
         // Truncate into the buffered bytes: the prefix below the new size survives.
         buffer.truncate(61);
         assert_eq!(buffer.size(), 61);
-        let taken = buffer.take().unwrap();
-        assert_eq!(taken.0.as_ref(), &[4]);
-        assert_eq!(taken.1, 60);
+        assert_eq!(buffer.as_ref(), &[4]);
+        buffer.advance(1);
         assert_eq!(buffer.size(), 61);
 
         buffer.append(&[7, 8, 9]);
@@ -341,8 +297,7 @@ mod tests {
         // empty buffer restarts at the new size.
         buffer.truncate(59);
         assert_eq!(buffer.size(), 59);
-        assert!(buffer.take().is_none());
-        assert_eq!(buffer.size(), 59);
+        assert!(buffer.is_empty());
     }
 
     #[test]
@@ -370,7 +325,9 @@ mod tests {
         let mut buffer = Buffer::new(0, 16, pool);
 
         buffer.append(b"stale");
-        let _ = buffer.take().expect("buffer should contain data");
+        // `clear` empties the buffer logically but leaves the old bytes in the backing
+        // allocation. A slice must see the empty buffer, not the leftover bytes.
+        buffer.clear();
 
         assert!(buffer.slice(..).is_empty());
         assert!(buffer.slice(0..).is_empty());
