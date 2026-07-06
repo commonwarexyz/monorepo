@@ -88,6 +88,8 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+#[cfg(feature = "std")]
+use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
 use core::ops::Range;
@@ -265,6 +267,27 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
         let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
+    }
+
+    /// Encode and hash `items` across the strategy, adding their leaf digests in order.
+    #[cfg(feature = "std")]
+    pub(crate) fn add_many<Item: Write + Send + Sync>(
+        self,
+        hasher: &impl Hasher<F, Digest = D>,
+        items: &[Item],
+    ) -> Self {
+        let first = self.leaves();
+        let digests = self.strategy().map_init_collect_vec(
+            items.iter().enumerate(),
+            Vec::new,
+            |buf, (i, item)| {
+                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
+                buf.clear();
+                item.write(buf);
+                hasher.leaf_digest(pos, buf.as_slice())
+            },
+        );
+        self.add_leaf_digests(digests)
     }
 
     /// Validate that `loc` refers to an in-bounds, non-pruned leaf and return its position.

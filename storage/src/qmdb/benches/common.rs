@@ -1,7 +1,7 @@
 //! Shared infrastructure for QMDB benchmarks: constants, config builders, type aliases, dispatch
 //! macros, and the common `gen_random_kv` helper.
 
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
@@ -32,7 +32,7 @@ use rand::{distributions::Distribution, rngs::StdRng, RngCore, SeedableRng};
 use rand_distr::Zipf;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
-pub type Digest = <Sha256 as Hasher>::Digest;
+pub type Digest = DigestOf<Sha256>;
 
 /// Default items per blob for benchmarks. This is small enough that blob boundary crossings can
 /// affect benchmark time. Benchmarks that don't want to measure that cost should override via the
