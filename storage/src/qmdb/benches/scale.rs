@@ -16,6 +16,7 @@
 //! cargo bench -p commonware-storage --bench scale --features test-traits -- generate /tmp/db 50000000 250000000 [zipf_exponent] [page_size]
 //! cargo bench -p commonware-storage --bench scale --features test-traits -- init     /tmp/db [page_size]
 //! cargo bench -p commonware-storage --bench scale --features test-traits -- get      /tmp/db 50000000 100000 1,8,32 [page_size]
+//! cargo bench -p commonware-storage --bench scale --features test-traits -- get_many /tmp/db 50000000 100000 1,8,32 256 [page_size]
 //! cargo bench -p commonware-storage --bench scale --features test-traits -- destroy  /tmp/db
 //! ```
 //!
@@ -37,7 +38,9 @@
 //! opens the database (untimed), then for each entry in the comma-separated concurrency list drops
 //! the OS page cache in-process (init's replay warms it) and runs a cold pass of `num_gets`
 //! uniform-random gets across that many spawned reader tasks, followed by a warm pass over the same
-//! keys as a control. Keys are sampled the same way `generate` derives them (`Sha256(index)` over
+//! keys as a control. `get_many` is identical except each reader issues its gets in `batch`-key
+//! [`get_many`](commonware_storage::qmdb::any) calls, exercising the batched read path the commit
+//! path uses. Keys are sampled the same way `generate` derives them (`Sha256(index)` over
 //! the keyspace), so nearly all gets hit a live key. By default this mode performs no in-process
 //! caching so reads always reach the storage layer; pass a non-zero `cache_pages` to measure
 //! through an in-process cache of that many pages instead.
@@ -86,7 +89,7 @@ const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [page_size]   build a database (omit exponent => zipf 1.0; 0 => uniform; page_size = logical bytes, default 16384)\n  init     <folder> [page_size]  reopen + time init at cache off / R/4 / R (page_size must match generate)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,<concurrency>...] [page_size] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, 0/omitted = no caching)\n  destroy  <folder>              delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [page_size]   build a database (omit exponent => zipf 1.0; 0 => uniform; page_size = logical bytes, default 16384)\n  init     <folder> [page_size]  reopen + time init at cache off / R/4 / R (page_size must match generate)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,<concurrency>...] [page_size] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, 0/omitted = no caching)\n  get_many <folder> <keyspace> <num_gets> <concurrency>[,<concurrency>...] <batch> [page_size] [cache_pages]   like get, but each reader issues gets in `batch`-key get_many calls\n  destroy  <folder>              delete the database"
     );
 }
 
@@ -135,7 +138,7 @@ fn main() {
             }
             None => usage(),
         },
-        Some("get") => match (
+        Some(mode @ ("get" | "get_many")) => match (
             argv.get(1),
             argv.get(2).and_then(|a| a.parse().ok()),
             argv.get(3).and_then(|a| a.parse().ok()),
@@ -146,13 +149,29 @@ fn main() {
             }),
         ) {
             (Some(folder), Some(keyspace), Some(num_gets), Some(Some(concurrencies))) => {
-                let Some(page_size) = parse_page_size(argv.get(5)) else {
+                // `get_many` takes the batch size as its fifth arg; later options shift right.
+                let (batch, opts_at) = if *mode == *"get_many" {
+                    match argv
+                        .get(5)
+                        .and_then(|a| a.parse::<u64>().ok())
+                        .and_then(NonZeroU64::new)
+                    {
+                        Some(batch) => (Some(batch), 6),
+                        None => {
+                            usage();
+                            return;
+                        }
+                    }
+                } else {
+                    (None, 5)
+                };
+                let Some(page_size) = parse_page_size(argv.get(opts_at)) else {
                     usage();
                     return;
                 };
-                // Optional in-process page cache size (7th arg): omitted or `0` disables
-                // in-process caching, so reads always reach the storage layer.
-                let cache_pages = match argv.get(6).map(|a| a.parse::<usize>()) {
+                // Optional in-process page cache size: omitted or `0` disables in-process
+                // caching, so reads always reach the storage layer.
+                let cache_pages = match argv.get(opts_at + 1).map(|a| a.parse::<usize>()) {
                     None => None,
                     Some(Ok(n)) => NonZeroUsize::new(n),
                     Some(Err(_)) => {
@@ -165,6 +184,7 @@ fn main() {
                     keyspace,
                     num_gets,
                     concurrencies,
+                    batch,
                     page_size,
                     cache_pages,
                 )
@@ -283,6 +303,7 @@ fn get_bench(
     keyspace: u64,
     num_gets: u64,
     concurrencies: Vec<u64>,
+    batch: Option<NonZeroU64>,
     page_size: NonZeroU16,
     cache_pages: Option<NonZeroUsize>,
 ) {
@@ -320,8 +341,9 @@ fn get_bench(
             .await
             .unwrap();
         let opened = open_start.elapsed();
+        let batch_mode = batch.map_or_else(|| "point".to_string(), |b| format!("get_many x{b}"));
         println!(
-            "get_scale: {folder}  (logical page size {page_size}, page cache {cache_mode}, keyspace {keyspace})"
+            "get_scale: {folder}  (logical page size {page_size}, page cache {cache_mode}, keyspace {keyspace}, reads {batch_mode})"
         );
         println!("  open (untimed phase): {opened:?}");
         let _ = std::io::stdout().flush();
@@ -339,7 +361,7 @@ fn get_bench(
             }
             for pass in ["cold", "warm"] {
                 let (elapsed, total, found) =
-                    run_gets(&ctx, db.clone(), keyspace, num_gets, concurrency).await;
+                    run_gets(&ctx, db.clone(), keyspace, num_gets, concurrency, batch).await;
                 let us = elapsed.as_secs_f64() * 1e6 / total as f64;
                 let rate = total as f64 / elapsed.as_secs_f64();
                 println!(
@@ -353,14 +375,16 @@ fn get_bench(
 
 /// Run one pass of uniform-random gets: `num_gets` gets split across `concurrency` spawned
 /// reader tasks (the first `num_gets % concurrency` readers take one extra), each consuming its
-/// own deterministic key stream (so a repeat pass replays the same keys). Returns the elapsed
-/// time, the number of gets issued, and how many found a value.
+/// own deterministic key stream (so a repeat pass replays the same keys). With a `batch` size,
+/// each reader issues its gets in `batch`-key [get_many](AnyOFixDb::get_many) calls instead of
+/// point gets. Returns the elapsed time, the number of gets issued, and how many found a value.
 async fn run_gets(
     ctx: &Context,
     db: Arc<AnyOFixDb<Mmr>>,
     keyspace: u64,
     num_gets: u64,
     concurrency: u64,
+    batch: Option<NonZeroU64>,
 ) -> (Duration, u64, u64) {
     let per_reader = num_gets / concurrency;
     let remainder = num_gets % concurrency;
@@ -372,11 +396,31 @@ async fn run_gets(
             ctx.child("reader").spawn(move |_| async move {
                 let mut rng = StdRng::seed_from_u64(reader);
                 let mut found = 0u64;
-                for _ in 0..gets {
-                    let index = rng.next_u64() % keyspace;
-                    let key = Sha256::hash(&index.to_be_bytes());
-                    if db.get(&key).await.unwrap().is_some() {
-                        found += 1;
+                match batch {
+                    None => {
+                        for _ in 0..gets {
+                            let index = rng.next_u64() % keyspace;
+                            let key = Sha256::hash(&index.to_be_bytes());
+                            if db.get(&key).await.unwrap().is_some() {
+                                found += 1;
+                            }
+                        }
+                    }
+                    Some(batch) => {
+                        let mut remaining = gets;
+                        while remaining > 0 {
+                            let n = remaining.min(batch.get());
+                            let keys: Vec<_> = (0..n)
+                                .map(|_| {
+                                    let index = rng.next_u64() % keyspace;
+                                    Sha256::hash(&index.to_be_bytes())
+                                })
+                                .collect();
+                            let refs: Vec<_> = keys.iter().collect();
+                            let values = db.get_many(&refs).await.unwrap();
+                            found += values.iter().flatten().count() as u64;
+                            remaining -= n;
+                        }
                     }
                 }
                 found
