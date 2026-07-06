@@ -1311,8 +1311,7 @@ mod tests {
     fn test_front_layout_accepts_maximum_valid_capacity() {
         // Largest capacity whose layout size stays within Layout's isize::MAX
         // bound after rounding up to the header alignment.
-        let capacity =
-            isize::MAX as usize - size_of::<HeapOwner>() - (align_of::<HeapOwner>() - 1);
+        let capacity = isize::MAX as usize - size_of::<HeapOwner>() - (align_of::<HeapOwner>() - 1);
         let layout = HeapOwner::front_layout(capacity);
         assert_eq!(layout.size(), size_of::<HeapOwner>() + capacity);
         assert_eq!(layout.align(), align_of::<HeapOwner>());
