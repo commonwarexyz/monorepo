@@ -112,7 +112,7 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Writer},
     Blob as RBlob, Buf, IoBuf,
 };
-use futures::Stream;
+use futures::{future::try_join_all, Stream};
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -1226,7 +1226,12 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         // true misses from the blob (concurrently).
         let mut result: Vec<A> = Vec::with_capacity(positions.len());
         let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
-        let mut hits = 0u64;
+
+        // The buffer is pre-sized for every position, so each group can own a disjoint slice and
+        // all groups can read concurrently: the whole batch becomes one I/O wave instead of one
+        // wave per blob (misses within a group already read concurrently).
+        let mut reads = Vec::new();
+        let mut remaining_buf = reusable_buf.as_mut_slice();
         for group in positions.chunk_by(|a, b| {
             super::position_to_blob(*a, items_per_blob)
                 == super::position_to_blob(*b, items_per_blob)
@@ -1242,15 +1247,21 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
                 .blobs
                 .get(blob)
                 .expect("positions in bounds map to a retained blob");
-            let buf = &mut reusable_buf[..group.len() * chunk_size];
-            let group_hits = blob
-                .read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
-                .await?;
-            hits += group_hits as u64;
+            let (buf, rest) = remaining_buf.split_at_mut(group.len() * chunk_size);
+            remaining_buf = rest;
+            reads.push(async move {
+                blob.read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+                    .await
+            });
+        }
+        let hits: u64 = try_join_all(reads)
+            .await?
+            .into_iter()
+            .map(|group_hits| group_hits as u64)
+            .sum();
 
-            for slice in buf.chunks_exact(chunk_size) {
-                result.push(A::decode(slice).map_err(Error::Codec)?);
-            }
+        for slice in reusable_buf.chunks_exact(chunk_size) {
+            result.push(A::decode(slice).map_err(Error::Codec)?);
         }
 
         self.metrics.record_cache_hits(hits);
