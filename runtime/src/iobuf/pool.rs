@@ -503,7 +503,9 @@ unsafe impl Sync for SizeClass {}
 ///
 /// This is the one raw pointer shape used by all pool-owned, pooled view, and
 /// thread-local references to a [`SizeClass`]. The pointer is always derived
-/// from [`Arc::into_raw`].
+/// from [`Arc::into_raw`]. Under `cfg(loom)` the strong count lives in a
+/// loom-tracked `Arc` instead, so the pool loom models explore class-teardown
+/// races (park-before-release ordering) that std's untracked count cannot.
 ///
 /// `SizeClassToken` itself owns nothing. It is only an identity token and raw
 /// pointer accepted by the `Arc` refcount APIs:
@@ -531,7 +533,13 @@ impl SizeClassToken {
     /// immediately place it in an owning wrapper, such as [`SizeClassHandle`],
     /// or otherwise arrange for that strong reference to be released.
     fn new(class: SizeClass) -> Self {
-        let ptr = Arc::into_raw(Arc::new(class)).cast_mut();
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                let ptr = loom::sync::Arc::into_raw(loom::sync::Arc::new(class)).cast_mut();
+            } else {
+                let ptr = Arc::into_raw(Arc::new(class)).cast_mut();
+            }
+        }
         // SAFETY: `Arc::into_raw` never returns null.
         let ptr = unsafe { ptr::NonNull::new_unchecked(ptr) };
         Self { ptr }
@@ -555,8 +563,19 @@ impl SizeClassToken {
     /// Some owner must currently hold a strong reference for this token.
     #[inline(always)]
     unsafe fn retain(self) {
-        // SAFETY: guaranteed by the caller.
-        unsafe { Arc::increment_strong_count(self.ptr.as_ptr()) };
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                // loom's Arc has no increment_strong_count; round-trip
+                // through from_raw and clone so the tracked count matches.
+                // SAFETY: guaranteed by the caller.
+                let arc = unsafe { loom::sync::Arc::from_raw(self.ptr.as_ptr().cast_const()) };
+                std::mem::forget(arc.clone());
+                std::mem::forget(arc);
+            } else {
+                // SAFETY: guaranteed by the caller.
+                unsafe { Arc::increment_strong_count(self.ptr.as_ptr()) };
+            }
+        }
     }
 
     /// Releases one owned strong reference for this token.
@@ -566,8 +585,15 @@ impl SizeClassToken {
     /// The caller must own one strong reference represented by this token.
     #[inline(always)]
     unsafe fn release(self) {
-        // SAFETY: guaranteed by the caller.
-        unsafe { Arc::decrement_strong_count(self.ptr.as_ptr()) };
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                // SAFETY: guaranteed by the caller.
+                drop(unsafe { loom::sync::Arc::from_raw(self.ptr.as_ptr().cast_const()) });
+            } else {
+                // SAFETY: guaranteed by the caller.
+                unsafe { Arc::decrement_strong_count(self.ptr.as_ptr()) };
+            }
+        }
     }
 }
 
@@ -3335,6 +3361,83 @@ mod loom_tests {
             assert!(again.is_pooled());
             again.put_slice(b"reuse");
             assert_eq!(again.as_ref(), b"reuse");
+        });
+    }
+
+    // Models the teardown edge: a pooled buffer's final drop (which parks the
+    // buffer and then releases its size-class lease) racing the public pool's
+    // drop (which drains the global freelist and then releases the pool-owned
+    // class reference). Whichever release is last drops the SizeClass and its
+    // freelist. Parking strictly before releasing is what keeps the freelist
+    // alive for the return-path fetch_or: with the loom-tracked class strong
+    // count, swapping that order would free the freelist's loom-tracked state
+    // while the returning thread still targets it, which loom reports.
+    #[test]
+    fn loom_final_drop_races_pool_teardown() {
+        loom::model(|| {
+            let mut registry = Registry::default();
+            let config = BufferPoolConfig {
+                pool_min_size: 0,
+                min_size: NZUsize!(64),
+                max_size: NZUsize!(64),
+                max_per_class: NZU32!(1),
+                prefill: false,
+                alignment: NZUsize!(1),
+                parallelism: NZUsize!(1),
+                thread_cache_config: BufferPoolThreadCacheConfig::Disabled,
+            };
+            let pool = BufferPool::new(config, &mut registry);
+
+            let mut buf = pool.alloc(64);
+            assert!(buf.is_pooled());
+            buf.put_slice(b"x");
+            let frozen = buf.freeze();
+
+            let t = thread::spawn(move || drop(frozen));
+            drop(pool);
+            t.join().unwrap();
+        });
+    }
+
+    // Models a re-checkout racing the final drop of a shared pooled buffer.
+    // The winning dropper restores the refcount sentinel (Relaxed) before the
+    // freelist's Release publication; a successful concurrent take must
+    // observe that restored sentinel (asserted in Freelist::buffer under
+    // loom) before handing the slot to a new mutable handle.
+    #[test]
+    fn loom_final_drop_races_recheckout() {
+        loom::model(|| {
+            let mut registry = Registry::default();
+            let config = BufferPoolConfig {
+                pool_min_size: 0,
+                min_size: NZUsize!(64),
+                max_size: NZUsize!(64),
+                max_per_class: NZU32!(1),
+                prefill: false,
+                alignment: NZUsize!(1),
+                parallelism: NZUsize!(1),
+                thread_cache_config: BufferPoolThreadCacheConfig::Disabled,
+            };
+            let pool = BufferPool::new(config, &mut registry);
+
+            let mut buf = pool.alloc(64);
+            assert!(buf.is_pooled());
+            buf.put_slice(b"x");
+            let frozen = buf.freeze();
+            let clone = frozen.clone();
+
+            let t = thread::spawn(move || drop(clone));
+            drop(frozen);
+
+            // The single slot may still be checked out (Exhausted) or already
+            // returned by whichever drop was final; a successful claim must
+            // expose a writable buffer with the sentinel restored.
+            if let Ok(mut again) = pool.try_alloc(64) {
+                assert!(again.is_pooled());
+                again.put_slice(b"y");
+                assert_eq!(again.as_ref(), b"y");
+            }
+            t.join().unwrap();
         });
     }
 }

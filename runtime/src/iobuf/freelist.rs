@@ -622,7 +622,12 @@ impl Freelist {
     #[inline(always)]
     fn buffer(&self, slot: u32) -> PooledBuffer {
         // SAFETY: the caller owns the slot and its data allocation is live.
-        unsafe { PooledBuffer::from_owner(self.slot_ptr(slot)) }
+        let buffer = unsafe { PooledBuffer::from_owner(self.slot_ptr(slot)) };
+        // Under loom, every claim validates that the parked slot's refcount
+        // sentinel was restored before the bitmap publication.
+        #[cfg(feature = "loom")]
+        buffer.assert_parked_sentinel();
+        buffer
     }
 }
 
@@ -1267,6 +1272,46 @@ mod loom_tests {
         thread,
     };
 
+    /// Tracked stand-ins for the non-atomic side-table state that bitmap
+    /// publication transfers between threads.
+    ///
+    /// The real side-table accesses escape loom's tracking (they go through
+    /// raw pointers extracted from the slot cells), so the publication models
+    /// write these cells before `put` and read them after a claim: weakening
+    /// the put-Release or take-Acquire edge makes loom report a data race
+    /// here, which the slot-accounting assertions alone cannot detect.
+    struct SlotStamps {
+        cells: Vec<UnsafeCell<usize>>,
+    }
+
+    // SAFETY: cross-thread access is what the stamps exist to check; loom
+    // tracks every access made through `UnsafeCell::with`/`with_mut`.
+    unsafe impl Send for SlotStamps {}
+    // SAFETY: as above.
+    unsafe impl Sync for SlotStamps {}
+
+    impl SlotStamps {
+        fn new(slots: usize) -> Arc<Self> {
+            Arc::new(Self {
+                cells: (0..slots).map(|_| UnsafeCell::new(0)).collect(),
+            })
+        }
+
+        /// Stamps a slot before its owner publishes it.
+        fn write(&self, slot: u32) {
+            // SAFETY: the slot is owned by the stamping thread until `put`
+            // publishes it; loom flags any racing access.
+            self.cells[slot as usize].with_mut(|cell| unsafe { *cell = 1 });
+        }
+
+        /// Asserts a claimed slot's stamp is visible to the claimant.
+        fn assert_visible(&self, slot: u32) {
+            // SAFETY: claiming the bit transfers slot ownership; loom flags
+            // the read as racing if the publication edge is too weak.
+            self.cells[slot as usize].with(|cell| assert_eq!(unsafe { *cell }, 1));
+        }
+    }
+
     // This module uses loom to model the freelist's ownership protocol between
     // bitmap bits and side-table slots: a producer publishes a returned slot,
     // and exactly one consumer clears that bit before rebuilding a buffer
@@ -1418,24 +1463,33 @@ mod loom_tests {
     fn put_publishes_before_take() {
         // `put` publishes the returned slot with a Release RMW. The taker
         // spins until it can clear that bit with an Acquire RMW, then rebuilds
-        // a buffer handle from the same side-table slot.
+        // a buffer handle from the same side-table slot. The stamp pins the
+        // publication edge itself: the producer's pre-put write must be
+        // visible and race-free to the claimant.
         model(&ALL_GEOMETRIES, |geometry, freelist| {
             let slot = geometry.slots()[0];
             let buffer = freelist.try_create(false).unwrap();
             assert_eq!(buffer.slot(), slot);
             let leases = Leases::new(freelist.clone());
+            let stamps = SlotStamps::new(4);
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(buffer)
+                let stamps = stamps.clone();
+                move || {
+                    stamps.write(slot);
+                    freelist.put(buffer)
+                }
             });
 
             let reader = thread::spawn({
                 let freelist = freelist.clone();
                 let leases = leases.clone();
+                let stamps = stamps.clone();
                 move || loop {
                     if let Some(buffer) = freelist.take() {
                         assert_eq!(buffer.slot(), slot);
+                        stamps.assert_visible(slot);
                         leases.push(buffer);
                         break;
                     }
@@ -1941,24 +1995,37 @@ mod loom_tests {
         // The reader loops because loom may run it before the writer has
         // published anything. A zero-sized claim is just a retry, not an
         // observable failure.
+        //
+        // Per-slot stamps pin the batch publication edge: every staged slot's
+        // pre-publish write must be visible and race-free to whichever
+        // claimant ends up with that slot.
         model(&BATCH_GEOMETRIES, |geometry, freelist| {
             let seen = Arc::new(AtomicUsize::new(0));
             let slots = geometry.slots();
             let expected = geometry.slot_mask();
             let (leases, entries) = Leases::reserve(freelist.clone());
+            let stamps = SlotStamps::new(4);
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put_batch(entries)
+                let stamps = stamps.clone();
+                move || {
+                    for entry in &entries {
+                        stamps.write(entry.slot());
+                    }
+                    freelist.put_batch(entries)
+                }
             });
 
             let reader = thread::spawn({
                 let freelist = freelist.clone();
                 let seen = seen.clone();
                 let leases = leases.clone();
+                let stamps = stamps.clone();
                 move || {
                     while seen.load(Ordering::Relaxed) != expected {
                         let claimed = freelist.take_batch(slots.len(), |buffer| {
+                            stamps.assert_visible(buffer.slot());
                             leases.push_expected(&seen, expected, buffer);
                         });
 
@@ -1989,15 +2056,21 @@ mod loom_tests {
             let slot = geometry.slots()[0];
             let buffer = freelist.try_create(false).unwrap();
             assert_eq!(buffer.slot(), slot);
+            let stamps = SlotStamps::new(4);
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(buffer)
+                let stamps = stamps.clone();
+                move || {
+                    stamps.write(slot);
+                    freelist.put(buffer)
+                }
             });
 
             let drainer = thread::spawn({
                 let freelist = freelist.clone();
                 let drained = drained.clone();
+                let stamps = stamps.clone();
                 move || {
                     while drained.load(Ordering::Relaxed) == 0 {
                         let count = freelist.drain();
@@ -2007,6 +2080,9 @@ mod loom_tests {
                             thread::yield_now();
                         } else {
                             assert_eq!(count, 1);
+                            // The Acquire swap must make the producer's
+                            // pre-put write visible to the draining thread.
+                            stamps.assert_visible(slot);
                             drained.store(count, Ordering::Relaxed);
                         }
                     }

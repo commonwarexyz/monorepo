@@ -911,6 +911,21 @@ impl PooledBuffer {
         // SAFETY: guaranteed by the caller.
         unsafe { dealloc(self.data_ptr().as_ptr(), layout) };
     }
+
+    /// Asserts the parked-slot sentinel invariant on a freshly claimed buffer.
+    ///
+    /// A buffer leaving the global freelist must observe the refcount
+    /// sentinel of 1: the final release restores the sentinel before the
+    /// bitmap bit's Release publication, and the claimant's Acquire clear
+    /// pairs with it. A Relaxed load suffices because the assertion is on the
+    /// value; loom explores every interleaving that could expose a stale one.
+    #[cfg(feature = "loom")]
+    pub(crate) fn assert_parked_sentinel(&self) {
+        // SAFETY: the caller just claimed the slot, so the side-table entry
+        // is live and owned by this thread.
+        let refs = unsafe { &self.owner.as_ref().refs };
+        assert_eq!(refs.load(Ordering::Relaxed), 1);
+    }
 }
 
 impl HeapOwner {
@@ -1497,11 +1512,12 @@ mod tests {
                 );
             } else {
                 // Adopted: the header must start at or past the readable
-                // bytes, header-aligned, and end within the allocation.
+                // bytes, at a header-aligned address, and end within the
+                // allocation.
                 // SAFETY: owner is unique and live.
                 let header_offset = unsafe { owner.usable_capacity() };
                 assert!(header_offset >= len, "spare={spare} cap={cap}");
-                assert!(header_offset.is_multiple_of(align_of::<HeapOwner>()));
+                assert!((base_addr + header_offset).is_multiple_of(align_of::<HeapOwner>()));
                 assert!(header_offset + size_of::<HeapOwner>() <= cap);
                 assert_eq!(ptr.as_ptr() as usize, base_addr);
             }
@@ -1559,6 +1575,7 @@ mod tests {
 mod loom_tests {
     use super::*;
     use loom::{
+        cell::UnsafeCell,
         sync::{atomic::AtomicUsize, Arc},
         thread,
     };
@@ -1652,22 +1669,44 @@ mod loom_tests {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
             let (_, _, owner) = OwnerRef::from_bytes(bytes);
+            // Tracked stand-in for the payload state a caller would mutate
+            // after observing uniqueness (the try_into_mut gate).
+            let payload = Arc::new(UnsafeCell::new(0usize));
 
-            // Two handles: this thread checks uniqueness (the try_into_mut
-            // gate) while the other drops. Observing unique must mean the
-            // other drop fully happened-before (its Release decrement pairs
-            // with is_unique's Acquire load) and did not release the payload.
+            // Two handles: this thread checks uniqueness while the other
+            // drops. Observing unique must mean the other drop fully
+            // happened-before (its Release decrement pairs with is_unique's
+            // Acquire load), so the dropper's payload write must be visible
+            // and race-free here. Weakening the is_unique load to Relaxed
+            // makes loom report a data race on the payload cell.
+            //
+            // The uniqueness check spins with yields (rather than branching
+            // on one load) so every explored execution eventually observes
+            // the drop: loom advances yielding loads past stale stores, which
+            // keeps the post-uniqueness assertions reached in every run.
             // SAFETY: `owner` is live with one reference owned here.
             unsafe { owner.clone_shared() };
-            let t1 = thread::spawn(move || {
-                // SAFETY: this thread owns one reference.
-                unsafe { owner.drop_shared() };
+            let t1 = thread::spawn({
+                let payload = payload.clone();
+                move || {
+                    // SAFETY: this thread owns one reference; the write is
+                    // sequenced before its drop.
+                    payload.with_mut(|cell| unsafe { *cell = 1 });
+                    // SAFETY: this thread owns one reference.
+                    unsafe { owner.drop_shared() };
+                }
             });
-            // SAFETY: the main thread owns one reference.
-            if unsafe { owner.is_unique() } {
-                // The other handle is gone, so this thread holds the only
-                // reference and the payload must still be live.
-                assert_eq!(released.load(Ordering::SeqCst), 0);
+            loop {
+                // SAFETY: the main thread owns one reference.
+                if unsafe { owner.is_unique() } {
+                    // The other handle is gone: its payload write must be
+                    // visible and the payload must still be live.
+                    // SAFETY: uniqueness transfers exclusive payload access.
+                    payload.with(|cell| assert_eq!(unsafe { *cell }, 1));
+                    assert_eq!(released.load(Ordering::SeqCst), 0);
+                    break;
+                }
+                thread::yield_now();
             }
             // SAFETY: the main thread owns the remaining reference.
             unsafe { owner.drop_shared() };
