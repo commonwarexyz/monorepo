@@ -6,11 +6,17 @@
 //! allocation (in front of the data for low-alignment mutable buffers, at the
 //! tail for high-alignment ones and adopted vecs), pooled buffers keep their
 //! owner record in a per-slot side table owned by the size class,
-//! caller-supplied `Vec<u8>` values are adopted into the native heap form when
-//! their spare capacity allows, and caller-supplied [`Bytes`] values are held
-//! zero-copy by a small external owner. This keeps `bytes::Buf` and
-//! `bytes::BufMut` hot paths as simple pointer/length arithmetic; `owner.rs`
-//! documents the owner model.
+//! caller-supplied `Vec<u8>` values converted to immutable buffers are adopted
+//! into the native heap form when their spare capacity allows (mutable
+//! conversions copy to preserve the caller's capacity), and caller-supplied
+//! [`Bytes`] values are held zero-copy by a small external owner. This keeps
+//! `bytes::Buf` and `bytes::BufMut` hot paths as simple pointer/length
+//! arithmetic; `owner.rs` documents the owner model.
+//!
+//! Because untracked heap buffers embed their owner header in the same
+//! allocation, a power-of-two capacity request may land in the allocator's
+//! next size bin. Pooled buffers do not pay this: their side-table record
+//! keeps the data allocation exactly the class size.
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
@@ -71,9 +77,10 @@ pub const fn cache_line_size() -> usize {
 /// This is not a supported public API: the exported types carry ownership
 /// contracts (documented on their methods) that the pool normally enforces
 /// internally, and misusing them corrupts memory (for example, returning a
-/// buffer to a freelist that did not create it deallocates with the wrong
-/// layout). The surface exists solely so `benches/` can drive the freelist
-/// directly.
+/// buffer to a freelist that did not create it marks that freelist's
+/// same-numbered slot free, later handing out a dangling or already-owned
+/// allocation). The surface exists solely so `benches/` can drive the
+/// freelist directly.
 #[doc(hidden)]
 #[cfg(feature = "bench")]
 pub mod bench {
@@ -583,9 +590,9 @@ impl Read for IoBuf {
     ///
     /// Zero payload copies when the payload is contiguous in the source:
     /// `copy_to_bytes` extracts owned [`Bytes`] without copying from `IoBuf`,
-    /// `Bytes`, and single-chunk `IoBufs` sources, and `Self::from` wraps them
-    /// zero-copy. A payload that spans chunks in a multi-chunk source is
-    /// copied into one contiguous allocation.
+    /// `Bytes`, and `IoBufs` sources whose first chunk contains the whole
+    /// payload, and `Self::from` wraps them zero-copy. A payload that spans
+    /// chunks is copied into one contiguous allocation.
     #[inline]
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
@@ -1788,9 +1795,10 @@ pub struct IoBufsMut {
 /// - The deque-backed read paths (four or more chunks) skip past a chunk
 ///   with no readable bytes by popping it, so a never-filled chunk ordered
 ///   before readable data loses its capacity when a read crosses it.
-/// - A full-length `copy_to_bytes` on the Single shape consumes the whole
-///   handle (see [`IoBufMut`]'s `copy_to_bytes` doc), so spare capacity
-///   behind a fully-drained single chunk is released rather than retained.
+/// - A `copy_to_bytes` that exactly drains the front chunk's readable bytes
+///   consumes that chunk's whole handle on every shape (see [`IoBufMut`]'s
+///   `copy_to_bytes` doc), so spare capacity behind an exactly-drained chunk
+///   is released rather than retained.
 #[derive(Debug)]
 enum IoBufsMutInner {
     /// Single buffer (common case, no allocation).

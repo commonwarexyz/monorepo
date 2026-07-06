@@ -165,10 +165,12 @@ mod tests {
     use crate::{
         deterministic,
         mocks::{next_pending_sync, DelayedSyncBlob},
-        Blob as _, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner, Storage,
+        telemetry::metrics::Registry,
+        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBufMut, IoBufs, IoBufsMut,
+        Runner, Storage,
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{sync::Mutex, NZUsize};
+    use commonware_utils::{sync::Mutex, NZUsize, NZU32};
     use futures::FutureExt;
     use std::sync::Arc;
 
@@ -335,6 +337,35 @@ mod tests {
             // Attempt to read beyond the end should fail
             let result = reader.read(5).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        });
+    }
+
+    #[test_traced]
+    fn test_read_allocates_lazily_on_first_refill() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let data = b"hello world";
+            let (blob, _) = context.open("partition", b"lazy").await.unwrap();
+            blob.write_at(0, data).await.unwrap();
+
+            // A dedicated single-slot pool: reader construction must not
+            // touch it (an eagerly-allocated unwritten buffer would be
+            // checked out of the pool and, under empty-freeze semantics,
+            // released straight back).
+            let mut registry = Registry::default();
+            let config = BufferPoolConfig::for_storage().with_max_per_class(NZU32!(1));
+            let pool = BufferPool::new(config, &mut registry);
+            let mut reader = Read::new(blob, data.len() as u64, NZUsize!(10), pool.clone());
+
+            // The single slot is still free: claiming it proves construction
+            // allocated nothing.
+            let probe = pool
+                .try_alloc(1)
+                .expect("reader construction must not allocate");
+            drop(probe);
+
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
         });
     }
 

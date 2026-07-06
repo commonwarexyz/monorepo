@@ -60,12 +60,21 @@ use std::{
     mem::MaybeUninit,
     num::{NonZeroU32, NonZeroUsize},
     ptr,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicUsize, Ordering},
 };
 use thiserror::Error;
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "loom")] {
+        // Under the loom feature the pool's shared ownership (including the
+        // class strong count behind SizeClassToken) is loom-tracked, so the
+        // pool models explore teardown races. loom's Arc mirrors the std
+        // raw-count API used by the token.
+        use loom::sync::Arc;
+    } else {
+        use std::sync::Arc;
+    }
+}
 
 /// Minimum thread-local cache capacity required before refill/spill batches.
 ///
@@ -509,9 +518,10 @@ unsafe impl Sync for SizeClass {}
 ///
 /// This is the one raw pointer shape used by all pool-owned, pooled view, and
 /// thread-local references to a [`SizeClass`]. The pointer is always derived
-/// from [`Arc::into_raw`]. Under `cfg(loom)` the strong count lives in a
-/// loom-tracked `Arc` instead, so the pool loom models explore class-teardown
-/// races (park-before-release ordering) that std's untracked count cannot.
+/// from [`Arc::into_raw`]. Under the `loom` feature the strong count lives in
+/// a loom-tracked `Arc` instead, so the pool loom models explore
+/// class-teardown races (park-before-release ordering) that std's untracked
+/// count cannot.
 ///
 /// `SizeClassToken` itself owns nothing. It is only an identity token and raw
 /// pointer accepted by the `Arc` refcount APIs:
@@ -539,13 +549,7 @@ impl SizeClassToken {
     /// immediately place it in an owning wrapper, such as [`SizeClassHandle`],
     /// or otherwise arrange for that strong reference to be released.
     fn new(class: SizeClass) -> Self {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "loom")] {
-                let ptr = loom::sync::Arc::into_raw(loom::sync::Arc::new(class)).cast_mut();
-            } else {
-                let ptr = Arc::into_raw(Arc::new(class)).cast_mut();
-            }
-        }
+        let ptr = Arc::into_raw(Arc::new(class)).cast_mut();
         // SAFETY: `Arc::into_raw` never returns null.
         let ptr = unsafe { ptr::NonNull::new_unchecked(ptr) };
         Self { ptr }
@@ -569,19 +573,8 @@ impl SizeClassToken {
     /// Some owner must currently hold a strong reference for this token.
     #[inline(always)]
     unsafe fn retain(self) {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "loom")] {
-                // loom's Arc has no increment_strong_count; round-trip
-                // through from_raw and clone so the tracked count matches.
-                // SAFETY: guaranteed by the caller.
-                let arc = unsafe { loom::sync::Arc::from_raw(self.ptr.as_ptr().cast_const()) };
-                std::mem::forget(arc.clone());
-                std::mem::forget(arc);
-            } else {
-                // SAFETY: guaranteed by the caller.
-                unsafe { Arc::increment_strong_count(self.ptr.as_ptr()) };
-            }
-        }
+        // SAFETY: guaranteed by the caller.
+        unsafe { Arc::increment_strong_count(self.ptr.as_ptr()) };
     }
 
     /// Releases one owned strong reference for this token.
@@ -591,15 +584,8 @@ impl SizeClassToken {
     /// The caller must own one strong reference represented by this token.
     #[inline(always)]
     unsafe fn release(self) {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "loom")] {
-                // SAFETY: guaranteed by the caller.
-                drop(unsafe { loom::sync::Arc::from_raw(self.ptr.as_ptr().cast_const()) });
-            } else {
-                // SAFETY: guaranteed by the caller.
-                unsafe { Arc::decrement_strong_count(self.ptr.as_ptr()) };
-            }
-        }
+        // SAFETY: guaranteed by the caller.
+        unsafe { Arc::decrement_strong_count(self.ptr.as_ptr()) };
     }
 }
 

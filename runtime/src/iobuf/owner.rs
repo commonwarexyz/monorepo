@@ -1503,8 +1503,14 @@ mod tests {
             assert_eq!(out_len, len, "spare={spare} cap={cap}");
 
             if owner.is_external() {
-                // Declined: the header genuinely does not fit past the
-                // readable bytes.
+                // Declined: independent of the placement helper, spare room
+                // of at least the header size plus worst-case round-down
+                // slack always fits regardless of the base address, so a
+                // decline proves the spare was genuinely tight.
+                assert!(
+                    cap - len < size_of::<HeapOwner>() + align_of::<HeapOwner>() - 1,
+                    "spare={spare} cap={cap} base={base_addr:#x}"
+                );
                 assert!(
                     HeapOwner::vec_adoption_header_offset(base_addr, len, cap).is_none(),
                     "spare={spare} cap={cap} base={base_addr:#x}"
