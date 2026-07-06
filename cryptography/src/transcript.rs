@@ -544,9 +544,9 @@ mod test {
         let summary = transcript.summarize();
         let sig = transcript.sign(&sk);
 
-        let mut summary_batch = ed25519::Batch::new();
+        let mut summary_batch = ed25519::Batch::new(1);
         assert!(summary.add_to_batch(&mut summary_batch, &pk, &sig));
-        let mut transcript_batch = ed25519::Batch::new();
+        let mut transcript_batch = ed25519::Batch::new(1);
         assert!(transcript.add_to_batch(&mut transcript_batch, &pk, &sig));
 
         assert!(summary_batch.verify(&mut test_rng(), &Sequential));

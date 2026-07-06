@@ -145,7 +145,8 @@ fn bisect<V: Variant>(
     }
 
     // Single chunk: skip aggregate verification if caller already checked it.
-    let par_hint = strategy.parallelism_hint();
+    let manual = strategy.manual();
+    let par_hint = manual.parallelism_hint();
     let chunk_size = entries.len().div_ceil(par_hint);
     if entries.len() <= chunk_size {
         let mut out = SegmentTree::<V>::build(entries).verify(hm, aggregate_invalid);
@@ -154,7 +155,7 @@ fn bisect<V: Variant>(
     }
 
     // Multiple chunks: verify each chunk root (may be valid or invalid).
-    let mut out = strategy.fold(
+    let mut out = manual.fold(
         entries.chunks(chunk_size).enumerate(),
         || Vec::with_capacity(entries.len()),
         |mut acc, (i, chunk)| {

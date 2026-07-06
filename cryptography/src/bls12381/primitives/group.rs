@@ -1140,7 +1140,8 @@ impl G1 {
             return Self::zero();
         }
         let npoints = points_filtered.len();
-        let ncpus = strategy.parallelism_hint();
+        let manual = strategy.manual();
+        let ncpus = manual.parallelism_hint();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
@@ -1157,7 +1158,7 @@ impl G1 {
         }
 
         // Parallel MSM using tile_pippenger
-        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
+        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, &manual)
     }
 
     fn msm_sequential(affine_points: &[blst_p1_affine], scalars: &[u8], nbits: usize) -> Self {
@@ -1560,7 +1561,8 @@ impl G2 {
             return Self::zero();
         }
         let npoints = points_filtered.len();
-        let ncpus = strategy.parallelism_hint();
+        let manual = strategy.manual();
+        let ncpus = manual.parallelism_hint();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
@@ -1577,7 +1579,7 @@ impl G2 {
         }
 
         // Parallel MSM using tile_pippenger
-        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
+        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, &manual)
     }
 
     fn msm_sequential(affine_points: &[blst_p2_affine], scalars: &[u8], nbits: usize) -> Self {

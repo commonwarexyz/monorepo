@@ -319,9 +319,9 @@
 //! against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
-//! verifying ops proofs directly should use [`crate::qmdb::hasher`]. After sync, the bitmap and
-//! grafted tree are reconstructed deterministically from the operations, and the canonical root is
-//! computed. [proof::OpsRootWitness] can be used to validate that a particular ops root is
+//! verifying ops proofs directly should use [`crate::qmdb::verify_proof`]. After sync, the bitmap
+//! and grafted tree are reconstructed deterministically from the operations, and the canonical root
+//! is computed. [proof::OpsRootWitness] can be used to validate that a particular ops root is
 //! committed by a trusted canonical root; the sync engine does not perform this check itself.
 
 use crate::{
@@ -332,7 +332,6 @@ use crate::{
     },
     merkle::{self, full::Config as MerkleConfig, Location},
     qmdb::{
-        self,
         any::{
             self,
             operation::{Operation, Update},
@@ -349,6 +348,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap::Prunable as BitMap;
+use core::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub mod batch;
@@ -376,6 +376,10 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// The translator used by the compressed index.
     pub translator: T,
+
+    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
+    /// collisions without re-reading the log; `None` disables it.
+    pub init_cache_size: Option<NonZeroUsize>,
 }
 
 impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
@@ -384,6 +388,7 @@ impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S>
             merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
+            init_cache_size: cfg.init_cache_size,
         }
     }
 }
@@ -442,11 +447,9 @@ where
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
 
     // Build the grafted tree from the bitmap and ops tree.
-    let hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = crate::merkle::Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
-        &hasher,
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
@@ -456,16 +459,14 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(
+    let storage = grafting::Storage::<F, H, _, _>::new(
         &grafted_tree,
         grafting::height::<N>(),
         &any.log.merkle,
-        hasher.clone(),
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.root();
-    let root = db::compute_db_root(
-        &hasher,
+    let root = db::compute_db_root::<F, H, _, _, N>(
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
@@ -508,14 +509,14 @@ pub mod tests {
     pub use super::BitmapPrunedBits;
     use super::{ordered, unordered, FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig};
     use crate::{
-        merkle::{self, mmb, mmr, Bagging::ForwardFold},
+        merkle::{self, mmb, mmr},
         qmdb::{
-            self,
             any::{
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
+            verify_proof,
         },
         translator::Translator,
     };
@@ -567,6 +568,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -595,6 +597,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -1375,7 +1378,6 @@ pub mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
@@ -1396,6 +1398,7 @@ pub mod tests {
                 },
                 grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
                 translator: OneCap,
+                init_cache_size: Some(NZUsize!(1024)),
             };
             let mut db = ForgedExclusionDb::init(context.child("db"), cfg)
                 .await
@@ -1442,17 +1445,17 @@ pub mod tests {
 
             // Honest exclusion proving refuses a live key.
             assert!(matches!(
-                db.exclusion_proof(&hasher, &c).await,
+                db.exclusion_proof(&c).await,
                 Err(Error::KeyExists)
             ));
 
             // Forge attempt: package `b`'s authenticated update as an exclusion proof for `c`. The
             // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
             // [b, a), which cyclically covered `c` and verified).
-            let kvp = db.key_value_proof(&hasher, b.clone()).await.unwrap();
+            let kvp = db.key_value_proof(b.clone()).await.unwrap();
             let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
             assert!(!ForgedExclusionDb::verify_exclusion_proof(
-                &hasher, &c, &forged, &root
+                &c, &forged, &root
             ));
 
             db.destroy().await.unwrap();
@@ -1946,8 +1949,7 @@ pub mod tests {
             assert_eq!(reopened.get(&k).await.unwrap(), expected);
 
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
-            let hasher = qmdb::hasher::<Sha256>();
-            let _proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let _proof = reopened.key_value_proof(k).await.unwrap();
 
             reopened.destroy().await.unwrap();
         });
@@ -2187,10 +2189,8 @@ pub mod tests {
                 mmb_commit(&mut db, [(key(1), Some(val(round)))]).await;
             }
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = db.key_value_proof(&hasher, k).await.unwrap();
+            let proof = db.key_value_proof(k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2210,10 +2210,8 @@ pub mod tests {
 
             assert_eq!(reopened.root(), target_root);
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let proof = reopened.key_value_proof(k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2437,11 +2435,9 @@ pub mod tests {
                     "root mismatch after prune at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -2470,11 +2466,9 @@ pub mod tests {
                     "value mismatch after reopen at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -3876,9 +3870,6 @@ pub mod tests {
     /// Regression: `ops_historical_proof` must verify with QMDB's ops-tree hasher configuration.
     #[test_traced("INFO")]
     fn test_current_mmb_ops_historical_proof_verifies_with_backward_bagging() {
-        use crate::{merkle::hasher::Standard, qmdb::verify_proof};
-        use commonware_utils::NZU64;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
@@ -3902,19 +3893,7 @@ pub mod tests {
                 .unwrap();
 
             // Verifies under the QMDB ops-tree hasher configuration.
-            let hasher = qmdb::hasher::<Sha256>();
-            assert!(verify_proof(
-                &hasher,
-                &proof,
-                Location::new(0),
-                &ops,
-                &ops_root
-            ));
-
-            // Sanity: a different Merkle hasher configuration must not accept this proof.
-            let plain = Standard::<Sha256>::new(ForwardFold);
-            assert!(!verify_proof(
-                &plain,
+            assert!(verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(0),
                 &ops,

@@ -18,7 +18,7 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let mut batch = bls12381::Batch::new();
+                            let mut batch = bls12381::Batch::new(n_signers);
                             for _ in 0..n_signers {
                                 let signer = bls12381::PrivateKey::random(&mut thread_rng());
                                 let sig = signer.sign(namespace, &msg);

@@ -30,7 +30,7 @@ use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{BufMut, BufferPooler, Error as RError, Metrics, Storage};
+use commonware_runtime::{BufMut, BufferPooler, Error as RError, Handle, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -165,6 +165,14 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// Sync the given `sections` to disk (flushes write buffers).
     pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
         self.manager.sync(sections).await
+    }
+
+    /// Start syncing the given `sections` to disk.
+    pub async fn start_sync(
+        &mut self,
+        sections: impl crate::Sections,
+    ) -> Result<Handle<()>, Error> {
+        self.manager.start_sync(sections).await
     }
 
     /// Sync all sections to disk.

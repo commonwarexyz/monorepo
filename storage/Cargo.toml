@@ -39,9 +39,9 @@ commonware-math.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage = { path = ".", features = ["std", "test-utils"] }
 criterion.workspace = true
-governor.workspace = true
 paste.workspace = true
 rand.workspace = true
+rand_distr.workspace = true
 rstest.workspace = true
 tracing-subscriber.workspace = true
 
@@ -89,6 +89,12 @@ path = "src/qmdb/benches/constantinople.rs"
 name = "qmdb"
 harness = false
 path = "src/qmdb/benches/bench.rs"
+required-features = ["test-traits"]
+
+[[bench]]
+name = "init_scale"
+harness = false
+path = "src/qmdb/benches/init_scale.rs"
 required-features = ["test-traits"]
 
 [[bench]]

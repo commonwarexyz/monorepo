@@ -20,7 +20,7 @@
 //! - updates: keys written per batch (default 32,768)
 //! - threads: strategy pool threads (default 8)
 
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
     buffer::paged::CacheRef,
@@ -41,7 +41,7 @@ use std::{
     time::Instant,
 };
 
-type Digest = <Sha256 as Hasher>::Digest;
+type Digest = DigestOf<Sha256>;
 const CHUNK_SIZE: usize = 32;
 type AnyDb = commonware_storage::qmdb::any::unordered::fixed::Db<
     mmb::Family,
@@ -326,6 +326,7 @@ fn main() {
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
+                    init_cache_size: Some(NZUsize!(1 << 18)),
                 };
                 let db = CurrentDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(
@@ -341,6 +342,7 @@ fn main() {
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
+                    init_cache_size: Some(NZUsize!(1 << 18)),
                 };
                 let db = CurrentOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(
@@ -355,6 +357,7 @@ fn main() {
                     merkle_config,
                     journal_config,
                     translator: EightCap,
+                    init_cache_size: Some(NZUsize!(1 << 18)),
                 };
                 let db = AnyOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
@@ -371,6 +374,7 @@ fn main() {
                         write_buffer: WRITE_BUFFER,
                     },
                     translator: EightCap,
+                    init_cache_size: Some(NZUsize!(1 << 18)),
                 };
                 let db = AnyVarDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
@@ -380,6 +384,7 @@ fn main() {
                     merkle_config,
                     journal_config,
                     translator: EightCap,
+                    init_cache_size: Some(NZUsize!(1 << 18)),
                 };
                 let db = AnyDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::fixed::mmb", AnyMerkleized)

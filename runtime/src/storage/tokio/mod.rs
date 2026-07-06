@@ -25,14 +25,14 @@ async fn sync_dir(path: &Path) -> Result<(), Error> {
         Error::BlobOpenFailed(
             path.to_string_lossy().to_string(),
             "directory".to_string(),
-            e,
+            e.into(),
         )
     })?;
     dir.sync_all().await.map_err(|e| {
         Error::BlobSyncFailed(
             path.to_string_lossy().to_string(),
             "directory".to_string(),
-            e,
+            e.into(),
         )
     })
 }
@@ -110,7 +110,7 @@ impl crate::Storage for Storage {
             .truncate(false)
             .open(&path)
             .await
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
 
         // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
@@ -121,7 +121,7 @@ impl crate::Storage for Storage {
             // Sync the file to ensure it is durable
             file.sync_all()
                 .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
 
             // Windows doesn't have a notion of syncing a directory entry to ensure that it's
             // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
@@ -147,13 +147,13 @@ impl crate::Storage for Storage {
             let (header, blob_version) = Header::new(&versions);
             file.set_len(Header::SIZE_U64)
                 .await
-                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
+                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
             file.write_all(&header.encode())
                 .await
                 .map_err(|_| Error::WriteFailed)?;
             file.sync_all()
                 .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
             (blob_version, 0)
         } else {
             // Existing blob - read and validate header

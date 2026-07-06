@@ -45,7 +45,7 @@ use crate::{
         tip::Buffer,
         SyncState,
     },
-    Blob, Error, IoBuf, IoBufMut, IoBufs,
+    Blob, Error, Handle, IoBuf, IoBufMut, IoBufs,
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
@@ -152,11 +152,6 @@ impl<B: Blob> Writer<B> {
         }
     }
 
-    /// Sync the underlying blob if there are unsynced mutations.
-    async fn sync_inner(&mut self) -> Result<(), Error> {
-        self.sync_state.sync(&self.blob).await
-    }
-
     /// Wrap `blob` in a [Writer]. `blob` must already hold `original_blob_size` physical bytes;
     /// reads are cached through `cache_ref` and appends stage in a write buffer of capacity
     /// `capacity`. Rewinds the blob if necessary so it only contains checksum-validated data.
@@ -198,7 +193,11 @@ impl<B: Blob> Writer<B> {
             blob,
             current_page,
             partial_page_state,
-            sync_state: SyncState::new(needs_sync),
+            sync_state: if needs_sync {
+                SyncState::Dirty
+            } else {
+                SyncState::Clean
+            },
             id: cache_ref.next_id(),
             cache_ref,
             buffer,
@@ -341,10 +340,13 @@ impl<B: Blob> Writer<B> {
         let mut physical_pages = IoBufs::default();
         self.append_full_pages(&bulk, None, &mut physical_pages);
 
-        debug_assert!(
+        assert!(
             self.partial_page_state.is_none(),
             "an empty tip implies no partial page state"
         );
+
+        // Direct blob writes must not overtake an earlier started sync barrier.
+        self.sync_state.wait_for_pending().await?;
 
         // Cache the pages before `replace` publishes the new size, so reads of the bulk range are
         // served from the cache while the blob write is still in flight. Insert in
@@ -415,6 +417,9 @@ impl<B: Blob> Writer<B> {
         if physical_pages.is_empty() {
             return Ok(false);
         }
+
+        // A flush mutates the blob, so first resolve any outstanding start_sync barrier.
+        self.sync_state.wait_for_pending().await?;
 
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
         // partial page in tip for continued buffering.
@@ -927,7 +932,25 @@ impl<B: Blob> Writer<B> {
 
         // Otherwise, the flush either had no bytes to write or used plain writes. Sync only if a
         // durability barrier is still pending.
-        self.sync_inner().await
+        self.sync_state.sync(&self.blob).await
+    }
+
+    /// Flushes buffered data and begins making all pending mutations durable, returning a
+    /// completion handle.
+    ///
+    /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
+    /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
+    /// mutate the blob first wait for any outstanding start_sync handles.
+    pub async fn start_sync(&mut self) -> Handle<()> {
+        if let Err(err) = self.flush_internal(true, false).await {
+            return Handle::ready(Err(err));
+        }
+        self.sync_state.start_sync(&self.blob).await
+    }
+
+    /// Wait for any started sync to complete without starting a new sync.
+    pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
+        self.sync_state.wait_for_pending().await
     }
 
     /// Resize the blob to the provided logical `size`.
@@ -994,8 +1017,9 @@ impl<B: Blob> Writer<B> {
         // A logical shrink can leave the physical page count unchanged. Only real physical
         // resizes need to create a pending sync.
         if new_physical_size != current_physical_size {
-            self.blob.resize(new_physical_size).await?;
-            self.sync_state.mark_unsynced();
+            self.sync_state
+                .resize(&self.blob, new_physical_size)
+                .await?;
         }
 
         // Evict cached pages at or beyond the new full-page boundary. The page at
@@ -1097,6 +1121,7 @@ impl<B: Blob> Writer<B> {
     /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
     /// [`super::Sealed::sync`].
     pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
+        self.sync_state.wait_for_pending().await?;
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.id))
     }
@@ -1108,6 +1133,7 @@ mod tests {
     use crate::{
         buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
         deterministic,
+        mocks::{next_pending_sync, DelayedSyncBlob},
         telemetry::metrics::Registry,
         Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
@@ -1115,6 +1141,7 @@ mod tests {
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16, NZU32};
+    use futures::FutureExt as _;
     use std::{
         num::NonZeroU16,
         sync::{
@@ -2144,6 +2171,384 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    // Verifies a successful start_sync marks the writer clean.
+    fn test_start_sync_persists_and_marks_clean() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // A fresh writer is dirty, so start_sync does one full fsync; nothing is buffered to write.
+            let handle = writer.start_sync().await;
+            // Let the started sync finish.
+            handle.await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            // Now clean, so the next write syncs just its range instead of the whole blob.
+            let data = b"hello world";
+            writer.append(data).await.unwrap();
+            writer.sync().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+
+            // Nothing left to sync, so start_sync does nothing.
+            let handle = writer.start_sync().await;
+            handle.await.unwrap();
+            let (_, _, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+
+            // Durable and readable after reopening.
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies sync waits for a pending start_sync with no new writes.
+    fn test_sync_waits_for_outstanding_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+
+            // Try to sync while the started sync is still blocked.
+            let mut sync = Box::pin(writer.sync());
+            assert!(
+                sync.as_mut().now_or_never().is_none(),
+                "sync must wait for the outstanding start_sync handle"
+            );
+            drop(sync);
+            let (_, _, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Release the started sync and retry.
+            deferred.release.send(Ok(())).unwrap();
+            writer.sync().await.unwrap();
+            handle.await.unwrap();
+            let (_, _, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies a small buffered write cannot range-sync before pending start_sync finishes.
+    fn test_sync_after_start_sync_and_small_write_waits_before_range_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+            writer.append(b"hello world").await.unwrap();
+
+            // Sync must wait before flushing the buffered write.
+            let mut sync = Box::pin(writer.sync());
+            assert!(
+                sync.as_mut().now_or_never().is_none(),
+                "sync must join the outstanding barrier before flushing the small write"
+            );
+            drop(sync);
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Release the started sync, then flush the buffered write.
+            deferred.release.send(Ok(())).unwrap();
+            writer.sync().await.unwrap();
+            handle.await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies a large append cannot flush before pending start_sync finishes.
+    fn test_write_flush_waits_for_outstanding_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+
+            let data = vec![7; BUFFER_SIZE + PAGE_SIZE.get() as usize];
+            let append = context.child("append").spawn(move |_| async move {
+                writer.append(&data).await.unwrap();
+                writer
+            });
+            // The append has reached the pending sync wait.
+            deferred
+                .blocked
+                .await
+                .expect("append never waited on start_sync");
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Release the started sync so the append can flush.
+            deferred.release.send(Ok(())).unwrap();
+            let mut writer = append.await.unwrap();
+            handle.await.unwrap();
+            writer.sync().await.unwrap();
+            let (_, writes, full_syncs, _) = inner.snapshot();
+            assert!(writes > 0);
+            assert!(full_syncs > 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies seal cannot flush buffered bytes before pending start_sync finishes.
+    fn test_seal_waits_for_outstanding_start_sync_before_flushing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            let prior = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+            writer.append(b"hello world").await.unwrap();
+
+            let seal = context
+                .child("seal")
+                .spawn(move |_| async move { writer.seal().await });
+            // The seal has reached the pending sync wait.
+            deferred
+                .blocked
+                .await
+                .expect("seal never waited on start_sync");
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Release the started sync so seal can flush.
+            deferred.release.send(Ok(())).unwrap();
+            let sealed = seal.await.unwrap().unwrap();
+            prior.await.unwrap();
+            let read = sealed
+                .read_at(0, b"hello world".len())
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), b"hello world");
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies snapshot cannot flush buffered bytes before pending start_sync finishes.
+    fn test_snapshot_waits_for_outstanding_start_sync_before_flushing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            // Start a sync, then buffer newer bytes not covered by it.
+            let prior = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+            writer.append(b"hello world").await.unwrap();
+
+            let snapshot = context.child("snapshot").spawn(move |_| async move {
+                let snapshot = writer.snapshot().await.unwrap();
+                let read = snapshot
+                    .read_at(0, b"hello world".len())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                assert_eq!(read.as_ref(), b"hello world");
+                writer
+            });
+
+            // Snapshot must wait before flushing buffered bytes.
+            deferred
+                .blocked
+                .await
+                .expect("snapshot never waited on start_sync");
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Releasing the sync lets snapshot flush and read the buffered bytes.
+            deferred.release.send(Ok(())).unwrap();
+            let _writer = snapshot.await.unwrap();
+            prior.await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies replay cannot flush buffered bytes before pending start_sync finishes.
+    fn test_replay_waits_for_outstanding_start_sync_before_flushing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            // Start a sync, then buffer newer bytes not covered by it.
+            let prior = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+            writer.append(b"hello world").await.unwrap();
+
+            let replay = context.child("replay").spawn(move |_| async move {
+                {
+                    let mut replay = writer.replay(NZUsize!(BUFFER_SIZE)).await.unwrap();
+                    assert!(replay.ensure(1).await.unwrap());
+                    assert_eq!(replay.chunk()[0], b'h');
+                }
+                writer
+            });
+
+            // Replay must wait before flushing buffered bytes.
+            deferred
+                .blocked
+                .await
+                .expect("replay never waited on start_sync");
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Releasing the sync lets replay flush and read the buffered bytes.
+            deferred.release.send(Ok(())).unwrap();
+            let _writer = replay.await.unwrap();
+            prior.await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies resize growth cannot write zeros before pending start_sync finishes.
+    fn test_resize_grow_waits_for_outstanding_start_sync_before_writing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            // Start a sync before growing into the direct-write path.
+            let prior = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+
+            let target_size = (BUFFER_SIZE + PAGE_SIZE.get() as usize) as u64;
+            let resize = context.child("resize_grow").spawn(move |_| async move {
+                writer.resize(target_size).await.unwrap();
+                writer
+            });
+
+            // Growth must wait before writing zero-filled pages.
+            deferred
+                .blocked
+                .await
+                .expect("resize grow never waited on start_sync");
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Releasing the sync lets the resize complete.
+            deferred.release.send(Ok(())).unwrap();
+            let mut writer = resize.await.unwrap();
+            prior.await.unwrap();
+            assert_eq!(writer.size(), target_size);
+            writer.sync().await.unwrap();
+            let (_, writes, full_syncs, _) = inner.snapshot();
+            assert!(writes > 0);
+            assert!(full_syncs > 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies shrink cannot resize the blob before pending start_sync finishes.
+    fn test_resize_shrink_waits_for_outstanding_start_sync_before_resizing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            // Build durable pages, then start a sync for a newer partial page.
+            let data = vec![3; PAGE_SIZE.get() as usize * 2];
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+            writer.append(b"x").await.unwrap();
+            let prior = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+            let physical_size = inner.size();
+
+            let resize = context.child("resize_shrink").spawn(move |_| async move {
+                writer.resize(PAGE_SIZE.get() as u64).await.unwrap();
+                writer
+            });
+
+            // Shrink must wait before truncating the physical blob.
+            deferred
+                .blocked
+                .await
+                .expect("resize shrink never waited on start_sync");
+            assert_eq!(
+                inner.size(),
+                physical_size,
+                "resize must not shrink the blob before the pending sync finishes"
+            );
+
+            // Releasing the sync lets the shrink truncate the blob.
+            deferred.release.send(Ok(())).unwrap();
+            let writer = resize.await.unwrap();
+            prior.await.unwrap();
+            assert_eq!(writer.size(), PAGE_SIZE.get() as u64);
+            assert!(inner.size() < physical_size);
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_sync_failed_range_sync_does_not_mark_clean() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -2463,7 +2868,9 @@ mod tests {
                     .write_at(offset, bytes.slice(..partial_len))
                     .await?;
                 self.inner.sync().await?;
-                return Err(Error::Io(std::io::Error::other("injected partial write")));
+                return Err(Error::Io(
+                    std::io::Error::other("injected partial write").into(),
+                ));
             }
 
             self.inner.write_at(offset, bufs).await
@@ -2483,7 +2890,9 @@ mod tests {
                 self.inner
                     .write_at_sync(offset, bytes.slice(..partial_len))
                     .await?;
-                return Err(Error::Io(std::io::Error::other("injected partial write")));
+                return Err(Error::Io(
+                    std::io::Error::other("injected partial write").into(),
+                ));
             }
 
             self.inner.write_at_sync(offset, bufs).await

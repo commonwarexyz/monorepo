@@ -429,13 +429,13 @@ where
             sender,
         );
         let (receiver_service, mut receiver) =
-            WrappedBackgroundReceiver::<_, P, X, _, Shard<C, H>>::new(
+            WrappedBackgroundReceiver::<_, P, X, _, Shard<C, H>, T>::new(
                 self.context.child("shard_ingress"),
                 receiver,
                 self.shard_codec_cfg.clone(),
                 self.blocker.clone(),
                 self.background_channel_capacity,
-                &self.strategy,
+                self.strategy.clone(),
             );
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();

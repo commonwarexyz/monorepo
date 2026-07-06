@@ -96,10 +96,11 @@ use crate::{
 };
 use ahash::AHashSet;
 use commonware_codec::EncodeShared;
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use std::{num::NonZeroU64, ops::Range, sync::Arc};
+use core::num::{NonZeroU64, NonZeroUsize};
+use std::{ops::Range, sync::Arc};
 use tracing::warn;
 
 /// Metrics for Immutable QMDBs.
@@ -148,6 +149,10 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// The translator used by the compressed index.
     pub translator: T,
+
+    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
+    /// collisions without re-reading the log; `None` disables it.
+    pub init_cache_size: Option<NonZeroUsize>,
 }
 
 /// An authenticated database that only supports adding new keyed values (no updates or
@@ -165,7 +170,7 @@ pub struct Immutable<
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
-    H: CHasher,
+    H: Hasher,
     T: Translator,
     S: Strategy,
 > where
@@ -204,7 +209,7 @@ where
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
     C::Item: EncodeShared,
-    H: CHasher,
+    H: Hasher,
     T: Translator,
     S: Strategy,
 {
@@ -217,6 +222,7 @@ where
         mut journal: authenticated::Journal<F, E, C, H, S>,
         context: E,
         translator: T,
+        cache_size: Option<NonZeroUsize>,
     ) -> Result<Self, Error<F>> {
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
@@ -247,6 +253,7 @@ where
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
+                cache_size,
                 |_, _| {},
             )
             .await?;
@@ -765,7 +772,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         merkle::{Family, Location},
-        qmdb::{self, verify_proof},
+        qmdb::verify_proof,
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
@@ -972,8 +979,12 @@ pub(super) mod test {
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
         let root = db.root();
-        let hasher = qmdb::hasher::<Sha256>();
-        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
+            Location::new(0),
+            &ops,
+            &root
+        ));
 
         db.destroy().await.unwrap();
     }
@@ -1085,7 +1096,6 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
-        let hasher = qmdb::hasher::<Sha256>();
         let mut db = open_db(context.child("first")).await;
 
         let mut batch = db.new_batch();
@@ -1117,7 +1127,12 @@ pub(super) mod test {
         let max_ops = NZU64!(5);
         for i in 0..*db.bounds().end {
             let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
-            assert!(verify_proof(&hasher, &proof, Location::new(i), &log, &root));
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof,
+                Location::new(i),
+                &log,
+                &root
+            ));
         }
 
         db.destroy().await.unwrap();
@@ -1875,7 +1890,6 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
-        let hasher = qmdb::hasher::<Sha256>();
 
         const BATCHES: u64 = 20;
         const KEYS_PER_BATCH: u64 = 5;
@@ -1903,7 +1917,12 @@ pub(super) mod test {
         // Verify proof over the full range.
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(10000)).await.unwrap();
-        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
+            Location::new(0),
+            &ops,
+            &root
+        ));
 
         // Expected: 1 initial commit + BATCHES * (KEYS_PER_BATCH + 1 commit).
         let expected = 1 + BATCHES * (KEYS_PER_BATCH + 1);
@@ -2021,7 +2040,6 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
-        let hasher = qmdb::hasher::<Sha256>();
 
         const N: u64 = 500;
         let mut kvs: Vec<(Digest, Digest)> = Vec::new();
@@ -2044,7 +2062,12 @@ pub(super) mod test {
         // Verify proof over the full range.
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-        assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
+            Location::new(0),
+            &ops,
+            &root
+        ));
 
         // Expected: 1 initial commit + N sets + 1 commit.
         assert_eq!(db.bounds().end, 1 + N + 1);

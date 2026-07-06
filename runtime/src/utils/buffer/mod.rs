@@ -1,5 +1,7 @@
 //! Buffers for reading and writing to [crate::Blob]s.
 
+use futures::future::{BoxFuture, FutureExt as _, Shared};
+
 pub mod paged;
 mod read;
 mod tip;
@@ -8,61 +10,152 @@ mod write;
 pub use read::Read;
 pub use write::Write;
 
-/// Tracks whether plain blob mutations still need a full durability barrier.
-struct SyncState {
-    needs_sync: bool,
+/// A shared sync result.
+///
+/// Handles returned by [Completion::handle] are detached observers of the same shared result:
+/// dropping one neither cancels the underlying sync nor consumes its result, and every
+/// observer sees the same outcome.
+#[derive(Clone)]
+struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
+
+impl Completion {
+    /// Return a handle for the sync result.
+    fn handle(&self) -> crate::Handle<()> {
+        crate::Handle::from_future(self.0.clone())
+    }
+
+    /// Wait for the sync result.
+    async fn wait(&self) -> Result<(), crate::Error> {
+        self.0.clone().await
+    }
+}
+
+impl From<crate::Handle<()>> for Completion {
+    fn from(handle: crate::Handle<()>) -> Self {
+        Self(handle.boxed().shared())
+    }
+}
+
+/// Tracks whether blob mutations still need a sync.
+///
+/// Callers rely on three properties:
+/// - Every operation that mutates the blob first waits for an in-flight sync, so a started
+///   sync's coverage is never disturbed by later writes.
+/// - [SyncState::start_sync] on a [SyncState::Pending] state returns the in-flight sync's
+///   handle (completed syncs resolve immediately), so re-requesting a sync is a cheap way to
+///   observe outstanding work.
+/// - A failure is never lost: every handle cloned from the shared completion reports it, and
+///   an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
+///   which also marks the state [SyncState::Dirty] since the mutations still need durability.
+enum SyncState {
+    // No unsynced mutations.
+    Clean,
+    // Unsynced mutations need a sync.
+    Dirty,
+    // A started sync is in flight.
+    Pending(Completion),
 }
 
 impl SyncState {
-    /// Create a new sync state.
-    ///
-    /// Use `needs_sync = true` when wrapping an existing blob because prior plain mutations may
-    /// still need a full [`crate::Blob::sync`] barrier. [`Self::write_at_sync`] can use
-    /// [`crate::Blob::write_at_sync`] only when this is false.
-    const fn new(needs_sync: bool) -> Self {
-        Self { needs_sync }
+    /// Mark a new unsynced mutation.
+    fn mark_dirty(&mut self) {
+        assert!(
+            !matches!(self, Self::Pending(_)),
+            "pending sync must be joined before marking dirty"
+        );
+        *self = Self::Dirty;
     }
 
-    const fn mark_unsynced(&mut self) {
-        self.needs_sync = true;
+    /// Wait for an in-flight sync before reusing or mutating the blob.
+    async fn wait_for_pending(&mut self) -> Result<(), crate::Error> {
+        let Self::Pending(pending) = self else {
+            return Ok(());
+        };
+        match pending.wait().await {
+            Ok(()) => {
+                *self = Self::Clean;
+                Ok(())
+            }
+            Err(err) => {
+                // The sync failed, so the pending mutations still need durability.
+                *self = Self::Dirty;
+                Err(err)
+            }
+        }
     }
 
+    /// Write data that will require a later sync.
     async fn write_at(
         &mut self,
         blob: &impl crate::Blob,
         offset: u64,
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
+        self.wait_for_pending().await?;
         blob.write_at(offset, bufs).await?;
-        self.needs_sync = true;
+        self.mark_dirty();
         Ok(())
     }
 
+    /// Write data and make it durable before returning.
     async fn write_at_sync(
         &mut self,
         blob: &impl crate::Blob,
         offset: u64,
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
-        if self.needs_sync {
-            self.write_at(blob, offset, bufs).await?;
-            self.sync(blob).await
-        } else {
-            // If `write_at_sync` fails, a later sync must not treat the drained buffer as durable.
-            self.needs_sync = true;
-            blob.write_at_sync(offset, bufs).await?;
-            self.needs_sync = false;
-            Ok(())
+        self.wait_for_pending().await?;
+        match self {
+            Self::Dirty => {
+                // Earlier mutations need a full durability barrier too.
+                blob.write_at(offset, bufs).await?;
+                blob.sync().await?;
+                *self = Self::Clean;
+                Ok(())
+            }
+            Self::Clean => {
+                // If this fails, a later sync must still cover the attempted write.
+                self.mark_dirty();
+                blob.write_at_sync(offset, bufs).await?;
+                *self = Self::Clean;
+                Ok(())
+            }
+            Self::Pending(_) => unreachable!("pending sync waited above"),
         }
     }
 
+    /// Resize the blob and require a later sync.
+    async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
+        self.wait_for_pending().await?;
+        blob.resize(len).await?;
+        self.mark_dirty();
+        Ok(())
+    }
+
+    /// Make all pending mutations durable before returning.
     async fn sync(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
-        if !self.needs_sync {
+        self.wait_for_pending().await?;
+        if matches!(self, Self::Clean) {
             return Ok(());
         }
         blob.sync().await?;
-        self.needs_sync = false;
+        *self = Self::Clean;
         Ok(())
+    }
+
+    /// Start making pending mutations durable and return a handle for completion.
+    async fn start_sync(&mut self, blob: &impl crate::Blob) -> crate::Handle<()> {
+        match self {
+            Self::Clean => crate::Handle::ready(Ok(())),
+            Self::Dirty => {
+                // Store a shared completion so repeated calls observe the same sync.
+                let pending = Completion::from(blob.start_sync().await);
+                let handle = pending.handle();
+                *self = Self::Pending(pending);
+                handle
+            }
+            Self::Pending(pending) => pending.handle(),
+        }
     }
 }
 
@@ -70,8 +163,9 @@ impl SyncState {
 mod tests {
     use super::*;
     use crate::{
-        deterministic, Blob as _, BufMut, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner,
-        Storage,
+        deterministic,
+        mocks::{next_pending_sync, DelayedSyncBlob},
+        Blob as _, BufMut, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner, Storage,
     };
     use commonware_macros::test_traced;
     use commonware_utils::{sync::Mutex, NZUsize};
@@ -100,7 +194,7 @@ mod tests {
 
     /// Test blob with separate visible and durable state.
     ///
-    /// Plain writes and resizes only update `data`. `write_at_sync` updates `data`
+    /// Writes and resizes only update `data`. `write_at_sync` updates `data`
     /// and then copies only that submitted range into `durable`. `sync` copies all
     /// of `data` to `durable`. This lets tests assert that `Write::sync` uses range
     /// sync only when no earlier unsynced mutation needs a full durability barrier.
@@ -1355,6 +1449,211 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(10));
             let read = reader.read(10).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), b"01234XXXXX");
+        });
+    }
+
+    // Verifies start_sync flushes current bytes, completes durability, and marks the writer clean.
+    #[test_traced]
+    fn test_write_start_sync_persists_and_marks_clean() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = SyncTrackingBlob::new();
+            let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+
+            // Start a sync for buffered bytes and wait for the returned handle.
+            writer.write_at(0, b"abc").await.unwrap();
+            let handle = writer.start_sync().await;
+            handle.await.unwrap();
+
+            // The buffered write required a full sync because the fresh writer starts dirty.
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            // The started sync marked the writer clean, so the next buffered write can use a
+            // range-scoped sync.
+            writer.write_at(3, b"d").await.unwrap();
+            writer.sync().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcd");
+            assert_eq!(writes, 2);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+
+            // Nothing left to sync.
+            let handle = writer.start_sync().await;
+            handle.await.unwrap();
+            let (_, _, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+        });
+    }
+
+    // Verifies sync waits for an outstanding start_sync instead of starting new disk work.
+    #[test_traced]
+    fn test_write_sync_waits_for_outstanding_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            // Hold the started sync open so a later sync cannot finish right away.
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+
+            // The attempted sync reaches the pending handle and cannot complete yet.
+            let mut sync = Box::pin(writer.sync());
+            assert!(
+                sync.as_mut().now_or_never().is_none(),
+                "sync must wait for the outstanding start_sync handle"
+            );
+            deferred
+                .blocked
+                .await
+                .expect("sync never waited on start_sync");
+
+            let (_, _, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Releasing the original handle lets sync observe the completed disk sync.
+            deferred.release.send(Ok(())).unwrap();
+            sync.await.unwrap();
+            handle.await.unwrap();
+            let (_, _, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    // Verifies writes made after start_sync wait before they are flushed.
+    #[test_traced]
+    fn test_write_sync_after_start_sync_and_small_write_waits_before_range_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, 0, NZUsize!(8));
+
+            // Begin syncing the initial dirty state and keep that sync blocked.
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+
+            // The tip must not reach the blob while the earlier sync is pending.
+            writer.write_at(0, b"abc").await.unwrap();
+            let mut sync = Box::pin(writer.sync());
+            assert!(
+                sync.as_mut().now_or_never().is_none(),
+                "sync must wait for the outstanding start_sync before flushing the small write"
+            );
+            deferred
+                .blocked
+                .await
+                .expect("sync never waited on start_sync");
+
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // After the earlier sync completes, the buffered write can be persisted.
+            deferred.release.send(Ok(())).unwrap();
+            sync.await.unwrap();
+            handle.await.unwrap();
+
+            let (durable, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+        });
+    }
+
+    // Verifies overlapping writes wait before flushing buffered bytes while start_sync is pending.
+    #[test_traced]
+    fn test_write_at_overlap_flush_waits_for_outstanding_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            inner.write_at(0, b"xxx").await.unwrap();
+
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, inner.size(), NZUsize!(8));
+
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+
+            // This append is local while the earlier sync is pending.
+            writer.write_at(3, b"abc").await.unwrap();
+
+            // The drained tip must not reach the blob while the earlier sync is pending.
+            let mut write = Box::pin(writer.write_at(2, b"ZZ"));
+            assert!(
+                write.as_mut().now_or_never().is_none(),
+                "overlapping write must wait for the outstanding start_sync before flushing"
+            );
+            deferred
+                .blocked
+                .await
+                .expect("write never waited on start_sync");
+
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Releasing the sync lets the parked write reach the blob.
+            deferred.release.send(Ok(())).unwrap();
+            write.await.unwrap();
+            handle.await.unwrap();
+
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!(writes, 3);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    // Verifies resize does not mutate the blob before an outstanding start_sync completes.
+    #[test_traced]
+    fn test_write_resize_waits_for_outstanding_start_sync_before_resizing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let inner = SyncTrackingBlob::new();
+            inner.write_at(0, b"abcdef").await.unwrap();
+
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let mut writer = Write::from_pooler(&context, blob, inner.size(), NZUsize!(8));
+
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+            let original_size = inner.size();
+
+            // Resize must not reach the blob while the earlier sync is pending.
+            let mut resize = Box::pin(writer.resize(3));
+            assert!(
+                resize.as_mut().now_or_never().is_none(),
+                "resize must wait for the outstanding start_sync handle"
+            );
+            deferred
+                .blocked
+                .await
+                .expect("resize never waited on start_sync");
+            assert_eq!(
+                inner.size(),
+                original_size,
+                "resize must not mutate the blob before the pending sync finishes"
+            );
+
+            // Releasing the sync lets the resize apply.
+            deferred.release.send(Ok(())).unwrap();
+            resize.await.unwrap();
+            handle.await.unwrap();
+            assert_eq!(writer.size(), 3);
+            assert_eq!(inner.size(), 3);
         });
     }
 

@@ -8,9 +8,9 @@
 //! the module documentation). The sync engine operates on the **ops root**, not the canonical root:
 //! it downloads operations and verifies each batch against the ops root using ops-tree range proofs
 //! (identical to `any` sync). Callers that verify current ops proofs directly should use
-//! `qmdb::hasher`. [crate::qmdb::current::proof::OpsRootWitness] can be used by callers that need
-//! to authenticate the synced ops root against a trusted canonical root; the sync engine does not
-//! perform this check itself.
+//! [crate::qmdb::verify_proof]. [crate::qmdb::current::proof::OpsRootWitness] can be used by
+//! callers that need to authenticate the synced ops root against a trusted canonical root; the sync
+//! engine does not perform this check itself.
 //!
 //! After all operations are synced, the bitmap and grafted tree are reconstructed deterministically
 //! from the operations. The canonical root is then computed from the ops root, the reconstructed
@@ -71,6 +71,7 @@ use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
+use core::num::NonZeroUsize;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -100,6 +101,7 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
+    cache_size: Option<NonZeroUsize>,
     metadata_partition: String,
     strategy: S,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>
@@ -115,7 +117,6 @@ where
     Operation<F, U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
-    let hasher = qmdb::hasher::<H>();
     let merkle = Merkle::<F, _, _, S>::init_sync(
         context.child("merkle"),
         full::SyncConfig {
@@ -129,7 +130,7 @@ where
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         merkle,
         log,
-        hasher,
+        qmdb::hasher::<H>(),
         apply_batch_size as u64,
     )
     .await?;
@@ -149,7 +150,7 @@ where
     // during replay.
     let any_metrics = AnyMetrics::new(context.child("any"));
     let any: AnyDb<F, E, J, I, H, U, N, S> =
-        AnyDb::init_from_log(index, log, Some(bitmap), any_metrics).await?;
+        AnyDb::init_from_log(index, log, Some(bitmap), cache_size, any_metrics).await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
@@ -176,11 +177,9 @@ where
     };
 
     // Build grafted tree.
-    let hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
-        &hasher,
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
@@ -192,36 +191,22 @@ where
     // Compute the canonical root. The grafted root is deterministic from the ops
     // (which are authenticated by the engine) and the bitmap (which is deterministic
     // from the ops).
-    let storage = grafting::Storage::new(
+    let storage = grafting::Storage::<F, H, _, _>::new(
         &grafted_tree,
         grafting::height::<N>(),
         &any.log.merkle,
-        hasher.clone(),
     );
     let partial = db::partial_chunk(any.bitmap.as_ref());
-    let grafted_root = db::compute_grafted_root(
-        &hasher,
+    let ops_root = any.root();
+    let root = db::compute_db_root::<F, H, _, _, N>(
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
+        partial,
         any.inactivity_floor_loc,
+        &ops_root,
     )
     .await?;
-    let ops_root = any.root();
-    let partial_digest = partial.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(&chunk);
-        (next_bit, digest)
-    });
-    let pending_digest =
-        db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
-            .map(|chunk| hasher.digest(&chunk));
-    let root = db::combine_roots(
-        &hasher,
-        &ops_root,
-        &grafted_root,
-        pending_digest.as_ref(),
-        partial_digest.as_ref().map(|(nb, d)| (*nb, d)),
-    );
 
     // Initialize metadata store and construct the Db.
     let (metadata, _, _) =
@@ -283,6 +268,7 @@ macro_rules! impl_current_sync_database {
                 let metadata_partition = config.grafted_metadata_partition.clone();
                 let strategy = config.merkle_config.strategy.clone();
                 let translator = config.translator.clone();
+                let cache_size = config.init_cache_size;
                 build_db::<F, _, $update<K, V>, _, H, _, T, N, _>(
                     context,
                     merkle_config,
@@ -291,6 +277,7 @@ macro_rules! impl_current_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
+                    cache_size,
                     metadata_partition,
                     strategy,
                 )

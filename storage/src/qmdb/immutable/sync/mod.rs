@@ -111,6 +111,7 @@ where
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
+                db_config.init_cache_size,
                 |_, _| {},
             )
             .await?;

@@ -167,6 +167,11 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         })
     }
 
+    /// Whether the index currently holds no keys.
+    fn is_empty(&self) -> bool {
+        self.keys.get() == 0
+    }
+
     /// Values of the smallest key strictly greater than `k` in partition `i`.
     fn partition_next_after(&self, i: usize, k: &T::Key) -> Option<&[V]> {
         self.partitions[i].next_values_after(k).or_else(|| {
@@ -439,10 +444,15 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     where
         V: 'a,
     {
-        let (i, sub) = partition_index_and_sub_key::<P>(key);
-        let k = self.translator.transform(sub);
+        // Skip the all-partitions scan when there is nothing to find.
+        if self.is_empty() {
+            return None;
+        }
+
         // The largest translated key strictly less than `k`: within the partition first, then the
         // last key of the nearest lower partition, else cycle to the global last key.
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
         if let Some(vals) = self.partition_prev_before(i, &k) {
             return Some((vals.iter(), false));
         }
@@ -466,10 +476,15 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     where
         V: 'a,
     {
-        let (i, sub) = partition_index_and_sub_key::<P>(key);
-        let k = self.translator.transform(sub);
+        // Skip the all-partitions scan when there is nothing to find.
+        if self.is_empty() {
+            return None;
+        }
+
         // The smallest translated key strictly greater than `k`: within the partition first, then
         // the first key of the nearest higher partition, else cycle to the global first key.
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
         if let Some(vals) = self.partition_next_after(i, &k) {
             return Some((vals.iter(), false));
         }
@@ -490,6 +505,12 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     where
         V: 'a,
     {
+        // Skip the all-partitions scan when there is nothing to find.
+        if self.is_empty() {
+            return None;
+        }
+
+        // Scan partitions in ascending order for the global first key.
         for p in 0..self.partitions.len() {
             if let Some(vals) = self.partition_first(p) {
                 return Some(vals.iter());
@@ -502,6 +523,12 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     where
         V: 'a,
     {
+        // Skip the all-partitions scan when there is nothing to find.
+        if self.is_empty() {
+            return None;
+        }
+
+        // Scan partitions in descending order for the global last key.
         for p in (0..self.partitions.len()).rev() {
             if let Some(vals) = self.partition_last(p) {
                 return Some(vals.iter());
@@ -528,6 +555,67 @@ mod tests {
     /// so keys sharing a first byte land in one partition.
     fn new_index_spilling(context: deterministic::Context) -> Index<OneCap, u64, 1> {
         Index::with_threshold(context, OneCap, 2)
+    }
+
+    #[test_traced]
+    fn test_empty_and_sparse_nav() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index(context);
+
+            // Empty index: every ordered navigation returns None (via the empty fast path, without
+            // scanning all partitions).
+            assert!(index.first_translated_key().is_none());
+            assert!(index.last_translated_key().is_none());
+            assert!(index.prev_translated_key(&[0x80, 0x00]).is_none());
+            assert!(index.next_translated_key(&[0x80, 0x00]).is_none());
+
+            // Two keys in widely separated partitions (0x05 and 0xF0): neighbor scans must still
+            // cross the large empty gap between them.
+            index.insert(&[0x05, 0x01], 1);
+            index.insert(&[0xF0, 0x02], 2);
+            assert_eq!(index.keys(), 2);
+            assert_eq!(
+                index
+                    .first_translated_key()
+                    .unwrap()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![1]
+            );
+            assert_eq!(
+                index
+                    .last_translated_key()
+                    .unwrap()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![2]
+            );
+
+            // Forward across the gap, then wrap from the global last key.
+            let (it, wrapped) = index.next_translated_key(&[0x05, 0x01]).unwrap();
+            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![2], false));
+            let (it, wrapped) = index.next_translated_key(&[0xF0, 0x02]).unwrap();
+            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![1], true));
+
+            // Backward across the gap, then wrap from the global first key.
+            let (it, wrapped) = index.prev_translated_key(&[0xF0, 0x02]).unwrap();
+            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![1], false));
+            let (it, wrapped) = index.prev_translated_key(&[0x05, 0x01]).unwrap();
+            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![2], true));
+
+            // A query landing in an empty partition between the two finds both neighbors.
+            let (it, wrapped) = index.prev_translated_key(&[0x80, 0x00]).unwrap();
+            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![1], false));
+            let (it, wrapped) = index.next_translated_key(&[0x80, 0x00]).unwrap();
+            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![2], false));
+
+            // Removing all keys returns to the empty fast path.
+            index.remove(&[0x05, 0x01]);
+            index.remove(&[0xF0, 0x02]);
+            assert_eq!(index.keys(), 0);
+            assert!(index.prev_translated_key(&[0x80, 0x00]).is_none());
+            assert!(index.next_translated_key(&[0x80, 0x00]).is_none());
+        });
     }
 
     #[test_traced]

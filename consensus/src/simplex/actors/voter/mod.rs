@@ -5132,23 +5132,23 @@ mod tests {
     }
 
     /// When the voter is the leader of a view and later reconstructs a
-    /// notarization for the proposal it built locally, it must not ask the
-    /// automaton to certify that same proposal again.
+    /// notarization for the proposal it built locally, it certifies that proposal
+    /// through the automaton like any other.
     ///
-    /// This is enforced in `actor::run` by short-circuiting certification only
-    /// when the round carries explicit local proposal evidence, not merely
-    /// because `leader == me`. The test asserts the end-to-end invariant on the
-    /// live path: a `Finalize` is emitted for the leader-owned view without the
-    /// certify observer firing for that view.
-    fn no_self_certify_when_proposing<S, F>(mut fixture: F)
+    /// Certification is the durability barrier: the leader awaits its own
+    /// proposal's persistence (via the automaton's `certify`) before casting a
+    /// finalize vote, so it must not short-circuit. The test asserts the end-to-end
+    /// invariant on the live path: a `Finalize` is emitted for the leader-owned
+    /// view and the certify observer fires for that view.
+    fn certifies_own_proposal_when_proposing<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"no_self_certify_when_proposing".to_vec();
-        let partition = "no_self_certify_when_proposing".to_string();
+        let namespace = b"certifies_own_proposal_when_proposing".to_vec();
+        let partition = "certifies_own_proposal_when_proposing".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Set up the simulated network.
@@ -5173,8 +5173,8 @@ mod tests {
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::new());
 
-            // Install a certify observer to detect any spurious certify call for
-            // the leader-owned view.
+            // Install a certify observer to confirm the leader certifies its own
+            // proposal for the leader-owned view.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
             let app_cfg = mocks::application::Config {
@@ -5293,42 +5293,43 @@ mod tests {
                 }
             }
 
-            // Assert the live invariant: the certify observer never fired for
-            // the leader-owned proposal we built ourselves.
+            // Assert the live invariant: the certify observer fired for the
+            // leader-owned proposal we built ourselves.
             let certified = certify_calls.lock();
             assert!(
-                !certified.contains(&target_view),
-                "voter must not certify its own leader-built proposal (observed: {certified:?})"
+                certified.contains(&target_view),
+                "voter must certify its own leader-built proposal through the automaton \
+                 (the durability barrier before finalize); observed: {certified:?}"
             );
         });
     }
 
     #[test_traced]
-    fn test_no_self_certify_when_proposing() {
-        no_self_certify_when_proposing(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        no_self_certify_when_proposing(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        no_self_certify_when_proposing(bls12381_multisig::fixture::<MinPk, _>);
-        no_self_certify_when_proposing(bls12381_multisig::fixture::<MinSig, _>);
-        no_self_certify_when_proposing(ed25519::fixture);
-        no_self_certify_when_proposing(secp256r1::fixture);
+    fn test_certifies_own_proposal_when_proposing() {
+        certifies_own_proposal_when_proposing(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        certifies_own_proposal_when_proposing(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        certifies_own_proposal_when_proposing(bls12381_multisig::fixture::<MinPk, _>);
+        certifies_own_proposal_when_proposing(bls12381_multisig::fixture::<MinSig, _>);
+        certifies_own_proposal_when_proposing(ed25519::fixture);
+        certifies_own_proposal_when_proposing(secp256r1::fixture);
     }
 
-    /// Restart analogue of `no_self_certify_when_proposing`: after the voter has
-    /// proposed and journaled a local notarize as leader, restarting must
-    /// recover that local proposal evidence and continue to bypass automaton
-    /// certification once the corresponding notarization is resolved.
+    /// Restart analogue of `certifies_own_proposal_when_proposing`: after the voter
+    /// has proposed and journaled a local notarize as leader, restarting recovers
+    /// that local proposal evidence and still certifies through the automaton once
+    /// the corresponding notarization is resolved.
     ///
     /// The replayed local notarize is what distinguishes this case from merely
     /// observing a leader-owned proposal certificate during catch-up.
-    fn no_self_certify_after_restart<S, F>(mut fixture: F)
+    fn certifies_own_proposal_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"no_self_certify_after_restart".to_vec();
-        let partition = "no_self_certify_after_restart".to_string();
+        let namespace = b"certifies_own_proposal_after_restart".to_vec();
+        let partition = "certifies_own_proposal_after_restart".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             // Set up the simulated network.
@@ -5532,8 +5533,8 @@ mod tests {
             mailbox
                 .resolved(Certificate::Notarization(notarization));
 
-            // A finalize for the leader-owned view proves the voter recovered
-            // the local certification shortcut after replay.
+            // A finalize for the leader-owned view proves replay restored the
+            // local proposal state and the voter certified it through the automaton.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
@@ -5554,34 +5555,32 @@ mod tests {
                 }
             }
 
-            // Assert the restart invariant: certify did not fire for the
-            // leader-owned view whose journaled local notarize replay restored
-            // the local proposal evidence.
+            // Assert the restart invariant: certify fired for the leader-owned
+            // view whose journaled local notarize replay restored the local
+            // proposal evidence.
             let certified = certify_calls.lock();
             assert!(
-                !certified.contains(&target_view),
-                "voter must not certify its own leader-built proposal after restart (observed: {certified:?})"
+                certified.contains(&target_view),
+                "voter must certify its own leader-built proposal after restart (observed: {certified:?})"
             );
         });
     }
 
     #[test_traced]
-    fn test_no_self_certify_after_restart() {
-        no_self_certify_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        no_self_certify_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        no_self_certify_after_restart(bls12381_multisig::fixture::<MinPk, _>);
-        no_self_certify_after_restart(bls12381_multisig::fixture::<MinSig, _>);
-        no_self_certify_after_restart(ed25519::fixture);
-        no_self_certify_after_restart(secp256r1::fixture);
+    fn test_certifies_own_proposal_after_restart() {
+        certifies_own_proposal_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        certifies_own_proposal_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        certifies_own_proposal_after_restart(bls12381_multisig::fixture::<MinPk, _>);
+        certifies_own_proposal_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        certifies_own_proposal_after_restart(ed25519::fixture);
+        certifies_own_proposal_after_restart(secp256r1::fixture);
     }
 
     /// Regression: when an elected leader receives an external notarization
     /// for a proposal it did *not* build locally, it must invoke
-    /// `automaton.certify` before finalizing the view. The
-    /// `is_local=true` shortcut in `actor::run` must only short-circuit when
-    /// the slot carries explicit local proposal evidence; an
-    /// externally-recovered proposal on a leader-owned view produces
-    /// `is_local=false`, which requires consulting the automaton.
+    /// `automaton.certify` before finalizing the view. The voter certifies every
+    /// notarized proposal through the automaton, including externally-recovered
+    /// proposals on a leader-owned view.
     fn certify_observer_fires_for_external_leader_proposal<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -5620,11 +5619,11 @@ mod tests {
             // a locally-built proposal. The slot stays empty (proposal=None,
             // status=None) while the voter's internal flag `requested_build`
             // is true, exactly the state in which an externally-recovered
-            // proposal lands with `is_local=false` at the leader.
+            // proposal lands at the leader.
             //
-            // The certify observer records every `automaton.certify` call so
-            // the final assertion can confirm the `is_local=false` code path
-            // ran instead of being short-circuited.
+            // The certify observer records every `automaton.certify` call so the
+            // final assertion can confirm certification ran for the recovered
+            // leader-owned proposal.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
             let app_cfg = mocks::application::Config {
@@ -5718,15 +5717,13 @@ mod tests {
             let (_, foreign_notarization) = build_notarization(&schemes, &foreign_proposal, quorum);
 
             // Deliver the foreign notarization. This seeds the voter's slot
-            // with a proposal it never built, producing `is_local=false` on
-            // the certification candidate.
+            // with a proposal it never built.
             mailbox.resolved(Certificate::Notarization(foreign_notarization));
 
             // Wait for a `Finalize` on the leader-owned view. Observing
             // finalize proves the certify callback both fired and resolved
             // successfully. Any `Nullify` here would mean the voter never
-            // reached the certification branch (for example because
-            // `is_local=true` incorrectly short-circuited it).
+            // reached the certification branch.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
@@ -5749,10 +5746,8 @@ mod tests {
                 }
             }
 
-            // Assert the `is_local=false` invariant: the certify callback
-            // fired for the leader-owned view. Without the fix under test,
-            // a `leader == me`-only shortcut would skip the call and this
-            // assertion would fail.
+            // The certify callback must fire for the leader-owned view: the voter
+            // certifies its own proposals through the automaton.
             let certified = certify_calls.lock();
             assert!(
                 certified.contains(&target_view),
@@ -7511,8 +7506,9 @@ mod tests {
     /// Verify that a voter recovers via timeout when certification hangs indefinitely.
     ///
     /// This simulates the scenario where a notarization forms but the block is
-    /// unrecoverable (e.g., proposer is dead and shard gossip didn't deliver enough
-    /// shards for reconstruction). In this case, `certify()` subscribes to the block
+    /// unrecoverable. This includes the restart case where the local block was not
+    /// durable and no peer can provide enough data for reconstruction. In this
+    /// case, `certify()` subscribes to the block
     /// but the subscription never resolves. The voter must rely on the view timeout
     /// to emit a nullify vote and advance the chain.
     ///

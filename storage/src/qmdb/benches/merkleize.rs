@@ -328,6 +328,7 @@ fn any_fix_cfg(
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
         translator: EightCap,
+        init_cache_size: crate::common::INIT_CACHE_SIZE,
     }
 }
 
@@ -340,6 +341,7 @@ fn any_var_cfg(
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
         translator: EightCap,
+        init_cache_size: crate::common::INIT_CACHE_SIZE,
     }
 }
 
@@ -353,6 +355,7 @@ fn cur_fix_cfg(
         journal_config: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
+        init_cache_size: crate::common::INIT_CACHE_SIZE,
     }
 }
 
@@ -366,6 +369,7 @@ fn cur_var_cfg(
         journal_config: var_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
+        init_cache_size: crate::common::INIT_CACHE_SIZE,
     }
 }
 
