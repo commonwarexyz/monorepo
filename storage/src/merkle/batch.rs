@@ -206,7 +206,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
                 let (ll, lr) = self.child_digests(base, *left, height);
                 let (rl, rr) = self.child_digests(base, *right, height);
                 let (left_digest, right_digest) =
-                    hasher.node_digest_pair(*left, &ll, &lr, *right, &rl, &rr);
+                    hasher.node_digest_pair([(*left, &ll, &lr), (*right, &rl, &rr)]);
                 output.push((*left, left_digest));
                 output.push((*right, right_digest));
                 self.zip_nodes(base, hasher, remaining, height, output);

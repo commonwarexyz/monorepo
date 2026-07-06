@@ -43,13 +43,9 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     /// Computes digests for two nodes at once.
     fn node_digest_pair(
         &self,
-        left_pos: Position<F>,
-        left_left: &Self::Digest,
-        left_right: &Self::Digest,
-        right_pos: Position<F>,
-        right_left: &Self::Digest,
-        right_right: &Self::Digest,
+        nodes: [(Position<F>, &Self::Digest, &Self::Digest); 2],
     ) -> (Self::Digest, Self::Digest) {
+        let [(left_pos, left_left, left_right), (right_pos, right_left, right_right)] = nodes;
         (
             self.node_digest(left_pos, left_left, left_right),
             self.node_digest(right_pos, right_left, right_right),
@@ -214,13 +210,9 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
 
     fn node_digest_pair(
         &self,
-        left_pos: Position<F>,
-        left_left: &Self::Digest,
-        left_right: &Self::Digest,
-        right_pos: Position<F>,
-        right_left: &Self::Digest,
-        right_right: &Self::Digest,
+        nodes: [(Position<F>, &Self::Digest, &Self::Digest); 2],
     ) -> (Self::Digest, Self::Digest) {
+        let [(left_pos, left_left, left_right), (right_pos, right_left, right_right)] = nodes;
         if H::Digest::SIZE != sha256::Digest::SIZE {
             return (
                 self.node_digest(left_pos, left_left, left_right),
@@ -257,6 +249,13 @@ impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
     fn root_bagging(&self) -> Bagging {
         (**self).root_bagging()
     }
+
+    fn node_digest_pair(
+        &self,
+        nodes: [(Position<F>, &Self::Digest, &Self::Digest); 2],
+    ) -> (Self::Digest, Self::Digest) {
+        (**self).node_digest_pair(nodes)
+    }
 }
 
 #[cfg(test)]
@@ -266,8 +265,9 @@ mod tests {
         mmr::{Location, Position, StandardHasher as Standard},
         Bagging::{BackwardFold, ForwardFold},
     };
-    use alloc::vec::Vec;
+    use alloc::{sync::Arc, vec::Vec};
     use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_leaf_digest_sha256() {
@@ -282,6 +282,75 @@ mod tests {
     #[test]
     fn test_root_sha256() {
         test_root::<Sha256>();
+    }
+
+    #[test]
+    fn test_reference_forwards_node_digest_pair() {
+        #[derive(Clone)]
+        struct PairHasher {
+            pairs: Arc<AtomicUsize>,
+        }
+
+        impl Hasher<crate::merkle::mmr::Family> for PairHasher {
+            type Digest = sha256::Digest;
+
+            fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+                let mut hasher = Sha256::new();
+                for part in parts {
+                    hasher.update(part);
+                }
+                hasher.finalize()
+            }
+
+            fn root_bagging(&self) -> Bagging {
+                ForwardFold
+            }
+
+            fn node_digest_pair(
+                &self,
+                nodes: [(Position, &Self::Digest, &Self::Digest); 2],
+            ) -> (Self::Digest, Self::Digest) {
+                self.pairs.fetch_add(1, Ordering::Relaxed);
+                let [(left_pos, left_left, left_right), (right_pos, right_left, right_right)] =
+                    nodes;
+                (
+                    self.node_digest(left_pos, left_left, left_right),
+                    self.node_digest(right_pos, right_left, right_right),
+                )
+            }
+        }
+
+        let pairs = Arc::new(AtomicUsize::new(0));
+        let hasher = PairHasher {
+            pairs: Arc::clone(&pairs),
+        };
+        let digest = test_digest::<Sha256>(1);
+
+        <&PairHasher as Hasher<crate::merkle::mmr::Family>>::node_digest_pair(
+            &&hasher,
+            [
+                (Position::new(0), &digest, &digest),
+                (Position::new(1), &digest, &digest),
+            ],
+        );
+
+        assert_eq!(pairs.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_reference_forwards_node_digest_pair_explicit() {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let digest = test_digest::<Sha256>(1);
+        let nodes = [
+            (Position::new(0), &digest, &digest),
+            (Position::new(1), &digest, &digest),
+        ];
+        let direct = hasher.node_digest_pair(nodes);
+        let forwarded = <&Standard<Sha256> as Hasher<crate::merkle::mmr::Family>>::node_digest_pair(
+            &&hasher, nodes,
+        );
+
+        assert_eq!(direct, forwarded);
     }
 
     #[test]
