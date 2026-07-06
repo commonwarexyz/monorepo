@@ -203,7 +203,6 @@ impl Freelist {
     ///
     /// If `prefill` is true, creates `capacity` buffers and makes them
     /// immediately available in the freelist.
-    ///
     pub fn new(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
