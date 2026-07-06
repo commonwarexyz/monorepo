@@ -1031,10 +1031,13 @@ impl<const N: usize> From<&[u8; N]> for IoBufMut {
 /// Create a mutable buffer by copying `bytes`.
 ///
 /// A mutable buffer requires runtime-owned storage for its owner header, which
-/// a `BytesMut` allocation cannot host, so this conversion copies.
+/// a `BytesMut` allocation cannot host, so this conversion copies. The
+/// caller's reserved capacity is preserved.
 impl From<BytesMut> for IoBufMut {
     fn from(bytes: BytesMut) -> Self {
-        Self::from(bytes.as_ref())
+        let mut out = Self::with_capacity(bytes.capacity());
+        out.put_slice(bytes.as_ref());
+        out
     }
 }
 
@@ -1060,25 +1063,17 @@ impl From<IoBuf> for IoBufMut {
 
 /// Converts a vec into a mutable handle, preserving the caller's capacity.
 ///
-/// Adopts the vec's allocation zero-copy when its spare capacity can host
-/// the owner header (including empty vecs with reserved capacity); otherwise
-/// copies the readable bytes into a fresh buffer with at least the vec's
-/// capacity. Unlike `From<Vec<u8>> for IoBuf`, an empty vec keeps its
-/// reserved capacity instead of detaching.
+/// Copies the readable bytes into a fresh buffer with exactly the vec's
+/// capacity. Adopting the vec's own allocation would have to reserve owner
+/// header space inside it, shrinking the writable capacity below
+/// `vec.capacity()`, so the mutable conversion always copies. Zero-copy
+/// adoption remains available through `From<Vec<u8>> for IoBuf` (and
+/// [`IoBuf::try_into_mut`]), where view capacity is derived from the adopted
+/// allocation rather than promised to the caller.
 fn iobuf_mut_from_vec(vec: Vec<u8>) -> IoBufMut {
-    match HeapOwner::try_adopt_vec(vec) {
-        Ok((ptr, len, cap, owner)) => IoBufMut {
-            ptr,
-            len,
-            cap,
-            owner,
-        },
-        Err(vec) => {
-            let mut out = IoBufMut::with_capacity(vec.capacity());
-            out.put_slice(&vec);
-            out
-        }
-    }
+    let mut out = IoBufMut::with_capacity(vec.capacity());
+    out.put_slice(&vec);
+    out
 }
 
 /// Panics for cursor or write operations that run past the available region.
@@ -2281,15 +2276,13 @@ impl From<IoBufMut> for IoBufsMut {
 
 /// Convert a [`Vec<u8>`] into a single-buffer [`IoBufsMut`].
 ///
-/// Zero-copy when the vec's allocation can be adopted as a native buffer
-/// (spare capacity hosts the owner header); otherwise copies into a fresh
-/// buffer with at least the vec's capacity. The caller's reserved capacity
-/// is preserved either way, so reuse patterns like passing
-/// `Vec::with_capacity(len)` to [`Blob::read_at_buf`](crate::Blob)
-/// work. There is no `From<Vec<u8>> for IoBufMut` because that impl had no
-/// production users and exactly-sized vecs have no zero-copy mutable
-/// representation (`IoBuf::from(vec).try_into_mut()` covers the zero-copy
-/// cases).
+/// Copies the readable bytes into a fresh buffer with exactly the vec's
+/// capacity. The caller's reserved capacity is preserved, so reuse patterns
+/// like passing `Vec::with_capacity(len)` to
+/// [`Blob::read_at_buf`](crate::Blob) work. Zero-copy adoption is not used
+/// here because it would reserve owner header space inside the vec's
+/// allocation, shrinking the writable capacity below `vec.capacity()`; use
+/// `From<Vec<u8>> for IoBuf` for zero-copy immutable conversion.
 impl From<Vec<u8>> for IoBufsMut {
     fn from(vec: Vec<u8>) -> Self {
         Self {
@@ -3759,36 +3752,34 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_from_vec_u8_preserves_capacity() {
-        // Spare capacity for the header: the vec's allocation is adopted
-        // zero-copy and stays writable.
+        // The readable bytes are copied and the vec's reserved capacity is
+        // preserved exactly.
         let mut vec = Vec::with_capacity(128);
         vec.extend_from_slice(b"abc");
-        let base = vec.as_ptr() as usize;
+        let cap = vec.capacity();
         let mut bufs = IoBufsMut::from(vec);
         assert_eq!(bufs.remaining(), 3);
-        assert!(bufs.remaining_mut() > 0);
-        assert_eq!(bufs.chunk().as_ptr() as usize, base);
+        assert_eq!(bufs.capacity(), cap);
         bufs.put_slice(b"d");
         assert_eq!(bufs.copy_to_bytes(4).as_ref(), b"abcd");
 
-        // Empty vec with reserved capacity adopts and stays writable.
-        let mut bufs = IoBufsMut::from(Vec::<u8>::with_capacity(64));
+        // Empty vec with reserved capacity keeps the full reservation, so
+        // the documented Vec::with_capacity(len) -> read_at_buf(len) reuse
+        // pattern holds: set_len(len) must fit.
+        let vec = Vec::<u8>::with_capacity(64);
+        let len = vec.capacity();
+        let mut bufs = IoBufsMut::from(vec);
         assert!(bufs.is_empty());
-        assert!(bufs.remaining_mut() > 0);
-        bufs.put_slice(b"z");
-        assert_eq!(bufs.remaining(), 1);
-
-        // Too small to host the header: copied, but the reserved capacity is
-        // still honored.
-        let mut bufs = IoBufsMut::from(Vec::<u8>::with_capacity(20));
-        assert!(bufs.is_empty());
-        assert!(bufs.remaining_mut() >= 20);
-        bufs.put_slice(&[7u8; 20]);
-        assert_eq!(bufs.remaining(), 20);
+        assert_eq!(bufs.capacity(), len);
+        // SAFETY: all `len` bytes are initialized by copy_from_slice below.
+        unsafe { bufs.set_len(len) };
+        bufs.copy_from_slice(&vec![9u8; len]);
+        assert_eq!(bufs.copy_to_bytes(len).as_ref(), vec![9u8; len].as_slice());
 
         // Exactly-sized vec: copied with contents intact.
         let bufs = IoBufsMut::from(vec![1u8, 2, 3]);
         assert_eq!(bufs.remaining(), 3);
+        assert_eq!(bufs.capacity(), 3);
         assert_eq!(bufs.chunk(), &[1, 2, 3]);
     }
 
@@ -4384,6 +4375,32 @@ mod tests {
         // `Bytes::from_static` cannot be converted to mutable without copy.
         let from_iobuf = IoBufMut::from(IoBuf::from(Bytes::from_static(b"io")));
         assert_eq!(from_iobuf.as_ref(), b"io");
+    }
+
+    #[test]
+    fn test_iobufmut_from_bytesmut_preserves_capacity() {
+        let mut bytes = BytesMut::with_capacity(100);
+        bytes.put_slice(b"abc");
+        let cap = bytes.capacity();
+        let buf = IoBufMut::from(bytes);
+        assert_eq!(buf.as_ref(), b"abc");
+        assert_eq!(buf.capacity(), cap);
+
+        // An empty reserved BytesMut keeps its reservation writable.
+        let bytes = BytesMut::with_capacity(64);
+        let cap = bytes.capacity();
+        let mut buf = IoBufMut::from(bytes);
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), cap);
+        buf.put_bytes(7, cap);
+        assert_eq!(buf.len(), cap);
+    }
+
+    #[test]
+    #[should_panic(expected = "front heap layout size overflow")]
+    fn test_iobufmut_with_capacity_rejects_oversized_request() {
+        // Constructs the layout (and must panic) before any allocation.
+        let _ = IoBufMut::with_capacity(isize::MAX as usize);
     }
 
     #[test]

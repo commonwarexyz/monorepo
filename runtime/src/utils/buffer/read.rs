@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 ///
 /// # Allocation Semantics
 ///
-/// - The internal read buffer is allocated eagerly in [Self::new].
+/// - The internal read buffer is allocated lazily on the first refill.
 /// - Refills try to reclaim mutable ownership of that same backing allocation.
 /// - If backing is still shared (for example, previously returned slices are alive), a pooled
 ///   replacement is allocated and existing backing is left alive until all aliases drop.
@@ -63,7 +63,9 @@ impl<B: Blob> Read<B> {
     pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,
-            buffer: pool.alloc(buffer_size.get()).freeze(),
+            // Freezing an unwritten buffer would detach and release it
+            // immediately, so the first refill allocates instead.
+            buffer: IoBuf::default(),
             blob_position: 0,
             blob_size,
             buffer_position: 0,

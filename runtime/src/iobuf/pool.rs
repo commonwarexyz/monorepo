@@ -1575,6 +1575,8 @@ impl BufferPool {
     /// return an untracked aligned allocation instead.
     ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`.
+    /// Zero-capacity requests return a detached empty buffer without touching
+    /// the pool.
     ///
     /// # Initialization
     ///
@@ -1587,9 +1589,14 @@ impl BufferPool {
     /// - [`PoolError::Exhausted`]: pool exhausted for the required size class
     #[inline(always)]
     pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
+        if capacity == 0 {
+            return Ok(IoBufMut::default());
+        }
         if capacity < self.inner.config.pool_min_size {
-            let size = capacity.max(1);
-            return Ok(IoBufMut::with_alignment(size, self.inner.config.alignment));
+            return Ok(IoBufMut::with_alignment(
+                capacity,
+                self.inner.config.alignment,
+            ));
         }
 
         let class_index = self
@@ -1614,6 +1621,8 @@ impl BufferPool {
     /// matching the semantics of [`IoBufMut::with_capacity`] and
     /// [`bytes::BytesMut::with_capacity`]. Use [`bytes::BufMut::put_slice`] or
     /// other [`bytes::BufMut`] methods to write data to the buffer.
+    /// Zero-capacity requests return a detached empty buffer without touching
+    /// the pool.
     ///
     /// If the pool can provide a buffer (capacity within limits and pool not
     /// exhausted), this returns a pooled buffer that will be returned to the
@@ -1660,6 +1669,8 @@ impl BufferPool {
     /// pooling and return an untracked aligned allocation instead.
     ///
     /// The returned buffer has `len() == len` and `capacity() >= len`.
+    /// Zero-length requests return a detached empty buffer without touching
+    /// the pool.
     ///
     /// # Initialization
     ///
@@ -1671,11 +1682,14 @@ impl BufferPool {
     /// - [`PoolError::Oversized`]: `len` exceeds `max_size`
     /// - [`PoolError::Exhausted`]: pool exhausted for the required size class
     pub fn try_alloc_zeroed(&self, len: usize) -> Result<IoBufMut, PoolError> {
+        if len == 0 {
+            return Ok(IoBufMut::default());
+        }
         if len < self.inner.config.pool_min_size {
-            let size = len.max(1);
-            let mut buf = IoBufMut::zeroed_with_alignment(size, self.inner.config.alignment);
-            buf.truncate(len);
-            return Ok(buf);
+            return Ok(IoBufMut::zeroed_with_alignment(
+                len,
+                self.inner.config.alignment,
+            ));
         }
 
         let class_index = self
@@ -1706,6 +1720,8 @@ impl BufferPool {
     /// Allocates a zero-initialized buffer with readable length `len`.
     ///
     /// The returned buffer has `len() == len` and `capacity() >= len`.
+    /// Zero-length requests return a detached empty buffer without touching
+    /// the pool.
     ///
     /// If the pool can provide a buffer (len within limits and pool not
     /// exhausted), this returns a pooled buffer that will be returned to the
@@ -2005,6 +2021,30 @@ mod tests {
         let pooled = pool.try_alloc(512).unwrap();
         assert!(pooled.is_pooled());
         assert_eq!(pooled.capacity(), 512);
+    }
+
+    #[test]
+    fn test_zero_capacity_requests_bypass_pool() {
+        // A single-slot pool: if a zero-capacity request claimed a buffer,
+        // the follow-up real allocation would fail with Exhausted.
+        let page = page_size();
+        let pool = test_pool(test_config(page, page, 1));
+
+        let empty = pool.try_alloc(0).unwrap();
+        assert!(!empty.is_pooled());
+        assert_eq!(empty.capacity(), 0);
+
+        let zeroed = pool.try_alloc_zeroed(0).unwrap();
+        assert!(!zeroed.is_pooled());
+        assert_eq!(zeroed.len(), 0);
+        assert_eq!(zeroed.capacity(), 0);
+
+        assert_eq!(pool.alloc(0).capacity(), 0);
+        assert_eq!(pool.alloc_zeroed(0).len(), 0);
+
+        let real = pool.try_alloc(page).unwrap();
+        assert!(real.is_pooled());
+        assert_eq!(real.capacity(), page);
     }
 
     #[test]
@@ -2851,7 +2891,11 @@ mod tests {
             let pool = pool.clone();
             let handle = thread::spawn(move || {
                 for _ in 0..iterations {
-                    let buf = pool.try_alloc(page).unwrap();
+                    let mut buf = pool.try_alloc(page).unwrap();
+                    // Write a byte so freeze produces a live pooled owner
+                    // (freezing an empty buffer detaches and releases it,
+                    // which would leave the refcount protocol unexercised).
+                    buf.put_slice(b"x");
                     let iobuf = buf.freeze();
 
                     // Clone a few times

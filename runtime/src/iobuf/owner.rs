@@ -711,7 +711,8 @@ impl PooledOwner {
     /// alignment.
     #[inline]
     pub(crate) fn layout(size: usize, alignment: usize) -> Layout {
-        Layout::from_size_align(size, alignment).expect("alignment is a power of two")
+        Layout::from_size_align(size, alignment)
+            .expect("pool layout size overflow or alignment not a power of two")
     }
 
     /// Releases a unique pooled owner into the thread-cache push fast path.
@@ -1126,8 +1127,8 @@ impl HeapOwner {
             .checked_add(size_of::<Self>())
             .expect("heap layout size overflow");
         let layout_alignment = alignment.max(align_of::<Self>());
-        let layout =
-            Layout::from_size_align(total, layout_alignment).expect("alignment is a power of two");
+        let layout = Layout::from_size_align(total, layout_alignment)
+            .expect("heap layout size overflow or alignment not a power of two");
         (layout, header_offset)
     }
 
@@ -1137,9 +1138,12 @@ impl HeapOwner {
         let total = size_of::<Self>()
             .checked_add(capacity)
             .expect("front heap layout size overflow");
-        // SAFETY: `HeapOwner` has a non-zero power-of-two alignment, and
-        // `capacity > 0` at allocation sites makes `total` non-zero.
-        unsafe { Layout::from_size_align_unchecked(total, align_of::<Self>()) }
+        // The checked constructor also enforces `Layout`'s rounded-size
+        // isize::MAX bound, which `checked_add` alone does not.
+        match Layout::from_size_align(total, align_of::<Self>()) {
+            Ok(layout) => layout,
+            Err(_) => panic!("front heap layout size overflow"),
+        }
     }
 
     #[inline(always)]
@@ -1286,6 +1290,30 @@ mod tests {
         assert_eq!(usable, capacity);
         // SAFETY: owner is unique and must be released by this test.
         unsafe { owner.release_unique() };
+    }
+
+    #[test]
+    fn test_front_layout_accepts_maximum_valid_capacity() {
+        // Largest capacity whose layout size stays within Layout's isize::MAX
+        // bound after rounding up to the header alignment.
+        let capacity =
+            isize::MAX as usize - size_of::<HeapOwner>() - (align_of::<HeapOwner>() - 1);
+        let layout = HeapOwner::front_layout(capacity);
+        assert_eq!(layout.size(), size_of::<HeapOwner>() + capacity);
+        assert_eq!(layout.align(), align_of::<HeapOwner>());
+    }
+
+    #[test]
+    #[should_panic(expected = "front heap layout size overflow")]
+    fn test_front_layout_rejects_isize_max_overflow() {
+        // Passes the usize checked_add but violates Layout's isize::MAX bound.
+        let _ = HeapOwner::front_layout(isize::MAX as usize);
+    }
+
+    #[test]
+    #[should_panic(expected = "front heap layout size overflow")]
+    fn test_front_layout_rejects_usize_overflow() {
+        let _ = HeapOwner::front_layout(usize::MAX);
     }
 
     #[test]
