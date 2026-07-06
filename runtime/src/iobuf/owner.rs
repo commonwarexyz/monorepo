@@ -414,7 +414,7 @@ impl OwnerRef {
         // happen-before this release.
         if refs.load(Ordering::Acquire) == 1 {
             // SAFETY: this is the final shared owner.
-            unsafe { self.release_unique() };
+            unsafe { self.release_unique_outlined() };
             return;
         }
 
@@ -426,6 +426,23 @@ impl OwnerRef {
             // SAFETY: this drop won the final-owner race.
             unsafe { self.drop_shared_race_final(refs) };
         }
+    }
+
+    /// Outlined final-owner release for the shared-drop fast path.
+    ///
+    /// Keeping the release tail out of line shrinks `IoBuf`'s drop glue to a
+    /// null test, a tag mask, one refcount load, and a branch to this call,
+    /// small enough to inline into drop sites; the non-final decrement they
+    /// execute pays no call. The mutable drop path is unaffected
+    /// (`release_unique_mut_at` keeps its pooled arm fully inline).
+    ///
+    /// # Safety
+    ///
+    /// `self` must be the final shared owner.
+    #[inline(never)]
+    unsafe fn release_unique_outlined(self) {
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.release_unique() };
     }
 
     /// Releases after a shared-drop race made this handle final.
