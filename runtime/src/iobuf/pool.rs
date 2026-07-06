@@ -1788,6 +1788,7 @@ mod tests {
     use bytes::{Buf, BufMut};
     use commonware_utils::NZU32;
     use std::{
+        cell::Cell,
         sync::{mpsc, Arc},
         thread,
     };
@@ -3037,6 +3038,86 @@ mod tests {
         let _buf = pool
             .try_alloc(page)
             .expect("thread-exited local buffer should be reusable");
+    }
+
+    #[test]
+    fn test_pooled_ops_inside_tls_destructor_fall_back_to_global() {
+        // Pooled operations that run inside another thread_local's destructor
+        // may find the pool's TLS registry already destroyed; the push/pop
+        // slow paths must then fall back to the global freelist instead of
+        // panicking or stranding buffers. Destructor order is
+        // platform-dependent, so this test asserts the outcome invariant
+        // (a clean exit with every buffer reusable) rather than the path.
+        struct ExitReleaser {
+            pool: BufferPool,
+            size: usize,
+            held: Option<IoBuf>,
+        }
+
+        impl Drop for ExitReleaser {
+            fn drop(&mut self) {
+                // An allocation inside a TLS destructor exercises the pop
+                // fallback; the drops exercise the push fallback.
+                let extra = self
+                    .pool
+                    .try_alloc(self.size)
+                    .expect("pool must serve allocations from TLS destructors");
+                drop(extra);
+                drop(self.held.take());
+            }
+        }
+
+        thread_local! {
+            static EXIT_RELEASER: Cell<Option<ExitReleaser>> = const { Cell::new(None) };
+        }
+
+        let page = page_size();
+        let pool = test_pool(test_config(page, page, 4));
+
+        thread::spawn({
+            let pool = pool.clone();
+            move || {
+                // Register the releaser's thread_local before first touching
+                // the pool: destructors run in reverse registration order on
+                // the platforms we target, so the releaser's pooled operations
+                // run after the pool's TLS registry is gone (on platforms with
+                // a different order the outcome invariant still holds).
+                EXIT_RELEASER.with(|cell| {
+                    cell.set(Some(ExitReleaser {
+                        pool: pool.clone(),
+                        size: page,
+                        held: None,
+                    }));
+                });
+
+                drop(pool.try_alloc(page).expect("first allocation"));
+                let mut buf = pool.try_alloc(page).expect("second allocation");
+                buf.put_u8(1);
+                let held = buf.freeze();
+                EXIT_RELEASER.with(|cell| {
+                    let mut releaser = cell.take().expect("releaser installed above");
+                    releaser.held = Some(held);
+                    cell.set(Some(releaser));
+                });
+            }
+        })
+        .join()
+        .expect("worker thread must exit cleanly");
+
+        // Nothing may remain in the dead thread's cache, and every buffer the
+        // worker touched must be reusable: with a class capacity of four, all
+        // four allocations succeed only if none were stranded.
+        let class_index = pool
+            .class_index(page)
+            .expect("class exists for page-sized buffer");
+        assert_eq!(get_local_len(&pool.inner.classes[class_index]), 0);
+        let bufs = (0..4)
+            .map(|i| {
+                pool.try_alloc(page)
+                    .unwrap_or_else(|_| panic!("buffer {i} was stranded at thread exit"))
+            })
+            .collect::<Vec<_>>();
+        drop(bufs);
     }
 
     #[test]

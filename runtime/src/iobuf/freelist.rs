@@ -847,6 +847,22 @@ pub(super) mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "returned slot batch must not already contain a free slot")]
+    fn test_freelist_put_batch_rejects_double_return() {
+        // Two entries force the multi-entry `put_entries` path, whose per-word
+        // assert is separate from the single-buffer `put` assert.
+        let set = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false);
+        let buffer0 = set.try_create(false).expect("first slot");
+        let buffer1 = set.try_create(false).expect("second slot");
+        // SAFETY: the duplicate handle exists only to drive the batch
+        // double-return assert; put_batch panics before it is used further,
+        // and drain deallocates each slot exactly once afterwards.
+        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) };
+        set.put(buffer0);
+        set.put_batch([buffer1, duplicate]);
+    }
+
+    #[test]
     fn test_freelist_returns_each_slot_once() {
         // Use a non-power-of-two capacity to cover partial final words while
         // keeping the expected slot set easy to inspect.

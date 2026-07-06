@@ -2920,6 +2920,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "range start overflow")]
+    fn test_iobuf_slice_excluded_start_overflow() {
+        let buf = IoBuf::from(b"hello");
+        let _ = buf.slice((Bound::Excluded(usize::MAX), Bound::Unbounded));
+    }
+
+    #[test]
     fn test_iobuf_try_into_mut_empty_and_static() {
         // Empty views convert trivially.
         let buf = IoBuf::default().try_into_mut().expect("empty converts");
@@ -3759,6 +3766,32 @@ mod tests {
         let recovered = frozen.try_into_mut().expect("unique buffer recovers");
         assert_eq!(recovered.as_ref(), b"fgh");
         assert_eq!(recovered.capacity(), 11);
+    }
+
+    #[test]
+    fn test_iobufmut_write_after_partial_advance_appends_at_tail() {
+        // A partial advance moves the view start while retaining readable
+        // bytes; a subsequent write must land at the initialized tail so old
+        // and new data stay adjacent, with len and cap tracked in lockstep.
+        let mut buf = IoBufMut::with_capacity(16);
+        buf.put_slice(b"hello");
+        buf.advance(2);
+        buf.put_slice(b"world");
+        assert_eq!(buf.as_ref(), b"lloworld");
+        assert_eq!(buf.len(), 8);
+        assert_eq!(buf.capacity(), 14);
+
+        // The same holds for pooled buffers, whose cursor bookkeeping feeds
+        // the thread-cache return path instead of a dealloc layout.
+        let pool = test_pool();
+        let mut buf = pool.alloc(16);
+        let capacity = buf.capacity();
+        buf.put_slice(b"hello");
+        buf.advance(2);
+        buf.put_slice(b"world");
+        assert_eq!(buf.as_ref(), b"lloworld");
+        assert_eq!(buf.len(), 8);
+        assert_eq!(buf.capacity(), capacity - 2);
     }
 
     #[test]
@@ -5441,6 +5474,36 @@ mod tests {
 
         let buf = value.encode_with_pool_mut(&pool);
         assert_eq!(buf.len(), value.encode_size());
+    }
+
+    /// Claims a larger encoding than `write` produces, driving the
+    /// [`EncodeExt`] size asserts in the failing direction.
+    struct UnderWriter;
+
+    impl Write for UnderWriter {
+        fn write(&self, buf: &mut impl BufMut) {
+            buf.put_slice(b"ab");
+        }
+    }
+
+    impl EncodeSize for UnderWriter {
+        fn encode_size(&self) -> usize {
+            4
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "write() did not write expected bytes into pooled buffer")]
+    fn test_encode_with_pool_mut_rejects_short_write() {
+        let pool = test_pool();
+        let _ = UnderWriter.encode_with_pool_mut(&pool);
+    }
+
+    #[test]
+    #[should_panic(expected = "write_bufs() did not write expected bytes")]
+    fn test_encode_with_pool_rejects_short_write() {
+        let pool = test_pool();
+        let _ = UnderWriter.encode_with_pool(&pool);
     }
 
     #[test]

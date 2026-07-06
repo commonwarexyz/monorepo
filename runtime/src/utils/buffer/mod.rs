@@ -357,11 +357,24 @@ mod tests {
             let pool = BufferPool::new(config, &mut registry);
             let mut reader = Read::new(blob, data.len() as u64, NZUsize!(10), pool.clone());
 
-            // The single slot is still free: claiming it proves construction
-            // allocated nothing.
+            // No size class may report a created buffer: construction must
+            // not check one out of the pool even transiently. (A free-slot
+            // probe alone cannot pin this: an eagerly-allocated unwritten
+            // buffer would have been released back by empty-freeze before the
+            // probe ran.) The created gauge registers per-class label sets
+            // lazily, so a clean pool encodes no member lines at all.
+            let encoded = registry.encode();
+            assert!(
+                !encoded
+                    .lines()
+                    .any(|line| line.starts_with("buffer_pool_created{")),
+                "reader construction created a pool buffer: {encoded}"
+            );
+
+            // The single slot is also unclaimed at read time.
             let probe = pool
                 .try_alloc(1)
-                .expect("reader construction must not allocate");
+                .expect("reader construction must not retain a buffer");
             drop(probe);
 
             let read = reader.read(5).await.unwrap().coalesce();

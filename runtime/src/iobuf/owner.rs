@@ -1335,6 +1335,29 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "layout size overflow")]
+    fn test_layout_rejects_rounding_overflow() {
+        // Rounding the capacity up to the header alignment overflows before
+        // the header size is even added.
+        let _ = HeapOwner::layout(usize::MAX, 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "heap layout size overflow")]
+    fn test_layout_rejects_header_add_overflow() {
+        // Rounds cleanly (usize::MAX - 31 is a multiple of 8) but overflows
+        // when the tail header is added.
+        let _ = HeapOwner::layout(usize::MAX - 31, 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "heap layout size overflow or alignment not a power of two")]
+    fn test_layout_rejects_isize_max_overflow() {
+        // Passes both usize checked ops but violates Layout's isize::MAX bound.
+        let _ = HeapOwner::layout(isize::MAX as usize, 64);
+    }
+
+    #[test]
     fn test_front_heap_mut_drop_does_not_read_reserved_header() {
         let (data, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
         assert!((data.as_ptr() as usize).is_multiple_of(align_of::<HeapOwner>()));
