@@ -60,7 +60,7 @@ macro_rules! bench_sizes {
             });
 
             bench_decode_fixed::<$size, _>($c, "vec_cursor", || {
-                FixedBytes::<$size>::decode(Cursor::new(vec.clone())).unwrap()
+                FixedBytes::<$size>::decode(Cursor::new(black_box(vec.clone()))).unwrap()
             });
 
             bench_decode_fixed::<$size, _>($c, "vec_slice", || {

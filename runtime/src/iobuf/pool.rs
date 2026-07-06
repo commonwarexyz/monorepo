@@ -371,7 +371,7 @@ impl BufferPoolConfig {
             BufferPoolThreadCacheConfig::Enabled(None) => {
                 let max_per_class = self.max_per_class.get() as usize;
                 let effective_threads = self.parallelism.get().min(max_per_class);
-                max_per_class / (2 * effective_threads)
+                max_per_class / effective_threads.saturating_mul(2)
             }
             BufferPoolThreadCacheConfig::Enabled(Some(thread_cache_capacity)) => {
                 thread_cache_capacity.get()

@@ -948,6 +948,10 @@ impl HeapOwner {
         zeroed: bool,
     ) -> (NonNull<u8>, usize, OwnerRef) {
         assert!(capacity > 0, "capacity must be greater than zero");
+        assert!(
+            alignment.is_power_of_two(),
+            "alignment must be a power of two"
+        );
         let (layout, header_offset) = Self::layout(capacity, alignment);
         let ptr = if zeroed {
             // SAFETY: layout is valid and non-zero sized.
