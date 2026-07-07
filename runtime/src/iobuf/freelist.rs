@@ -30,7 +30,7 @@
 //! bit. The side-table entry is stable for the lifetime of the size class and
 //! stores the data pointer, capacity, routing fields, refcount, and any live
 //! size-class lease. The free bit records whether that slot is globally
-//! available. Returning a buffer consumes its lease and sets the bit; taking a
+//! available. Returning a buffer consumes its lease and sets the bit. Taking a
 //! buffer clears a set bit and then rebuilds a [`PooledBuffer`] handle from the
 //! side-table entry.
 //!
@@ -180,7 +180,7 @@ pub struct Freelist {
     ///
     /// A slot is mutated only while its free bit is clear and the slot is owned
     /// by exactly one buffer/cache path. Publishing a slot to the global
-    /// freelist is the bitmap bit's Release transition; taking it is the
+    /// freelist is the bitmap bit's Release transition. Taking it is the
     /// matching Acquire transition.
     slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
     /// Mask used to map a slot id to its striped bitmap word.
@@ -352,7 +352,7 @@ impl Freelist {
     /// in the batch map to that word.
     ///
     /// `BufferPool` callers pass simple non-panicking iterators over entries
-    /// they already own; avoiding per-entry guards keeps this path
+    /// they already own. Avoiding per-entry guards keeps this path
     /// allocation-free for ordinary batches.
     ///
     /// The caller must own every buffer in the batch. Slots must be unique
@@ -854,7 +854,7 @@ pub(super) mod tests {
         let set = Freelist::new(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false);
         let buffer = set.try_create(false).expect("slot available");
         // SAFETY: the duplicate handle exists only to drive the double-return
-        // assert; the second put panics before it is used further, and drain
+        // assert. The second put panics before it is used further, and drain
         // deallocates the slot exactly once afterwards.
         let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) };
         set.put(buffer);
@@ -870,7 +870,7 @@ pub(super) mod tests {
         let buffer0 = set.try_create(false).expect("first slot");
         let buffer1 = set.try_create(false).expect("second slot");
         // SAFETY: the duplicate handle exists only to drive the batch
-        // double-return assert; put_batch panics before it is used further,
+        // double-return assert. put_batch panics before it is used further,
         // and drain deallocates each slot exactly once afterwards.
         let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) };
         set.put(buffer0);
@@ -887,7 +887,7 @@ pub(super) mod tests {
         let set = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false);
         let buffer = set.try_create(false).expect("slot available");
         // SAFETY: the duplicate handle exists only to drive the staging
-        // assert; put_batch panics before publishing either handle.
+        // assert. put_batch panics before publishing either handle.
         let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) };
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             set.put_batch([buffer, duplicate]);
@@ -1348,7 +1348,7 @@ mod loom_tests {
         cells: Vec<UnsafeCell<usize>>,
     }
 
-    // SAFETY: cross-thread access is what the stamps exist to check; loom
+    // SAFETY: cross-thread access is what the stamps exist to check. Loom
     // tracks every access made through `UnsafeCell::with`/`with_mut`.
     unsafe impl Send for SlotStamps {}
     // SAFETY: as above.
@@ -1364,13 +1364,13 @@ mod loom_tests {
         /// Stamps a slot before its owner publishes it.
         fn write(&self, slot: u32) {
             // SAFETY: the slot is owned by the stamping thread until `put`
-            // publishes it; loom flags any racing access.
+            // publishes it. Loom flags any racing access.
             self.cells[slot as usize].with_mut(|cell| unsafe { *cell = 1 });
         }
 
         /// Asserts a claimed slot's stamp is visible to the claimant.
         fn assert_visible(&self, slot: u32) {
-            // SAFETY: claiming the bit transfers slot ownership; loom flags
+            // SAFETY: claiming the bit transfers slot ownership. Loom flags
             // the read as racing if the publication edge is too weak.
             self.cells[slot as usize].with(|cell| assert_eq!(unsafe { *cell }, 1));
         }
@@ -1423,7 +1423,7 @@ mod loom_tests {
         }
 
         // Returns the slot ids that are active in this geometry. Models use
-        // only the first id and the id set; the order is not significant.
+        // only the first id and the id set. The order is not significant.
         const fn slots(self) -> &'static [u32] {
             match self {
                 Self::SingleWordSingleBit => &[0],

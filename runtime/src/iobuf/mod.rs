@@ -11,7 +11,7 @@
 //! conversions copy to preserve the caller's capacity), and caller-supplied
 //! [`Bytes`] values are held zero-copy by a small external owner. This keeps
 //! `bytes::Buf` and `bytes::BufMut` hot paths as simple pointer/length
-//! arithmetic; `owner.rs` documents the owner model.
+//! arithmetic. `owner.rs` documents the owner model.
 //!
 //! Throughout this module, "native" means runtime-owned storage whose owner
 //! supports zero-copy mutable recovery through [`IoBuf::try_into_mut`]: heap
@@ -134,8 +134,8 @@ pub mod bench {
 /// ```
 ///
 /// Allocation ownership is represented by `owner`, a compact tagged pointer to
-/// an internal owner header. `bytes::Buf` methods use only `ptr` and `len`;
-/// clone/drop/slice/split use `owner` on colder lifecycle paths.
+/// an internal owner header. `bytes::Buf` methods use only `ptr` and `len`.
+/// Clone/drop/slice/split use `owner` on colder lifecycle paths.
 ///
 /// Cloning and slicing are zero-copy. For pooled-backed values, the underlying
 /// allocation is returned to the pool when the final immutable reference is
@@ -539,7 +539,7 @@ impl From<Vec<u8>> for IoBuf {
 ///
 /// The `Bytes` value moves into a small external owner and the handle points
 /// directly into its payload. Handle clones and drops never touch the inner
-/// refcount; only the final release and the `slice_ref` conversion fast paths
+/// refcount. Only the final release and the `slice_ref` conversion fast paths
 /// do.
 impl From<Bytes> for IoBuf {
     fn from(bytes: Bytes) -> Self {
@@ -579,9 +579,9 @@ impl From<IoBuf> for Vec<u8> {
 /// Convert an [`IoBuf`] into [`Bytes`] without copying readable data.
 ///
 /// Static views convert via [`Bytes::from_static`] (free), external-backed
-/// views via [`Bytes::slice_ref`] on the inner `Bytes` (a refcount clone;
-/// the first conversion of a still-promotable inner `Bytes` pays bytes' one
-/// shared-header allocation), and native heap/pooled views via
+/// views via [`Bytes::slice_ref`] on the inner `Bytes` (a refcount clone,
+/// though the first conversion of a still-promotable inner `Bytes` pays
+/// bytes' one shared-header allocation), and native heap/pooled views via
 /// [`Bytes::from_owner`] (one box).
 impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
@@ -684,7 +684,7 @@ impl arbitrary::Arbitrary<'_> for IoBuf {
 /// The capacity is fixed at construction: unlike [`BytesMut`], the buffer
 /// never grows, and every write past `capacity()` panics (including through
 /// [`BufMut`] methods such as `put_slice`). [`Self::default`] and zero-sized
-/// constructions own no storage, so any write to them panics; allocate the
+/// constructions own no storage, so any write to them panics. Allocate the
 /// full expected size up front. `remaining_mut()` reports the actual writable
 /// tail rather than `usize::MAX`.
 pub struct IoBufMut {
@@ -697,7 +697,7 @@ pub struct IoBufMut {
 // SAFETY: mutable handles have unique ownership. Moving them across threads is
 // safe because final release uses thread-safe pool/allocator paths.
 unsafe impl Send for IoBufMut {}
-// SAFETY: shared references expose only immutable reads; mutation requires
+// SAFETY: shared references expose only immutable reads. Mutation requires
 // `&mut self`.
 unsafe impl Sync for IoBufMut {}
 
@@ -737,7 +737,7 @@ impl Default for IoBufMut {
 impl IoBufMut {
     /// Create a buffer with the given capacity.
     ///
-    /// The capacity is exact and fixed; writes past it panic (see the
+    /// The capacity is exact and fixed. Writes past it panic (see the
     /// [capacity](Self#capacity) section).
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
@@ -1113,7 +1113,7 @@ unsafe impl BufMut for IoBufMut {
     where
         Self: Sized,
     {
-        // Early check for a clear panic message; NOT a safety boundary.
+        // Early check for a clear panic message, not a safety boundary.
         let remaining = src.remaining();
         if remaining > self.cap - self.len {
             panic_advance(remaining, self.cap - self.len);
@@ -1164,7 +1164,7 @@ impl<const N: usize> From<&[u8; N]> for IoBufMut {
 /// capacity, so reuse patterns like passing `Vec::with_capacity(len)` to
 /// [`Blob::read_at_buf`](crate::Blob::read_at_buf) work. Zero-copy adoption
 /// is not used because it would reserve owner header space inside the vec's
-/// allocation, shrinking the writable capacity below `vec.capacity()`; use
+/// allocation, shrinking the writable capacity below `vec.capacity()`. Use
 /// `From<Vec<u8>> for IoBuf` for zero-copy immutable conversion (and
 /// [`IoBuf::try_into_mut`] to recover mutability).
 impl From<Vec<u8>> for IoBufMut {
@@ -1229,7 +1229,7 @@ fn panic_try_get(error: TryGetError) -> ! {
 /// Resolves `range` against a buffer of length `len` into `(start, end)`.
 ///
 /// Panics if a bound overflows `usize`, the range is inverted, or the end
-/// exceeds `len`; callers forward these as their documented slice panics.
+/// exceeds `len`. Callers forward these as their documented slice panics.
 fn resolve_range(len: usize, range: impl RangeBounds<usize>) -> (usize, usize) {
     let start = match range.start_bound() {
         Bound::Included(&n) => n,
@@ -1875,7 +1875,7 @@ impl From<&'static [u8]> for IoBufs {
 ///   with no readable bytes by popping it, so a never-filled chunk ordered
 ///   before readable data loses its capacity when a read crosses it.
 /// - The same paths pop any chunk whose readable bytes a read fully
-///   consumes, releasing its writable tail; the two- and three-chunk shapes
+///   consumes, releasing its writable tail. The two- and three-chunk shapes
 ///   advance in place and retain such tails, so `remaining_mut()` after an
 ///   identical read can differ by shape.
 /// - A `copy_to_bytes` that exactly drains the front chunk's readable bytes
@@ -1895,7 +1895,7 @@ pub struct IoBufsMut {
 ///
 /// Construction and canonicalization keep every chunk that still owns
 /// storage (`capacity() > 0`), readable or not, so caller-reserved write
-/// capacity generally survives read operations; the reader-facing rules and
+/// capacity generally survives read operations. The reader-facing rules and
 /// the accepted exceptions are documented on [`IoBufsMut`] under "Capacity
 /// retention". Only fully-drained chunks (capacity consumed by `advance`)
 /// and empty defaults are removed as the shape collapses.
@@ -1922,7 +1922,7 @@ impl Default for IoBufsMut {
 impl IoBufsMut {
     /// Build mutable chunk storage from already-filtered chunks.
     ///
-    /// This helper intentionally does not filter; callers route through
+    /// This helper intentionally does not filter. Callers route through
     /// [`Self::from_writable_chunks_iter`] so storage-owning chunks are kept.
     fn from_chunks_iter(chunks: impl IntoIterator<Item = IoBufMut>) -> Self {
         let mut iter = chunks.into_iter();
@@ -2204,7 +2204,7 @@ impl IoBufsMut {
         self.for_each_chunk_mut(|buf| {
             let cap = buf.capacity();
             let to_set = remaining.min(cap);
-            // SAFETY: forwarded from this method's contract; the caller
+            // SAFETY: forwarded from this method's contract. The caller
             // initializes all `len` bytes before any read.
             unsafe { buf.set_len(to_set) };
             remaining -= to_set;
@@ -2749,7 +2749,7 @@ impl Builder {
 
 // SAFETY: All methods delegate directly to `self.buf`, a pool-backed
 // `IoBufMut` with a sound `BufMut` implementation. The inline buffer has
-// fixed capacity; writes that exceed it panic in bytes' `BufMut` trait
+// fixed capacity. Writes that exceed it panic in bytes' `BufMut` trait
 // defaults (which check `remaining_mut`) or, for a direct `advance_mut`,
 // in `IoBufMut::advance_mut`.
 unsafe impl BufMut for Builder {
@@ -3116,7 +3116,7 @@ mod tests {
         assert_eq!(buf, &b"hello world"[..]);
         assert_eq!(buf.freeze(), b"hello world");
 
-        // `zeroed` creates readable initialized bytes; `set_len` can shrink safely.
+        // `zeroed` creates readable initialized bytes, so `set_len` can shrink safely.
         let mut zeroed = IoBufMut::zeroed(10);
         assert_eq!(zeroed, &[0u8; 10]);
         // SAFETY: shrinking readable length to initialized region.
@@ -3875,7 +3875,7 @@ mod tests {
     #[test]
     fn test_iobufmut_write_after_partial_advance_appends_at_tail() {
         // A partial advance moves the view start while retaining readable
-        // bytes; a subsequent write must land at the initialized tail so old
+        // bytes. A subsequent write must land at the initialized tail so old
         // and new data stay adjacent, with len and cap tracked in lockstep.
         let mut buf = IoBufMut::with_capacity(16);
         buf.put_slice(b"hello");
@@ -4931,7 +4931,7 @@ mod tests {
     #[test]
     fn test_iobufmut_aligned_capacity_stable_across_recovery() {
         // High-alignment requests round the usable region up to the header
-        // alignment; the handle must report that capacity from construction
+        // alignment. The handle must report that capacity from construction
         // so a freeze/try_into_mut round trip cannot grow it.
         let alignment = NonZeroUsize::new(4096).expect("non-zero alignment");
         let mut buf = IoBufMut::with_alignment(100, alignment);
@@ -5383,7 +5383,7 @@ mod tests {
         // `advance_mut_in_chunks` should skip non-writable chunks.
         let pool = test_pool();
         let mut full = pool.alloc(1);
-        // SAFETY: We only mark initialized capacity; bytes are not read.
+        // SAFETY: We only mark initialized capacity and never read bytes.
         unsafe { full.set_len(full.capacity()) };
         let mut writable_after_full = [full, IoBufMut::with_capacity(2)];
         let mut remaining = 2usize;
@@ -5902,7 +5902,7 @@ mod tests {
             assert_eq!(r.get_u8(), 0xAB);
         }
 
-        // Writing past a full buffer panics (fixed capacity; the panic comes
+        // Writing past a full buffer panics (fixed capacity, with the panic coming
         // from bytes' trait default).
         #[test]
         #[should_panic(expected = "advance out of bounds")]

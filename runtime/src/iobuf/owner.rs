@@ -11,7 +11,7 @@
 //!
 //! The `bytes::Buf` and `bytes::BufMut` cursor methods (`remaining`, `chunk`,
 //! `advance`, `copy_to_slice`, and the write-side equivalents) read only those
-//! handle fields; they do not match on allocation kind and do not dispatch
+//! handle fields. They do not match on allocation kind and do not dispatch
 //! through a vtable. The allocation kind is needed only for lifecycle and
 //! ownership-transferring operations such as clone, drop, `freeze`,
 //! `copy_to_bytes`, and `try_into_mut`, so that metadata is stored in an owner
@@ -24,8 +24,8 @@
 //! bits:
 //!
 //! ```text
-//! 0 (entire value)        EMPTY     no owner; empty views and 'static slices
-//! header ptr | 0b01       HEAP      HeapOwner; tail-header aligned
+//! 0 (entire value)        EMPTY     no owner: empty views and 'static slices
+//! header ptr | 0b01       HEAP      HeapOwner: tail-header aligned
 //!                                   allocations, adopted vecs, and
 //!                                   front-block mutables
 //! slot ptr   | 0b10       POOLED    PooledOwner side-table entry
@@ -118,7 +118,7 @@
 //! ^ OwnerRef target        ^ kept alive by the inner Bytes
 //! ```
 //!
-//! Clones, slices, and drops of the `IoBuf` touch only our refcount; the
+//! Clones, slices, and drops of the `IoBuf` touch only our refcount. The
 //! inner `Bytes` refcount is touched at construction, at final release, and
 //! by the `slice_ref` fast paths (partial `copy_to_bytes` drains and
 //! `Bytes::from(IoBuf)` conversions of external-backed views).
@@ -168,7 +168,7 @@ const OWNER_TAG_MASK: usize = 0b11;
 /// Refcount ceiling shared with `Arc` and `bytes`.
 ///
 /// A refcount above `isize::MAX` can only result from a leak loop (`mem::forget`
-/// in a cycle); allowing it to wrap would turn into use-after-free, so
+/// in a cycle). Allowing it to wrap would turn into use-after-free, so
 /// [`OwnerRef::clone_shared`] aborts instead.
 const MAX_REFCOUNT: usize = isize::MAX as usize;
 
@@ -272,7 +272,7 @@ impl OwnerRef {
     ///
     /// `header` must point to the [`HeapOwner`] of an allocation owned by this
     /// owner ref, with its low tag bits zero. The contents may be uninitialized
-    /// (for example a reserved front block before `freeze`); they must be
+    /// (for example a reserved front block before `freeze`). They must be
     /// initialized before any clone, drop, or freeze that reads them.
     #[inline(always)]
     unsafe fn from_heap(header: NonNull<HeapOwner>) -> Self {
@@ -306,7 +306,7 @@ impl OwnerRef {
     ///
     /// Empty vecs detach entirely (empty immutable buffers never pin an
     /// allocation). Non-adoptable vecs move into `Bytes` (zero-copy for any
-    /// `Vec<u8>`; for `len == cap` also `bytes`' allocation-free promotable
+    /// `Vec<u8>`, and for `len == cap` also `bytes`' allocation-free promotable
     /// path) behind an external owner.
     pub(crate) fn from_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, Self) {
         if vec.is_empty() {
@@ -321,7 +321,7 @@ impl OwnerRef {
     /// Moves `bytes` into a boxed [`ExternalOwner`] and returns handle fields.
     ///
     /// Zero-copy: the handle points directly into the payload kept alive by the
-    /// inner `Bytes`. Costs one box; handle clones and drops never touch the
+    /// inner `Bytes`. Costs one box. Handle clones and drops never touch the
     /// inner refcount (only final release and the `slice_ref` conversion fast
     /// paths do).
     pub(crate) fn from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, Self) {
@@ -373,7 +373,7 @@ impl OwnerRef {
     /// # Safety
     ///
     /// `self` must be a live non-empty owner. The returned reference is only
-    /// valid while the owner is live; the `'static` lifetime is a convenience
+    /// valid while the owner is live. The `'static` lifetime is a convenience
     /// the caller must bound.
     #[inline(always)]
     unsafe fn refs(self) -> &'static AtomicUsize {
@@ -426,7 +426,7 @@ impl OwnerRef {
     /// so the unshared fast path is a single Acquire load followed by release:
     /// no read-modify-write, with the release work outlined in
     /// [`Self::release_unique_outlined`]. Shared owners pay one inline Release
-    /// decrement; the rare race where another drop reaches the sentinel
+    /// decrement. The rare race where another drop reaches the sentinel
     /// between the load and the decrement lands in
     /// [`Self::drop_shared_race_final`].
     ///
@@ -465,7 +465,7 @@ impl OwnerRef {
     ///
     /// Keeping the release tail out of line shrinks `IoBuf`'s drop glue to a
     /// null test, a tag mask, one refcount load, and a branch to this call,
-    /// small enough to inline into drop sites; the non-final decrement they
+    /// small enough to inline into drop sites. The non-final decrement they
     /// execute pays no call. The mutable drop path is unaffected
     /// (`release_unique_mut_at` keeps its pooled arm fully inline).
     ///
@@ -495,7 +495,7 @@ impl OwnerRef {
         // handles, ordering their payload accesses before the release.
         fence(Ordering::Acquire);
         // Restore the sentinel before releasing. No other handle exists, so
-        // Relaxed is sufficient; pooled reuse synchronizes through the
+        // Relaxed is sufficient. Pooled reuse synchronizes through the
         // freelist's own Release/Acquire bit transitions.
         refs.store(1, Ordering::Relaxed);
         // SAFETY: guaranteed by the caller.
@@ -586,7 +586,7 @@ impl OwnerRef {
     ///
     /// Eager tail headers are already initialized. Front headers can be
     /// initialized more than once while uniquely mutable (for example after
-    /// `try_into_mut` and another `freeze`); rewriting the header is harmless
+    /// `try_into_mut` and another `freeze`). Rewriting the header is harmless
     /// because it contains no drop state and the mutable handle is unique.
     ///
     /// # Safety
@@ -600,7 +600,7 @@ impl OwnerRef {
         }
 
         // SAFETY: a front-heap mutable owner carries the reserved header base
-        // in its tagged pointer; its contents are written below before sharing.
+        // in its tagged pointer. Its contents are written below before sharing.
         let base = unsafe { self.heap() };
         let data_base = HeapOwner::front_data_base(base);
         let alloc_size = HeapOwner::front_alloc_size(base, ptr, cap);
@@ -620,7 +620,7 @@ impl OwnerRef {
     /// mutable handle's current pointer.
     ///
     /// Front blocks place the header before the data, so the owner address is
-    /// below the data pointer; tail headers sit above it. This distinguishes
+    /// below the data pointer. Tail headers sit above it. This distinguishes
     /// the two heap layouts without spending a tag bit.
     #[inline(always)]
     fn is_front_heap_for_mut(self, ptr: NonNull<u8>) -> bool {
@@ -665,7 +665,7 @@ impl OwnerRef {
     ///
     /// For tail-header heap owners the capacity is the distance from the data
     /// base to the header. For canonical heap allocations this is the requested
-    /// capacity rounded up to header alignment; the at most `ALIGN - 1` padding
+    /// capacity rounded up to header alignment. The at most `ALIGN - 1` padding
     /// bytes precede the header and are genuinely writable. For adopted vecs it
     /// is the prefix below the header (readable bytes plus spare capacity).
     /// For initialized front-header heap owners, capacity is the allocation
@@ -729,7 +729,7 @@ impl OwnerRef {
 /// uses the stored layout exactly.
 #[repr(C)]
 pub(crate) struct HeapOwner {
-    /// Shared refcount; must stay at offset 0 (see [`OwnerRef::refs`]).
+    /// Shared refcount. Must stay at offset 0 (see [`OwnerRef::refs`]).
     refs: AtomicUsize,
     /// Base address of the usable data region.
     data_base: NonNull<u8>,
@@ -748,9 +748,9 @@ pub(crate) struct HeapOwner {
 /// is outside the global freelist.
 #[repr(C)]
 pub struct PooledOwner {
-    /// Shared refcount; must stay at offset 0 (see [`OwnerRef::refs`]).
+    /// Shared refcount. Must stay at offset 0 (see [`OwnerRef::refs`]).
     refs: AtomicUsize,
-    /// Strong size-class reference; initialized at checkout, consumed at
+    /// Strong size-class reference, initialized at checkout and consumed at
     /// return.
     lease: MaybeUninit<SizeClassLease>,
     /// Base address of the usable data region.
@@ -811,7 +811,7 @@ impl PooledOwner {
 /// Release is a plain box drop, which drops the inner `Bytes` exactly once.
 #[repr(C)]
 struct ExternalOwner {
-    /// Shared refcount; must stay at offset 0 (see [`OwnerRef::refs`]).
+    /// Shared refcount. Must stay at offset 0 (see [`OwnerRef::refs`]).
     refs: AtomicUsize,
     /// The payload owner. The handle view `ptr..ptr+len` always lies within
     /// this value's range (required by the `slice_ref` conversion fast path).
@@ -823,7 +823,7 @@ struct ExternalOwner {
 /// This handle is a pointer to the owning side-table slot. The slot stores the
 /// data pointer, stable slot id, capacity, refcount sentinel, and optional live
 /// lease. Checkout initializes only the lease field in place and returns an
-/// [`OwnerRef`] to that slot; return to the global freelist consumes the lease.
+/// [`OwnerRef`] to that slot. Return to the global freelist consumes the lease.
 ///
 /// `PooledBuffer` has no `Drop`: callers must return it to the originating
 /// freelist or deallocate it with the exact layout used for allocation.
@@ -996,7 +996,7 @@ impl PooledBuffer {
     /// sentinel of 1: the final release restores the sentinel before the
     /// bitmap bit's Release publication, and the claimant's Acquire clear
     /// pairs with it. A Relaxed load suffices because the assertion is on the
-    /// value; loom explores every interleaving that could expose a stale one.
+    /// value. Loom explores every interleaving that could expose a stale one.
     #[cfg(feature = "loom")]
     pub(crate) fn assert_parked_sentinel(&self) {
         // SAFETY: the caller just claimed the slot, so the side-table entry
@@ -1059,12 +1059,12 @@ impl HeapOwner {
     /// Allocates an untracked mutable buffer.
     ///
     /// Low-alignment allocations reserve a front [`HeapOwner`] and leave it
-    /// uninitialized until `freeze`; high-alignment allocations use the eager
+    /// uninitialized until `freeze`. High-alignment allocations use the eager
     /// tail owner layout from [`Self::allocate_aligned`] so the returned data
     /// pointer keeps the requested alignment.
     ///
     /// Returns the data pointer, the usable capacity (the request itself on
-    /// the front layout; rounded up to the header alignment, at most
+    /// the front layout, or rounded up to the header alignment, at most
     /// `align_of::<Self>() - 1` bytes more, on the tail layout), and the
     /// owner. Handles must adopt the returned capacity so a later
     /// `try_into_mut` recovery reports the same value.
@@ -1118,7 +1118,7 @@ impl HeapOwner {
     /// length, usable capacity (the prefix below the header), and the owner.
     ///
     /// Exactly-sized vecs (`len == cap`, the common case for `vec![0; n]` and
-    /// `collect()`) have no spare room; reallocating could copy, so they are
+    /// `collect()`) have no spare room. Reallocating could copy, so they are
     /// returned unchanged for the caller to convert another way.
     pub(crate) fn try_adopt_vec(
         vec: Vec<u8>,
@@ -1135,7 +1135,7 @@ impl HeapOwner {
         let mut vec = ManuallyDrop::new(vec);
         let base = vec.as_mut_ptr();
         // SAFETY: `base..base+cap` is one live allocation (`cap > 0`) owned by
-        // the dismantled vec; `base + header_offset` is owner-aligned and
+        // the dismantled vec. `base + header_offset` is owner-aligned and
         // `header_offset + size_of::<HeapOwner>() <= cap`, so the write is in
         // bounds.
         unsafe {
@@ -1236,9 +1236,9 @@ impl HeapOwner {
 
     /// Releases a unique initialized heap owner.
     ///
-    /// The stored fields recover the exact layout; no placement math is
-    /// redone on release. Tail headers deallocate from the stored data base;
-    /// initialized front headers deallocate from the header address, which is
+    /// The stored fields recover the exact layout: no placement math is
+    /// redone on release. Tail headers deallocate from the stored data base.
+    /// Initialized front headers deallocate from the header address, which is
     /// the allocation base. The owner fields are copied out before `dealloc`
     /// because the owner lives inside the allocation being freed.
     ///
@@ -1262,7 +1262,7 @@ impl HeapOwner {
         let layout = unsafe {
             Layout::from_size_align_unchecked(header_ref.alloc_size, header_ref.alloc_align)
         };
-        // SAFETY: base/layout came from the global allocator; the header borrow
+        // SAFETY: base/layout came from the global allocator. The header borrow
         // ended above (its fields were copied to locals).
         unsafe { dealloc(base.as_ptr(), layout) };
     }
@@ -1313,7 +1313,7 @@ impl ExternalOwner {
         // SAFETY: guaranteed by the caller.
         let owner_ref = unsafe { owner.as_ref() };
         assert_eq!(owner_ref.refs.load(Ordering::Relaxed), 1);
-        // SAFETY: the owner box was leaked at construction; dropping it here
+        // SAFETY: the owner box was leaked at construction. Dropping it here
         // drops the inner `Bytes` exactly once.
         drop(unsafe { Box::from_raw(owner.as_ptr()) });
     }
@@ -1357,7 +1357,7 @@ mod tests {
     #[test]
     fn test_heap_unaligned_capacity_rounds_usable_region_up() {
         // A capacity that is not a multiple of the header alignment gains the
-        // padding bytes that precede the header; they are genuinely writable.
+        // padding bytes that precede the header. They are genuinely writable.
         let (_, usable, owner) = HeapOwner::allocate_aligned(10, 1, false);
         // SAFETY: owner is unique and live.
         let capacity = unsafe { owner.usable_capacity() };
@@ -1548,7 +1548,7 @@ mod tests {
         // SAFETY: owner is unique and live.
         let usable = unsafe { owner.usable_capacity() };
         assert_eq!(usable, expected_header - base_addr);
-        // SAFETY: the adopted region below the header is writable; verify the
+        // SAFETY: the adopted region below the header is writable. Verify the
         // payload survived adoption.
         let payload = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) };
         assert_eq!(payload, &[1, 2, 3, 4]);
@@ -1741,7 +1741,7 @@ mod loom_tests {
             let t1 = thread::spawn(move || {
                 // SAFETY: this thread owns one live reference to clone from.
                 unsafe { owner.clone_shared() };
-                // SAFETY: this thread owns two references; drop both.
+                // SAFETY: this thread owns two references and drops both.
                 unsafe { owner.drop_shared() };
                 // SAFETY: as above.
                 unsafe { owner.drop_shared() };
@@ -1780,7 +1780,7 @@ mod loom_tests {
             let t1 = thread::spawn({
                 let payload = payload.clone();
                 move || {
-                    // SAFETY: this thread owns one reference; the write is
+                    // SAFETY: this thread owns one reference, and the write is
                     // sequenced before its drop.
                     payload.with_mut(|cell| unsafe { *cell = 1 });
                     // SAFETY: this thread owns one reference.
@@ -1811,7 +1811,7 @@ mod loom_tests {
     /// (deallocation or reuse).
     struct PayloadCell(UnsafeCell<usize>);
 
-    // SAFETY: cross-thread access is what the cell exists to check; loom
+    // SAFETY: cross-thread access is what the cell exists to check. Loom
     // tracks every access made through `UnsafeCell::with`/`with_mut`.
     unsafe impl Send for PayloadCell {}
     // SAFETY: as above.
@@ -1831,7 +1831,7 @@ mod loom_tests {
         fn drop(&mut self) {
             self.payload.0.with(|cell| {
                 // SAFETY: the refcount protocol grants the final release
-                // exclusive payload access; loom reports a data race here if
+                // exclusive payload access. Loom reports a data race here if
                 // a weakened ordering lets the release run unsynchronized
                 // with another handle's write.
                 assert_eq!(unsafe { *cell }, 1);
@@ -1858,7 +1858,7 @@ mod loom_tests {
             let (_, _, owner) = OwnerRef::from_bytes(bytes);
 
             // Two handles: the spawned thread writes the payload through its
-            // handle and drops; the main thread only drops. In the explored
+            // handle and drops. The main thread only drops. In the explored
             // executions where the decrements race (both fast-path loads see
             // a shared count and the main thread's decrement lands last), the
             // main thread frees through `drop_shared_race_final`, and the
@@ -1872,8 +1872,8 @@ mod loom_tests {
             unsafe { owner.clone_shared() };
             let t1 = thread::spawn({
                 move || {
-                    // SAFETY: this thread's handle keeps the payload alive;
-                    // the write is sequenced before its drop.
+                    // SAFETY: this thread's handle keeps the payload alive.
+                    // The write is sequenced before its drop.
                     payload.0.with_mut(|cell| unsafe { *cell = 1 });
                     // SAFETY: this thread owns one reference.
                     unsafe { owner.drop_shared() };
@@ -1899,8 +1899,8 @@ mod loom_tests {
             let (_, _, owner) = OwnerRef::from_bytes(bytes);
 
             // Two handles: the spawned thread writes the payload through its
-            // handle and drops; the main thread waits until the decrement is
-            // visible through a Relaxed probe (no happens-before edge; the
+            // handle and drops. The main thread waits until the decrement is
+            // visible through a Relaxed probe (no happens-before edge, and the
             // yields let loom advance the probe past stale values), so its
             // drop deterministically takes the fast path and frees. The only
             // ordering protecting the tracked read inside TrackedPayload::drop
@@ -1910,8 +1910,8 @@ mod loom_tests {
             unsafe { owner.clone_shared() };
             let t1 = thread::spawn({
                 move || {
-                    // SAFETY: this thread's handle keeps the payload alive;
-                    // the write is sequenced before its drop.
+                    // SAFETY: this thread's handle keeps the payload alive.
+                    // The write is sequenced before its drop.
                     payload.0.with_mut(|cell| unsafe { *cell = 1 });
                     // SAFETY: this thread owns one reference.
                     unsafe { owner.drop_shared() };
@@ -1921,7 +1921,7 @@ mod loom_tests {
             while unsafe { owner.refcount_relaxed() } != 1 {
                 thread::yield_now();
             }
-            // SAFETY: as above; observing 1 makes this the final owner, and
+            // SAFETY: as above. Observing 1 makes this the final owner, and
             // per-location coherence keeps the fast-path load at 1.
             unsafe { owner.drop_shared() };
             t1.join().unwrap();

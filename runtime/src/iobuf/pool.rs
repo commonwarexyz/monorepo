@@ -21,7 +21,7 @@
 //! - Requests smaller than [`BufferPoolConfig::pool_min_size`] bypass pooling
 //!   entirely and return untracked aligned allocations from both
 //!   [`BufferPool::try_alloc`] and [`BufferPool::alloc`].
-//! - Dropping [`BufferPool`] drains only the shared global freelists; pooled
+//! - Dropping [`BufferPool`] drains only the shared global freelists. Pooled
 //!   views and buffers cached in a live thread's local cache can keep their
 //!   size class alive until they are dropped or the thread exits.
 //!
@@ -502,7 +502,7 @@ unsafe impl Sync for SizeClass {}
 /// | parked in global  |                             | checked out     |
 /// | freelist          |                             | (pooled view)   |
 /// | (no per-buffer    |                             +-----------------+
-/// | ref; the pool's   |                       cache pop ^   | move buffer;
+/// | ref: the pool's   |                       cache pop ^   | move buffer,
 /// | SizeClassHandle   |                                 |   v lease stays
 /// | keeps class       |                             +-----------------+
 /// | alive)            | <-------------------------- | parked in TLS   |
@@ -517,7 +517,7 @@ unsafe impl Sync for SizeClass {}
 /// Dropping the public [`BufferPool`] drains globally parked buffers, then
 /// drops its `SizeClassHandle`s. Pooled views and non-empty TLS caches may keep
 /// the `SizeClass` alive after that point. Empty TLS caches keep no size-class
-/// reference; a later return of an outstanding buffer can recreate the cache
+/// reference. A later return of an outstanding buffer can recreate the cache
 /// from the live lease in that buffer's slot.
 ///
 /// This is the one raw pointer shape used by all pool-owned, pooled view, and
@@ -537,7 +537,7 @@ unsafe impl Sync for SizeClass {}
 /// Because the token is non-owning, code may dereference it or adjust the
 /// strong count only when another invariant proves the allocation is still
 /// live. [`SizeClassHandle`] and [`SizeClassLease`] prove liveness through
-/// owned strong references; a non-empty [`TlsSizeClassCache`] proves liveness
+/// owned strong references. A non-empty [`TlsSizeClassCache`] proves liveness
 /// through the live leases stored in its entries' pooled slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
@@ -800,7 +800,7 @@ impl SizeClassLease {
 
     /// Consumes the lease without releasing its strong reference.
     ///
-    /// The returned token still represents one owned strong reference; the
+    /// The returned token still represents one owned strong reference. The
     /// caller takes over responsibility for releasing it. Batch returns use
     /// this to park many buffers first and release their references together
     /// afterwards.
@@ -838,13 +838,13 @@ impl TlsSizeClassCacheEntry {
 ///
 /// Each instance is stored in [`TlsSizeClassCaches`] under one global
 /// [`SizeClass::class_id`], so all entries in the cache belong to the same size
-/// class. The cache owns full [`PooledBuffer`] values while they are local;
-/// interaction with the global freelist happens only on miss refill (take),
+/// class. The cache owns full [`PooledBuffer`] values while they are local.
+/// Interaction with the global freelist happens only on miss refill (take),
 /// overflow spill, explicit flush, or thread exit (return).
 ///
 /// When `len > 0`, each initialized entry in `entries[..len]` owns one live
 /// slot lease, which keeps the pointed-to class alive. An empty cache owns no
-/// class reference; it is only an allocated local stack for a class id.
+/// class reference. It is only an allocated local stack for a class id.
 ///
 /// The hot steady-state allocation path pops an entry from `entries`, and the
 /// hot return path pushes one back while there is room.
@@ -1041,7 +1041,7 @@ impl TlsSizeClassCache {
         // not-yet-released lease references keep the class (and its freelist)
         // alive until the releases below.
         // SAFETY: `start..end` was initialized and ownership transferred to
-        // this function; the entry is only borrowed here.
+        // this function. The entry is only borrowed here.
         let token = unsafe { (*entries.add(start)).assume_init_ref().buffer.lease() }.token;
 
         // SAFETY: the lease strong references consumed below are not released
@@ -1053,7 +1053,7 @@ impl TlsSizeClassCache {
             let mut entry = unsafe { entries.add(index).read().assume_init() };
             // SAFETY: local cache entries keep a live lease in the pooled
             // slot. The strong reference it owns is intentionally not
-            // released here (leases have no drop glue); the token releases
+            // released here (leases have no drop glue). The token releases
             // below settle it.
             let _ = unsafe { entry.buffer.take_lease() }.into_token();
             entry.buffer
@@ -1393,7 +1393,7 @@ impl Drop for BufferPoolInner {
     fn drop(&mut self) {
         // The public pool is going away. Drain globally parked buffers while
         // the pool-owned class handles are still live. Pooled views and live
-        // TLS cache entries own their own size-class references; if they
+        // TLS cache entries own their own size-class references. If they
         // return later, they park their buffer and release the reference that
         // kept the class alive.
         for class in &self.classes {
@@ -1472,7 +1472,7 @@ impl BufferPoolInner {
 ///
 /// Returned buffers are cached per thread for reuse. After the pool is
 /// dropped, buffers still cached on other threads are reclaimed when those
-/// threads exit or call [`BufferPoolThreadCache::flush`]; a long-lived
+/// threads exit or call [`BufferPoolThreadCache::flush`]. A long-lived
 /// thread that used a since-dropped pool retains its cached buffers until
 /// then. Processes that create and drop many pools should reuse threads'
 /// pools or flush explicitly.
@@ -3067,7 +3067,7 @@ mod tests {
     #[test]
     fn test_pooled_ops_inside_tls_destructor_fall_back_to_global() {
         // Pooled operations that run inside another thread_local's destructor
-        // may find the pool's TLS registry already destroyed; the push/pop
+        // may find the pool's TLS registry already destroyed. The push/pop
         // slow paths must then fall back to the global freelist instead of
         // panicking or stranding buffers. Destructor order is
         // platform-dependent, so this test asserts the outcome invariant
@@ -3081,7 +3081,7 @@ mod tests {
         impl Drop for ExitReleaser {
             fn drop(&mut self) {
                 // An allocation inside a TLS destructor exercises the pop
-                // fallback; the drops exercise the push fallback.
+                // fallback. The drops exercise the push fallback.
                 let extra = self
                     .pool
                     .try_alloc(self.size)
@@ -3453,7 +3453,7 @@ mod loom_tests {
             drop(frozen);
             t.join().unwrap();
 
-            // The buffer returned through whichever drop was final; checkout
+            // The buffer returned through whichever drop was final. Checkout
             // must succeed and expose a writable buffer again.
             let mut again = pool.alloc(64);
             assert!(again.is_pooled());
@@ -3471,7 +3471,7 @@ mod loom_tests {
     // when tracked state is dropped, so swapping that order manifests as a
     // use-after-free of the freed bitmap that corrupts loom's internal object
     // state (caught by its internal asserts in practice, not by a designed
-    // race report); the loom-tracked class strong count still verifies the
+    // race report). The loom-tracked class strong count still verifies the
     // release accounting itself.
     #[test]
     fn final_drop_races_pool_teardown() {
@@ -3503,7 +3503,7 @@ mod loom_tests {
     // Models a re-checkout racing the final drop of a shared pooled buffer.
     // The final drop leaves the refcount at the sentinel (the losing handle's
     // Release decrement lands on 1, or the race-final path re-stores it with
-    // a Relaxed store) before the freelist's Release publication; a
+    // a Relaxed store) before the freelist's Release publication. A
     // successful concurrent take must observe that sentinel (asserted in
     // Freelist::buffer under loom) before handing the slot to a new mutable
     // handle.
@@ -3533,7 +3533,7 @@ mod loom_tests {
             drop(frozen);
 
             // The single slot may still be checked out (Exhausted) or already
-            // returned by whichever drop was final; a successful claim must
+            // returned by whichever drop was final. A successful claim must
             // expose a writable buffer with the sentinel restored.
             if let Ok(mut again) = pool.try_alloc(64) {
                 assert!(again.is_pooled());
