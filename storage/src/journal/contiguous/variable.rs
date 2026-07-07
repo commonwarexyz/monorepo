@@ -741,8 +741,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
             })?;
 
         // Group runs of consecutive positions that fall into the same blob, then read all runs
-        // concurrently: uniform access makes most runs a single item, so reading them
-        // sequentially would serialize one I/O per miss.
+        // concurrently.
         let items_per_blob = self.items_per_blob.get();
         let mut runs = Vec::new();
         let mut group_start = 0;

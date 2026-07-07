@@ -1228,8 +1228,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
 
         // The buffer is pre-sized for every position, so each group can own a disjoint slice and
-        // all groups can read concurrently: the whole batch becomes one I/O wave instead of one
-        // wave per blob (misses within a group already read concurrently).
+        // all groups can read concurrently.
         let mut reads = Vec::new();
         let mut remaining_buf = reusable_buf.as_mut_slice();
         for group in positions.chunk_by(|a, b| {
