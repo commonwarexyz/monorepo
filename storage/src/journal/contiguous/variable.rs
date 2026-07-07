@@ -2332,6 +2332,83 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_variable_read_many_scattered_single_runs_across_blobs() {
+        // Read a batch where cache hits are interleaved with non-consecutive misses spanning
+        // several blobs. The misses split into many small runs that are fetched separately, and
+        // each run's items must land in the correct result slots between the cached items. Every
+        // item's payload encodes its position, so a wrong run boundary or a misplaced result
+        // fails the value assertions.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "read-many-scattered-runs".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(16)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Each item's frame is 302 bytes, so a 5-item blob spans two full 512-byte pages plus
+            // a partial page. Full pages are served through the page cache and go cold on reopen,
+            // which is what lets this test stage misses at all.
+            let items = (0..30)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal =
+                Journal::<_, FixedBytes<300>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            for item in &items {
+                journal.append(item).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen with a fresh page cache so sealed-blob full pages are cold.
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(16)),
+                ..cfg
+            };
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            let reader = journal.snapshot().await.unwrap();
+
+            // Warm blobs 1 (positions 5..10) and 3 (positions 15..20) with one read each. The
+            // faulted pages cover the neighboring positions asserted below.
+            reader.read(6).await.unwrap();
+            reader.read(16).await.unwrap();
+
+            // Prove the interleave the batch will see: warm-blob positions are sync hits, and the
+            // scattered positions in blobs 0, 2, and 4 are misses. The hit pass in read_many runs
+            // before any miss I/O, so this is exactly the hit/miss split the call resolves.
+            for hit in [5, 6, 15, 17] {
+                assert!(reader.try_read_sync(hit).is_some(), "position {hit}");
+            }
+            let misses = [0, 3, 10, 12, 20, 21, 23];
+            for miss in misses {
+                assert!(reader.try_read_sync(miss).is_none(), "position {miss}");
+            }
+
+            // The misses decompose into runs [0], [3], [10], [12], [20, 21], [23]: four single-item
+            // runs and one consecutive pair across three blobs, with hits interleaved between them.
+            let positions = [0, 3, 5, 6, 10, 12, 15, 17, 20, 21, 23];
+            let expected: Vec<_> = positions
+                .iter()
+                .map(|&p| items[p as usize].clone())
+                .collect();
+            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+
+            // A second pass serves the now-cached positions through the hit path and must agree.
+            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Test that complete offsets partition loss after pruning is detected as unrecoverable.
     ///
     /// When the offsets partition is completely lost and the data has been pruned, we cannot

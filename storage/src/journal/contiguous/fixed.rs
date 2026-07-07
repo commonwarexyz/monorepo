@@ -1429,6 +1429,16 @@ mod tests {
         format!("{}-blobs", cfg.partition)
     }
 
+    /// Extract a metric counter's value from encoded metrics output.
+    fn counter(buffer: &str, name: &str) -> u64 {
+        buffer
+            .lines()
+            .find(|l| l.contains(name) && !l.starts_with('#'))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|v| v.parse().ok())
+            .expect("counter missing")
+    }
+
     impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
         /// Test helper: Get the oldest blob from the blob store.
         pub(crate) const fn test_oldest_blob(&self) -> Option<u64> {
@@ -4845,15 +4855,6 @@ mod tests {
 
             let reader = journal.snapshot().await.unwrap();
 
-            fn counter(buffer: &str, name: &str) -> u64 {
-                buffer
-                    .lines()
-                    .find(|l| l.contains(name) && !l.starts_with('#'))
-                    .and_then(|l| l.split_whitespace().last())
-                    .and_then(|v| v.parse().ok())
-                    .expect("counter missing")
-            }
-
             // Sparse subset spanning multiple blobs, including the pruning boundary.
             // `try_read_sync` probes do not populate the cache, so the cached subset is
             // whatever the append path left resident; derive the expected hit count from
@@ -4888,6 +4889,72 @@ mod tests {
             let batch = reader.read_many(&all).await.unwrap();
             for (i, &pos) in all.iter().enumerate() {
                 assert_eq!(batch[i], reader.read(pos).await.unwrap());
+            }
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_cold_blob_groups() {
+        // Read a batch whose positions are all cache misses spread over four blobs, so the whole
+        // batch is served by per-blob group reads into disjoint slices of the shared output
+        // buffer. Each digest encodes its position, so a group read into the wrong slice fails
+        // the value assertions.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(8));
+            cfg.page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(32));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..40u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen with a fresh page cache so every full page is cold. The positions avoid
+            // each blob's trailing bytes, which sealed blobs keep in memory and always serve
+            // synchronously.
+            cfg.page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(32));
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            let reader = journal.snapshot().await.unwrap();
+            let positions = [1, 5, 10, 14, 17, 22, 25, 30];
+            for pos in positions {
+                assert!(reader.try_read_sync(pos).is_none(), "position {pos}");
+            }
+
+            // Every item requires a blob read, split into four groups of two.
+            let before = context.encode();
+            let batch = reader.read_many(&positions).await.unwrap();
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "second_cache_misses") - counter(&before, "second_cache_misses"),
+                positions.len() as u64
+            );
+            assert_eq!(
+                counter(&after, "second_cache_hits"),
+                counter(&before, "second_cache_hits")
+            );
+            for (i, &pos) in positions.iter().enumerate() {
+                assert_eq!(batch[i], test_digest(pos), "position {pos}");
+            }
+
+            // The first pass cached every page it faulted, so a second pass is all hits and must
+            // return the same items.
+            let before = context.encode();
+            let batch = reader.read_many(&positions).await.unwrap();
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "second_cache_hits") - counter(&before, "second_cache_hits"),
+                positions.len() as u64
+            );
+            for (i, &pos) in positions.iter().enumerate() {
+                assert_eq!(batch[i], test_digest(pos), "position {pos}");
             }
             drop(reader);
 
