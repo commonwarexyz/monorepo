@@ -172,7 +172,7 @@ fn bench_name<S: FreelistImplementation>(
 }
 
 struct MutexVec {
-    _slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
+    _slots: BenchSlots,
     buffers: Mutex<Vec<PooledBuffer>>,
 }
 
@@ -220,7 +220,7 @@ impl Drop for MutexVec {
 }
 
 struct ArrayQueueFreelist {
-    _slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
+    _slots: BenchSlots,
     queue: ArrayQueue<PooledBuffer>,
 }
 
