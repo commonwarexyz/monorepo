@@ -1294,9 +1294,12 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                     misses.next();
                     continue;
                 }
-                let item = A::decode(slice).expect("cached item must decode");
-                out[base + idx] = Some(item);
-                hits += 1;
+                // A decode failure declines to a miss: the async completion re-reads the
+                // item and bubbles the failure as [Error::Codec], like every async read path.
+                if let Ok(item) = A::decode(slice) {
+                    out[base + idx] = Some(item);
+                    hits += 1;
+                }
             }
         }
         self.metrics.record_cache_hits(hits);

@@ -11,7 +11,7 @@ pub trait Journal<F: Family>: Sized + Send {
     type Context;
 
     /// The configuration of the journal
-    type Config;
+    type Config: Sync;
 
     /// The type of operations in the journal
     type Op: Send;
