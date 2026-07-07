@@ -109,7 +109,7 @@ mod runner;
 mod variant;
 
 pub use input::{MarshalEvent, MarshalFuzzInput};
-pub use runner::fuzz_marshal;
+pub use runner::fuzz_marshal_single_node;
 pub use variant::VariantPublish;
 
 /// Number of blocks in the canonical single-node fuzz chain.

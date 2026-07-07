@@ -2,15 +2,20 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize, Read};
-use commonware_consensus::simplex::{
-    scheme::{
-        bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
-        Scheme as SimplexScheme,
+use commonware_consensus::{
+    simplex::{
+        scheme::{
+            bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
+            secp256r1, Scheme as SimplexScheme,
+        },
+        types::{
+            Activity, Artifact, Backfiller, Certificate, ConflictingFinalize, ConflictingNotarize,
+            Context, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            NullifyFinalize, Proposal, Request, Response, Vote,
+        },
     },
-    types::{
-        Certificate, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-        Proposal, Vote,
-    },
+    types::View,
+    Epochable, Viewable,
 };
 use commonware_consensus_fuzz::id_mock;
 #[cfg(feature = "mocks")]
@@ -24,6 +29,11 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
+use std::{
+    collections::hash_map::DefaultHasher,
+    fmt::Debug,
+    hash::{Hash, Hasher},
+};
 
 type Ed25519Scheme = ed25519::Scheme;
 type Bls12381MultisigMinPk = bls12381_multisig::Scheme<PublicKey, MinPk>;
@@ -53,6 +63,37 @@ enum StructuredKind {
     CertificateNotarization,
     CertificateNullification,
     CertificateFinalization,
+    ArtifactVoteNotarize,
+    ArtifactVoteNullify,
+    ArtifactVoteFinalize,
+    ArtifactCertificateNotarization,
+    ArtifactCertificateNullification,
+    ArtifactCertificateFinalization,
+    ArtifactCertification,
+    ActivityNotarize,
+    ActivityNullify,
+    ActivityFinalize,
+    ActivityNotarization,
+    ActivityNullification,
+    ActivityFinalization,
+    ActivityCertification,
+    ActivityConflictingNotarize,
+    ActivityConflictingFinalize,
+    ActivityNullifyFinalize,
+    BackfillerRequest,
+    BackfillerResponse,
+    Context,
+}
+
+#[derive(Arbitrary, Debug)]
+enum ArbitraryKind {
+    Context,
+    Vote,
+    Certificate,
+    Artifact,
+    Backfiller,
+    Response,
+    Activity,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -114,6 +155,12 @@ enum FuzzInput {
         signer: u8,
         proposal: Proposal<sha256::Digest>,
     },
+
+    Arbitrary {
+        kind: ArbitraryKind,
+        participants: u8,
+        data: Vec<u8>,
+    },
 }
 
 fn roundtrip_vote<S: SimplexScheme<sha256::Digest>>(data: &[u8]) {
@@ -167,13 +214,101 @@ where
     assert_eq!(decoded.encode(), encoded);
 }
 
+fn assert_byte_roundtrip<T>(value: T, cfg: &T::Cfg)
+where
+    T: Read + Encode + EncodeSize,
+{
+    let encoded = value.encode();
+    assert_eq!(encoded.len(), value.encode_size());
+    let decoded = T::decode_cfg(encoded.as_ref(), cfg).expect("valid value");
+    assert_eq!(decoded.encode(), encoded);
+}
+
+fn assert_hash<T: Hash>(value: &T) {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    let _ = hasher.finish();
+}
+
+fn assert_structural<T>(value: &T)
+where
+    T: Clone + Debug + Eq + Hash,
+{
+    let cloned = value.clone();
+    assert_eq!(&cloned, value);
+    assert_hash(value);
+}
+
+fn assert_activity_roundtrip<S>(scheme: &S, activity: Activity<S, sha256::Digest>)
+where
+    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+{
+    let cfg = scheme.certificate_codec_config();
+    let view = activity.view();
+    let epoch = activity.epoch();
+    assert_hash(&activity);
+    let encoded = activity.encode();
+    assert_eq!(encoded.len(), activity.encode_size());
+    let decoded =
+        Activity::<S, sha256::Digest>::decode_cfg(encoded.as_ref(), &cfg).expect("valid activity");
+    assert_eq!(decoded, activity);
+    assert_eq!(decoded.view(), view);
+    assert_eq!(decoded.epoch(), epoch);
+    assert_eq!(decoded.encode(), encoded);
+}
+
+fn assert_artifact_roundtrip<S>(scheme: &S, artifact: Artifact<S, sha256::Digest>)
+where
+    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+{
+    let cfg = scheme.certificate_codec_config();
+    let view = artifact.view();
+    let epoch = artifact.epoch();
+    let encoded = artifact.encode();
+    assert_eq!(encoded.len(), artifact.encode_size());
+    let decoded =
+        Artifact::<S, sha256::Digest>::decode_cfg(encoded.as_ref(), &cfg).expect("valid artifact");
+    assert_eq!(decoded.view(), view);
+    assert_eq!(decoded.epoch(), epoch);
+    assert_eq!(decoded.encode(), encoded);
+}
+
+fn assert_backfiller_roundtrip<S>(scheme: &S, backfiller: Backfiller<S, sha256::Digest>, max: usize)
+where
+    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+{
+    let cfg = (max, scheme.certificate_codec_config());
+    assert_byte_roundtrip(backfiller, &cfg);
+}
+
+fn assert_context_roundtrip(context: Context<sha256::Digest, PublicKey>) {
+    let view = context.view();
+    let epoch = context.epoch();
+    let encoded = context.encode();
+    assert_eq!(encoded.len(), context.encode_size());
+    let decoded =
+        Context::<sha256::Digest, PublicKey>::decode(encoded.as_ref()).expect("valid context");
+    assert_eq!(decoded, context);
+    assert_eq!(decoded.view(), view);
+    assert_eq!(decoded.epoch(), epoch);
+    assert_eq!(decoded.encode(), encoded);
+}
+
+fn conflicting_proposal(proposal: Proposal<sha256::Digest>) -> Proposal<sha256::Digest> {
+    Proposal::new(
+        proposal.round,
+        View::new(proposal.parent.get().wrapping_add(1)),
+        proposal.payload,
+    )
+}
+
 fn structured<S>(
     schemes: &[S],
     kind: StructuredKind,
     signer: u8,
     proposal: Proposal<sha256::Digest>,
 ) where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+    S: SimplexScheme<sha256::Digest> + CertificateScheme<PublicKey = PublicKey>,
 {
     let signer = signer as usize % schemes.len();
     match kind {
@@ -209,6 +344,7 @@ fn structured<S>(
             else {
                 return;
             };
+            assert_structural(&certificate);
             assert_certificate_roundtrip(&schemes[0], Certificate::Notarization(certificate));
         }
         StructuredKind::CertificateNullification => {
@@ -224,6 +360,7 @@ fn structured<S>(
             else {
                 return;
             };
+            assert_structural(&certificate);
             assert_certificate_roundtrip(&schemes[0], Certificate::Nullification(certificate));
         }
         StructuredKind::CertificateFinalization => {
@@ -239,8 +376,310 @@ fn structured<S>(
             else {
                 return;
             };
+            assert_structural(&certificate);
             assert_certificate_roundtrip(&schemes[0], Certificate::Finalization(certificate));
         }
+        StructuredKind::ArtifactVoteNotarize => {
+            let Some(vote) = Notarize::sign(&schemes[signer], proposal) else {
+                return;
+            };
+            assert_artifact_roundtrip(&schemes[0], Vote::Notarize(vote).into());
+        }
+        StructuredKind::ArtifactVoteNullify => {
+            let Some(vote) = Nullify::sign::<sha256::Digest>(&schemes[signer], proposal.round)
+            else {
+                return;
+            };
+            assert_artifact_roundtrip(&schemes[0], Vote::Nullify(vote).into());
+        }
+        StructuredKind::ArtifactVoteFinalize => {
+            let Some(vote) = Finalize::sign(&schemes[signer], proposal) else {
+                return;
+            };
+            assert_artifact_roundtrip(&schemes[0], Vote::Finalize(vote).into());
+        }
+        StructuredKind::ArtifactCertificateNotarization => {
+            let Some(votes) = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Some(certificate) =
+                Notarization::from_notarizes(&schemes[0], votes.iter(), &Sequential)
+            else {
+                return;
+            };
+            assert_structural(&certificate);
+            assert_artifact_roundtrip(&schemes[0], Certificate::Notarization(certificate).into());
+        }
+        StructuredKind::ArtifactCertificateNullification => {
+            let Some(votes) = schemes
+                .iter()
+                .map(|scheme| Nullify::sign::<sha256::Digest>(scheme, proposal.round))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Some(certificate) =
+                Nullification::from_nullifies(&schemes[0], votes.iter(), &Sequential)
+            else {
+                return;
+            };
+            assert_structural(&certificate);
+            assert_artifact_roundtrip(&schemes[0], Certificate::Nullification(certificate).into());
+        }
+        StructuredKind::ArtifactCertificateFinalization => {
+            let Some(votes) = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal.clone()))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Some(certificate) =
+                Finalization::from_finalizes(&schemes[0], votes.iter(), &Sequential)
+            else {
+                return;
+            };
+            assert_structural(&certificate);
+            assert_artifact_roundtrip(&schemes[0], Certificate::Finalization(certificate).into());
+        }
+        StructuredKind::ArtifactCertification => {
+            assert_artifact_roundtrip(
+                &schemes[0],
+                Artifact::Certification(proposal.round, signer.is_multiple_of(2)),
+            );
+        }
+        StructuredKind::ActivityNotarize => {
+            let Some(vote) = Notarize::sign(&schemes[signer], proposal) else {
+                return;
+            };
+            assert_activity_roundtrip(&schemes[0], Activity::Notarize(vote));
+        }
+        StructuredKind::ActivityNullify => {
+            let Some(vote) = Nullify::sign::<sha256::Digest>(&schemes[signer], proposal.round)
+            else {
+                return;
+            };
+            assert_activity_roundtrip(&schemes[0], Activity::Nullify(vote));
+        }
+        StructuredKind::ActivityFinalize => {
+            let Some(vote) = Finalize::sign(&schemes[signer], proposal) else {
+                return;
+            };
+            assert_activity_roundtrip(&schemes[0], Activity::Finalize(vote));
+        }
+        StructuredKind::ActivityNotarization | StructuredKind::ActivityCertification => {
+            let Some(votes) = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Some(certificate) =
+                Notarization::from_notarizes(&schemes[0], votes.iter(), &Sequential)
+            else {
+                return;
+            };
+            assert_structural(&certificate);
+            let activity = match kind {
+                StructuredKind::ActivityNotarization => Activity::Notarization(certificate),
+                StructuredKind::ActivityCertification => Activity::Certification(certificate),
+                _ => unreachable!(),
+            };
+            assert_activity_roundtrip(&schemes[0], activity);
+        }
+        StructuredKind::ActivityNullification => {
+            let Some(votes) = schemes
+                .iter()
+                .map(|scheme| Nullify::sign::<sha256::Digest>(scheme, proposal.round))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Some(certificate) =
+                Nullification::from_nullifies(&schemes[0], votes.iter(), &Sequential)
+            else {
+                return;
+            };
+            assert_structural(&certificate);
+            assert_activity_roundtrip(&schemes[0], Activity::Nullification(certificate));
+        }
+        StructuredKind::ActivityFinalization => {
+            let Some(votes) = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal.clone()))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Some(certificate) =
+                Finalization::from_finalizes(&schemes[0], votes.iter(), &Sequential)
+            else {
+                return;
+            };
+            assert_structural(&certificate);
+            assert_activity_roundtrip(&schemes[0], Activity::Finalization(certificate));
+        }
+        StructuredKind::ActivityConflictingNotarize => {
+            let Some(vote_1) = Notarize::sign(&schemes[signer], proposal.clone()) else {
+                return;
+            };
+            let Some(vote_2) = Notarize::sign(&schemes[signer], conflicting_proposal(proposal))
+            else {
+                return;
+            };
+            let conflict = ConflictingNotarize::new(vote_1, vote_2);
+            assert_structural(&conflict);
+            assert_activity_roundtrip(&schemes[0], Activity::ConflictingNotarize(conflict));
+        }
+        StructuredKind::ActivityConflictingFinalize => {
+            let Some(vote_1) = Finalize::sign(&schemes[signer], proposal.clone()) else {
+                return;
+            };
+            let Some(vote_2) = Finalize::sign(&schemes[signer], conflicting_proposal(proposal))
+            else {
+                return;
+            };
+            let conflict = ConflictingFinalize::new(vote_1, vote_2);
+            assert_structural(&conflict);
+            assert_activity_roundtrip(&schemes[0], Activity::ConflictingFinalize(conflict));
+        }
+        StructuredKind::ActivityNullifyFinalize => {
+            let Some(nullify) = Nullify::sign::<sha256::Digest>(&schemes[signer], proposal.round)
+            else {
+                return;
+            };
+            let Some(finalize) = Finalize::sign(&schemes[signer], proposal) else {
+                return;
+            };
+            let conflict = NullifyFinalize::new(nullify, finalize);
+            assert_structural(&conflict);
+            assert_activity_roundtrip(&schemes[0], Activity::NullifyFinalize(conflict));
+        }
+        StructuredKind::BackfillerRequest => {
+            let request = Request::new(
+                proposal.round.view().get(),
+                vec![proposal.round.view()],
+                vec![proposal.parent],
+            );
+            assert_backfiller_roundtrip(&schemes[0], Backfiller::Request(request), 2);
+        }
+        StructuredKind::BackfillerResponse => {
+            let Some(notarizes) = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Some(nullifies) = schemes
+                .iter()
+                .map(|scheme| Nullify::sign::<sha256::Digest>(scheme, proposal.round))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Some(notarization) =
+                Notarization::from_notarizes(&schemes[0], notarizes.iter(), &Sequential)
+            else {
+                return;
+            };
+            let Some(nullification) =
+                Nullification::from_nullifies(&schemes[0], nullifies.iter(), &Sequential)
+            else {
+                return;
+            };
+            assert_structural(&notarization);
+            assert_structural(&nullification);
+            let response = Response::new(
+                proposal.round.view().get(),
+                vec![notarization],
+                vec![nullification],
+            );
+            assert_backfiller_roundtrip(&schemes[0], Backfiller::Response(response), 2);
+        }
+        StructuredKind::Context => {
+            let Some(leader) = schemes[0].participants().get(signer).cloned() else {
+                return;
+            };
+            assert_context_roundtrip(Context {
+                round: proposal.round,
+                leader,
+                parent: (proposal.parent, proposal.payload),
+            });
+        }
+    }
+}
+
+fn assert_arbitrary_byte_roundtrip<T>(u: &mut arbitrary::Unstructured<'_>, cfg: &T::Cfg)
+where
+    T: for<'a> Arbitrary<'a> + Read + Encode + EncodeSize,
+{
+    let Ok(value) = T::arbitrary(u) else {
+        return;
+    };
+    let encoded = value.encode();
+    assert_eq!(encoded.len(), value.encode_size());
+    if let Ok(decoded) = T::decode_cfg(encoded.as_ref(), cfg) {
+        assert_eq!(decoded.encode(), encoded);
+    }
+}
+
+fn assert_arbitrary_activity(u: &mut arbitrary::Unstructured<'_>, participants: usize) {
+    let Ok(activity) = Activity::<Ed25519Scheme, sha256::Digest>::arbitrary(u) else {
+        return;
+    };
+    assert_hash(&activity);
+    let encoded = activity.encode();
+    assert_eq!(encoded.len(), activity.encode_size());
+    if let Ok(decoded) =
+        Activity::<Ed25519Scheme, sha256::Digest>::decode_cfg(encoded.as_ref(), &participants)
+    {
+        assert_eq!(decoded, activity);
+        assert_hash(&decoded);
+        assert_eq!(decoded.encode(), encoded);
+    }
+}
+
+fn arbitrary_case(kind: ArbitraryKind, participants: u8, data: Vec<u8>) {
+    let participants = participant_cfg(participants);
+    let mut u = arbitrary::Unstructured::new(&data);
+    match kind {
+        ArbitraryKind::Context => {
+            assert_arbitrary_byte_roundtrip::<Context<sha256::Digest, PublicKey>>(&mut u, &());
+        }
+        ArbitraryKind::Vote => {
+            assert_arbitrary_byte_roundtrip::<Vote<Ed25519Scheme, sha256::Digest>>(&mut u, &());
+        }
+        ArbitraryKind::Certificate => {
+            assert_arbitrary_byte_roundtrip::<Certificate<Ed25519Scheme, sha256::Digest>>(
+                &mut u,
+                &participants,
+            );
+        }
+        ArbitraryKind::Artifact => {
+            assert_arbitrary_byte_roundtrip::<Artifact<Ed25519Scheme, sha256::Digest>>(
+                &mut u,
+                &participants,
+            );
+        }
+        ArbitraryKind::Backfiller => {
+            assert_arbitrary_byte_roundtrip::<Backfiller<Ed25519Scheme, sha256::Digest>>(
+                &mut u,
+                &(participants, participants),
+            );
+        }
+        ArbitraryKind::Response => {
+            assert_arbitrary_byte_roundtrip::<Response<Ed25519Scheme, sha256::Digest>>(
+                &mut u,
+                &(participants, participants),
+            );
+        }
+        ArbitraryKind::Activity => assert_arbitrary_activity(&mut u, participants),
     }
 }
 
@@ -336,6 +775,12 @@ fn fuzz(input: FuzzInput) {
             signer,
             proposal,
         } => structured_case(scheme, kind, seed, participants, signer, proposal),
+
+        FuzzInput::Arbitrary {
+            kind,
+            participants,
+            data,
+        } => arbitrary_case(kind, participants, data),
     }
 }
 
