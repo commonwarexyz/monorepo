@@ -300,6 +300,35 @@ impl OwnerRef {
         Self::from_tagged(owner, OWNER_EXTERNAL)
     }
 
+    /// Converts `vec` into immutable handle fields, adopting its allocation if
+    /// it can host a tail [`HeapOwner`] in spare capacity.
+    ///
+    /// Empty vecs detach entirely (empty immutable buffers never pin an
+    /// allocation). Non-adoptable vecs move into `Bytes` (zero-copy for any
+    /// `Vec<u8>`; for `len == cap` also `bytes`' allocation-free promotable
+    /// path) behind an external owner.
+    pub(crate) fn from_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, Self) {
+        if vec.is_empty() {
+            return (NonNull::dangling(), 0, Self::empty());
+        }
+        match HeapOwner::try_adopt_vec(vec) {
+            Ok((ptr, len, _, owner)) => (ptr, len, owner),
+            Err(vec) => Self::from_bytes(Bytes::from(vec)),
+        }
+    }
+
+    /// Moves `bytes` into a boxed [`ExternalOwner`] and returns handle fields.
+    ///
+    /// Zero-copy: the handle points directly into the payload kept alive by the
+    /// inner `Bytes`. Costs one box; the inner refcount is not touched again
+    /// until final release.
+    pub(crate) fn from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, Self) {
+        if bytes.is_empty() {
+            return (NonNull::dangling(), 0, Self::empty());
+        }
+        ExternalOwner::from_bytes(bytes)
+    }
+
     /// Returns the heap header for a heap owner (native, adopted, or front).
     ///
     /// # Safety
@@ -1103,75 +1132,7 @@ impl HeapOwner {
             ))
         }
     }
-}
 
-impl OwnerRef {
-    /// Converts `vec` into immutable handle fields, adopting its allocation if
-    /// it can host a tail [`HeapOwner`] in spare capacity.
-    ///
-    /// Empty vecs detach entirely (empty immutable buffers never pin an
-    /// allocation). Non-adoptable vecs move into `Bytes` (zero-copy for any
-    /// `Vec<u8>`; for `len == cap` also `bytes`' allocation-free promotable
-    /// path) behind an external owner.
-    pub(crate) fn from_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, Self) {
-        if vec.is_empty() {
-            return (NonNull::dangling(), 0, Self::empty());
-        }
-        match HeapOwner::try_adopt_vec(vec) {
-            Ok((ptr, len, _, owner)) => (ptr, len, owner),
-            Err(vec) => Self::from_bytes(Bytes::from(vec)),
-        }
-    }
-
-    /// Moves `bytes` into a boxed [`ExternalOwner`] and returns handle fields.
-    ///
-    /// Zero-copy: the handle points directly into the payload kept alive by the
-    /// inner `Bytes`. Costs one box; the inner refcount is not touched again
-    /// until final release.
-    pub(crate) fn from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, Self) {
-        if bytes.is_empty() {
-            return (NonNull::dangling(), 0, Self::empty());
-        }
-        ExternalOwner::from_bytes(bytes)
-    }
-}
-
-impl ExternalOwner {
-    fn from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, OwnerRef) {
-        // Box the owner first, then derive the handle pointer from the `Bytes`
-        // in its final location inside the box. This keeps the provenance
-        // chain trivially clean: the pointer the handle uses is derived from
-        // the exact value that owns the payload for the buffer's whole life.
-        let owner = Box::new(Self {
-            refs: AtomicUsize::new(1),
-            bytes,
-        });
-        let ptr = NonNull::new(owner.bytes.as_ptr().cast_mut())
-            .expect("non-empty Bytes has non-null data");
-        let len = owner.bytes.len();
-        let owner = NonNull::from(Box::leak(owner));
-        // SAFETY: the pointer came from `Box::leak` and is uniquely owned here.
-        let owner = unsafe { OwnerRef::from_external(owner) };
-        (ptr, len, owner)
-    }
-
-    /// Releases a unique external owner.
-    ///
-    /// # Safety
-    ///
-    /// `owner` must come from `Box::leak` and no other handle may reference it.
-    #[inline]
-    unsafe fn release(owner: NonNull<Self>) {
-        // SAFETY: guaranteed by the caller.
-        let owner_ref = unsafe { owner.as_ref() };
-        assert_eq!(owner_ref.refs.load(Ordering::Relaxed), 1);
-        // SAFETY: the owner box was leaked at construction; dropping it here
-        // drops the inner `Bytes` exactly once.
-        drop(unsafe { Box::from_raw(owner.as_ptr()) });
-    }
-}
-
-impl HeapOwner {
     /// Returns the full layout and header offset for a native aligned allocation.
     #[inline]
     fn layout(capacity: usize, alignment: usize) -> (Layout, usize) {
@@ -1296,6 +1257,41 @@ impl HeapOwner {
         let layout = unsafe { Layout::from_size_align_unchecked(alloc_size, align_of::<Self>()) };
         // SAFETY: base/layout came from the global allocator on the front branch.
         unsafe { dealloc(base.as_ptr().cast::<u8>(), layout) };
+    }
+}
+
+impl ExternalOwner {
+    fn from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, OwnerRef) {
+        // Box the owner first, then derive the handle pointer from the `Bytes`
+        // in its final location inside the box. This keeps the provenance
+        // chain trivially clean: the pointer the handle uses is derived from
+        // the exact value that owns the payload for the buffer's whole life.
+        let owner = Box::new(Self {
+            refs: AtomicUsize::new(1),
+            bytes,
+        });
+        let ptr = NonNull::new(owner.bytes.as_ptr().cast_mut())
+            .expect("non-empty Bytes has non-null data");
+        let len = owner.bytes.len();
+        let owner = NonNull::from(Box::leak(owner));
+        // SAFETY: the pointer came from `Box::leak` and is uniquely owned here.
+        let owner = unsafe { OwnerRef::from_external(owner) };
+        (ptr, len, owner)
+    }
+
+    /// Releases a unique external owner.
+    ///
+    /// # Safety
+    ///
+    /// `owner` must come from `Box::leak` and no other handle may reference it.
+    #[inline]
+    unsafe fn release(owner: NonNull<Self>) {
+        // SAFETY: guaranteed by the caller.
+        let owner_ref = unsafe { owner.as_ref() };
+        assert_eq!(owner_ref.refs.load(Ordering::Relaxed), 1);
+        // SAFETY: the owner box was leaked at construction; dropping it here
+        // drops the inner `Bytes` exactly once.
+        drop(unsafe { Box::from_raw(owner.as_ptr()) });
     }
 }
 
