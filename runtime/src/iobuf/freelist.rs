@@ -349,10 +349,10 @@ impl Freelist {
     /// per-entry guards keeps this path allocation-free for ordinary batches.
     ///
     /// The caller must own every buffer in the batch. Slots must be unique
-    /// within the batch and must not already be available in this freelist.
-    /// Each buffer must have been created by this freelist. If this method
-    /// panics after accepting one or more buffers, accepted-but-unpublished
-    /// buffers may leak.
+    /// within the batch (staging asserts this) and must not already be
+    /// available in this freelist. Each buffer must have been created by this
+    /// freelist. If this method panics after accepting one or more buffers,
+    /// accepted-but-unpublished buffers may leak.
     #[inline]
     pub fn put_batch(&self, entries: impl IntoIterator<Item = PooledBuffer>) {
         let mut entries = entries.into_iter();
@@ -443,10 +443,17 @@ impl Freelist {
     /// map to the same bitmap word share a single `Release` operation.
     ///
     /// `masks` must contain the scratch word for `buffer`'s slot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the batch already staged this slot: a duplicate would OR
+    /// into the mask idempotently and silently alias the slot, where the
+    /// equivalent sequential `put` calls panic on the second return.
     #[inline(always)]
     fn stage_put(&self, masks: &mut [u64], buffer: PooledBuffer) {
         let slot = buffer.slot();
         let (word_index, mask) = self.slot_word(slot);
+        assert_eq!(masks[word_index] & mask, 0, "duplicate slot in put_batch");
         masks[word_index] |= mask;
     }
 
@@ -860,6 +867,38 @@ pub(super) mod tests {
         let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) };
         set.put(buffer0);
         set.put_batch([buffer1, duplicate]);
+    }
+
+    #[test]
+    fn test_freelist_put_batch_rejects_duplicate_within_batch() {
+        // A duplicate inside one batch trips the staging assert before any
+        // bit is published. The panic is caught (instead of should_panic) so
+        // the staged-but-unpublished slot can be republished afterwards:
+        // leaking it is the documented panic behavior, but it would trip
+        // miri's leak check.
+        let set = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false);
+        let buffer = set.try_create(false).expect("slot available");
+        // SAFETY: the duplicate handle exists only to drive the staging
+        // assert; put_batch panics before publishing either handle.
+        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) };
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            set.put_batch([buffer, duplicate]);
+        }))
+        .expect_err("duplicate slot must panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(
+            message.contains("duplicate slot in put_batch"),
+            "unexpected panic: {message}"
+        );
+
+        // Republish the slot so teardown reclaims its allocation.
+        // SAFETY: slot 0 was created by this freelist and is not available
+        // (the staging panic happened before its bit was inserted).
+        set.put(unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) });
     }
 
     #[test]
