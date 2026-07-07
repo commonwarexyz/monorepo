@@ -49,12 +49,7 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{
-        any::value::ValueEncoding,
-        batch_chain,
-        metrics::Metrics,
-        Error,
-    },
+    qmdb::{any::value::ValueEncoding, batch_chain, metrics::Metrics, Error},
     Context,
 };
 use commonware_codec::EncodeShared;
@@ -204,8 +199,7 @@ where
 
         let _timer = self.metrics.get_many_timer();
         self.metrics.get_many_calls.inc();
-        self.metrics.lookups_requested
-            .inc_by(locs.len() as u64);
+        self.metrics.lookups_requested.inc_by(locs.len() as u64);
         assert!(
             locs.windows(2).all(|w| w[0] < w[1]),
             "locations must be strictly increasing"
@@ -529,7 +523,8 @@ where
         debug!(size = ?end_loc, "applied batch");
         let range = start_loc..end_loc;
         self.update_metrics();
-        self.metrics.operations_applied
+        self.metrics
+            .operations_applied
             .inc_by(*range.end - *range.start);
         Ok(range)
     }

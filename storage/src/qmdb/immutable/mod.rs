@@ -84,13 +84,7 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{
-        any::ValueEncoding,
-        build_snapshot_from_log,
-        metrics::Metrics,
-        operation::Key,
-        Error,
-    },
+    qmdb::{any::ValueEncoding, build_snapshot_from_log, metrics::Metrics, operation::Key, Error},
     translator::Translator,
     Context,
 };
@@ -739,7 +733,8 @@ where
         self.root = batch.root;
         let range = start_loc..Location::new(batch.bounds.total_size);
         self.update_metrics();
-        self.metrics.operations_applied
+        self.metrics
+            .operations_applied
             .inc_by(*range.end - *range.start);
         Ok(range)
     }

@@ -12,11 +12,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        bitmap::Shared,
-        build_snapshot_from_log, delete_known_loc,
-        metrics::Metrics,
-        operation::Operation as OperationTrait,
-        update_known_loc, Error,
+        bitmap::Shared, build_snapshot_from_log, delete_known_loc, metrics::Metrics,
+        operation::Operation as OperationTrait, update_known_loc, Error,
     },
     Context,
 };

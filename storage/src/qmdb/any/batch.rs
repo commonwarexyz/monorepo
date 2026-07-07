@@ -2358,7 +2358,8 @@ where
         let end_loc = Location::new(*self.last_commit_loc + 1);
         let range = start_loc..end_loc;
         self.update_metrics();
-        self.metrics.operations_applied
+        self.metrics
+            .operations_applied
             .inc_by(*range.end - *range.start);
         Ok(range)
     }

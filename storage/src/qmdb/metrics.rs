@@ -81,8 +81,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             ),
             get_calls: context.counter("get_calls", "Number of get calls"),
             get_duration: Timed::register(&context, "get_duration", "Duration of get calls"),
-            get_many_calls: context
-                .counter("get_many_calls", "Number of non-empty get-many calls"),
+            get_many_calls: context.counter("get_many_calls", "Number of non-empty get-many calls"),
             get_many_duration: Timed::register(
                 &context,
                 "get_many_duration",
