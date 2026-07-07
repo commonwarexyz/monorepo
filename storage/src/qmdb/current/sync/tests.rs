@@ -25,7 +25,7 @@ use commonware_runtime::{
     deterministic, deterministic::Context, BufferPooler, Runner as _, Supervisor as _,
 };
 use commonware_utils::non_empty_range;
-use rand::RngCore as _;
+use rand::Rng as _;
 
 // ===== Harness Implementations =====
 

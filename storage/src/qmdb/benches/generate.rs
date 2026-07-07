@@ -18,7 +18,7 @@ use commonware_storage::{
     qmdb::any::traits::DbAny,
 };
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::{Duration, Instant};
 
 const NUM_ELEMENTS: u64 = 1_000;

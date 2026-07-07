@@ -590,7 +590,7 @@ where
     // At this point, we've committed to the claim we're trying to prove, so
     // we can't pull any shenanigans by modifying the claim based on the challenges.
     transcript.commit(claim.encode());
-    let w = F::random(&mut transcript.noise(b"w challenge"));
+    let w = F::random(transcript.noise(b"w challenge"));
     let w_q = setup.product_generator.clone() * &w;
 
     let mut l_r_coms = Vec::<(G, G)>::new();
@@ -616,7 +616,7 @@ where
         l_r_coms.push((l.clone(), r.clone()));
         transcript.commit(l.encode());
         transcript.commit(r.encode());
-        let u = F::random(&mut transcript.noise(b"u challenge"));
+        let u = F::random(transcript.noise(b"u challenge"));
         let u_inv = u.inv();
 
         for (a_lo_i, a_hi_i) in a_lo.iter_mut().zip(a_hi.iter_mut()) {
@@ -763,7 +763,7 @@ where
     }
     transcript.commit(claim.encode());
 
-    let w = F::random(&mut transcript.noise(b"w challenge"));
+    let w = F::random(transcript.noise(b"w challenge"));
 
     // We reduce verification down to one MSM which needs to equal 0:
     // commitment + product * U + sum(u_i^2 * L_i + u_i^-2 * R_i)

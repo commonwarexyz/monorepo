@@ -321,7 +321,7 @@ use commonware_utils::{
     Faults, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{borrow::Cow, collections::BTreeMap, marker::PhantomData};
 use thiserror::Error;
 
@@ -524,7 +524,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     /// However, if there is a previous round, we expect a share, hence `Result`.
     fn unwrap_or_random_share(
         &self,
-        mut rng: impl CryptoRngCore,
+        mut rng: impl CryptoRng,
         share: Option<Scalar>,
     ) -> Result<Scalar, Error> {
         let out = match (self.previous.as_ref(), share) {
@@ -610,7 +610,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     #[must_use]
     fn check_dealer_log<M: Faults, B: BatchVerifier<PublicKey = P>>(
         &self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         strategy: &impl Strategy,
         round_transcript: &Transcript,
         dealer: &P,
@@ -1337,7 +1337,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     }
 
     fn check_dealers<B: BatchVerifier<PublicKey = P>>(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         info: &Info<V, P>,
         strategy: &impl Strategy,
         transcript: &Transcript,
@@ -1383,7 +1383,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// each call.
     pub fn pre_verify<B: BatchVerifier<PublicKey = P>>(
         &mut self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         strategy: &impl Strategy,
     ) {
         let required_commitments = self.info.required_commitments::<M>() as usize;
@@ -1442,7 +1442,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// This might return an error if there are not enough good logs that we can use.
     fn select<B: BatchVerifier<PublicKey = P>>(
         mut self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         strategy: &impl Strategy,
     ) -> Result<SelectedLogs<V, P>, Error> {
         self.pre_verify::<B>(rng, strategy);
@@ -1493,7 +1493,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
     #[allow(clippy::type_complexity)]
     pub fn start<M: Faults>(
-        mut rng: impl CryptoRngCore,
+        mut rng: impl CryptoRng,
         info: Info<V, S::PublicKey>,
         me: S,
         share: Option<Share>,
@@ -1678,7 +1678,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 ///
 /// This will only ever return [`Error::DkgFailed`].
 pub fn observe<V: Variant, P: PublicKey, M: Faults, B: BatchVerifier<PublicKey = P>>(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     logs: Logs<V, P, M>,
     strategy: &impl Strategy,
 ) -> Result<Output<V, P>, Error> {
@@ -1829,7 +1829,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// [`Error::MismatchedLogs`] if `logs` are bound to a different DKG round.
     pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = S::PublicKey>>(
         self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         logs: Logs<V, S::PublicKey, M>,
         strategy: &impl Strategy,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
@@ -1900,7 +1900,7 @@ pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share>), Error>;
 
 /// Simply distribute shares at random, instead of performing a distributed protocol.
 pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
-    mut rng: impl CryptoRngCore,
+    mut rng: impl CryptoRng,
     mode: Mode,
     players: Set<P>,
 ) -> DealResult<V, P> {
@@ -1942,7 +1942,7 @@ pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
 /// the trouble of generating signing keys. The downside is that the result isn't
 /// compatible with subsequent DKGs, which need an [`Output`].
 pub fn deal_anonymous<V: Variant, M: Faults>(
-    rng: impl CryptoRngCore,
+    rng: impl CryptoRng,
     mode: Mode,
     n: NonZeroU32,
 ) -> (Sharing<V>, Vec<Share>) {

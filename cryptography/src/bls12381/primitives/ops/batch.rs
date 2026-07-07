@@ -21,7 +21,7 @@ use super::{
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// Segment tree for batch verification bisection.
 ///
@@ -205,7 +205,7 @@ pub fn verify_same_message<R, V>(
     par: &impl Strategy,
 ) -> Vec<usize>
 where
-    R: CryptoRngCore,
+    R: CryptoRng,
     V: Variant,
 {
     if entries.is_empty() {
@@ -259,7 +259,7 @@ pub fn verify_same_signer<'a, R, V, I>(
     strategy: &impl Strategy,
 ) -> Result<(), Error>
 where
-    R: CryptoRngCore,
+    R: CryptoRng,
     V: Variant,
     I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], V::Signature)>,
 {

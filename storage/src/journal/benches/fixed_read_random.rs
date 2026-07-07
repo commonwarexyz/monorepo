@@ -8,7 +8,7 @@ use commonware_storage::journal::contiguous::{fixed::Journal, Contiguous as _};
 use commonware_utils::{sequence::FixedBytes, NZU64};
 use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::{
     hint::black_box,
     num::NonZeroU64,
@@ -36,7 +36,7 @@ async fn bench_run_serial(
     let reader = journal.snapshot().await.unwrap();
     let mut rng = StdRng::seed_from_u64(0);
     for _ in 0..items_to_read {
-        let pos = rng.gen_range(0..ITEMS_TO_WRITE);
+        let pos = rng.random_range(0..ITEMS_TO_WRITE);
         black_box(reader.read(pos).await.expect("failed to read data"));
     }
 }
@@ -50,7 +50,7 @@ async fn bench_run_concurrent(
     let mut rng = StdRng::seed_from_u64(0);
     let mut futures = Vec::with_capacity(items_to_read);
     for _ in 0..items_to_read {
-        let pos = rng.gen_range(0..ITEMS_TO_WRITE);
+        let pos = rng.random_range(0..ITEMS_TO_WRITE);
         futures.push(reader.read(pos));
     }
     try_join_all(futures).await.expect("failed to read data");
@@ -64,7 +64,7 @@ async fn bench_run_read_many(
     let reader = journal.snapshot().await.unwrap();
     let mut rng = StdRng::seed_from_u64(0);
     let mut positions: Vec<u64> = (0..items_to_read)
-        .map(|_| rng.gen_range(0..ITEMS_TO_WRITE))
+        .map(|_| rng.random_range(0..ITEMS_TO_WRITE))
         .collect();
     positions.sort_unstable();
     positions.dedup();

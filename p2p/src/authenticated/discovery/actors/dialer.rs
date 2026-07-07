@@ -19,8 +19,8 @@ use commonware_runtime::{
     StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use rand::seq::SliceRandom;
-use rand_core::CryptoRngCore;
+use rand::seq::{IndexedRandom, SliceRandom};
+use rand_core::CryptoRng;
 use std::time::Duration;
 use tracing::debug;
 
@@ -65,10 +65,8 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     attempts: CounterFamily<metrics::Peer<C::PublicKey>>,
 }
 
-impl<
-        E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Metrics,
-        C: Signer,
-    > Actor<E, C>
+impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metrics, C: Signer>
+    Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = context.family("attempts", "The number of dial attempts made to each peer");

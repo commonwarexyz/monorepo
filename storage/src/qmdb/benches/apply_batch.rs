@@ -17,7 +17,7 @@ use commonware_storage::{
 };
 use commonware_utils::NZU64;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
     num::NonZeroU64,
     time::{Duration, Instant},

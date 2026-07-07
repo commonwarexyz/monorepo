@@ -28,7 +28,6 @@ std = [
 	"commonware-macros/std",
 	"commonware-parallel/std",
 	"commonware-utils/std",
-	"rand_core/std",
 ]
 fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 

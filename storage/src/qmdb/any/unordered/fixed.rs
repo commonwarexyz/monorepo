@@ -143,7 +143,7 @@ pub(crate) mod test {
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU64};
     use core::num::NonZeroUsize;
-    use rand::RngCore;
+    use rand::Rng;
     use std::collections::HashMap;
 
     /// A generic type alias for an Any database parameterized by merkle family.

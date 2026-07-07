@@ -3,7 +3,7 @@
 use crate::{deterministic::BoxDynRng, Error, Handle, IoBufs, IoBufsMut};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
-use rand::Rng;
+use rand::RngExt as _;
 use std::{
     io::Error as IoError,
     sync::{
@@ -171,7 +171,7 @@ impl Oracle {
         if rate >= 1.0 {
             return true;
         }
-        self.rng.lock().gen::<f64>() < rate
+        self.rng.lock().random::<f64>() < rate
     }
 
     /// Generate a random value strictly between `from` and `to`, or None if not possible.
@@ -183,7 +183,7 @@ impl Oracle {
         if max - min <= 1 {
             return None;
         }
-        Some(self.rng.lock().gen_range(min + 1..max))
+        Some(self.rng.lock().random_range(min + 1..max))
     }
 
     /// Try to generate a partial operation target. Returns Some if both the rate

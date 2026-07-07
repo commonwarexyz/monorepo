@@ -148,7 +148,7 @@ use commonware_utils::{
 };
 pub use evrf::{PrivateKey, PublicKey, Setup};
 use evrf::{Signature, VrfCommitments};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU32};
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_GOLDEN_DKG";
@@ -422,7 +422,7 @@ impl Info {
     /// However, if there is a previous round, we expect a share, hence `Result`.
     fn unwrap_or_random_share(
         &self,
-        mut rng: impl CryptoRngCore,
+        mut rng: impl CryptoRng,
         share: Option<Scalar>,
     ) -> Result<Scalar, Error> {
         let out = match (self.previous.as_ref(), share) {
@@ -477,7 +477,7 @@ const fn check_setup(setup: &Setup, info: &Info) -> Result<(), Error> {
 ///
 /// Returns a [`SignedDealerLog`] ready for broadcast.
 pub fn deal(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     setup: &Setup,
     info: &Info,
     me: &PrivateKey,
@@ -559,7 +559,7 @@ impl Selection {
 }
 
 fn select(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     setup: &Setup,
     info: &Info,
     logs: BTreeMap<PublicKey, DealerLog>,
@@ -620,7 +620,7 @@ fn select(
 /// [`Error::DkgFailed`] if too few valid dealings are available, or
 /// [`Error::UnsupportedNumPlayers`] if `setup` is too small for `info`.
 pub fn observe(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     setup: &Setup,
     info: &Info,
     logs: BTreeMap<PublicKey, DealerLog>,
@@ -654,7 +654,7 @@ pub fn observe(
 /// `setup` must support at least `info.players.len()` players (see
 /// [`Setup::supports`]); otherwise [`Error::UnsupportedNumPlayers`] is returned.
 pub fn play(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     setup: &Setup,
     info: &Info,
     logs: BTreeMap<PublicKey, DealerLog>,
@@ -835,7 +835,7 @@ impl Read for DealerLog {
 impl DealerLog {
     #[allow(dead_code)]
     fn batch_check(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         setup: &Setup,
         info: &Info,
         batch: impl IntoIterator<Item = (PublicKey, Self)>,
@@ -943,7 +943,7 @@ impl Dealing {
     #[must_use]
     fn check(
         &self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         info: &Info,
         dealer: &PublicKey,
         mask_commitments: &Map<PublicKey, G1>,

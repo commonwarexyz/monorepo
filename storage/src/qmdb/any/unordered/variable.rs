@@ -144,7 +144,7 @@ pub(crate) mod test {
         BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
-    use rand::RngCore;
+    use rand::Rng;
     use std::{
         num::{NonZeroU16, NonZeroUsize},
         sync::Arc,
@@ -872,7 +872,7 @@ pub(crate) mod test {
             let base = db.to_batch();
 
             // Build a child batch via owned API, merkleize, and apply.
-            let key = Digest::random(&mut commonware_utils::test_rng_seeded(200));
+            let key = Digest::random(commonware_utils::test_rng_seeded(200));
             let value = vec![42u8; 16];
             let child_batch = base
                 .new_batch::<Sha256>()
@@ -907,7 +907,7 @@ pub(crate) mod test {
             let base = db.to_batch();
 
             // Parent batch (via owned API).
-            let key_a = Digest::random(&mut commonware_utils::test_rng_seeded(300));
+            let key_a = Digest::random(commonware_utils::test_rng_seeded(300));
             let val_a = vec![1u8; 10];
             let parent_batch = base
                 .new_batch::<Sha256>()
@@ -917,7 +917,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // Child batch (built on parent batch).
-            let key_b = Digest::random(&mut commonware_utils::test_rng_seeded(301));
+            let key_b = Digest::random(commonware_utils::test_rng_seeded(301));
             let val_b = vec![2u8; 10];
             let child_batch = parent_batch
                 .new_batch::<Sha256>()
@@ -954,7 +954,7 @@ pub(crate) mod test {
             let base = db.to_batch();
 
             // Fork A.
-            let key_a = Digest::random(&mut commonware_utils::test_rng_seeded(400));
+            let key_a = Digest::random(commonware_utils::test_rng_seeded(400));
             let fork_a = base
                 .new_batch::<Sha256>()
                 .write(key_a, Some(vec![10u8; 8]))
@@ -963,7 +963,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // Fork B (different key, same parent).
-            let key_b = Digest::random(&mut commonware_utils::test_rng_seeded(401));
+            let key_b = Digest::random(commonware_utils::test_rng_seeded(401));
             let fork_b = base
                 .new_batch::<Sha256>()
                 .write(key_b, Some(vec![20u8; 8]))
@@ -1012,7 +1012,7 @@ pub(crate) mod test {
             let mut collection: HashMap<sha256::Digest, Arc<Snap>> = HashMap::new();
 
             // Depth 1.
-            let key = Digest::random(&mut commonware_utils::test_rng_seeded(500));
+            let key = Digest::random(commonware_utils::test_rng_seeded(500));
             let batch1 = base
                 .new_batch::<Sha256>()
                 .write(key, Some(vec![1u8; 8]))
@@ -1024,7 +1024,7 @@ pub(crate) mod test {
             // Depth 2 (retrieve batch1 from collection, build child).
             let batch1_root = *collection.keys().next().unwrap();
             let batch1_ref = collection.get(&batch1_root).unwrap();
-            let key = Digest::random(&mut commonware_utils::test_rng_seeded(501));
+            let key = Digest::random(commonware_utils::test_rng_seeded(501));
             let batch2 = batch1_ref
                 .new_batch::<Sha256>()
                 .write(key, Some(vec![2u8; 8]))
@@ -1053,7 +1053,7 @@ pub(crate) mod test {
             let base = db.to_batch();
 
             // Parent batch: insert key_x.
-            let key_x = Digest::random(&mut commonware_utils::test_rng_seeded(700));
+            let key_x = Digest::random(commonware_utils::test_rng_seeded(700));
             let val_a = vec![10u8; 8];
             let parent_batch = base
                 .new_batch::<Sha256>()
@@ -1099,7 +1099,7 @@ pub(crate) mod test {
             let base = db.to_batch();
 
             // Parent batch: insert key_x with value_a.
-            let key_x = Digest::random(&mut commonware_utils::test_rng_seeded(600));
+            let key_x = Digest::random(commonware_utils::test_rng_seeded(600));
             let val_a = vec![10u8; 8];
             let parent_batch = base
                 .new_batch::<Sha256>()
@@ -1148,7 +1148,7 @@ pub(crate) mod test {
             let base = db.to_batch();
 
             // Grandparent: insert key_a.
-            let key_a = Digest::random(&mut commonware_utils::test_rng_seeded(900));
+            let key_a = Digest::random(commonware_utils::test_rng_seeded(900));
             let val_a = vec![1u8; 10];
             let grandparent_batch = base
                 .new_batch::<Sha256>()
@@ -1158,7 +1158,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // Parent: insert key_b.
-            let key_b = Digest::random(&mut commonware_utils::test_rng_seeded(901));
+            let key_b = Digest::random(commonware_utils::test_rng_seeded(901));
             let val_b = vec![2u8; 10];
             let parent_batch = grandparent_batch
                 .new_batch::<Sha256>()
@@ -1168,7 +1168,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // Child: insert key_c.
-            let key_c = Digest::random(&mut commonware_utils::test_rng_seeded(902));
+            let key_c = Digest::random(commonware_utils::test_rng_seeded(902));
             let val_c = vec![3u8; 10];
             let child_batch = parent_batch
                 .new_batch::<Sha256>()
@@ -1211,7 +1211,7 @@ pub(crate) mod test {
             db.commit().await.unwrap();
 
             let base = db.to_batch();
-            let key_x = Digest::random(&mut commonware_utils::test_rng_seeded(910));
+            let key_x = Digest::random(commonware_utils::test_rng_seeded(910));
 
             // Grandparent: insert key_x = val_a.
             let val_a = vec![10u8; 8];
@@ -1272,7 +1272,7 @@ pub(crate) mod test {
             db.commit().await.unwrap();
 
             // Chain: DB <-- a <-- b
-            let key_a = Digest::random(&mut commonware_utils::test_rng_seeded(800));
+            let key_a = Digest::random(commonware_utils::test_rng_seeded(800));
             let val_a = vec![10u8; 8];
             let a = db
                 .new_batch()
@@ -1281,7 +1281,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let key_b = Digest::random(&mut commonware_utils::test_rng_seeded(801));
+            let key_b = Digest::random(commonware_utils::test_rng_seeded(801));
             let val_b = vec![20u8; 8];
             let b = a
                 .new_batch::<Sha256>()
@@ -1295,7 +1295,7 @@ pub(crate) mod test {
             db.commit().await.unwrap();
 
             // Build c from b. This must not panic despite a being freed.
-            let key_c = Digest::random(&mut commonware_utils::test_rng_seeded(802));
+            let key_c = Digest::random(commonware_utils::test_rng_seeded(802));
             let val_c = vec![30u8; 8];
             let c = b
                 .new_batch::<Sha256>()
@@ -1337,7 +1337,7 @@ pub(crate) mod test {
             let base = db.to_batch();
 
             // Chain: base <-- a <-- b <-- c
-            let key_a = Digest::random(&mut commonware_utils::test_rng_seeded(700));
+            let key_a = Digest::random(commonware_utils::test_rng_seeded(700));
             let val_a = vec![1u8; 10];
             let a = base
                 .new_batch::<Sha256>()
@@ -1346,7 +1346,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let key_b = Digest::random(&mut commonware_utils::test_rng_seeded(701));
+            let key_b = Digest::random(commonware_utils::test_rng_seeded(701));
             let val_b = vec![2u8; 10];
             let b = a
                 .new_batch::<Sha256>()
@@ -1355,7 +1355,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let key_c = Digest::random(&mut commonware_utils::test_rng_seeded(702));
+            let key_c = Digest::random(commonware_utils::test_rng_seeded(702));
             let val_c = vec![3u8; 10];
             let c = b
                 .new_batch::<Sha256>()

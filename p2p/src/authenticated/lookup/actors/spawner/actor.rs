@@ -14,12 +14,12 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::num::NonZeroUsize;
 use tracing::debug;
 
 pub struct Actor<
-    E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics,
+    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
     Si: Sink,
     St: Stream,
     C: PublicKey,
@@ -38,7 +38,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics,
+        E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
         Si: Sink,
         St: Stream,
         C: PublicKey,

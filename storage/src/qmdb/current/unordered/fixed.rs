@@ -114,7 +114,7 @@ pub mod test {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics, Runner as _, Supervisor as _};
     use commonware_utils::test_rng_seeded;
-    use rand::RngCore as _;
+    use rand::Rng as _;
     use std::collections::HashMap;
 
     /// A type alias for the concrete [Db] type used in these unit tests.

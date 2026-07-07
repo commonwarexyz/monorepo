@@ -24,11 +24,11 @@ hash = "e53b4b684f0344590427aae976d298e3b6fd2b08ef46ff2cad5def04b4f7690b"
 
 ["commonware_consensus::marshal::conformance::CodingStorageConformance"]
 n_cases = 32
-hash = "87011da609173eff07008418afce29de77356663e1681e25b0e530e020da21ac"
+hash = "0e08b1fc95dc959c09296c615323111272900f4709dd04dd0a449604a4b4bed4"
 
 ["commonware_consensus::marshal::conformance::StandardStorageConformance"]
 n_cases = 32
-hash = "c1b012f81b93360a970d0a98dbc768af6c6d87617590878d137ae73ddfc8492f"
+hash = "c15b5e7ac2edb7a8fd93da3b356ffb46f40ecae12f2857072d28e1b41f0242c6"
 
 ["commonware_consensus::marshal::resolver::handler::tests::conformance::CodecConformance<Key<D>>"]
 n_cases = 65536
@@ -64,11 +64,11 @@ hash = "6fc6f17d8734a14fb841a8acc1a39cda7519bdd025700663e260d3b000c9c5c6"
 
 ["commonware_consensus::simplex::elector::tests::conformance::RandomSelectLeaderConformance"]
 n_cases = 512
-hash = "4df7290375d7ae3b005cfad96dc5fc091bdce4a246665f94b79acf34159a3945"
+hash = "b67e7a2a61c54156c0422160a6dbc096b01f518c26784505def8b5849c597b74"
 
 ["commonware_consensus::simplex::elector::tests::conformance::RoundRobinShuffleConformance"]
 n_cases = 512
-hash = "d6232310a3adc5cc8bf0767d095251f25211f165419372a5fe6b4ed7b06dd765"
+hash = "b892972a5b3cad361beebcc4f90a81dff4833c96411d02f0c5151e29689f1baf"
 
 ["commonware_consensus::simplex::scheme::bls12381_threshold::vrf::tests::conformance::CodecConformance<Certificate<MinSig>>"]
 n_cases = 65536

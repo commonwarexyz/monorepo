@@ -1,6 +1,6 @@
 use commonware_utils::cache::Clock;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::{hint::black_box, num::NonZeroUsize};
 
 /// Benchmarks a read-heavy mix under churn: 8 hits per miss insert, so resident
@@ -19,7 +19,7 @@ fn bench_mixed(c: &mut Criterion) {
             .map(|round| {
                 let mut reads = [0u64; 8];
                 for slot in &mut reads {
-                    *slot = rng.gen_range(0..capacity as u64);
+                    *slot = rng.random_range(0..capacity as u64);
                 }
                 (reads, u64::MAX - round)
             })

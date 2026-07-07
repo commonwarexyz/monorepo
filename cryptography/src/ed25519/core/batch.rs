@@ -53,13 +53,13 @@ use curve25519_dalek::{
     traits::{IsIdentity, VartimeMultiscalarMul},
 };
 use hashbrown::HashMap;
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{CryptoRng, Rng};
 use sha2::{digest::Update, Sha512};
 
 const NOISE_BATCH_VERIFY: &[u8] = b"batch_verify";
 
 // Shim to generate a u128 without importing `rand`.
-fn gen_u128<R: RngCore + CryptoRng>(mut rng: R) -> u128 {
+fn gen_u128<R: Rng + CryptoRng>(mut rng: R) -> u128 {
     let mut bytes = [0u8; 16];
     rng.fill_bytes(&mut bytes[..]);
     u128::from_le_bytes(bytes)
@@ -110,7 +110,7 @@ impl Verifier {
     /// verifications. This function does not have the same verification criteria
     /// as individual verification, which may reject some signatures this method
     /// accepts.
-    pub fn verify<R: RngCore + CryptoRng>(
+    pub fn verify<R: Rng + CryptoRng>(
         self,
         mut rng: R,
         strategy: &impl Strategy,
@@ -275,7 +275,7 @@ mod tests {
     use super::{super::SigningKey, *};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{test_rng, NZUsize};
-    use rand::Rng;
+    use rand::RngExt as _;
 
     /// Generate `signers` keys with `per_signer` signed messages each.
     fn signatures(

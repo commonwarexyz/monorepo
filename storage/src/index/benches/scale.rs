@@ -21,7 +21,7 @@ use commonware_storage::{
     index::{ordered, partitioned, unordered, Unordered},
     translator::{Cap, EightCap},
 };
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
     hint::black_box,
     time::{Duration, Instant},

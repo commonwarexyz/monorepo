@@ -354,7 +354,7 @@ fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
 /// This matrix is random, using the transcript as a deterministic source of randomness.
 fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix<F> {
     Matrix::rand(
-        &mut transcript.noise(b"checking matrix"),
+        transcript.noise(b"checking matrix"),
         topology.data_cols,
         topology.column_samples,
     )

@@ -2589,7 +2589,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::test_rng;
-    use rand::Rng;
+    use rand::RngExt as _;
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
 
@@ -2614,11 +2614,11 @@ mod tests {
         let mut rng = test_rng();
         for _ in 0..50 {
             // Build 1-4 sorted diffs over a small key universe so overlaps are common.
-            let num_diffs = rng.gen_range(1..=4);
+            let num_diffs = rng.random_range(1..=4);
             let diffs: Vec<DiffVec<u64, mmr::Family, u64>> = (0..num_diffs)
                 .map(|d| {
-                    let mut keys: Vec<u64> = (0..rng.gen_range(0..30))
-                        .map(|_| rng.gen_range(0..50u64))
+                    let mut keys: Vec<u64> = (0..rng.random_range(0..30))
+                        .map(|_| rng.random_range(0..50u64))
                         .collect();
                     keys.sort_unstable();
                     keys.dedup();
@@ -2638,8 +2638,8 @@ mod tests {
                 .collect();
 
             // Ascending queries spanning the universe (with gaps and duplicates).
-            let mut queries: Vec<u64> = (0..rng.gen_range(1..60))
-                .map(|_| rng.gen_range(0..55u64))
+            let mut queries: Vec<u64> = (0..rng.random_range(1..60))
+                .map(|_| rng.random_range(0..55u64))
                 .collect();
             queries.sort_unstable();
 

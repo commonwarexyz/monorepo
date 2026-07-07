@@ -7,7 +7,7 @@ use commonware_actor::mailbox::{self, Receiver};
 use commonware_cryptography::Hasher;
 use commonware_formatting::hex;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use rand::Rng;
+use rand::{Rng, RngExt as _};
 use tracing::info;
 
 /// Application actor.

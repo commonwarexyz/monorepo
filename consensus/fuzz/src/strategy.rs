@@ -5,7 +5,7 @@ use commonware_consensus::{
     Viewable,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use rand::Rng;
+use rand::{Rng, RngExt as _};
 
 pub trait Strategy: Send + Sync {
     fn random_proposal(
@@ -153,7 +153,7 @@ impl Strategy for SmallScope {
     ) -> Proposal<Sha256Digest> {
         let view = proposal.view().get();
         let parent = proposal.parent.get();
-        match rng.gen::<u8>() % 5 {
+        match rng.random::<u8>() % 5 {
             0 => proposal_with_view(proposal, view.saturating_add(1)),
             1 => proposal_with_view(proposal, view.saturating_sub(1)),
             2 => proposal_with_parent_view(proposal, parent.saturating_add(1)),
@@ -170,7 +170,7 @@ impl Strategy for SmallScope {
         last_notarized_view: u64,
         last_nullified_view: u64,
     ) -> u64 {
-        match rng.gen::<u8>() % 12 {
+        match rng.random::<u8>() % 12 {
             0 => last_vote_view,
             1 => last_vote_view.saturating_add(1),
             2 => last_vote_view.saturating_sub(1),
@@ -194,7 +194,7 @@ impl Strategy for SmallScope {
         last_notarized_view: u64,
         last_nullified_view: u64,
     ) -> u64 {
-        match rng.gen::<u8>() % 8 {
+        match rng.random::<u8>() % 8 {
             0 => {
                 let hi = last_notarized_view
                     .min(last_vote_view)
@@ -219,7 +219,7 @@ impl Strategy for SmallScope {
         last_notarized_view: u64,
         last_nullified_view: u64,
     ) -> u64 {
-        match rng.gen::<u8>() % 6 {
+        match rng.random::<u8>() % 6 {
             0 => last_vote_view.saturating_sub(1),
             1 => last_finalized_view,
             2 => last_notarized_view.saturating_sub(1),
@@ -248,7 +248,7 @@ impl Strategy for SmallScope {
         if proposals_len <= 1 {
             return Some(0);
         }
-        if rng.gen_bool(0.5) {
+        if rng.random_bool(0.5) {
             return None;
         }
         Some(proposals_len - 2)
@@ -318,7 +318,7 @@ impl Strategy for AnyScope {
         last_nullified_view: u64,
     ) -> Proposal<Sha256Digest> {
         let view = proposal.view().get();
-        match rng.gen::<u8>() % 4 {
+        match rng.random::<u8>() % 4 {
             0 => proposal_with_payload(proposal, random_payload(rng)),
             1 => proposal_with_view(
                 proposal,
@@ -444,10 +444,10 @@ impl Strategy for AnyScope {
         if proposals_len == 0 {
             return None;
         }
-        if rng.gen_bool(0.5) {
+        if rng.random_bool(0.5) {
             return None;
         }
-        let idx = rng.gen_range(0..proposals_len);
+        let idx = rng.random_range(0..proposals_len);
         Some(idx)
     }
 
@@ -519,8 +519,8 @@ impl Strategy for FutureScope {
     ) -> Proposal<Sha256Digest> {
         let view = proposal.view().get();
         let parent = proposal.parent.get();
-        let bump = if rng.gen_bool(0.5) { 1 } else { 2 };
-        match rng.gen::<u8>() % 3 {
+        let bump = if rng.random_bool(0.5) { 1 } else { 2 };
+        match rng.random::<u8>() % 3 {
             0 => proposal_with_view(proposal, view.saturating_add(bump)),
             1 => proposal_with_parent_view(proposal, parent.saturating_add(bump)),
             _ => {
@@ -543,7 +543,7 @@ impl Strategy for FutureScope {
         _last_notarized_view: u64,
         _last_nullified_view: u64,
     ) -> u64 {
-        let bump = if rng.gen_bool(0.5) { 1 } else { 2 };
+        let bump = if rng.random_bool(0.5) { 1 } else { 2 };
         last_vote_view.saturating_add(bump)
     }
 
@@ -555,7 +555,7 @@ impl Strategy for FutureScope {
         _last_notarized_view: u64,
         _last_nullified_view: u64,
     ) -> u64 {
-        let bump = if rng.gen_bool(0.5) { 1 } else { 2 };
+        let bump = if rng.random_bool(0.5) { 1 } else { 2 };
         last_vote_view.saturating_add(bump)
     }
 
@@ -567,7 +567,7 @@ impl Strategy for FutureScope {
         _last_notarized_view: u64,
         _last_nullified_view: u64,
     ) -> u64 {
-        let bump = if rng.gen_bool(0.5) { 1 } else { 2 };
+        let bump = if rng.random_bool(0.5) { 1 } else { 2 };
         base_view.saturating_sub(bump)
     }
 
@@ -590,7 +590,7 @@ impl Strategy for FutureScope {
         if proposals_len <= 1 {
             return Some(0);
         }
-        if rng.gen_bool(0.5) {
+        if rng.random_bool(0.5) {
             return None;
         }
         Some(proposals_len - 2)
@@ -633,8 +633,8 @@ fn proposal_with_payload(
 
 fn tweak_payload(rng: &mut impl Rng, payload: Sha256Digest) -> Sha256Digest {
     let mut bytes = payload.0;
-    let idx = rng.gen_range(0..bytes.len());
-    let bit = rng.gen::<u8>() % 8;
+    let idx = rng.random_range(0..bytes.len());
+    let bit = rng.random::<u8>() % 8;
     bytes[idx] ^= 1 << bit;
     Sha256Digest(bytes)
 }
@@ -644,8 +644,8 @@ fn tweak_bytes(rng: &mut impl Rng, bytes: &[u8]) -> Vec<u8> {
         return vec![0];
     }
     let mut out = bytes.to_vec();
-    let idx = rng.gen_range(0..out.len());
-    let bit = rng.gen::<u8>() % 8;
+    let idx = rng.random_range(0..out.len());
+    let bit = rng.random::<u8>() % 8;
     out[idx] ^= 1 << bit;
     out
 }
@@ -663,7 +663,7 @@ fn random_view(
     last_notarized_view: u64,
     last_nullified_view: u64,
 ) -> u64 {
-    match rng.gen::<u8>() % 7 {
+    match rng.random::<u8>() % 7 {
         0 => {
             if last_finalized_view == 0 {
                 last_finalized_view
@@ -685,19 +685,19 @@ fn random_view(
             sample_inclusive(rng, last_finalized_view, hi)
         }
         3 => {
-            let k = 1 + (rng.gen::<u8>() as u64 % 4);
+            let k = 1 + (rng.random::<u8>() as u64 % 4);
             add_or_sample_at_or_above(rng, last_vote_view, k)
         }
         4 => {
-            let k = 5 + (rng.gen::<u8>() as u64 % 6);
+            let k = 5 + (rng.random::<u8>() as u64 % 6);
             add_or_sample_at_or_above(rng, last_vote_view, k)
         }
         5 => {
             let view = last_vote_view.max(last_nullified_view);
-            let k = 1 + (rng.gen::<u8>() as u64 % 10);
+            let k = 1 + (rng.random::<u8>() as u64 % 10);
             add_or_sample_at_or_above(rng, view, k)
         }
-        _ => rng.gen::<u64>(),
+        _ => rng.random::<u64>(),
     }
 }
 
@@ -727,8 +727,8 @@ fn sample_inclusive(rng: &mut impl Rng, lo: u64, hi: u64) -> u64 {
         return lo;
     }
     if lo == 0 && hi == u64::MAX {
-        return rng.gen::<u64>();
+        return rng.random::<u64>();
     }
     let width = (hi - lo) + 1;
-    lo + (rng.gen::<u64>() % width)
+    lo + (rng.random::<u64>() % width)
 }

@@ -19,7 +19,7 @@ use commonware_utils::{
     ordered::{Quorum, Set},
     N3f1,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use tracing::{info_span, Span};
 
 /// Per-view state for vote accumulation and certificate tracking.
@@ -327,7 +327,7 @@ impl<
     }
 
     #[tracing::instrument(name = "simplex.batcher.verify_notarizes", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
-    pub fn verify_notarizes<E: CryptoRngCore>(
+    pub fn verify_notarizes<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,
@@ -344,7 +344,7 @@ impl<
     }
 
     #[tracing::instrument(name = "simplex.batcher.verify_nullifies", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
-    pub fn verify_nullifies<E: CryptoRngCore>(
+    pub fn verify_nullifies<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,
@@ -361,7 +361,7 @@ impl<
     }
 
     #[tracing::instrument(name = "simplex.batcher.verify_finalizes", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
-    pub fn verify_finalizes<E: CryptoRngCore>(
+    pub fn verify_finalizes<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,

@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
@@ -847,7 +847,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// This ensures that the notarize signature is valid for the claimed proposal.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_attestation::<_, D>(
@@ -953,7 +953,7 @@ pub fn verify_certificates<'a, R, S, D>(
     strategy: &impl Strategy,
 ) -> Vec<bool>
 where
-    R: CryptoRngCore,
+    R: CryptoRng,
     S: CertificateVerifier<D>,
     D: Digest,
 {
@@ -995,7 +995,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Verifies the notarization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: CryptoRngCore>(
+    pub fn verify<R: CryptoRng>(
         &self,
         rng: &mut R,
         scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
@@ -1128,7 +1128,7 @@ impl<S: Scheme> Nullify<S> {
     /// This ensures that the nullify signature is valid for the given round.
     pub fn verify<R, D: Digest>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_attestation::<_, D>(
@@ -1227,7 +1227,7 @@ impl<S: Scheme> Nullification<S> {
     /// Verifies the nullification certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed round.
-    pub fn verify<R: CryptoRngCore, D: Digest>(
+    pub fn verify<R: CryptoRng, D: Digest>(
         &self,
         rng: &mut R,
         scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
@@ -1342,7 +1342,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// This ensures that the finalize signature is valid for the claimed proposal.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_attestation::<_, D>(
@@ -1472,7 +1472,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Verifies the finalization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: CryptoRngCore>(
+    pub fn verify<R: CryptoRng>(
         &self,
         rng: &mut R,
         scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
@@ -1744,12 +1744,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     }
 
     /// Verifies the certificates contained in this response against the signing scheme.
-    pub fn verify<R: CryptoRngCore>(
-        &self,
-        rng: &mut R,
-        scheme: &S,
-        strategy: &impl Strategy,
-    ) -> bool
+    pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -1987,12 +1982,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// This method **always** performs verification regardless of whether the activity has been
     /// previously verified. Callers can use [`Activity::verified`] to check if verification is
     /// necessary before calling this method.
-    pub fn verify<R: CryptoRngCore>(
-        &self,
-        rng: &mut R,
-        scheme: &S,
-        strategy: &impl Strategy,
-    ) -> bool
+    pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -2267,7 +2257,7 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         self.notarize_1.verify(rng, scheme, strategy)
@@ -2395,7 +2385,7 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         self.finalize_1.verify(rng, scheme, strategy)
@@ -2512,7 +2502,7 @@ impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         self.nullify.verify(rng, scheme, strategy) && self.finalize.verify(rng, scheme, strategy)

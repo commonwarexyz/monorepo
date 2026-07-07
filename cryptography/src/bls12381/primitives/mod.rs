@@ -18,13 +18,15 @@
 //!     primitives::{ops::{self, threshold}, variant::MinSig, sharing::Mode},
 //! };
 //! use commonware_utils::{NZU32, N3f1};
-//! use rand::rngs::OsRng;
+//! use rand::{rngs::StdRng, SeedableRng};
+//!
+//! let mut rng = StdRng::seed_from_u64(0);
 //!
 //! // Configure number of players
 //! let n = NZU32!(5);
 //!
 //! // Generate commitment and shares
-//! let (sharing, shares) = dkg::deal_anonymous::<MinSig, N3f1>(&mut OsRng, Mode::default(), n);
+//! let (sharing, shares) = dkg::deal_anonymous::<MinSig, N3f1>(&mut rng, Mode::default(), n);
 //!
 //! // Generate partial signatures from shares
 //! let namespace = b"demo";
