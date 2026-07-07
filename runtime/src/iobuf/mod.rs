@@ -18,6 +18,15 @@
 //! allocations (front or tail header), pooled buffers, and adopted vecs, as
 //! opposed to external `Bytes` and `'static` views.
 //!
+//! # Conversions
+//!
+//! Every `From` conversion into [`IoBuf`] or [`IoBufs`] is zero-copy: the
+//! payload is never copied and the cost is at most one small owner
+//! allocation. Conversions into [`IoBufMut`] or [`IoBufsMut`] are zero-copy
+//! where the source allocation can back a mutable handle and copy otherwise.
+//! Each mutable conversion documents which one it is, and conversions out of
+//! the handles document their cost on each impl.
+//!
 //! Because untracked heap buffers embed their owner header in the same
 //! allocation, a power-of-two capacity request may land in the allocator's
 //! next size bin. Pooled buffers do not pay this: their side-table record
@@ -501,10 +510,8 @@ impl Buf for IoBuf {
 
 /// Convert a [`Vec<u8>`] into an [`IoBuf`] without copying.
 ///
-/// When the vec's spare capacity can host the owner header, its allocation is
-/// adopted as a native heap buffer (zero extra allocations, and
-/// [`IoBuf::try_into_mut`] recovers it). Otherwise the allocation moves into
-/// [`Bytes`] (also zero-copy) behind a small external owner.
+/// Adopts the vec's allocation when its spare capacity can host the owner
+/// header, and otherwise moves it into [`Bytes`] behind an external owner.
 impl From<Vec<u8>> for IoBuf {
     fn from(vec: Vec<u8>) -> Self {
         let (ptr, len, owner) = OwnerRef::from_vec(vec);
@@ -532,12 +539,14 @@ impl From<BytesMut> for IoBuf {
     }
 }
 
+/// Zero-copy: creates a static view with no owner.
 impl<const N: usize> From<&'static [u8; N]> for IoBuf {
     fn from(array: &'static [u8; N]) -> Self {
         Self::from_static(array)
     }
 }
 
+/// Zero-copy: creates a static view with no owner.
 impl From<&'static [u8]> for IoBuf {
     fn from(slice: &'static [u8]) -> Self {
         Self::from_static(slice)
@@ -1092,6 +1101,7 @@ unsafe impl BufMut for IoBufMut {
     }
 }
 
+/// Create a mutable buffer by copying the slice.
 impl From<&[u8]> for IoBufMut {
     fn from(slice: &[u8]) -> Self {
         let mut buf = Self::with_capacity(slice.len());
@@ -1100,12 +1110,14 @@ impl From<&[u8]> for IoBufMut {
     }
 }
 
+/// Create a mutable buffer by copying the array.
 impl<const N: usize> From<[u8; N]> for IoBufMut {
     fn from(array: [u8; N]) -> Self {
         Self::from(array.as_ref())
     }
 }
 
+/// Create a mutable buffer by copying the array.
 impl<const N: usize> From<&[u8; N]> for IoBufMut {
     fn from(array: &[u8; N]) -> Self {
         Self::from(array.as_ref())
@@ -1149,8 +1161,9 @@ impl From<Bytes> for IoBufMut {
     }
 }
 
+/// Zero-copy when exclusive ownership can be recovered (see
+/// [`IoBuf::try_into_mut`]), copies otherwise.
 impl From<IoBuf> for IoBufMut {
-    /// Zero-copy when exclusive ownership can be recovered, copies otherwise.
     fn from(buf: IoBuf) -> Self {
         match buf.try_into_mut() {
             Ok(buf) => buf,
@@ -1761,6 +1774,7 @@ impl Buf for IoBufs {
     }
 }
 
+/// Zero-copy: wraps the buffer as the single chunk.
 impl From<IoBuf> for IoBufs {
     fn from(buf: IoBuf) -> Self {
         Self {
@@ -1769,6 +1783,7 @@ impl From<IoBuf> for IoBufs {
     }
 }
 
+/// Zero-copy: freezes the buffer and wraps it as the single chunk.
 impl From<IoBufMut> for IoBufs {
     fn from(buf: IoBufMut) -> Self {
         Self {
@@ -1777,36 +1792,42 @@ impl From<IoBufMut> for IoBufs {
     }
 }
 
+/// Zero-copy via `From<Bytes> for IoBuf`.
 impl From<Bytes> for IoBufs {
     fn from(bytes: Bytes) -> Self {
         Self::from(IoBuf::from(bytes))
     }
 }
 
+/// Zero-copy via `From<BytesMut> for IoBuf`.
 impl From<BytesMut> for IoBufs {
     fn from(bytes: BytesMut) -> Self {
         Self::from(IoBuf::from(bytes))
     }
 }
 
+/// Zero-copy via `From<Vec<u8>> for IoBuf`.
 impl From<Vec<u8>> for IoBufs {
     fn from(vec: Vec<u8>) -> Self {
         Self::from(IoBuf::from(vec))
     }
 }
 
+/// Zero-copy: collects the chunks, dropping empty ones.
 impl From<Vec<IoBuf>> for IoBufs {
     fn from(bufs: Vec<IoBuf>) -> Self {
         Self::from_chunks_iter(bufs)
     }
 }
 
+/// Zero-copy: creates a static view with no owner.
 impl<const N: usize> From<&'static [u8; N]> for IoBufs {
     fn from(array: &'static [u8; N]) -> Self {
         Self::from(IoBuf::from(array))
     }
 }
 
+/// Zero-copy: creates a static view with no owner.
 impl From<&'static [u8]> for IoBufs {
     fn from(slice: &'static [u8]) -> Self {
         Self::from(IoBuf::from(slice))
@@ -2386,6 +2407,7 @@ unsafe impl BufMut for IoBufsMut {
     }
 }
 
+/// Zero-copy: wraps the buffer as the single chunk.
 impl From<IoBufMut> for IoBufsMut {
     fn from(buf: IoBufMut) -> Self {
         Self {
@@ -2406,6 +2428,8 @@ impl From<Vec<u8>> for IoBufsMut {
     }
 }
 
+/// Copies via `From<BytesMut> for IoBufMut`, preserving the caller's
+/// capacity.
 impl From<BytesMut> for IoBufsMut {
     fn from(bytes: BytesMut) -> Self {
         Self {
@@ -2414,12 +2438,14 @@ impl From<BytesMut> for IoBufsMut {
     }
 }
 
+/// Zero-copy: collects the chunks, dropping zero-capacity ones.
 impl From<Vec<IoBufMut>> for IoBufsMut {
     fn from(bufs: Vec<IoBufMut>) -> Self {
         Self::from_writable_chunks_iter(bufs)
     }
 }
 
+/// Copies via `From<[u8; N]> for IoBufMut`.
 impl<const N: usize> From<[u8; N]> for IoBufsMut {
     fn from(array: [u8; N]) -> Self {
         Self {
@@ -2865,6 +2891,43 @@ mod tests {
         assert_eq!(src.slice(6..), b"world");
         assert_eq!(src.slice(3..8), b"lo wo");
         assert!(src.slice(5..5).is_empty());
+    }
+
+    #[test]
+    fn test_iobuf_from_conversions_are_zero_copy() {
+        // The module doc guarantees every From conversion into IoBuf is
+        // zero-copy. Pin payload pointer identity for each route.
+
+        // A vec with header room adopts its own allocation.
+        let mut vec = Vec::with_capacity(128);
+        vec.extend_from_slice(b"adopt");
+        let ptr = vec.as_ptr();
+        let buf = IoBuf::from(vec);
+        assert_eq!(buf.as_ref().as_ptr(), ptr);
+
+        // An exactly-sized vec moves into Bytes without copying.
+        let vec = b"exact".to_vec();
+        let ptr = vec.as_ptr();
+        let buf = IoBuf::from(vec);
+        assert_eq!(buf.as_ref().as_ptr(), ptr);
+
+        // Bytes moves behind the external owner.
+        let bytes = Bytes::from(b"bytes".to_vec());
+        let ptr = bytes.as_ptr();
+        let buf = IoBuf::from(bytes);
+        assert_eq!(buf.as_ref().as_ptr(), ptr);
+
+        // BytesMut freezes in place.
+        let mut bytes = BytesMut::with_capacity(16);
+        bytes.put_slice(b"frozen");
+        let ptr = bytes.as_ref().as_ptr();
+        let buf = IoBuf::from(bytes);
+        assert_eq!(buf.as_ref().as_ptr(), ptr);
+
+        // Static views point at the static data itself.
+        static DATA: [u8; 4] = *b"data";
+        let buf = IoBuf::from(&DATA[..]);
+        assert_eq!(buf.as_ref().as_ptr(), DATA.as_ptr());
     }
 
     #[test]
