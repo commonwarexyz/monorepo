@@ -165,6 +165,16 @@ stability_scope!(BETA {
         }
     }
 
+    /// Outcome of resolving a blob's header at open (see [Header::resolve]).
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) enum HeaderResolution {
+        /// The blob needs a fresh header written: it is new, or an interrupted creation left
+        /// it with a torn header and no committed data.
+        Recreate,
+        /// The header parsed and validated.
+        Valid { blob_version: u16, size: u64 },
+    }
+
     /// Fixed-size header at the start of each [crate::Blob].
     ///
     /// On-disk layout (8 bytes, big-endian):
@@ -225,6 +235,29 @@ stability_scope!(BETA {
                 .expect("header decode should never fail for correct size input");
             header.validate(versions)?;
             Ok((header.blob_version, raw_len - Self::SIZE_U64))
+        }
+
+        /// Resolves a blob's header at open, deciding between recreating the blob and
+        /// honoring the header it records.
+        ///
+        /// `head` holds the blob's first `min(raw_len, Header::SIZE)` raw bytes. Errors are
+        /// classified with [HeaderError::interrupted_creation]: a torn header on a blob that
+        /// cannot hold committed data resolves to [HeaderResolution::Recreate], anything else
+        /// stays a hard error.
+        pub(crate) fn resolve(
+            head: &[u8],
+            raw_len: u64,
+            versions: &RangeInclusive<u16>,
+        ) -> Result<HeaderResolution, HeaderError> {
+            if Self::missing(raw_len) {
+                return Ok(HeaderResolution::Recreate);
+            }
+            let prelude: [u8; Self::SIZE] = head[..Self::SIZE].try_into().unwrap();
+            match Self::from(prelude, raw_len, versions) {
+                Ok((blob_version, size)) => Ok(HeaderResolution::Valid { blob_version, size }),
+                Err(e) if e.interrupted_creation(raw_len) => Ok(HeaderResolution::Recreate),
+                Err(e) => Err(e),
+            }
         }
 
         /// Validates the magic bytes, runtime version, and blob version.

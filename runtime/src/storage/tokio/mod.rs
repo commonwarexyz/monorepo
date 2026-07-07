@@ -1,4 +1,4 @@
-use super::Header;
+use super::{Header, HeaderResolution};
 use crate::{BufferPool, Error};
 use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
@@ -142,23 +142,17 @@ impl crate::Storage for Storage {
 
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
-        let parsed = if Header::missing(len) {
-            None
-        } else {
-            // Existing blob - read and validate header
-            let mut header_bytes = [0u8; Header::SIZE];
-            file.read_exact(&mut header_bytes)
-                .await
-                .map_err(|_| Error::ReadFailed)?;
-            match Header::from(header_bytes, len, &versions) {
-                Ok(parsed) => Some(parsed),
-                Err(e) if e.interrupted_creation(len) => None,
-                Err(e) => return Err(e.into_error(partition, name)),
-            }
-        };
-        let (blob_version, logical_size) = match parsed {
-            Some(parsed) => parsed,
-            None => {
+        let mut head = [0u8; Header::SIZE];
+        let head_len = len.min(Header::SIZE_U64) as usize;
+        file.read_exact(&mut head[..head_len])
+            .await
+            .map_err(|_| Error::ReadFailed)?;
+        let resolution = Header::resolve(&head[..head_len], len, &versions)
+            .map_err(|e| e.into_error(partition, name))?;
+        let (blob_version, logical_size) = match resolution {
+            // Existing blob - honor the header it records
+            HeaderResolution::Valid { blob_version, size } => (blob_version, size),
+            HeaderResolution::Recreate => {
                 // New, torn, or corrupted blob - truncate and write header with latest version
                 let (header, blob_version) = Header::new(&versions);
                 file.set_len(Header::SIZE_U64)

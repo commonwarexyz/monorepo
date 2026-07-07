@@ -20,7 +20,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
-use super::Header;
+use super::{Header, HeaderResolution};
 use crate::{
     iouring::{self},
     telemetry::metrics::Register,
@@ -144,24 +144,18 @@ impl crate::Storage for Storage {
 
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
-        let parsed = if Header::missing(raw_len) {
-            None
-        } else {
-            // Existing blob - read and validate header
-            file.seek(SeekFrom::Start(0))
-                .map_err(|_| Error::ReadFailed)?;
-            let mut header_bytes = [0u8; Header::SIZE];
-            file.read_exact(&mut header_bytes)
-                .map_err(|_| Error::ReadFailed)?;
-            match Header::from(header_bytes, raw_len, &versions) {
-                Ok(parsed) => Some(parsed),
-                Err(e) if e.interrupted_creation(raw_len) => None,
-                Err(e) => return Err(e.into_error(partition, name)),
-            }
-        };
-        let (blob_version, logical_len) = match parsed {
-            Some(parsed) => parsed,
-            None => {
+        let mut head = [0u8; Header::SIZE];
+        let head_len = raw_len.min(Header::SIZE_U64) as usize;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| Error::ReadFailed)?;
+        file.read_exact(&mut head[..head_len])
+            .map_err(|_| Error::ReadFailed)?;
+        let resolution = Header::resolve(&head[..head_len], raw_len, &versions)
+            .map_err(|e| e.into_error(partition, name))?;
+        let (blob_version, logical_len) = match resolution {
+            // Existing blob - honor the header it records
+            HeaderResolution::Valid { blob_version, size } => (blob_version, size),
+            HeaderResolution::Recreate => {
                 // New, torn, or corrupted blob - truncate and write header with latest version
                 let (header, blob_version) = Header::new(&versions);
                 file.set_len(Header::SIZE_U64)

@@ -1,4 +1,4 @@
-use super::Header;
+use super::{Header, HeaderResolution};
 use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
@@ -56,26 +56,21 @@ impl crate::Storage for Storage {
         let content = partition_entry.entry(name.into()).or_default();
 
         let raw_len = content.len() as u64;
-        let parsed = if Header::missing(raw_len) {
-            None
-        } else {
-            // Existing blob - read and validate header
-            let mut header_bytes = [0u8; Header::SIZE];
-            header_bytes.copy_from_slice(&content[..Header::SIZE]);
-            match Header::from(header_bytes, raw_len, &versions) {
-                Ok(parsed) => Some(parsed),
-                Err(e) if e.interrupted_creation(raw_len) => None,
-                Err(e) => return Err(e.into_error(partition, name)),
-            }
-        };
-        let (blob_version, logical_len) = parsed.unwrap_or_else(|| {
+        let head_len = (raw_len as usize).min(Header::SIZE);
+        let resolution = Header::resolve(&content[..head_len], raw_len, &versions)
+            .map_err(|e| e.into_error(partition, name))?;
+        let (blob_version, logical_len) = match resolution {
+            // Existing blob - honor the header it records
+            HeaderResolution::Valid { blob_version, size } => (blob_version, size),
             // New, torn, or corrupted blob - truncate and write default header with latest
             // version
-            let (header, blob_version) = Header::new(&versions);
-            content.clear();
-            content.extend_from_slice(&header.encode());
-            (blob_version, 0)
-        });
+            HeaderResolution::Recreate => {
+                let (header, blob_version) = Header::new(&versions);
+                content.clear();
+                content.extend_from_slice(&header.encode());
+                (blob_version, 0)
+            }
+        };
 
         Ok((
             Blob::new(
