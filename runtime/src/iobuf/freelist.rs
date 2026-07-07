@@ -1387,6 +1387,8 @@ mod loom_tests {
 
     // Each geometry gives a model a small bitmap layout: one or more active
     // bitmap words, with either one or multiple free bits per active word.
+    // The names spell out that words-by-bits matrix.
+    #[allow(clippy::enum_variant_names)]
     #[derive(Clone, Copy, Debug)]
     enum Geometry {
         SingleWordSingleBit,
@@ -1415,7 +1417,7 @@ mod loom_tests {
         // Returns the slot ids that are active in this geometry. The order is
         // used by batch tests, so layouts with multiple bits in a word keep
         // same-word slots adjacent.
-        fn slots(self) -> &'static [u32] {
+        const fn slots(self) -> &'static [u32] {
             match self {
                 Self::SingleWordSingleBit => &[0],
                 Self::SingleWordMultiBit => &[0, 1],
@@ -1539,9 +1541,7 @@ mod loom_tests {
             });
 
             let reader = thread::spawn({
-                let freelist = freelist.clone();
                 let leases = leases.clone();
-                let stamps = stamps.clone();
                 move || loop {
                     if let Some(buffer) = freelist.take() {
                         assert_eq!(buffer.slot(), slot);
@@ -1555,6 +1555,10 @@ mod loom_tests {
 
             writer.join().unwrap();
             reader.join().unwrap();
+
+            // Keep the taken buffers checked out until the model is done:
+            // Leases returns them to the freelist on drop.
+            drop(leases);
         });
     }
 
@@ -1938,7 +1942,6 @@ mod loom_tests {
             });
 
             let single_taker = thread::spawn({
-                let freelist = freelist.clone();
                 let seen = seen.clone();
                 let leases = leases.clone();
                 move || {
@@ -1957,6 +1960,10 @@ mod loom_tests {
                 batch_count.load(Ordering::Relaxed),
                 batch_callbacks.load(Ordering::Relaxed)
             );
+
+            // Keep the taken buffers checked out until the model is done:
+            // Leases returns them to the freelist on drop.
+            drop(leases);
         });
     }
 
@@ -2074,10 +2081,8 @@ mod loom_tests {
             });
 
             let reader = thread::spawn({
-                let freelist = freelist.clone();
                 let seen = seen.clone();
                 let leases = leases.clone();
-                let stamps = stamps.clone();
                 move || {
                     while seen.load(Ordering::Relaxed) != expected {
                         let claimed = freelist.take_batch(slots.len(), |buffer| {
@@ -2096,6 +2101,10 @@ mod loom_tests {
             reader.join().unwrap();
 
             assert_eq!(seen.load(Ordering::Relaxed), expected);
+
+            // Keep the taken buffers checked out until the model is done:
+            // Leases returns them to the freelist on drop.
+            drop(leases);
         });
     }
 
@@ -2126,7 +2135,6 @@ mod loom_tests {
             let drainer = thread::spawn({
                 let freelist = freelist.clone();
                 let drained = drained.clone();
-                let stamps = stamps.clone();
                 move || {
                     while drained.load(Ordering::Relaxed) == 0 {
                         let count = freelist.drain();
@@ -2239,6 +2247,10 @@ mod loom_tests {
 
             assert_eq!(seen.load(Ordering::Relaxed), expected);
             assert_eq!(freelist.drain(), 0);
+
+            // Keep the taken buffers checked out until the model is done:
+            // Leases returns them to the freelist on drop.
+            drop(leases);
         });
     }
 
@@ -2288,6 +2300,10 @@ mod loom_tests {
                     + taken.load(Ordering::Relaxed).count_ones() as usize,
                 expected
             );
+
+            // Keep the taken buffers checked out until the model is done:
+            // Leases returns them to the freelist on drop.
+            drop(leases);
         });
     }
 
@@ -2375,6 +2391,10 @@ mod loom_tests {
                 drained.load(Ordering::Relaxed) + taken.load(Ordering::Relaxed),
                 expected
             );
+
+            // Keep the taken buffers checked out until the model is done:
+            // Leases returns them to the freelist on drop.
+            drop(leases);
         });
     }
 }

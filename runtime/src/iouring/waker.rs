@@ -1313,11 +1313,11 @@ mod loom_tests {
         // Execute one generated producer operation.
         fn execute(self, waker: &Waker, publishes: &AtomicU32) {
             match self {
-                ProducerOp::Publish => {
+                Self::Publish => {
                     waker.publish();
                     publishes.fetch_add(1, Ordering::Relaxed);
                 }
-                ProducerOp::Wake => waker.wake(),
+                Self::Wake => waker.wake(),
             }
         }
     }

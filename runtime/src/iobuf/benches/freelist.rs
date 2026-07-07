@@ -45,12 +45,10 @@ const BENCH_LAYOUT: Layout =
         Err(_) => panic!("valid bench layout"),
     };
 
-fn new_buffers(
-    capacity: usize,
-) -> (
-    Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
-    Vec<PooledBuffer>,
-) {
+/// Benchmark slot storage backing a set of [`PooledBuffer`] handles.
+type BenchSlots = Box<[CachePadded<UnsafeCell<PooledOwner>>]>;
+
+fn new_buffers(capacity: usize) -> (BenchSlots, Vec<PooledBuffer>) {
     let slots = (0..capacity)
         .map(|slot| {
             CachePadded::new(UnsafeCell::new(PooledOwner::new(

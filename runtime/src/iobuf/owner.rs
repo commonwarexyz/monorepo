@@ -703,7 +703,7 @@ impl OwnerRef {
     /// # Safety
     ///
     /// `self` must be non-empty with a live reference owned by the caller.
-    #[cfg(feature = "loom")]
+    #[cfg(all(test, feature = "loom"))]
     pub(crate) unsafe fn refcount_relaxed(self) -> usize {
         // SAFETY: non-empty owners have a valid refcount.
         unsafe { self.refs() }.load(Ordering::Relaxed)
@@ -1852,7 +1852,6 @@ mod loom_tests {
             // SAFETY: `owner` is live with one reference owned here.
             unsafe { owner.clone_shared() };
             let t1 = thread::spawn({
-                let payload = payload.clone();
                 move || {
                     // SAFETY: this thread's handle keeps the payload alive;
                     // the write is sequenced before its drop.
@@ -1891,7 +1890,6 @@ mod loom_tests {
             // SAFETY: `owner` is live with one reference owned here.
             unsafe { owner.clone_shared() };
             let t1 = thread::spawn({
-                let payload = payload.clone();
                 move || {
                     // SAFETY: this thread's handle keeps the payload alive;
                     // the write is sequenced before its drop.
