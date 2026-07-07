@@ -264,6 +264,18 @@ commonware_macros::stability_scope!(BETA {
         /// the overhead of the streaming machinery.
         fn hash(parts: &[&[u8]]) -> Self::Digest;
 
+        /// Hash two messages, each given as a concatenation of `parts`, in a
+        /// single shot.
+        ///
+        /// Equivalent to hashing each message with [`Hasher::hash`].
+        /// Implementations are free to specialize this to make progress on
+        /// both messages concurrently (e.g. with instruction-level
+        /// parallelism), which can be substantially faster than two
+        /// independent hashes.
+        fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+            (Self::hash(left), Self::hash(right))
+        }
+
         /// Append `bytes` to the hasher's running state.
         fn update(&mut self, bytes: &[u8]) -> &mut Self;
 
