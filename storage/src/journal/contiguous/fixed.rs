@@ -1211,7 +1211,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                     blob.read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
                         .await
                 } else {
-                    blob.read_misses_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+                    blob.read_direct_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
                         .await
                 }
             });
