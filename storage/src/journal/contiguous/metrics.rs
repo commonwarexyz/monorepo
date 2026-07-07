@@ -113,9 +113,17 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
                 "Number of items returned by point reads, batch reads, and sync probes",
             ),
             commit_calls: context.counter("commit_calls", "Number of commit calls"),
-            commit_duration: Timed::register(&context, "commit_duration", "Duration of commit calls"),
+            commit_duration: Timed::register(
+                &context,
+                "commit_duration",
+                "Duration of commit calls",
+            ),
             sync_calls: context.counter("sync_calls", "Number of sync calls"),
-            sync_duration: Timed::register(&context, "sync_duration", "Duration of full sync calls"),
+            sync_duration: Timed::register(
+                &context,
+                "sync_duration",
+                "Duration of full sync calls",
+            ),
             clock: Arc::new(context),
         }
     }
