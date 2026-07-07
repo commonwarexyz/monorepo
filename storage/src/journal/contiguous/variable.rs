@@ -871,117 +871,16 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     }
 }
 
-impl<E: Context, V: CodecShared> Clone for Reader<'_, E, V> {
-    fn clone(&self) -> Self {
-        Self {
-            data: self.data.clone(),
-            bounds: self.bounds.clone(),
-            offsets: self.offsets.clone(),
-            items_per_blob: self.items_per_blob,
-            codec_config: self.codec_config.clone(),
-            compressed: self.compressed,
-            metrics: self.metrics.clone(),
-        }
-    }
-}
-
-/// A position the probe could not serve, carrying the frame offset the probe resolved from the
-/// offsets journal along the way (when it did).
+/// A position the sync pass could not serve, carrying the frame offset the pass resolved from
+/// the offsets journal along the way (when it did).
 #[derive(Clone, Copy)]
 struct Miss {
     position: u64,
     offset: Option<u64>,
 }
 
-/// See [`super::Probed`]: a probe over one variable journal view. Each miss carries the frame
-/// offset the probe already resolved, so completion consults the offsets journal only for
-/// offsets that missed its cache.
-pub struct Probed<'a, E: Context, V: CodecShared> {
-    reader: Reader<'a, E, V>,
-    items: Vec<Option<V>>,
-    misses: Vec<Miss>,
-}
-
-impl<'a, E: Context, V: CodecShared> Probed<'a, E, V> {
-    /// Probe `positions` (strictly increasing) against `reader`'s page caches.
-    fn probe(reader: Reader<'a, E, V>, positions: &[u64]) -> Self {
-        crate::journal::assert_positions_increasing(positions);
-        let (items, misses) = reader.probe_parts(positions);
-        Self {
-            reader,
-            items,
-            misses,
-        }
-    }
-}
-
-impl<E: Context, V: CodecShared> super::Probed for Probed<'_, E, V> {
-    type Item = V;
-
-    fn items(&self) -> &[Option<V>] {
-        &self.items
-    }
-
-    fn merge(shards: Vec<Self>) -> Self {
-        let mut shards = shards.into_iter();
-        let mut merged = shards.next().expect("merge requires at least one probe");
-        for shard in shards {
-            merged.items.extend(shard.items);
-            merged.misses.extend(shard.misses);
-        }
-        merged
-    }
-
-    async fn fetch(self) -> Result<Vec<V>, Error> {
-        let Self {
-            reader,
-            items,
-            misses,
-        } = self;
-        assert!(
-            misses.windows(2).all(|w| w[0].position < w[1].position),
-            "positions must be strictly increasing"
-        );
-        let _timer = reader.metrics.read_many_timer();
-        reader.metrics.read_many_calls.inc();
-        complete(&reader, items, misses).await
-    }
-
-    async fn fetch_missing(self) -> Result<(Vec<u64>, Vec<V>), Error> {
-        let Self {
-            reader,
-            items: _,
-            mut misses,
-        } = self;
-        let _timer = reader.metrics.read_many_timer();
-        reader.metrics.read_many_calls.inc();
-
-        // A single probe's misses are already strictly increasing (asserted by `probe`). Only
-        // `merge` can break that, by concatenating key-sharded probes whose position ranges
-        // interleave or repeat.
-        if !misses.windows(2).all(|w| w[0].position < w[1].position) {
-            misses.sort_by_key(|miss| miss.position);
-            // Duplicates come from merged key-sharded probes. Their offsets can only differ
-            // as resolved vs unresolved (offsets are immutable under a shared borrow), so
-            // keep the resolved one.
-            misses.dedup_by(|next, kept| {
-                if next.position != kept.position {
-                    return false;
-                }
-                if kept.offset.is_none() {
-                    kept.offset = next.offset;
-                }
-                true
-            });
-        }
-        let positions = misses.iter().map(|miss| miss.position).collect();
-        let items = reader.fetch_misses(&misses).await?;
-        Ok((positions, items))
-    }
-}
-
-/// Complete a probe's item slots: read `misses` (the positions of the `None` slots, in order)
-/// and fill each slot with its item.
+/// Complete a sync pass's item slots: read `misses` (the positions of the `None` slots, in
+/// order) and fill each slot with its item.
 async fn complete<E: Context, V: CodecShared>(
     reader: &Reader<'_, E, V>,
     items: Vec<Option<V>>,
@@ -1076,13 +975,8 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
     }
 }
 
-impl<'r, E: Context, V: CodecShared> super::Contiguous for Reader<'r, E, V> {
+impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
     type Item = V;
-
-    type Probed<'a>
-        = Probed<'r, E, V>
-    where
-        Self: 'a;
 
     fn bounds(&self) -> Range<u64> {
         self.bounds.clone()
@@ -1141,8 +1035,11 @@ impl<'r, E: Context, V: CodecShared> super::Contiguous for Reader<'r, E, V> {
         Some(item)
     }
 
-    fn try_read_many_sync(&self, positions: &[u64]) -> Self::Probed<'_> {
-        Probed::probe(self.clone(), positions)
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
+        crate::journal::assert_positions_increasing(positions);
+        let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
+        self.read_many_sync_pass(positions, &mut items);
+        items
     }
 
     async fn replay(
@@ -2205,11 +2102,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
-    type Probed<'a>
-        = Probed<'a, E, V>
-    where
-        Self: 'a;
-
     fn bounds(&self) -> Range<u64> {
         self.bounds.clone()
     }
@@ -2226,8 +2118,8 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         self.reader().try_read_sync(position)
     }
 
-    fn try_read_many_sync(&self, positions: &[u64]) -> Self::Probed<'_> {
-        Probed::probe(self.reader(), positions)
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
+        self.reader().try_read_many_sync(positions)
     }
 
     async fn replay(
@@ -2387,7 +2279,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::{tests::run_contiguous_tests, Probed as _};
+    use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::{CacheRef, Writer},
@@ -2654,8 +2546,8 @@ mod tests {
             // served synchronously.
             let expected = reader.read_many(&positions).await.unwrap();
             let served = reader.try_read_many_sync(&positions);
-            assert_eq!(served.items().len(), positions.len());
-            for (item, expected) in served.items().iter().zip(&expected) {
+            assert_eq!(served.len(), positions.len());
+            for (item, expected) in served.iter().zip(&expected) {
                 assert_eq!(item.as_ref().expect("cached position is served"), expected);
             }
 
@@ -2663,8 +2555,8 @@ mod tests {
             // (same offsets blob) are unaffected: validation trims the out-of-range suffix
             // instead of poisoning the group.
             let served = reader.try_read_many_sync(&[9, 13]);
-            assert!(served.items()[0].is_some());
-            assert!(served.items()[1].is_none());
+            assert!(served[0].is_some());
+            assert!(served[1].is_none());
             drop(served);
             drop(reader);
 
@@ -2726,13 +2618,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_probe_fetch_matches_read_many() {
-        // Completing a probe returns the same items as read_many, cold and warm, reusing the
-        // offsets the probe already resolved.
+    fn test_variable_probe_then_read_many_matches_read_many() {
+        // A probe completed by one batched read over its declined positions returns the same
+        // items as read_many, cold and warm.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "read-many-probe-fetch".into(),
+                partition: "read-many-probe-complete".into(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2750,32 +2642,21 @@ mod tests {
             let positions: Vec<u64> = (0..12).collect();
             let expected: Vec<u64> = (0..12).map(|i| i * 100).collect();
             let reader = journal.snapshot().await.unwrap();
-            let cold = reader.try_read_many_sync(&positions).fetch().await.unwrap();
-            assert_eq!(cold, expected);
-            let read = reader.read_many(&positions).await.unwrap();
-            assert_eq!(cold, read);
-
-            // Probes of disjoint shards of one request merge into a single completion.
-            let (left, right) = positions.split_at(5);
-            let merged = Probed::merge(vec![
-                reader.try_read_many_sync(left),
-                reader.try_read_many_sync(right),
-            ]);
-            assert_eq!(merged.fetch().await.unwrap(), expected);
-
-            // Key-sharded probes may overlap in position space; fetch_missing reads each
-            // distinct missed position once.
-            let (missed_positions, missed) = Probed::merge(vec![
-                reader.try_read_many_sync(&[0, 7]),
-                reader.try_read_many_sync(&[7, 11]),
-            ])
-            .fetch_missing()
-            .await
-            .unwrap();
-            crate::journal::assert_positions_increasing(&missed_positions);
-            for (pos, item) in missed_positions.iter().zip(&missed) {
-                assert_eq!(item, &expected[*pos as usize]);
+            for _ in 0..2 {
+                let mut served = reader.try_read_many_sync(&positions);
+                let misses: Vec<u64> = positions
+                    .iter()
+                    .zip(&served)
+                    .filter_map(|(&pos, item)| item.is_none().then_some(pos))
+                    .collect();
+                let mut fetched = reader.read_many(&misses).await.unwrap().into_iter();
+                for item in served.iter_mut().filter(|item| item.is_none()) {
+                    *item = fetched.next();
+                }
+                let completed: Vec<_> = served.into_iter().map(Option::unwrap).collect();
+                assert_eq!(completed, expected);
             }
+            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
             drop(reader);
 
             journal.destroy().await.unwrap();
@@ -2783,68 +2664,59 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_fetch_missing_reuses_deduped_offset() {
-        // Merged probes can duplicate a position with one unresolved and one resolved frame
-        // offset. Dedup must surface the resolved offset so completion never consults the
-        // offsets journal for it.
+    fn test_variable_read_many_reuses_probed_offset() {
+        // read_many's sync pass resolves frame offsets even when the frame itself misses. The
+        // completion must reuse them instead of consulting the offsets journal again.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Sections of 128 make section 0's offsets exactly fill two flushed pages, so a
             // section-0 offset lookup can genuinely miss (a sealed blob serves a partial
             // trailing page from memory, never the page cache).
             let cfg = Config {
-                partition: "probe-dedup-offset-reuse".into(),
+                partition: "read-many-offset-reuse".into(),
                 items_per_section: NZU64!(128),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(4)),
                 write_buffer: NZUsize!(1024),
             };
-            let items = (0..140)
+            let appended = (0..140)
                 .map(|i| FixedBytes::new([i as u8; 300]))
                 .collect::<Vec<_>>();
             let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
-            journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal.append_many(Many::Flat(&appended)).await.unwrap();
             journal.sync().await.unwrap();
             let reader = journal.snapshot().await.unwrap();
 
             // Churn the 4-page pool with section-1 frames (five data pages) so every
-            // section-0 page is evicted.
+            // section-0 page is evicted, then warm the offsets page shared by positions
+            // 0..64 without touching position 0's frame page (302-byte frames put frame 0
+            // in page 0 and frame 4 in page 2).
             reader
                 .read_many(&(128..136).collect::<Vec<u64>>())
                 .await
                 .unwrap();
-
-            // Probe position 0 while both its offset and its frame are cold: the miss
-            // carries no resolved offset.
-            let cold = reader.try_read_many_sync(&[0]);
-            assert!(cold.items()[0].is_none());
-            assert!(cold.misses[0].offset.is_none());
-
-            // Reading position 4 warms the offsets page shared by positions 0..64 without
-            // touching position 0's frame page (302-byte frames put frame 0 in page 0 and
-            // frame 4 in page 2). Re-probing then resolves the offset but still misses the
-            // frame.
             reader.read(4).await.unwrap();
-            let warm = reader.try_read_many_sync(&[0]);
-            assert!(warm.items()[0].is_none());
-            assert_eq!(warm.misses[0].offset, Some(0));
 
-            // Completing the merged probes serves the duplicate through the resolved
-            // offset: the offsets journal is never consulted.
+            // The sync pass resolves position 0's offset but cannot serve its frame.
+            let (items, misses) = reader.probe_parts(&[0]);
+            assert!(items[0].is_none());
+            assert_eq!(misses[0].offset, Some(0));
+
+            // read_many consults the offsets journal only in its sync pass (position 0 and
+            // its successor, both cache hits): completion reuses the carried offset rather
+            // than resolving it again.
             let before = context.encode();
-            let (positions, fetched) = Probed::merge(vec![cold, warm])
-                .fetch_missing()
-                .await
-                .unwrap();
-            assert_eq!(positions, vec![0]);
-            assert_eq!(fetched, vec![items[0].clone()]);
+            assert_eq!(
+                reader.read_many(&[0]).await.unwrap(),
+                vec![appended[0].clone()]
+            );
             let after = context.encode();
             assert_eq!(
                 counter(&after, "offsets_items_read_total"),
-                counter(&before, "offsets_items_read_total")
+                counter(&before, "offsets_items_read_total") + 2
             );
             drop(reader);
 

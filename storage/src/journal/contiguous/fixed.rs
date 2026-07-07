@@ -1169,10 +1169,9 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok((blob, offsets))
     }
 
-    /// Shared body of [`super::Contiguous::read_many`] and probe completion; the callers
-    /// record the batch-read metrics ([`super::Contiguous::read_many`] directly, completion at
-    /// the [`super::Probed`] verbs), so routing completion through `read_many` would count
-    /// every batch twice.
+    /// Shared body of [`super::Contiguous::read_many`] and the variable journal's offsets
+    /// reads; the callers record the batch-read metrics, so routing them through `read_many`
+    /// would count every batch twice.
     pub(super) async fn read_many_inner(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
         if positions.is_empty() {
             return Ok(Vec::new());
@@ -1307,107 +1306,8 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     }
 }
 
-impl<E: Context, A> Clone for Reader<'_, E, A> {
-    fn clone(&self) -> Self {
-        Self {
-            blobs: self.blobs.clone(),
-            bounds: self.bounds.clone(),
-            items_per_blob: self.items_per_blob,
-            metrics: self.metrics.clone(),
-            _phantom: PhantomData,
-        }
-    }
-}
-
-/// See [`super::Probed`]: a probe over one fixed journal view. Missed positions complete via
-/// the direct read engine, skipping the page-cache pass they already missed.
-pub struct Probed<'a, E: Context, A: CodecFixedShared> {
-    reader: Reader<'a, E, A>,
-    items: Vec<Option<A>>,
-    misses: Vec<u64>,
-}
-
-impl<'a, E: Context, A: CodecFixedShared> Probed<'a, E, A> {
-    /// Probe `positions` (strictly increasing) against `reader`'s page cache.
-    fn probe(reader: Reader<'a, E, A>, positions: &[u64]) -> Self {
-        let items = reader.probe_items(positions);
-        let misses = positions
-            .iter()
-            .zip(&items)
-            .filter_map(|(&pos, item)| item.is_none().then_some(pos))
-            .collect();
-        Self {
-            reader,
-            items,
-            misses,
-        }
-    }
-}
-
-impl<E: Context, A: CodecFixedShared> super::Probed for Probed<'_, E, A> {
+impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     type Item = A;
-
-    fn items(&self) -> &[Option<A>] {
-        &self.items
-    }
-
-    fn merge(shards: Vec<Self>) -> Self {
-        let mut shards = shards.into_iter();
-        let mut merged = shards.next().expect("merge requires at least one probe");
-        for shard in shards {
-            merged.items.extend(shard.items);
-            merged.misses.extend(shard.misses);
-        }
-        merged
-    }
-
-    async fn fetch(self) -> Result<Vec<A>, Error> {
-        let Self {
-            reader,
-            items,
-            misses,
-        } = self;
-        let _timer = reader.metrics.read_many_timer();
-        reader.metrics.read_many_calls.inc();
-        if misses.is_empty() {
-            return Ok(items
-                .into_iter()
-                .map(|item| item.expect("complete probe has no misses"))
-                .collect());
-        }
-
-        let fetched = reader.read_many_inner(&misses).await?;
-        let mut fetched = fetched.into_iter();
-        Ok(items
-            .into_iter()
-            .map(|item| item.unwrap_or_else(|| fetched.next().expect("one fetched item per miss")))
-            .collect())
-    }
-
-    async fn fetch_missing(self) -> Result<(Vec<u64>, Vec<A>), Error> {
-        let Self {
-            reader,
-            items: _,
-            mut misses,
-        } = self;
-        let _timer = reader.metrics.read_many_timer();
-        reader.metrics.read_many_calls.inc();
-        if !misses.windows(2).all(|w| w[0] < w[1]) {
-            misses.sort_unstable();
-            misses.dedup();
-        }
-        let items = reader.read_many_inner(&misses).await?;
-        Ok((misses, items))
-    }
-}
-
-impl<'r, E: Context, A: CodecFixedShared> super::Contiguous for Reader<'r, E, A> {
-    type Item = A;
-
-    type Probed<'a>
-        = Probed<'r, E, A>
-    where
-        Self: 'a;
 
     fn bounds(&self) -> Range<u64> {
         self.bounds.clone()
@@ -1454,8 +1354,8 @@ impl<'r, E: Context, A: CodecFixedShared> super::Contiguous for Reader<'r, E, A>
         item
     }
 
-    fn try_read_many_sync(&self, positions: &[u64]) -> Self::Probed<'_> {
-        Probed::probe(self.clone(), positions)
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
+        self.probe_items(positions)
     }
 
     async fn replay(
@@ -1476,11 +1376,6 @@ impl<'r, E: Context, A: CodecFixedShared> super::Contiguous for Reader<'r, E, A>
 impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
-    type Probed<'a>
-        = Probed<'a, E, A>
-    where
-        Self: 'a;
-
     fn bounds(&self) -> Range<u64> {
         self.bounds.clone()
     }
@@ -1497,8 +1392,8 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         self.reader().try_read_sync(pos)
     }
 
-    fn try_read_many_sync(&self, positions: &[u64]) -> Self::Probed<'_> {
-        Probed::probe(self.reader(), positions)
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
+        self.reader().probe_items(positions)
     }
 
     async fn replay(
@@ -1576,7 +1471,7 @@ impl<E: Context, A: CodecFixedShared> authenticated::Inner<E> for Journal<E, A> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::{Contiguous as _, Probed as _};
+    use crate::journal::contiguous::Contiguous as _;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
@@ -4828,8 +4723,8 @@ mod tests {
             // Every synchronously served item must match the async read. Positions the
             // 3-page test cache cannot hold are misses, never wrong values.
             let served = reader.try_read_many_sync(&positions);
-            assert_eq!(served.items().len(), positions.len());
-            for (item, expected) in served.items().iter().zip(&expected) {
+            assert_eq!(served.len(), positions.len());
+            for (item, expected) in served.iter().zip(&expected) {
                 if let Some(item) = item {
                     assert_eq!(item, expected);
                 }
@@ -4840,7 +4735,7 @@ mod tests {
             let tail: Vec<u64> = (16..20).collect();
             reader.read_many(&tail).await.unwrap();
             let served = reader.try_read_many_sync(&tail);
-            for (item, pos) in served.items().iter().zip(&tail) {
+            for (item, pos) in served.iter().zip(&tail) {
                 assert_eq!(
                     item.as_ref().expect("warmed position is served"),
                     &expected[*pos as usize]
@@ -4848,13 +4743,13 @@ mod tests {
             }
 
             // A long-evicted position is a miss.
-            assert!(reader.try_read_many_sync(&[0]).items()[0].is_none());
+            assert!(reader.try_read_many_sync(&[0])[0].is_none());
 
             // An out-of-range position is a miss, not an error, and does not poison the
             // valid position grouped before it.
             let served = reader.try_read_many_sync(&[19, 20]);
-            assert!(served.items()[0].is_some());
-            assert!(served.items()[1].is_none());
+            assert!(served[0].is_some());
+            assert!(served[1].is_none());
             drop(served);
             drop(reader);
 
@@ -4865,8 +4760,8 @@ mod tests {
             let reader = journal.snapshot().await.unwrap();
             reader.read_many(&[17]).await.unwrap();
             let served = reader.try_read_many_sync(&[17, 18]);
-            assert!(served.items()[0].is_some());
-            assert!(served.items()[1].is_none());
+            assert!(served[0].is_some());
+            assert!(served[1].is_none());
             drop(served);
             drop(reader);
 
@@ -4876,8 +4771,8 @@ mod tests {
             let reader = journal.snapshot().await.unwrap();
             reader.read_many(&[9]).await.unwrap();
             let served = reader.try_read_many_sync(&[3, 9]);
-            assert!(served.items()[0].is_none());
-            assert!(served.items()[1].is_some());
+            assert!(served[0].is_none());
+            assert!(served[1].is_some());
             drop(served);
             drop(reader);
 
@@ -4886,9 +4781,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_probe_fetch_matches_read_many() {
-        // Completing a probe returns the same items as read_many, cold and warm, without
-        // re-probing the positions that missed.
+    fn test_probe_then_read_many_matches_read_many() {
+        // A probe completed by one batched read over its declined positions returns the same
+        // items as read_many, cold and warm.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(4));
@@ -4902,34 +4797,21 @@ mod tests {
             let positions: Vec<u64> = (0..20).collect();
             let reader = journal.snapshot().await.unwrap();
             let expected: Vec<_> = (0..20).map(test_digest).collect();
-            let cold = reader.try_read_many_sync(&positions).fetch().await.unwrap();
-            assert_eq!(cold, expected);
-            let read = reader.read_many(&positions).await.unwrap();
-            assert_eq!(cold, read);
-            let warm = reader.try_read_many_sync(&positions).fetch().await.unwrap();
-            assert_eq!(warm, expected);
-
-            // Probes of disjoint shards of one request merge into a single completion.
-            let (left, right) = positions.split_at(7);
-            let merged = Probed::merge(vec![
-                reader.try_read_many_sync(left),
-                reader.try_read_many_sync(right),
-            ]);
-            assert_eq!(merged.fetch().await.unwrap(), expected);
-
-            // Key-sharded probes may overlap in position space; fetch_missing reads each
-            // distinct missed position once.
-            let (missed_positions, missed) = Probed::merge(vec![
-                reader.try_read_many_sync(&[0, 5]),
-                reader.try_read_many_sync(&[5, 9]),
-            ])
-            .fetch_missing()
-            .await
-            .unwrap();
-            crate::journal::assert_positions_increasing(&missed_positions);
-            for (pos, item) in missed_positions.iter().zip(&missed) {
-                assert_eq!(item, &expected[*pos as usize]);
+            for _ in 0..2 {
+                let mut served = reader.try_read_many_sync(&positions);
+                let misses: Vec<u64> = positions
+                    .iter()
+                    .zip(&served)
+                    .filter_map(|(&pos, item)| item.is_none().then_some(pos))
+                    .collect();
+                let mut fetched = reader.read_many(&misses).await.unwrap().into_iter();
+                for item in served.iter_mut().filter(|item| item.is_none()) {
+                    *item = fetched.next();
+                }
+                let completed: Vec<_> = served.into_iter().map(Option::unwrap).collect();
+                assert_eq!(completed, expected);
             }
+            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
             drop(reader);
 
             journal.destroy().await.unwrap();

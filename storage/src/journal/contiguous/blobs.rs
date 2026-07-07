@@ -427,25 +427,6 @@ enum SealedBlobs<'a, B: RBlob> {
     Owned(Arc<[Sealed<B>]>),
 }
 
-impl<B: RBlob> Clone for SealedBlobs<'_, B> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Borrowed(sealed) => Self::Borrowed(sealed),
-            Self::Owned(sealed) => Self::Owned(Arc::clone(sealed)),
-        }
-    }
-}
-
-impl<B: RBlob> Clone for Blobs<'_, B> {
-    fn clone(&self) -> Self {
-        Self {
-            oldest_blob_index: self.oldest_blob_index,
-            sealed: self.sealed.clone(),
-            tail: self.tail.clone(),
-        }
-    }
-}
-
 impl<B: RBlob> SealedBlobs<'_, B> {
     fn as_slice(&self) -> &[Sealed<B>] {
         match self {

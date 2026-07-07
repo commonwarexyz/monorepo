@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, Many, Mutable, Probed},
+        contiguous::{fixed, variable, Contiguous, Many, Mutable},
         Error as JournalError,
     },
     merkle::{
@@ -720,11 +720,6 @@ where
 {
     type Item = C::Item;
 
-    type Probed<'a>
-        = C::Probed<'a>
-    where
-        Self: 'a;
-
     fn bounds(&self) -> Range<u64> {
         self.journal.bounds()
     }
@@ -749,27 +744,45 @@ where
         crate::journal::assert_positions_increasing(positions);
         let strategy = self.strategy();
         let journal = &self.journal;
-        let probed = strategy.run(
+        let mut items = strategy.run(
             positions.len(),
             || journal.try_read_many_sync(positions),
             || {
                 let manual = strategy.manual();
                 let shard = positions.len().div_ceil(manual.parallelism_hint());
-                Probed::merge(
-                    manual.map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
+                let shards = manual
+                    .map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
                         journal.try_read_many_sync(shard)
-                    }),
-                )
+                    });
+                shards.into_iter().flatten().collect()
             },
         );
-        probed.fetch().await
+
+        // The declined positions are a strictly increasing subsequence of `positions`, so one
+        // batched read serves them all.
+        let misses: Vec<u64> = positions
+            .iter()
+            .zip(&items)
+            .filter_map(|(&position, item)| item.is_none().then_some(position))
+            .collect();
+        if !misses.is_empty() {
+            let fetched = journal.read_many(&misses).await?;
+            let mut fetched = fetched.into_iter();
+            for item in items.iter_mut().filter(|item| item.is_none()) {
+                *item = Some(fetched.next().expect("one fetched item per miss"));
+            }
+        }
+        Ok(items
+            .into_iter()
+            .map(|item| item.expect("every slot is served or fetched"))
+            .collect())
     }
 
     fn try_read_sync(&self, position: u64) -> Option<C::Item> {
         self.journal.try_read_sync(position)
     }
 
-    fn try_read_many_sync(&self, positions: &[u64]) -> Self::Probed<'_> {
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<C::Item>> {
         self.journal.try_read_many_sync(positions)
     }
 

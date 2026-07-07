@@ -38,19 +38,16 @@ pub(super) struct Metrics<E: Clock> {
     pub read_calls: Counter,
     /// Duration of single-item read calls that miss the page cache.
     read_duration: Timed,
-    /// Non-empty batch async read calls (`read_many` and probe completion via `Probed::fetch`
-    /// or `Probed::fetch_missing`).
+    /// Non-empty batch async read calls.
     pub read_many_calls: Counter,
     /// Duration of non-empty batch read calls.
     read_many_duration: Timed,
     /// Items read without async storage fallback.
     pub cache_hits: Counter,
-    /// Items that fell back to a blob read in `read`, `read_many`, and probe completion
-    /// (`Probed::fetch` and `Probed::fetch_missing`). Declined probes (`try_read_sync` and
-    /// `try_read_many_sync`) count hits only, never misses.
+    /// Items that fell back to a blob read in `read` and `read_many`. Declined probes
+    /// (`try_read_sync` and `try_read_many_sync`) count hits only, never misses.
     pub cache_misses: Counter,
-    /// Items returned by read, read_many, try_read_many_sync, try_read_sync, and probe
-    /// completion. Probes count their sync hits and completion counts the fetched misses.
+    /// Items returned by read, read_many, try_read_sync, and try_read_many_sync.
     pub items_read: Counter,
     /// Durable commit calls that do not fully sync all indexes.
     pub commit_calls: Counter,
@@ -113,7 +110,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             cache_misses: context.counter("cache_misses", "Number of items requiring a blob read"),
             items_read: context.counter(
                 "items_read",
-                "Number of items returned by point reads, batch reads, sync probes, and probe completion",
+                "Number of items returned by point reads, batch reads, and sync probes",
             ),
             commit_calls: context.counter("commit_calls", "Number of commit calls"),
             commit_duration: Timed::register(&context, "commit_duration", "Duration of commit calls"),
