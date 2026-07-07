@@ -7,9 +7,11 @@
 //!
 //! [Writer::snapshot] captures a logical read view without consuming the writer.
 //!
-//! # Seal
+//! # Roll
 //!
-//! [Writer::seal] consumes the writer and turns it into an immutable [super::Sealed] view.
+//! [Writer::roll] flushes the writer, replaces it with a successor, and returns an immutable
+//! [super::Sealed] view of the just-flushed contents. [Writer::snapshot] and [Writer::roll]
+//! both flush first, so a [super::Sealed] view is always backed entirely by written bytes.
 //!
 //! # Paging
 //!
@@ -1091,7 +1093,8 @@ impl<B: Blob> Writer<B> {
         self.id
     }
 
-    /// Construct an immutable read handle for the current blob state.
+    /// Construct an immutable read handle for the current blob state. Callers must flush first
+    /// so every byte of the view is on the blob.
     fn sealed_handle(&self, id: u64) -> super::Sealed<B> {
         let logical_page_size = self.cache_ref.page_size();
         let full_pages = self.current_page;
@@ -1114,16 +1117,19 @@ impl<B: Blob> Writer<B> {
         )
     }
 
-    /// Consume the write handle and return an immutable [`super::Sealed`] handle for the same
-    /// blob.
+    /// Flush this writer, replace it with `successor`, and return an immutable
+    /// [`super::Sealed`] view of the just-flushed contents.
     ///
-    /// Buffered bytes (full and partial pages) are written to the underlying blob, but the blob is
-    /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
-    /// [`super::Sealed::sync`].
-    pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
+    /// The sealed bytes are written to the blob but not durable; call [`super::Sealed::sync`]
+    /// (or [`Self::sync`] beforehand) if they must survive a crash.
+    pub async fn roll(&mut self, successor: Self) -> Result<super::Sealed<B>, Error> {
+        // Resolve any outstanding start_sync barrier before consuming this writer: its
+        // completion is the only witness of an in-flight fsync failure, and a flush with
+        // nothing to write would not wait on it.
         self.sync_state.wait_for_pending().await?;
         self.flush_internal(true, false).await?;
-        Ok(self.sealed_handle(self.id))
+        let old = std::mem::replace(self, successor);
+        Ok(old.sealed_handle(old.id))
     }
 }
 
@@ -1133,7 +1139,7 @@ mod tests {
     use crate::{
         buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
         deterministic,
-        mocks::{next_pending_sync, DelayedSyncBlob},
+        mocks::{fail_pending_syncs, next_pending_sync, DelayedSyncBlob},
         telemetry::metrics::Registry,
         Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
@@ -2327,35 +2333,41 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    // Verifies seal cannot flush buffered bytes before pending start_sync finishes.
-    fn test_seal_waits_for_outstanding_start_sync_before_flushing() {
+    // Verifies roll cannot flush buffered bytes before pending start_sync finishes.
+    fn test_roll_waits_for_outstanding_start_sync_before_flushing() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
 
             let prior = writer.start_sync().await;
             let deferred = next_pending_sync(&pending);
             writer.append(b"hello world").await.unwrap();
 
-            let seal = context
-                .child("seal")
-                .spawn(move |_| async move { writer.seal().await });
-            // The seal has reached the pending sync wait.
+            let (succ_blob, _succ_pending) = DelayedSyncBlob::new(SyncTrackingBlob::new());
+            let successor = Writer::new(succ_blob, 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let roll = context
+                .child("roll")
+                .spawn(move |_| async move { writer.roll(successor).await });
+            // The roll has reached the pending sync wait.
             deferred
                 .blocked
                 .await
-                .expect("seal never waited on start_sync");
+                .expect("roll never waited on start_sync");
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 0);
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
 
-            // Release the started sync so seal can flush.
+            // Release the started sync so roll can flush.
             deferred.release.send(Ok(())).unwrap();
-            let sealed = seal.await.unwrap().unwrap();
+            let sealed = roll.await.unwrap().unwrap();
             prior.await.unwrap();
             let read = sealed
                 .read_at(0, b"hello world".len())
@@ -4960,6 +4972,118 @@ mod tests {
                 .unwrap()
                 .coalesce();
             assert_eq!(read.as_ref(), &data[..new_size as usize]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies roll flushes the writer, seals its contents, and installs the successor.
+    fn test_roll_flushes_and_seals() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            writer.append(b"hello world").await.unwrap();
+
+            let succ_blob = SyncTrackingBlob::new();
+            let successor = Writer::new(succ_blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let sealed = writer.roll(successor).await.unwrap();
+
+            let read = sealed
+                .read_at(0, b"hello world".len())
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), b"hello world");
+
+            sealed.sync().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            // The writer continues on the successor's blob.
+            writer.append(b"next").await.unwrap();
+            writer.sync().await.unwrap();
+            let (_, succ_writes, _, _) = succ_blob.snapshot();
+            assert_eq!(succ_writes, 1);
+            assert_eq!(writer.size(), 4);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies roll surfaces a pending start_sync failure instead of dropping its completion
+    // with the consumed writer.
+    fn test_roll_surfaces_pending_sync_failure() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, pending) = DelayedSyncBlob::new(SyncTrackingBlob::new());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // Begin an fsync, then fail it while it is still pending.
+            let prior = writer.start_sync().await;
+            fail_pending_syncs(&pending);
+
+            // Nothing is buffered, so only the barrier wait can surface the failure.
+            let (succ_blob, _) = DelayedSyncBlob::new(SyncTrackingBlob::new());
+            let successor = Writer::new(succ_blob, 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert!(writer.roll(successor).await.is_err());
+            assert!(prior.await.is_err());
+        });
+    }
+
+    #[test_traced]
+    // Dropping a roll future mid-flush leaves the writer installed and retryable.
+    fn test_roll_cancelled_mid_flush() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, size) = context
+                .open("test_partition", b"roll_cancel")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            writer.append(b"hello world").await.unwrap();
+
+            // Park the flush write inside roll, then drop the future. The successor writer
+            // dies with it; the rolled writer must survive untouched.
+            let faults = context.storage_fault_config();
+            faults.write().stall_write = Some(("test_partition".into(), b"roll_cancel".to_vec()));
+            {
+                let (succ, succ_size) = context.open("test_partition", b"succ1").await.unwrap();
+                let successor = Writer::new(succ, succ_size, BUFFER_SIZE, cache_ref.clone())
+                    .await
+                    .unwrap();
+                let fut = writer.roll(successor);
+                futures::pin_mut!(fut);
+                assert!(futures::poll!(&mut fut).is_pending());
+            }
+            assert!(
+                faults.read().stall_write.is_none(),
+                "roll did not park at the flush"
+            );
+
+            // The writer is intact and a retried roll seals every appended byte.
+            assert_eq!(writer.size(), 11);
+            let (succ, succ_size) = context.open("test_partition", b"succ2").await.unwrap();
+            let successor = Writer::new(succ, succ_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let sealed = writer.roll(successor).await.unwrap();
+            assert_eq!(sealed.size(), 11);
+            let read = sealed.read_at(0, 11).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello world");
         });
     }
 }

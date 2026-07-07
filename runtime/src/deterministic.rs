@@ -298,7 +298,7 @@ impl Config {
     /// When set, the runtime will inject deterministic storage errors based on
     /// the provided configuration. Faults are drawn from the shared RNG, ensuring
     /// reproducible failure patterns for a given seed.
-    pub const fn with_storage_fault_config(mut self, faults: FaultConfig) -> Self {
+    pub fn with_storage_fault_config(mut self, faults: FaultConfig) -> Self {
         self.storage_fault_cfg = faults;
         self
     }

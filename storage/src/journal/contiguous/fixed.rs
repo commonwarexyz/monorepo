@@ -935,6 +935,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             .checked_add(items_count as u64)
             .ok_or(Error::SizeOverflow)?;
 
+        // A dropped append can leave a full tail unsealed with bounds already advanced; seal it
+        // before appending more.
+        if super::position_to_blob(self.bounds.end, self.items_per_blob.get())
+            > self.blobs.tail_blob_index()
+        {
+            self.blobs.seal_tail().await?;
+        }
+
         let first_dirty_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
         self.mark_dirty_from(first_dirty_blob);
         let mut written = 0;
@@ -1037,10 +1045,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// event of failure as items are always pruned in order from oldest to newest.
     pub async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
         // Calculate the blob that would contain min_item_pos, capped to the tail (which is
-        // guaranteed to exist by our invariant).
+        // guaranteed to exist by our invariant). The cap comes from the blob map, not
+        // `bounds.end`: after an interrupted rollover the tail is a full blob that `bounds.end`
+        // already lies past, and it must not be pruned.
         let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
-        let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
-        let min_blob = std::cmp::min(target_blob, tail_blob);
+        let min_blob = std::cmp::min(target_blob, self.blobs.tail_blob_index());
 
         if min_blob <= self.blobs.oldest_blob_index() {
             return Ok(false);
@@ -4989,5 +4998,211 @@ mod tests {
 
             journal.destroy().await.unwrap();
         });
+    }
+
+    /// Cancel a boundary-crossing append at the successor open inside `seal_tail`, then verify
+    /// the journal stays consistent, appendable, and recoverable.
+    #[test_traced]
+    fn test_append_cancelled_at_seal_tail_open() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(1));
+            cfg.partition = "cancel-seal-open".into();
+            let faults = context.storage_fault_config();
+            faults.write().stall_open = Some((blob_partition(&cfg), 1u64.to_be_bytes().to_vec()));
+
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            let items = [test_digest(0), test_digest(1)];
+
+            // With one item per blob, the append fills blob 0 and enters seal_tail, which
+            // flushes the tail and then parks opening blob 1. Dropping the parked future
+            // cancels the rollover mid-flight.
+            {
+                let fut = journal.append(&items[0]);
+                pin_mut!(fut);
+                assert!(futures::poll!(&mut fut).is_pending());
+            }
+            assert!(
+                faults.read().stall_open.is_none(),
+                "append did not park at the successor open"
+            );
+
+            // The tail is still blob 0 and the claimed item remains readable.
+            assert_eq!(journal.bounds(), 0..1);
+            assert_eq!(journal.test_newest_blob(), Some(0));
+            assert_eq!(journal.read(0).await.unwrap(), items[0]);
+
+            // The next append retries the interrupted rollover first.
+            journal.append(&items[1]).await.unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read(0).await.unwrap(), items[0]);
+            assert_eq!(journal.read(1).await.unwrap(), items[1]);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read(0).await.unwrap(), items[0]);
+            assert_eq!(journal.read(1).await.unwrap(), items[1]);
+        });
+    }
+
+    /// Cancel a boundary-crossing append at the tail flush write inside `seal_tail`, then verify
+    /// the live handle stays consistent and appendable. Reopen is NOT asserted here: the paged
+    /// writer publishes flush state before awaiting its write, so the retried rollover's flush
+    /// is a no-op and the tip page is not durable after this cancellation until the writer-level
+    /// cancel-safety work lands (#4160/#4161).
+    #[test_traced]
+    fn test_append_cancelled_at_seal_tail_flush() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(1));
+            cfg.partition = "cancel-seal-flush".into();
+            let faults = context.storage_fault_config();
+            faults.write().stall_write = Some((blob_partition(&cfg), 0u64.to_be_bytes().to_vec()));
+
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            let items = [test_digest(0), test_digest(1)];
+
+            // The append is buffered, so the first write to blob 0 is the tail flush inside
+            // seal_tail. Dropping the parked future cancels the rollover mid-flush.
+            {
+                let fut = journal.append(&items[0]);
+                pin_mut!(fut);
+                assert!(futures::poll!(&mut fut).is_pending());
+            }
+            assert!(
+                faults.read().stall_write.is_none(),
+                "append did not park at the tail flush"
+            );
+
+            // The tail is still blob 0 and the claimed item remains readable.
+            assert_eq!(journal.bounds(), 0..1);
+            assert_eq!(journal.test_newest_blob(), Some(0));
+            assert_eq!(journal.read(0).await.unwrap(), items[0]);
+
+            // The next append retries the interrupted rollover first.
+            journal.append(&items[1]).await.unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read(0).await.unwrap(), items[0]);
+            assert_eq!(journal.read(1).await.unwrap(), items[1]);
+            journal.sync().await.unwrap();
+        });
+    }
+
+    /// Prune during a pending rollover must not panic and must not remove the still-installed
+    /// full tail; after the rollover completes, a retried prune removes it.
+    #[test_traced]
+    fn test_prune_during_pending_rollover() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(1));
+            cfg.partition = "cancel-seal-prune".into();
+            let faults = context.storage_fault_config();
+            faults.write().stall_write = Some((blob_partition(&cfg), 0u64.to_be_bytes().to_vec()));
+
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            let items = [test_digest(0), test_digest(1)];
+            {
+                let fut = journal.append(&items[0]);
+                pin_mut!(fut);
+                assert!(futures::poll!(&mut fut).is_pending());
+            }
+            assert!(
+                faults.read().stall_write.is_none(),
+                "append did not park at the tail flush"
+            );
+
+            // Blob 0 is a full unsealed tail; pruning must decline to remove it.
+            assert!(!journal.prune(1).await.unwrap());
+            assert_eq!(journal.read(0).await.unwrap(), items[0]);
+
+            // After the rollover completes, blob 0 is sealed history and can be pruned.
+            journal.append(&items[1]).await.unwrap();
+            assert!(journal.prune(1).await.unwrap());
+            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(0))));
+            assert_eq!(journal.read(1).await.unwrap(), items[1]);
+        });
+    }
+
+    /// Rewind during a pending rollover must shrink the still-installed tail like any other
+    /// unsealed writer.
+    #[test_traced]
+    fn test_rewind_during_pending_rollover() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(1));
+            cfg.partition = "cancel-seal-rewind".into();
+            let faults = context.storage_fault_config();
+            faults.write().stall_write = Some((blob_partition(&cfg), 0u64.to_be_bytes().to_vec()));
+
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            let items = [test_digest(0), test_digest(1)];
+            {
+                let fut = journal.append(&items[0]);
+                pin_mut!(fut);
+                assert!(futures::poll!(&mut fut).is_pending());
+            }
+            assert!(
+                faults.read().stall_write.is_none(),
+                "append did not park at the tail flush"
+            );
+
+            // The full unsealed tail shrinks in place.
+            journal.rewind(0).await.unwrap();
+            assert_eq!(journal.bounds(), 0..0);
+
+            // The journal accepts new appends after the rewind.
+            journal.append(&items[1]).await.unwrap();
+            assert_eq!(journal.bounds(), 0..1);
+            assert_eq!(journal.read(0).await.unwrap(), items[1]);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..1);
+            assert_eq!(journal.read(0).await.unwrap(), items[1]);
+        });
+    }
+
+    /// A cancelled rollover followed by recovery appends must be deterministic.
+    #[test_traced]
+    fn test_append_cancelled_at_seal_tail_flush_is_deterministic() {
+        fn run(seed: u64) -> String {
+            let executor = deterministic::Runner::seeded(seed);
+            executor.start(|context| async move {
+                let mut cfg = test_cfg(&context, NZU64!(1));
+                cfg.partition = "cancel-seal-determinism".into();
+                context.storage_fault_config().write().stall_write =
+                    Some((blob_partition(&cfg), 0u64.to_be_bytes().to_vec()));
+
+                let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                let items = [test_digest(0), test_digest(1)];
+                {
+                    let fut = journal.append(&items[0]);
+                    pin_mut!(fut);
+                    assert!(futures::poll!(&mut fut).is_pending());
+                }
+                journal.append(&items[1]).await.unwrap();
+                journal.sync().await.unwrap();
+                context.auditor().state()
+            })
+        }
+
+        assert_eq!(run(7), run(7));
     }
 }

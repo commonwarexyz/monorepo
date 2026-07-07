@@ -226,7 +226,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
     }
 
     /// Enable deterministic storage fault injection for the simulation.
-    pub const fn with_storage_fault(mut self, faults: deterministic::FaultConfig) -> Self {
+    pub fn with_storage_fault(mut self, faults: deterministic::FaultConfig) -> Self {
         self.storage_fault = Some(faults);
         self
     }

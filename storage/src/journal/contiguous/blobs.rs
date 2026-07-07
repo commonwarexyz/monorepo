@@ -176,7 +176,7 @@ impl<E: Context> Writable<E> {
         let mut sealed = Vec::with_capacity(pending.len());
         let mut tail: Option<Writer<E::Blob>> = None;
         let mut expected = oldest;
-        for (blob, writer) in pending {
+        for (blob, mut writer) in pending {
             if expected != Some(blob) {
                 return Err(Error::Corruption(format!(
                     "retained blobs must be contiguous (expected {expected:?}, got {blob})"
@@ -186,7 +186,9 @@ impl<E: Context> Writable<E> {
             if blob == tail_blob {
                 tail = Some(writer);
             } else {
-                sealed.push(writer.seal().await.map_err(Error::Runtime)?);
+                // Seal the recovered writer; the flush is a no-op because recovery already
+                // wrote back any repairs.
+                sealed.push(writer.snapshot().await.map_err(Error::Runtime)?);
             }
         }
         let tail = match tail {
@@ -257,6 +259,10 @@ impl<E: Context> Writable<E> {
     }
 
     /// Seal the tail (no fsync) and open the next blob as the new tail.
+    ///
+    /// Cancellation-safe: a dropped future leaves the current tail installed and unsealed,
+    /// and a later append retries the rollover; the swap and the sealed-list update are
+    /// synchronous.
     pub(super) async fn seal_tail(&mut self) -> Result<(), Error> {
         // Open the next tail first so a failure leaves the current tail untouched.
         let next_blob = self
@@ -264,8 +270,9 @@ impl<E: Context> Writable<E> {
             .checked_add(1)
             .ok_or(Error::OffsetOverflow)?;
         let new_writer = self.partition.open(next_blob).await?;
-        let old_writer = std::mem::replace(&mut self.tail, new_writer);
-        let sealed = old_writer.seal().await.map_err(Error::Runtime)?;
+
+        // Dirty tracking covers the sealed blob until commit/sync.
+        let sealed = self.tail.roll(new_writer).await.map_err(Error::Runtime)?;
         self.metrics.tracked.inc();
         self.sealed.push(sealed);
         self.sealed_snapshot = None;
@@ -829,7 +836,7 @@ mod tests {
                 0
             );
 
-            let sealed = writer.seal().await.unwrap();
+            let sealed = writer.snapshot().await.unwrap();
             let sealed_blob = Blob::Sealed(sealed);
             assert_insufficient_length(
                 sealed_blob

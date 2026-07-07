@@ -3,11 +3,10 @@
 //!
 //! # Sealing and durability
 //!
-//! [`super::Writer::seal`] consumes the write handle and returns a [`Sealed`] handle without
-//! fsyncing the underlying blob. Buffered logical bytes are flushed to the blob (so subsequent
-//! reads observe them), but a crash before [`Sealed::sync`] may lose the most recently sealed
-//! bytes. Callers that need durability must invoke [`Sealed::sync`] (typically driven from a
-//! higher-level commit path).
+//! A [`Sealed`] is created by [`super::Writer::snapshot`] or [`super::Writer::roll`], both of
+//! which flush first, so every byte of the view has been written to the blob. Sealing does
+//! not make bytes durable: call [`Sealed::sync`] (or sync the writer beforehand) if they must
+//! survive a crash.
 //!
 //! # Cheap sharing
 //!
@@ -51,14 +50,16 @@ struct SealedInner<B: Blob> {
     /// Reference to the page cache used for reads of full pages.
     cache_ref: CacheRef,
 
-    /// Page-cache id. [`super::Writer::seal`] preserves the writer id so hot full pages remain
+    /// Page-cache id. [`super::Writer::roll`] preserves the writer id so hot full pages remain
     /// valid across the transition. [`super::Writer::snapshot`] uses a fresh id because the writer
     /// can keep mutating its own cache namespace.
     id: u64,
 }
 
 impl<B: Blob> Sealed<B> {
-    /// Construct a [`Sealed`] from already-validated parts. Invoked by [`super::Writer::seal`].
+    /// Construct a [`Sealed`] from already-validated parts. Invoked by
+    /// [`super::Writer::snapshot`] and [`super::Writer::roll`], which flush before constructing
+    /// the view.
     pub(super) fn new(
         blob: B,
         size: u64,
@@ -196,7 +197,7 @@ impl<B: Blob> Sealed<B> {
     }
 
     /// Page-cache id used for reads. Exposed for tests that verify the id is preserved across
-    /// [`super::Writer::seal`].
+    /// [`super::Writer::roll`].
     #[cfg(test)]
     pub(super) fn cache_id(&self) -> u64 {
         self.inner.id
@@ -216,48 +217,45 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky page size to test alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
 
-    /// Seal a [Writer] and assert no fsync (full or range) occurred during the seal itself.
+    /// Roll a synced [Writer] and assert it performs no I/O on the old blob.
     #[test_traced("DEBUG")]
-    fn test_seal_no_fsync() {
+    fn test_roll_after_sync_performs_no_io() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
-            // Append some data crossing several pages but don't sync.
+            // Append some data crossing several pages, then sync it.
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
             append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
 
-            let (_durable_before, _writes_before, full_before, range_before) = blob.snapshot();
-
-            // Seal -- this must flush logical bytes to the blob but NOT fsync.
-            let sealed = append.seal().await.unwrap();
-
-            let (_durable_after, _writes_after, full_after, range_after) = blob.snapshot();
-            assert_eq!(full_after, full_before, "seal must not invoke Blob::sync");
-            assert_eq!(
-                range_after, range_before,
-                "seal must not invoke Blob::write_at_sync"
-            );
+            // Rolling a synced writer has nothing left to flush: no writes, no syncs.
+            let successor = Writer::new(SyncTrackingBlob::new(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let before = blob.snapshot();
+            let sealed = append.roll(successor).await.unwrap();
+            assert_eq!(blob.snapshot(), before, "roll must not touch a synced blob");
 
             assert_eq!(sealed.size(), 300);
         });
     }
 
-    /// Sealing consumes the unique write handle; outstanding readers remain valid and agree
+    /// Rolling replaces the unique write handle; outstanding readers remain valid and agree
     /// with the sealed view.
     #[test_traced("DEBUG")]
-    fn test_seal_succeeds_with_readers() {
+    fn test_roll_succeeds_with_readers() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"readers").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             writer.append(b"hello world").await.unwrap();
@@ -267,8 +265,12 @@ mod tests {
             let reader_clone = reader.clone();
             assert_eq!(reader.size(), 11);
 
-            // Seal succeeds while snapshots exist.
-            let sealed = writer.seal().await.unwrap();
+            // Rolling succeeds while snapshots exist.
+            let (succ, succ_size) = context.open("test_partition", b"readers2").await.unwrap();
+            let successor = Writer::new(succ, succ_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let sealed = writer.roll(successor).await.unwrap();
             assert_eq!(sealed.size(), 11);
 
             // Both snapshot handles keep reading the frozen state and agree with the sealed view.
@@ -301,7 +303,7 @@ mod tests {
             writer.append(&data).await.unwrap();
 
             let reader = writer.snapshot().await.unwrap();
-            let sealed = writer.seal().await.unwrap();
+            let sealed = writer.snapshot().await.unwrap();
             assert_eq!(reader.size(), total as u64);
 
             // Full range, a page-straddling range, and the partial page, each compared
@@ -335,10 +337,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Write data with no fsync.
+            // Snapshot flushes without fsyncing.
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
             append.append(&data).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             let (durable_before, _, full_before, _) = blob.snapshot();
             assert!(
@@ -361,35 +363,40 @@ mod tests {
         });
     }
 
-    /// Sealing preserves the originating [Writer]'s page-cache id.
+    /// Rolling preserves the originating [Writer]'s page-cache id.
     #[test_traced("DEBUG")]
-    fn test_seal_preserves_cache_id() {
+    fn test_roll_preserves_cache_id() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"cache_id").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             let append_id = append.cache_id();
-            let sealed = append.seal().await.unwrap();
+            let (succ, succ_size) = context.open("test_partition", b"cache_id2").await.unwrap();
+            let successor = Writer::new(succ, succ_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let sealed = append.roll(successor).await.unwrap();
+
             assert_eq!(sealed.cache_id(), append_id);
         });
     }
 
     /// Sealing an empty blob yields an empty sealed view.
     #[test_traced("DEBUG")]
-    fn test_seal_empty_blob() {
+    fn test_sealed_empty_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"empty").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             assert_eq!(sealed.size(), 0);
 
@@ -400,9 +407,9 @@ mod tests {
         });
     }
 
-    /// Sealing a blob whose size is exactly a page-multiple has no partial page.
+    /// A sealed view of a blob whose size is exactly a page-multiple has no partial page.
     #[test_traced("DEBUG")]
-    fn test_seal_full_pages_only() {
+    fn test_sealed_full_pages_only() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"full").await.unwrap();
@@ -416,7 +423,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 2).collect();
             append.append(&data).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             assert_eq!(sealed.size(), data.len() as u64);
 
@@ -427,9 +434,9 @@ mod tests {
         });
     }
 
-    /// Sealing a blob whose size is smaller than one page yields only a partial page.
+    /// A sealed view of a blob whose size is smaller than one page has only a partial page.
     #[test_traced("DEBUG")]
-    fn test_seal_partial_only() {
+    fn test_sealed_partial_only() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"partial").await.unwrap();
@@ -442,7 +449,7 @@ mod tests {
             // Append fewer than one page of data.
             let data: Vec<u8> = (0u8..=50).collect();
             append.append(&data).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             assert_eq!(sealed.size(), data.len() as u64);
 
@@ -454,7 +461,7 @@ mod tests {
 
     /// Reads that straddle the partial-page boundary stitch together cache and partial bytes.
     #[test_traced("DEBUG")]
-    fn test_seal_full_plus_partial_straddle() {
+    fn test_sealed_full_plus_partial_straddle() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"straddle").await.unwrap();
@@ -469,7 +476,7 @@ mod tests {
             let total = page_size + 17;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
             append.append(&data).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             assert_eq!(sealed.size(), total as u64);
 
@@ -507,7 +514,7 @@ mod tests {
 
             let data: Vec<u8> = (0u8..=255).cycle().take(250).collect();
             append.append(&data).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             let bufs = sealed.read_at(0, data.len()).await.unwrap();
             let coalesced = bufs.coalesce();
@@ -532,7 +539,7 @@ mod tests {
             let total = page_size + 50;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
             append.append(&data).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             // 4-byte items at three positions: pure cache, straddling boundary, pure partial.
             let offsets = [0u64, (page_size - 2) as u64, (page_size + 10) as u64];
@@ -566,7 +573,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 2).collect();
             append.append(&data).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             let offsets = [0u64, page_size as u64];
             let item_size = 4usize;
@@ -596,7 +603,7 @@ mod tests {
                 .await
                 .unwrap();
             append.append(&[7; 32]).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             let mut out = vec![0u8; 8];
             let err = sealed
@@ -619,7 +626,7 @@ mod tests {
                 .await
                 .unwrap();
             append.append(&[7; 32]).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             let mut out = vec![0u8; 8];
             let err = sealed
@@ -655,7 +662,7 @@ mod tests {
             let total = page_size + 30;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
             append.append(&data).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             // Read fully within partial.
             let mut buf = vec![0u8; 10];
@@ -679,7 +686,7 @@ mod tests {
                 .unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -687,7 +694,14 @@ mod tests {
             let total = page_size + 30;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
             append.append(&data).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let (succ, succ_size) = context
+                .open("test_partition", b"trs_straddle2")
+                .await
+                .unwrap();
+            let successor = Writer::new(succ, succ_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let sealed = append.roll(successor).await.unwrap();
 
             let mut buf = vec![0u8; 12];
             assert!(sealed.try_read_sync((page_size - 4) as u64, &mut buf));
@@ -710,7 +724,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let data: Vec<u8> = (0u8..=255).cycle().take(page_size + 5).collect();
             append.append(&data).await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             let mut buf = vec![9u8; 10];
             assert!(!sealed.try_read_sync(data.len() as u64, &mut buf));
@@ -735,7 +749,7 @@ mod tests {
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
-            let sealed = append.seal().await.unwrap();
+            let sealed = append.snapshot().await.unwrap();
 
             let mut replay = sealed.replay(NZUsize!(BUFFER_SIZE)).unwrap();
             assert_eq!(replay.blob_size(), total as u64);
@@ -799,10 +813,10 @@ mod tests {
         });
     }
 
-    /// `Sealed::replay` works without a prior `Append::sync` because `Append::seal` writes bytes
+    /// `Sealed::replay` works without a prior sync because the snapshot flush writes bytes
     /// to the blob without fsyncing.
     #[test_traced("DEBUG")]
-    fn test_seal_replay_without_sync() {
+    fn test_snapshot_replay_without_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
@@ -816,13 +830,13 @@ mod tests {
             let total = page_size * 2 + 25;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
             append.append(&data).await.unwrap();
-            // Seal without a prior append sync.
-            let sealed = append.seal().await.unwrap();
+            // Snapshot flushes without fsyncing.
+            let sealed = append.snapshot().await.unwrap();
 
-            // Seal must not have fsynced.
+            // Nothing became durable.
             let (_durable, _writes, full_syncs, range_syncs) = blob.snapshot();
-            assert_eq!(full_syncs, 0, "seal must not invoke Blob::sync");
-            assert_eq!(range_syncs, 0, "seal must not invoke Blob::write_at_sync");
+            assert_eq!(full_syncs, 0, "flush must not fsync");
+            assert_eq!(range_syncs, 0, "flush must not invoke Blob::write_at_sync");
 
             // Replay must observe all bytes even though they were never fsynced.
             let mut replay = sealed.replay(NZUsize!(BUFFER_SIZE)).unwrap();
@@ -856,7 +870,7 @@ mod tests {
                     .await
                     .unwrap();
                 append.append(&data).await.unwrap();
-                let sealed = append.seal().await.unwrap();
+                let sealed = append.snapshot().await.unwrap();
                 sealed.sync().await.unwrap();
             }
 
@@ -872,7 +886,7 @@ mod tests {
 
     /// Sealing a recovered, already-synced partial page must not rewrite it.
     #[test_traced("DEBUG")]
-    fn test_seal_recovered_synced_partial_page_no_write() {
+    fn test_sealed_recovered_synced_partial_page_no_write() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
@@ -906,7 +920,7 @@ mod tests {
             assert_eq!(full_after_sync, full_syncs + 1);
             assert_eq!(range_after_sync, range_syncs);
 
-            let sealed = recovered.seal().await.unwrap();
+            let sealed = recovered.snapshot().await.unwrap();
             let (_, writes_after_seal, full_after_seal, range_after_seal) = blob.snapshot();
             assert_eq!(
                 writes_after_seal, writes_after_sync,

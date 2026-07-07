@@ -61,6 +61,14 @@ pub struct Config {
 
     /// Failure rate for `scan` operations.
     pub scan_rate: Option<f64>,
+
+    /// Blob (partition, name) whose next write parks forever, letting tests drop a future
+    /// mid-write. Cleared when it fires.
+    pub stall_write: Option<(String, Vec<u8>)>,
+
+    /// Blob (partition, name) whose next open parks forever (before any filesystem work),
+    /// letting tests drop a future mid-open. Cleared when it fires.
+    pub stall_open: Option<(String, Vec<u8>)>,
 }
 
 impl Config {
@@ -144,6 +152,32 @@ impl Oracle {
     /// Check if a fault should be injected for the given operation.
     fn should_fail(&self, op: Op) -> bool {
         self.roll(Some(self.config.read().rate_for(op)))
+    }
+
+    /// Park forever if a write stall targets this blob, clearing the stall first.
+    async fn stall_write(&self, partition: &str, name: &[u8]) {
+        let fired = self
+            .config
+            .write()
+            .stall_write
+            .take_if(|(p, n)| p == partition && n == name)
+            .is_some();
+        if fired {
+            futures::future::pending::<()>().await;
+        }
+    }
+
+    /// Park forever if an open stall targets this blob, clearing the stall first.
+    async fn stall_open(&self, partition: &str, name: &[u8]) {
+        let fired = self
+            .config
+            .write()
+            .stall_open
+            .take_if(|(p, n)| p == partition && n == name)
+            .is_some();
+        if fired {
+            futures::future::pending::<()>().await;
+        }
     }
 
     /// Check if a write fault should be injected. Returns (should_fail, partial_rate).
@@ -240,6 +274,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
+        self.ctx.stall_open(partition, name).await;
         if self.ctx.should_fail(Op::Open) {
             return Err(injected_io_error().into());
         }
@@ -247,7 +282,11 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             .open_versioned(partition, name, versions)
             .await
             .map(|(blob, len, blob_version)| {
-                (Blob::new(self.ctx.clone(), blob, len), len, blob_version)
+                (
+                    Blob::new(self.ctx.clone(), blob, len, partition, name),
+                    len,
+                    blob_version,
+                )
             })
     }
 
@@ -273,14 +312,19 @@ pub struct Blob<B: crate::Blob> {
     ctx: Oracle,
     /// Tracked size for partial resize support.
     size: Arc<AtomicU64>,
+    /// Identity for stall targeting.
+    partition: String,
+    name: Vec<u8>,
 }
 
 impl<B: crate::Blob> Blob<B> {
-    fn new(ctx: Oracle, inner: B, size: u64) -> Self {
+    fn new(ctx: Oracle, inner: B, size: u64, partition: &str, name: &[u8]) -> Self {
         Self {
             inner,
             ctx,
             size: Arc::new(AtomicU64::new(size)),
+            partition: partition.into(),
+            name: name.into(),
         }
     }
 }
@@ -306,6 +350,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.ctx.stall_write(&self.partition, &self.name).await;
         let bufs = bufs.into();
         let total_bytes = bufs.remaining() as u64;
 
@@ -335,6 +380,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
+        self.ctx.stall_write(&self.partition, &self.name).await;
         let bufs = bufs.into();
         let total_bytes = bufs.remaining() as u64;
         if total_bytes == 0 {

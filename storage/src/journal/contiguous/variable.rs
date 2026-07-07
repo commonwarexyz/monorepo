@@ -1196,6 +1196,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             .ok_or(Error::SizeOverflow)?;
 
         let items_per_blob = self.items_per_blob.get();
+
+        // A dropped append can leave a full tail unsealed with bounds already advanced; seal it
+        // before appending more.
+        if position_to_blob(self.bounds.end, items_per_blob) > self.blobs.tail_blob_index() {
+            self.blobs.seal_tail().await?;
+        }
+
         self.mark_dirty_from(position_to_blob(self.bounds.end, items_per_blob));
         let mut written = 0;
         while written < items_count {
@@ -1301,10 +1308,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let items_per_blob = self.items_per_blob.get();
 
         // Calculate the blob that would contain min_position, capped to the tail (which is
-        // guaranteed to exist by our invariant).
+        // guaranteed to exist by our invariant). The cap comes from the blob map, not
+        // `bounds.end`: after an interrupted rollover the tail is a full blob that `bounds.end`
+        // already lies past, and it must not be pruned.
         let target_blob = position_to_blob(min_position, items_per_blob);
-        let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
-        let min_blob = target_blob.min(tail_blob);
+        let min_blob = target_blob.min(self.blobs.tail_blob_index());
 
         if min_blob <= self.blobs.oldest_blob_index() {
             return Ok(false);
@@ -2036,7 +2044,7 @@ mod tests {
         deterministic, Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-    use futures::{FutureExt as _, StreamExt as _};
+    use futures::{pin_mut, FutureExt as _, StreamExt as _};
     use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
@@ -6661,6 +6669,63 @@ mod tests {
 
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// Cancel a boundary-crossing append at the successor open inside `seal_tail`, then verify
+    /// the journal stays consistent, appendable, and recoverable.
+    #[test_traced]
+    fn test_variable_append_cancelled_at_seal_tail_open() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "cancel-seal-open-variable".into(),
+                items_per_section: NZU64!(1),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                write_buffer: NZUsize!(1024),
+            };
+            let faults = context.storage_fault_config();
+            faults.write().stall_open = Some((cfg.data_partition(), 1u64.to_be_bytes().to_vec()));
+
+            let mut journal =
+                Journal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            let items = [FixedBytes::new([1; 32]), FixedBytes::new([2; 32])];
+
+            // With one item per section, the append fills data blob 0 and enters seal_tail,
+            // which flushes the tail and then parks opening blob 1. Dropping the parked future
+            // cancels the rollover mid-flight.
+            {
+                let fut = journal.append(&items[0]);
+                pin_mut!(fut);
+                assert!(futures::poll!(&mut fut).is_pending());
+            }
+            assert!(
+                faults.read().stall_open.is_none(),
+                "append did not park at the successor open"
+            );
+
+            // The tail is still blob 0 and the claimed item remains readable.
+            assert_eq!(journal.bounds(), 0..1);
+            assert_eq!(journal.read(0).await.unwrap(), items[0]);
+
+            // The next append retries the interrupted rollover first.
+            journal.append(&items[1]).await.unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read(0).await.unwrap(), items[0]);
+            assert_eq!(journal.read(1).await.unwrap(), items[1]);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, FixedBytes<32>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read(0).await.unwrap(), items[0]);
+            assert_eq!(journal.read(1).await.unwrap(), items[1]);
         });
     }
 }
