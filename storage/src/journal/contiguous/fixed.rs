@@ -1169,10 +1169,11 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok((blob, offsets))
     }
 
-    /// Shared body of [`super::Contiguous::read_many`] and [`Self::fetch_misses`]:
-    /// `cache_pass` controls the dedicated page-cache pass on each blob group (skipped for
-    /// positions that just missed a probe).
-    async fn read_many_impl(&self, positions: &[u64], cache_pass: bool) -> Result<Vec<A>, Error> {
+    /// Shared body of [`super::Contiguous::read_many`] and probe completion; the callers
+    /// record the batch-read metrics ([`super::Contiguous::read_many`] directly, completion at
+    /// the [`super::Probed`] verbs), so routing completion through `read_many` would count
+    /// every batch twice.
+    pub(super) async fn read_many_inner(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
@@ -1207,13 +1208,8 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             let (buf, rest) = remaining_buf.split_at_mut(group.len() * chunk_size);
             remaining_buf = rest;
             reads.push(async move {
-                if cache_pass {
-                    blob.read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
-                        .await
-                } else {
-                    blob.read_direct_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
-                        .await
-                }
+                blob.read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+                    .await
             });
         }
         let hits: u64 = try_join_all(reads)
@@ -1245,13 +1241,6 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .get(blob)
             .expect("position in bounds maps to a retained blob");
         Ok((blob, offset))
-    }
-
-    /// Read strictly increasing `positions` without the dedicated page-cache pass. The probe
-    /// completion engine: intended for positions that just missed a probe (of this journal or,
-    /// for the variable journal's offsets, an enclosing one).
-    pub(super) async fn fetch_misses(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
-        self.read_many_impl(positions, false).await
     }
 
     /// Probe `positions` (strictly increasing) against the page cache, returning one slot per
@@ -1305,12 +1294,9 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                     misses.next();
                     continue;
                 }
-                // A decode failure surfaces as a miss. The async completion read
-                // reports the error.
-                if let Ok(item) = A::decode(slice) {
-                    out[base + idx] = Some(item);
-                    hits += 1;
-                }
+                let item = A::decode(slice).expect("cached item must decode");
+                out[base + idx] = Some(item);
+                hits += 1;
             }
         }
         self.metrics.record_cache_hits(hits);
@@ -1388,7 +1374,7 @@ impl<E: Context, A: CodecFixedShared> super::Probed for Probed<'_, E, A> {
                 .collect());
         }
 
-        let fetched = reader.fetch_misses(&misses).await?;
+        let fetched = reader.read_many_inner(&misses).await?;
         let mut fetched = fetched.into_iter();
         Ok(items
             .into_iter()
@@ -1408,7 +1394,7 @@ impl<E: Context, A: CodecFixedShared> super::Probed for Probed<'_, E, A> {
             misses.sort_unstable();
             misses.dedup();
         }
-        let items = reader.fetch_misses(&misses).await?;
+        let items = reader.read_many_inner(&misses).await?;
         Ok((misses, items))
     }
 }
@@ -1448,7 +1434,7 @@ impl<'r, E: Context, A: CodecFixedShared> super::Contiguous for Reader<'r, E, A>
         }
         let _timer = self.metrics.read_many_timer();
         self.metrics.read_many_calls.inc();
-        self.read_many_impl(positions, true).await
+        self.read_many_inner(positions).await
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {

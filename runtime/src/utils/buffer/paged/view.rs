@@ -164,36 +164,6 @@ impl<B: Blob> View<'_, B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        self.read_many_into_inner(buf, offsets, item_size, true)
-            .await
-    }
-
-    /// Like [`Self::read_many_into`], but skips the dedicated page-cache pass. Intended for
-    /// callers that already probed the cache via [`Self::try_read_many_sync_into`] and are
-    /// reading the misses. Items in the in-memory tail are still served from memory, and blob
-    /// reads still populate the page cache.
-    ///
-    /// Calling this without a probe is safe but strictly slower than
-    /// [`Self::read_many_into`]: cached items are read from the blob anyway.
-    pub async fn read_direct_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Result<usize, Error> {
-        self.read_many_into_inner(buf, offsets, item_size, false)
-            .await
-    }
-
-    /// Shared body of [`Self::read_many_into`] and [`Self::read_direct_into`]:
-    /// `cache_pass` controls the dedicated page-cache pass over all items.
-    async fn read_many_into_inner(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-        cache_pass: bool,
-    ) -> Result<usize, Error> {
         let ranges = || offsets.iter().map(|&o| (o, item_size.get()));
         super::validate_read_ranges(buf.len(), ranges(), self.size)?;
         if offsets.is_empty() {
@@ -201,10 +171,9 @@ impl<B: Blob> View<'_, B> {
         }
 
         let mut cache_ranges = super::split_read_ranges(buf, ranges(), self.tail_offset, self.tail);
-        if cache_pass {
-            // Fast path: try the page cache for all ranges in a single lock acquisition.
-            self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
-        }
+
+        // Fast path: try the page cache for all ranges in a single lock acquisition.
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
         let blob_reads = cache_ranges.len();
         if cache_ranges.is_empty() {
             return Ok(offsets.len());

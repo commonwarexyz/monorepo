@@ -734,6 +734,8 @@ where
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<C::Item>, JournalError> {
+        // An empty batch cannot shard: the parallel arm's chunk math needs a non-zero chunk
+        // size, and the policy may explore that arm at any batch size.
         if positions.is_empty() {
             return Ok(Vec::new());
         }
@@ -798,6 +800,8 @@ where
         &'a mut self,
         items: Many<'a, Self::Item>,
     ) -> Result<u64, JournalError> {
+        // The per-item loop below never reaches the inner journal's shared empty check, so the
+        // trait's EmptyAppend contract must be enforced here.
         if items.is_empty() {
             return Err(JournalError::EmptyAppend);
         }
