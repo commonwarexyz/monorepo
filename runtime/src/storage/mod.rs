@@ -146,6 +146,23 @@ stability_scope!(BETA {
                 }
             }
         }
+
+        /// Returns true when this error on a blob of `raw_len` raw bytes indicates a creation
+        /// that never completed, so the blob can be recreated without losing data.
+        ///
+        /// Creation makes the header durable before [crate::Storage::open] returns, and data
+        /// can only be written through the returned blob. A file no larger than the header
+        /// region whose bytes do not form a header (writes may tear at any point) can
+        /// therefore only be a creation that never completed. [HeaderError::VersionMismatch]
+        /// never qualifies: it requires a fully valid header, so it reports a real version
+        /// conflict.
+        pub(crate) const fn interrupted_creation(&self, raw_len: u64) -> bool {
+            raw_len <= Header::SIZE_U64
+                && matches!(
+                    self,
+                    Self::InvalidMagic { .. } | Self::UnsupportedRuntimeVersion { .. }
+                )
+        }
     }
 
     /// Fixed-size header at the start of each [crate::Blob].
@@ -311,6 +328,34 @@ pub(crate) mod tests {
         let (header, _) = Header::new(&(5..=5));
         assert!(header.validate(&(3..=7)).is_ok());
         assert!(header.validate(&(5..=5)).is_ok());
+    }
+
+    #[test]
+    fn test_header_error_interrupted_creation() {
+        let magic = HeaderError::InvalidMagic {
+            expected: Header::MAGIC,
+            found: [0; 4],
+        };
+        let runtime = HeaderError::UnsupportedRuntimeVersion {
+            expected: Header::RUNTIME_VERSION,
+            found: 7,
+        };
+        let version = HeaderError::VersionMismatch {
+            expected: 0..=0,
+            found: 3,
+        };
+
+        // Bytes that do not form a header on a file no larger than the header region can
+        // only be an interrupted creation.
+        assert!(magic.interrupted_creation(Header::SIZE_U64));
+        assert!(runtime.interrupted_creation(Header::SIZE_U64));
+
+        // A version mismatch requires a fully valid header: a real conflict, never torn.
+        assert!(!version.interrupted_creation(Header::SIZE_U64));
+
+        // Anything larger than the header region may carry data.
+        assert!(!magic.interrupted_creation(Header::SIZE_U64 + 1));
+        assert!(!runtime.interrupted_creation(Header::SIZE_U64 + 1));
     }
 
     #[test]

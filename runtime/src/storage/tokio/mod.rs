@@ -7,7 +7,7 @@ use std::path::Path;
 use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex,
 };
 
@@ -142,26 +142,37 @@ impl crate::Storage for Storage {
 
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
-        let (blob_version, logical_size) = if Header::missing(len) {
-            // New or corrupted blob - truncate and write header with latest version
-            let (header, blob_version) = Header::new(&versions);
-            file.set_len(Header::SIZE_U64)
-                .await
-                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
-            file.write_all(&header.encode())
-                .await
-                .map_err(|_| Error::WriteFailed)?;
-            file.sync_all()
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-            (blob_version, 0)
+        let parsed = if Header::missing(len) {
+            None
         } else {
             // Existing blob - read and validate header
             let mut header_bytes = [0u8; Header::SIZE];
             file.read_exact(&mut header_bytes)
                 .await
                 .map_err(|_| Error::ReadFailed)?;
-            Header::from(header_bytes, len, &versions).map_err(|e| e.into_error(partition, name))?
+            match Header::from(header_bytes, len, &versions) {
+                Ok(parsed) => Some(parsed),
+                Err(e) if e.interrupted_creation(len) => None,
+                Err(e) => return Err(e.into_error(partition, name)),
+            }
+        };
+        let (blob_version, logical_size) = match parsed {
+            Some(parsed) => parsed,
+            None => {
+                // New, torn, or corrupted blob - truncate and write header with latest version
+                let (header, blob_version) = Header::new(&versions);
+                file.set_len(Header::SIZE_U64)
+                    .await
+                    .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
+                file.rewind().await.map_err(|_| Error::WriteFailed)?;
+                file.write_all(&header.encode())
+                    .await
+                    .map_err(|_| Error::WriteFailed)?;
+                file.sync_all()
+                    .await
+                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
+                (blob_version, 0)
+            }
         };
 
         #[cfg(unix)]
@@ -413,17 +424,73 @@ mod tests {
             test_pool(),
         );
 
-        // Create the partition directory and a file with invalid magic bytes
+        // Create the partition directory and a file with invalid magic bytes. It must be
+        // larger than the header region: it may carry data, so it is corrupt (a header-sized
+        // file would instead be healed as an interrupted creation).
         let partition_path = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_path).unwrap();
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
-        std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
+        std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE + 1]).unwrap();
 
         // Opening should fail with corrupt error
         let result = storage.open("partition", b"bad_magic").await;
         assert!(
             matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
         );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_torn_header_recreated() {
+        let storage_directory =
+            env::temp_dir().join(format!("test_torn_header_{}", rand::random::<u64>()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+        let partition_path = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_path).unwrap();
+
+        // A creation interrupted mid-write can leave any garbage in the header region.
+        // Anything that does not parse as a header on a file no larger than the header
+        // region is recreated in place, and the recreated blob is fully usable.
+        let mut torn_version = Vec::from(Header::MAGIC);
+        torn_version.extend_from_slice(&[0xFF; Header::SIZE - Header::MAGIC_LENGTH]);
+        let states = [
+            (b"zeros".as_slice(), vec![0u8; Header::SIZE]),
+            (b"version".as_slice(), torn_version),
+        ];
+        for (name, torn) in states {
+            std::fs::write(partition_path.join(hex(name)), torn).unwrap();
+
+            let (blob, size) = storage.open("partition", name).await.unwrap();
+            assert_eq!(size, 0, "torn blob should be recreated empty");
+            blob.write_at(0, b"hello".to_vec()).await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            let (blob, size) = storage.open("partition", name).await.unwrap();
+            assert_eq!(size, 5);
+            let read_buf = blob.read_at(0, 5).await.unwrap();
+            assert_eq!(read_buf.coalesce(), b"hello");
+            drop(blob);
+        }
+
+        // A valid header whose blob version is outside the caller's range is a real
+        // conflict, not a torn creation.
+        let (header, _) = Header::new(&(7..=7));
+        std::fs::write(partition_path.join(hex(b"conflict")), header.encode()).unwrap();
+        let result = storage
+            .open_versioned("partition", b"conflict", 0..=0)
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::Error::BlobVersionMismatch { .. })
+        ));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

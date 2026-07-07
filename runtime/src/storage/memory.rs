@@ -56,19 +56,26 @@ impl crate::Storage for Storage {
         let content = partition_entry.entry(name.into()).or_default();
 
         let raw_len = content.len() as u64;
-        let (blob_version, logical_len) = if Header::missing(raw_len) {
-            // New or corrupted blob - truncate and write default header with latest version
-            let (header, blob_version) = Header::new(&versions);
-            content.clear();
-            content.extend_from_slice(&header.encode());
-            (blob_version, 0)
+        let parsed = if Header::missing(raw_len) {
+            None
         } else {
             // Existing blob - read and validate header
             let mut header_bytes = [0u8; Header::SIZE];
             header_bytes.copy_from_slice(&content[..Header::SIZE]);
-            Header::from(header_bytes, raw_len, &versions)
-                .map_err(|e| e.into_error(partition, name))?
+            match Header::from(header_bytes, raw_len, &versions) {
+                Ok(parsed) => Some(parsed),
+                Err(e) if e.interrupted_creation(raw_len) => None,
+                Err(e) => return Err(e.into_error(partition, name)),
+            }
         };
+        let (blob_version, logical_len) = parsed.unwrap_or_else(|| {
+            // New, torn, or corrupted blob - truncate and write default header with latest
+            // version
+            let (header, blob_version) = Header::new(&versions);
+            content.clear();
+            content.extend_from_slice(&header.encode());
+            (blob_version, 0)
+        });
 
         Ok((
             Blob::new(
@@ -337,11 +344,13 @@ mod tests {
     async fn test_blob_magic_mismatch() {
         let storage = Storage::new(test_pool());
 
-        // Manually insert a blob with invalid magic bytes
+        // Manually insert a blob with invalid magic bytes. It must be larger than the header
+        // region: it may carry data, so it is corrupt (a header-sized file would instead be
+        // healed as an interrupted creation).
         {
             let mut partitions = storage.partitions.lock();
             let partition = partitions.entry("partition".into()).or_default();
-            partition.insert(b"bad_magic".to_vec(), vec![0u8; Header::SIZE]);
+            partition.insert(b"bad_magic".to_vec(), vec![0u8; Header::SIZE + 1]);
         }
 
         // Opening should fail with corrupt error
@@ -349,5 +358,53 @@ mod tests {
         assert!(
             matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_blob_torn_header_recreated() {
+        let storage = Storage::new(test_pool());
+
+        // A creation interrupted mid-write can leave any garbage in the header region.
+        // Anything that does not parse as a header on a file no larger than the header
+        // region is recreated in place, and the recreated blob is fully usable.
+        let mut torn_version = Vec::from(Header::MAGIC);
+        torn_version.extend_from_slice(&[0xFF; Header::SIZE - Header::MAGIC_LENGTH]);
+        let states = [
+            (b"zeros".as_slice(), vec![0u8; Header::SIZE]),
+            (b"version".as_slice(), torn_version),
+        ];
+        for (name, torn) in states {
+            {
+                let mut partitions = storage.partitions.lock();
+                let partition = partitions.entry("partition".into()).or_default();
+                partition.insert(name.to_vec(), torn);
+            }
+            let (blob, size) = storage.open("partition", name).await.unwrap();
+            assert_eq!(size, 0, "torn blob should be recreated empty");
+            blob.write_at(0, b"hello").await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            let (blob, size) = storage.open("partition", name).await.unwrap();
+            assert_eq!(size, 5);
+            let read_buf = blob.read_at(0, 5).await.unwrap();
+            assert_eq!(read_buf.coalesce(), b"hello");
+        }
+
+        // A valid header whose blob version is outside the caller's range is a real
+        // conflict, not a torn creation.
+        {
+            let (header, _) = Header::new(&(7..=7));
+            let mut partitions = storage.partitions.lock();
+            let partition = partitions.entry("partition".into()).or_default();
+            partition.insert(b"conflict".to_vec(), header.encode().into());
+        }
+        let result = storage
+            .open_versioned("partition", b"conflict", 0..=0)
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::Error::BlobVersionMismatch { .. })
+        ));
     }
 }

@@ -144,27 +144,8 @@ impl crate::Storage for Storage {
 
         // Handle header: new/corrupted blobs get a fresh header written,
         // existing blobs have their header read.
-        let (blob_version, logical_len) = if Header::missing(raw_len) {
-            // New (or corrupted) blob - truncate and write header with latest version
-            let (header, blob_version) = Header::new(&versions);
-            file.set_len(Header::SIZE_U64)
-                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
-            file.seek(SeekFrom::Start(0))
-                .map_err(|_| Error::WriteFailed)?;
-            file.write_all(&header.encode())
-                .map_err(|_| Error::WriteFailed)?;
-            file.sync_all()
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-            // For new files, sync the parent directory to ensure the directory entry is durable.
-            if raw_len == 0 {
-                sync_dir(parent)?;
-                if !parent_existed {
-                    sync_dir(&self.storage_directory)?;
-                }
-            }
-
-            (blob_version, 0)
+        let parsed = if Header::missing(raw_len) {
+            None
         } else {
             // Existing blob - read and validate header
             file.seek(SeekFrom::Start(0))
@@ -172,8 +153,37 @@ impl crate::Storage for Storage {
             let mut header_bytes = [0u8; Header::SIZE];
             file.read_exact(&mut header_bytes)
                 .map_err(|_| Error::ReadFailed)?;
-            Header::from(header_bytes, raw_len, &versions)
-                .map_err(|e| e.into_error(partition, name))?
+            match Header::from(header_bytes, raw_len, &versions) {
+                Ok(parsed) => Some(parsed),
+                Err(e) if e.interrupted_creation(raw_len) => None,
+                Err(e) => return Err(e.into_error(partition, name)),
+            }
+        };
+        let (blob_version, logical_len) = match parsed {
+            Some(parsed) => parsed,
+            None => {
+                // New, torn, or corrupted blob - truncate and write header with latest version
+                let (header, blob_version) = Header::new(&versions);
+                file.set_len(Header::SIZE_U64)
+                    .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|_| Error::WriteFailed)?;
+                file.write_all(&header.encode())
+                    .map_err(|_| Error::WriteFailed)?;
+                file.sync_all()
+                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
+
+                // For new files, sync the parent directory to ensure the directory entry is
+                // durable.
+                if raw_len == 0 {
+                    sync_dir(parent)?;
+                    if !parent_existed {
+                        sync_dir(&self.storage_directory)?;
+                    }
+                }
+
+                (blob_version, 0)
+            }
         };
 
         let blob = Blob::new(
@@ -582,9 +592,11 @@ mod tests {
         let partition_path = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_path).unwrap();
 
-        // Manually create a file with invalid magic bytes
+        // Manually create a file with invalid magic bytes. It must be larger than the header
+        // region: it may carry data, so it is corrupt (a header-sized file would instead be
+        // healed as an interrupted creation).
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
-        std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
+        std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE + 1]).unwrap();
 
         // Opening should fail with corrupt error
         let err = storage
