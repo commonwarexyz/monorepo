@@ -1158,6 +1158,23 @@ impl<const N: usize> From<&[u8; N]> for IoBufMut {
     }
 }
 
+/// Create a mutable buffer by copying `vec`.
+///
+/// Copies the readable bytes into a fresh buffer with exactly the vec's
+/// capacity, so reuse patterns like passing `Vec::with_capacity(len)` to
+/// [`Blob::read_at_buf`](crate::Blob::read_at_buf) work. Zero-copy adoption
+/// is not used because it would reserve owner header space inside the vec's
+/// allocation, shrinking the writable capacity below `vec.capacity()`; use
+/// `From<Vec<u8>> for IoBuf` for zero-copy immutable conversion (and
+/// [`IoBuf::try_into_mut`] to recover mutability).
+impl From<Vec<u8>> for IoBufMut {
+    fn from(vec: Vec<u8>) -> Self {
+        let mut buf = Self::with_capacity(vec.capacity());
+        buf.put_slice(&vec);
+        buf
+    }
+}
+
 /// Create a mutable buffer by copying `bytes`.
 ///
 /// A mutable buffer requires runtime-owned storage for its owner header, which
@@ -2428,19 +2445,12 @@ impl From<IoBufMut> for IoBufsMut {
 
 /// Convert a [`Vec<u8>`] into a single-buffer [`IoBufsMut`].
 ///
-/// Copies the readable bytes into a fresh buffer with exactly the vec's
-/// capacity. The caller's reserved capacity is preserved, so reuse patterns
-/// like passing `Vec::with_capacity(len)` to
-/// [`Blob::read_at_buf`](crate::Blob::read_at_buf) work. Zero-copy adoption is not used
-/// here because it would reserve owner header space inside the vec's
-/// allocation, shrinking the writable capacity below `vec.capacity()`; use
-/// `From<Vec<u8>> for IoBuf` for zero-copy immutable conversion.
+/// Copies via `From<Vec<u8>> for IoBufMut`, preserving the vec's capacity
+/// (see that impl for the copy-vs-adoption rationale).
 impl From<Vec<u8>> for IoBufsMut {
     fn from(vec: Vec<u8>) -> Self {
-        let mut buf = IoBufMut::with_capacity(vec.capacity());
-        buf.put_slice(&vec);
         Self {
-            inner: IoBufsMutInner::Single(buf),
+            inner: IoBufsMutInner::Single(IoBufMut::from(vec)),
         }
     }
 }
@@ -4773,6 +4783,23 @@ mod tests {
         assert_eq!(buf.capacity(), cap);
         buf.put_bytes(7, cap);
         assert_eq!(buf.len(), cap);
+    }
+
+    #[test]
+    fn test_iobufmut_from_vec_preserves_capacity() {
+        let mut vec = Vec::with_capacity(100);
+        vec.extend_from_slice(b"abc");
+        let buf = IoBufMut::from(vec);
+        assert_eq!(buf.as_ref(), b"abc");
+        assert_eq!(buf.capacity(), 100);
+
+        // An empty reservation converts to a writable buffer of the same
+        // capacity.
+        let mut buf = IoBufMut::from(Vec::with_capacity(64));
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), 64);
+        buf.put_bytes(7, 64);
+        assert_eq!(buf.len(), 64);
     }
 
     #[test]
