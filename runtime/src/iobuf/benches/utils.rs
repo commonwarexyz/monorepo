@@ -1,6 +1,6 @@
 //! Shared helpers for `iobuf` benchmarks.
 //!
-//! The benchmark modules in this directory share the same small set of
+//! The `pool` and `freelist` benchmark modules share the same small set of
 //! threading presets and the same timing harness:
 //!
 //! - [`Threading`] defines the single-threaded and multi-threaded benchmark
@@ -10,7 +10,7 @@
 //!     contention.
 //!   - `Staggered`: workers add a small variable spin delay between iterations
 //!     to decorrelate access timing. The delay executes inside the timed
-//!     loop, so staggered results include its cost; for operations measured
+//!     loop (so staggered results include its cost); for operations measured
 //!     in nanoseconds it can dominate. Compare staggered numbers against
 //!     other staggered numbers, not against lockstep or single-threaded ones.
 //! - [`measure`] runs the benchmark body under those presets, including the
@@ -120,8 +120,7 @@ pub fn measure<T>(
                         // Desynchronize threads so they don't all hit the
                         // allocator at once. The spins run inside the timed
                         // loop and their cost is included in the reported
-                        // time; see the module doc for how staggered numbers
-                        // may be compared.
+                        // time.
                         let spins = (iter as usize).wrapping_add(1).wrapping_mul(
                             thread_id
                                 .wrapping_mul(MAX_BENCH_THREADS - 1)

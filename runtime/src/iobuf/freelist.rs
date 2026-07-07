@@ -96,7 +96,8 @@
 //!
 //! The hot paths are fast for a few concrete reasons:
 //!
-//! - `put` is just "validate the slot, then `fetch_or` one bit".
+//! - `put` is just one `fetch_or`, plus a double-return assert on the value
+//!   it returns.
 //! - `take` uses a stable per-thread home word before scanning others, so
 //!   threads tend to start from different stripes.
 //! - `take` and `take_batch` rotate bit selection inside each word, so threads
@@ -199,8 +200,9 @@ impl Freelist {
     /// Creates a new fixed-capacity freelist.
     ///
     /// `parallelism` is the expected number of threads contending for the
-    /// freelist. The actual word count is rounded to a power of two and capped
-    /// so every word can contain at least one slot.
+    /// freelist. The actual word count is the parallelism target rounded to a
+    /// power of two, capped so every word can contain at least one slot, and
+    /// grown when needed so no word tracks more than 64 slots.
     ///
     /// If `prefill` is true, creates `capacity` buffers and makes them
     /// immediately available in the freelist.
@@ -324,6 +326,10 @@ impl Freelist {
     ///
     /// The caller must own `buffer`, its slot must not already be available in
     /// this freelist, and the buffer must have been created by this freelist.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slot is already free in this freelist.
     #[inline]
     pub fn put(&self, buffer: PooledBuffer) {
         let slot = buffer.slot();
@@ -345,14 +351,16 @@ impl Freelist {
     /// stripe needs only one atomic `fetch_or`, regardless of how many entries
     /// in the batch map to that word.
     ///
-    /// `BufferPool` callers use simple drain and array iterators, avoiding
-    /// per-entry guards keeps this path allocation-free for ordinary batches.
+    /// `BufferPool` callers pass simple non-panicking iterators over entries
+    /// they already own; avoiding per-entry guards keeps this path
+    /// allocation-free for ordinary batches.
     ///
     /// The caller must own every buffer in the batch. Slots must be unique
     /// within the batch (staging asserts this) and must not already be
-    /// available in this freelist. Each buffer must have been created by this
-    /// freelist. If this method panics after accepting one or more buffers,
-    /// accepted-but-unpublished buffers may leak.
+    /// available in this freelist (asserted per word on insert). Each buffer
+    /// must have been created by this freelist. If this method panics after
+    /// accepting one or more buffers, accepted-but-unpublished buffers may
+    /// leak.
     #[inline]
     pub fn put_batch(&self, entries: impl IntoIterator<Item = PooledBuffer>) {
         let mut entries = entries.into_iter();
@@ -1414,9 +1422,8 @@ mod loom_tests {
             }
         }
 
-        // Returns the slot ids that are active in this geometry. The order is
-        // used by batch tests, so layouts with multiple bits in a word keep
-        // same-word slots adjacent.
+        // Returns the slot ids that are active in this geometry. Models use
+        // only the first id and the id set; the order is not significant.
         const fn slots(self) -> &'static [u32] {
             match self {
                 Self::SingleWordSingleBit => &[0],

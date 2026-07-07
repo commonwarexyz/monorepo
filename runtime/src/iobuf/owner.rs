@@ -57,7 +57,7 @@
 //! per possible tracked buffer:
 //!
 //! ```text
-//! SizeClass slots: [ refs | lease | data | capacity | slot ]
+//! SizeClass slots: [ refs | lease | data_base | capacity | slot ]
 //!                    ^
 //!                    OwnerRef target
 //!
@@ -80,8 +80,8 @@
 //! ```
 //!
 //! The front header is reserved but not initialized while the allocation is
-//! held by an `IoBufMut`. Mutable drop can deallocate directly from
-//! `owner_base`, `ptr`, and `cap` because `ptr + cap` remains the allocation
+//! held by an `IoBufMut`. Mutable drop can deallocate directly from the owner
+//! ref's address, `ptr`, and `cap` because `ptr + cap` remains the allocation
 //! end even after `Buf::advance`. `freeze` initializes the header before the
 //! owner is shared by an `IoBuf`. This avoids writing metadata for the common
 //! direct alloc/drop path while preserving the same initialized owner shape for
@@ -125,8 +125,9 @@
 //!
 //! # Refcount state machine
 //!
-//! The refcount uses `1` as the reusable sentinel, so final release never has
-//! to write zero and pooled buffers re-enter the pool checkout-ready:
+//! The refcount uses `1` as the reusable sentinel, so the common final
+//! release performs no refcount write at all and pooled buffers re-enter the
+//! pool checkout-ready:
 //!
 //! ```text
 //! state                                refs
@@ -320,8 +321,9 @@ impl OwnerRef {
     /// Moves `bytes` into a boxed [`ExternalOwner`] and returns handle fields.
     ///
     /// Zero-copy: the handle points directly into the payload kept alive by the
-    /// inner `Bytes`. Costs one box; the inner refcount is not touched again
-    /// until final release.
+    /// inner `Bytes`. Costs one box; handle clones and drops never touch the
+    /// inner refcount (only final release and the `slice_ref` conversion fast
+    /// paths do).
     pub(crate) fn from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, Self) {
         if bytes.is_empty() {
             return (NonNull::dangling(), 0, Self::empty());
@@ -422,9 +424,11 @@ impl OwnerRef {
     ///
     /// The refcount uses `1` as the reusable sentinel (see the module docs),
     /// so the unshared fast path is a single Acquire load followed by release:
-    /// no read-modify-write. Shared owners pay one inline Release decrement.
-    /// Only the rare race where another drop reaches the sentinel between the
-    /// load and the decrement is outlined in [`Self::drop_shared_race_final`].
+    /// no read-modify-write, with the release work outlined in
+    /// [`Self::release_unique_outlined`]. Shared owners pay one inline Release
+    /// decrement; the rare race where another drop reaches the sentinel
+    /// between the load and the decrement lands in
+    /// [`Self::drop_shared_race_final`].
     ///
     /// # Safety
     ///
@@ -503,8 +507,9 @@ impl OwnerRef {
     /// Only the pooled arm is inlined: pooled alloc -> fill -> freeze -> drop
     /// is the lifecycle hot loop, and it feeds directly into the thread-cache
     /// push fast path. The aligned and external arms are outlined in
-    /// [`Self::release_unique_cold`] so every `IoBuf` drop site does not instantiate
-    /// dealloc and box-drop code twice (fast path and race branch).
+    /// [`Self::release_unique_cold`] so the two shared-drop release paths
+    /// ([`Self::release_unique_outlined`] and [`Self::drop_shared_race_final`])
+    /// share a single instantiation of the dealloc and box-drop code.
     ///
     /// # Safety
     ///
@@ -684,6 +689,10 @@ impl OwnerRef {
     }
 
     /// Returns the current refcount for internal tests.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be empty or have a live reference owned by the caller.
     #[cfg(all(test, not(feature = "loom")))]
     pub(crate) unsafe fn refcount(self) -> Option<usize> {
         if self.is_empty() {
@@ -846,6 +855,10 @@ impl PooledBuffer {
     /// side-table entry reserved for this allocation and must not be visible in
     /// the freelist.
     ///
+    /// # Panics
+    ///
+    /// Panics if `layout` is zero-sized.
+    ///
     /// # Safety
     ///
     /// The caller must own `owner` initialization for this size class. No other
@@ -1005,7 +1018,9 @@ impl HeapOwner {
     ///
     /// # Panics
     ///
-    /// Panics if `capacity == 0` or `alignment` is not a power of two.
+    /// Panics if `capacity == 0`, if `alignment` is not a power of two, or if
+    /// the total layout size overflows (including `Layout`'s `isize::MAX`
+    /// bound).
     #[inline]
     pub(crate) fn allocate_aligned(
         capacity: usize,
@@ -1056,7 +1071,9 @@ impl HeapOwner {
     ///
     /// # Panics
     ///
-    /// Panics if `capacity == 0` or `alignment` is not a power of two.
+    /// Panics if `capacity == 0`, if `alignment` is not a power of two, or if
+    /// the total layout size overflows (including `Layout`'s `isize::MAX`
+    /// bound).
     #[inline(always)]
     pub(crate) fn allocate_aligned_mut(
         capacity: usize,
@@ -1219,8 +1236,10 @@ impl HeapOwner {
 
     /// Releases a unique initialized heap owner.
     ///
-    /// Two loads recover the stored base and layout; no placement math is
-    /// redone on release. The owner fields are copied out before `dealloc`
+    /// The stored fields recover the exact layout; no placement math is
+    /// redone on release. Tail headers deallocate from the stored data base;
+    /// initialized front headers deallocate from the header address, which is
+    /// the allocation base. The owner fields are copied out before `dealloc`
     /// because the owner lives inside the allocation being freed.
     ///
     /// # Safety

@@ -510,6 +510,10 @@ unsafe impl Sync for SizeClass {}
 ///                        park, THEN release lease   +-----------------+
 /// ```
 ///
+/// A checked-out buffer can also return directly to the global freelist
+/// (thread caching disabled, tiny-cache overflow, or TLS unavailable during
+/// thread teardown) through the same park-then-release transition.
+///
 /// Dropping the public [`BufferPool`] drains globally parked buffers, then
 /// drops its `SizeClassHandle`s. Pooled views and non-empty TLS caches may keep
 /// the `SizeClass` alive after that point. Empty TLS caches keep no size-class
@@ -1182,9 +1186,12 @@ impl Drop for TlsSizeClassCaches {
 ///
 /// Steady-state allocation and return first read `TLS_SIZE_CLASS_CACHES_FAST`.
 /// If it points at this thread's registry and the requested class cache is
-/// initialized, the caller touches only thread-local memory. Missing TLS state
-/// routes through `cache_slow` or `push_slow`, which access the owning TLS key,
-/// install the fast pointer, and lazily initialize the class cache.
+/// initialized, the cache lookup itself touches only thread-local memory:
+/// local hits and non-spilling returns complete without shared state, while a
+/// local miss refills from the global freelist and a full cache spills to it.
+/// Missing TLS state routes through `cache_slow` or `push_slow`, which access
+/// the owning TLS key, install the fast pointer, and lazily initialize the
+/// class cache.
 ///
 /// Rust's access path for TLS values with destructors includes checks for
 /// access during or after destruction. Those checks are correct, but they are
@@ -3494,10 +3501,12 @@ mod loom_tests {
     }
 
     // Models a re-checkout racing the final drop of a shared pooled buffer.
-    // The winning dropper restores the refcount sentinel (Relaxed) before the
-    // freelist's Release publication; a successful concurrent take must
-    // observe that restored sentinel (asserted in Freelist::buffer under
-    // loom) before handing the slot to a new mutable handle.
+    // The final drop leaves the refcount at the sentinel (the losing handle's
+    // Release decrement lands on 1, or the race-final path re-stores it with
+    // a Relaxed store) before the freelist's Release publication; a
+    // successful concurrent take must observe that sentinel (asserted in
+    // Freelist::buffer under loom) before handing the slot to a new mutable
+    // handle.
     #[test]
     fn final_drop_races_recheckout() {
         loom::model(|| {

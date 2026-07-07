@@ -311,7 +311,7 @@ impl IoBuf {
 
     /// Try to convert this buffer into [`IoBufMut`] without copying.
     ///
-    /// Succeeds when this view is the unique owner of a native (aligned,
+    /// Succeeds when this view is the unique owner of a native (heap,
     /// pooled, or adopted-vec) allocation, including uniquely-owned slices:
     /// capacity is recovered from the allocation base and the current view
     /// offset, so spare capacity beyond the view returns with it. Views with
@@ -538,8 +538,9 @@ impl From<Vec<u8>> for IoBuf {
 /// Convert [`Bytes`] into an [`IoBuf`] without copying.
 ///
 /// The `Bytes` value moves into a small external owner and the handle points
-/// directly into its payload. The inner refcount is not touched again until
-/// the final `IoBuf` reference drops.
+/// directly into its payload. Handle clones and drops never touch the inner
+/// refcount; only the final release and the `slice_ref` conversion fast paths
+/// do.
 impl From<Bytes> for IoBuf {
     fn from(bytes: Bytes) -> Self {
         let (ptr, len, owner) = OwnerRef::from_bytes(bytes);
@@ -748,9 +749,10 @@ impl IoBufMut {
     /// The returned buffer is not tracked by a [`BufferPool`], so dropping it
     /// deallocates the aligned allocation immediately.
     ///
-    /// For alignments above the owner header alignment (8 bytes) the usable
-    /// region rounds the request up to that alignment, so `capacity()` may
-    /// exceed the request by up to 7 bytes.
+    /// For alignments above the owner header alignment (8 bytes on 64-bit
+    /// targets) the usable region rounds the request up to the header
+    /// alignment, so `capacity()` may exceed the request by up to that
+    /// alignment minus one.
     ///
     /// # Panics
     ///
@@ -772,9 +774,10 @@ impl IoBufMut {
     /// Create a zero-initialized untracked aligned buffer with the given
     /// length and alignment.
     ///
-    /// For alignments above the owner header alignment (8 bytes) the usable
-    /// region rounds the request up to that alignment, so `capacity()` may
-    /// exceed `len` by up to 7 (zero-initialized) bytes.
+    /// For alignments above the owner header alignment (8 bytes on 64-bit
+    /// targets) the usable region rounds the request up to the header
+    /// alignment, so `capacity()` may exceed `len` by up to that alignment
+    /// minus one (zero-initialized) bytes.
     ///
     /// # Panics
     ///
@@ -2428,7 +2431,7 @@ impl From<IoBufMut> for IoBufsMut {
 /// Copies the readable bytes into a fresh buffer with exactly the vec's
 /// capacity. The caller's reserved capacity is preserved, so reuse patterns
 /// like passing `Vec::with_capacity(len)` to
-/// [`Blob::read_at_buf`](crate::Blob) work. Zero-copy adoption is not used
+/// [`Blob::read_at_buf`](crate::Blob::read_at_buf) work. Zero-copy adoption is not used
 /// here because it would reserve owner header space inside the vec's
 /// allocation, shrinking the writable capacity below `vec.capacity()`; use
 /// `From<Vec<u8>> for IoBuf` for zero-copy immutable conversion.
@@ -2736,8 +2739,9 @@ impl Builder {
 
 // SAFETY: All methods delegate directly to `self.buf`, a pool-backed
 // `IoBufMut` with a sound `BufMut` implementation. The inline buffer has
-// fixed capacity; writes that exceed it will panic via the underlying
-// `IoBufMut` implementation.
+// fixed capacity; writes that exceed it panic in bytes' `BufMut` trait
+// defaults (which check `remaining_mut`) or, for a direct `advance_mut`,
+// in `IoBufMut::advance_mut`.
 unsafe impl BufMut for Builder {
     #[inline]
     fn remaining_mut(&self) -> usize {

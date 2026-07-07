@@ -348,21 +348,19 @@ mod tests {
             let (blob, _) = context.open("partition", b"lazy").await.unwrap();
             blob.write_at(0, data).await.unwrap();
 
-            // A dedicated single-slot pool: reader construction must not
-            // touch it (an eagerly-allocated unwritten buffer would be
-            // checked out of the pool and, under empty-freeze semantics,
-            // released straight back).
+            // A dedicated single-slot pool: reader construction must not touch
+            // it (an eagerly-allocated unwritten buffer would be checked out of
+            // the pool and, under empty-freeze semantics, released straight
+            // back).
             let mut registry = Registry::default();
             let config = BufferPoolConfig::for_storage().with_max_per_class(NZU32!(1));
             let pool = BufferPool::new(config, &mut registry);
             let mut reader = Read::new(blob, data.len() as u64, NZUsize!(10), pool.clone());
 
-            // No size class may report a created buffer: construction must
-            // not check one out of the pool even transiently. (A free-slot
-            // probe alone cannot pin this: an eagerly-allocated unwritten
-            // buffer would have been released back by empty-freeze before the
-            // probe ran.) The created gauge registers per-class label sets
-            // lazily, so a clean pool encodes no member lines at all.
+            // No size class may report a created buffer: construction must not
+            // check one out of the pool even transiently. The created gauge
+            // registers per-class label sets lazily, so a clean pool encodes no
+            // member lines at all.
             let encoded = registry.encode();
             assert!(
                 !encoded
