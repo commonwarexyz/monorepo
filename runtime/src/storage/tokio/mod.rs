@@ -306,15 +306,24 @@ impl crate::Storage for Storage {
                         Err(err) => return Err(err.into()),
                     };
 
-                    // Sync the partition directory to ensure the removal is durable. When the
-                    // blob was already missing, the partition directory itself may not exist;
-                    // then there is no directory entry change to persist.
-                    // Windows doesn't have a notion of syncing a directory entry to ensure that
-                    // it's durably persisted. See
+                    // Make the unlink durable before reporting the result. A deletion is
+                    // durable only once the directory that held the entry is synced:
+                    // - The partition directory exists: it held the blob's entry, sync it.
+                    // - The partition directory is gone too: an earlier partition removal
+                    //   may have deleted it without a durable sync. Its entry lived in the
+                    //   storage directory, so sync that instead.
+                    // - Neither exists: nothing was ever created, so there is nothing to
+                    //   sync.
+                    // Windows doesn't have a notion of syncing a directory entry to ensure
+                    // that it's durably persisted. See
                     // https://github.com/commonwarexyz/monorepo/issues/2026.
                     #[cfg(unix)]
                     if !missing || fs::try_exists(&path).await? {
                         sync_dir(&path).await?;
+                        #[cfg(test)]
+                        delete_dir_syncs.fetch_add(1, Ordering::Relaxed);
+                    } else if fs::try_exists(&storage_dir).await? {
+                        sync_dir(&storage_dir).await?;
                         #[cfg(test)]
                         delete_dir_syncs.fetch_add(1, Ordering::Relaxed);
                     }
@@ -738,15 +747,36 @@ mod tests {
             "the barrier must run even when the blob is already gone"
         );
 
-        // Removing a blob from a partition that never existed skips the sync: there is
-        // no partition directory to sync and no entry change to persist.
+        // Removing a blob whose partition directory is absent still syncs the storage
+        // directory: the backend cannot distinguish a partition that never existed from
+        // one whose removal was unlinked but never made durable, so it conservatively
+        // runs the remaining barrier.
         let before = storage.delete_dir_syncs.load(Ordering::Relaxed);
         let err = storage
             .remove("elsewhere", Some(b"barrier"))
             .await
             .unwrap_err();
         assert!(matches!(err, Error::BlobMissing(..)));
-        assert_eq!(storage.delete_dir_syncs.load(Ordering::Relaxed), before);
+        assert_eq!(storage.delete_dir_syncs.load(Ordering::Relaxed), before + 1);
+
+        // The dangerous variant of the case above: the whole partition was unlinked
+        // without syncing the storage directory (a partition removal dropped between
+        // its remove_dir_all and its sync). Retrying a blob removal inside it is the
+        // last chance to run the storage-directory barrier before `BlobMissing`
+        // promises the blob is durably gone.
+        let partition_path = storage_directory.join("gone");
+        std::fs::create_dir_all(&partition_path).unwrap();
+        std::fs::write(partition_path.join(hex(b"barrier")), []).unwrap();
+        std::fs::remove_dir_all(&partition_path).unwrap();
+
+        let before = storage.delete_dir_syncs.load(Ordering::Relaxed);
+        let err = storage.remove("gone", Some(b"barrier")).await.unwrap_err();
+        assert!(matches!(err, Error::BlobMissing(..)));
+        assert_eq!(
+            storage.delete_dir_syncs.load(Ordering::Relaxed),
+            before + 1,
+            "the storage directory barrier must run when the partition itself is already gone"
+        );
 
         // Removing an already-missing partition still syncs when the storage directory
         // exists: a dropped partition removal leaves the same durability gap.

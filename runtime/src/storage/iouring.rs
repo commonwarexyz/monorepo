@@ -207,10 +207,17 @@ impl crate::Storage for Storage {
                 Err(err) => return Err(err.into()),
             };
 
-            // When the blob was already missing, the partition directory itself may not
-            // exist; then there is no directory entry change to persist.
+            // Make the unlink durable before reporting the result. A deletion is
+            // durable only once the directory that held the entry is synced:
+            // - The partition directory exists: it held the blob's entry, sync it.
+            // - The partition directory is gone too: an earlier partition removal may
+            //   have deleted it without a durable sync. Its entry lived in the storage
+            //   directory, so sync that instead.
+            // - Neither exists: nothing was ever created, so there is nothing to sync.
             if !missing || path.try_exists()? {
                 sync_dir(&path)?;
+            } else if self.storage_directory.try_exists()? {
+                sync_dir(&self.storage_directory)?;
             }
 
             if missing {
