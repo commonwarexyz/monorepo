@@ -684,7 +684,7 @@ impl OwnerRef {
     }
 
     /// Returns the current refcount for internal tests.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "loom")))]
     pub(crate) unsafe fn refcount(self) -> Option<usize> {
         if self.is_empty() {
             return None;
@@ -883,7 +883,7 @@ impl PooledBuffer {
     }
 
     /// Returns the usable data base pointer.
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(any(all(test, not(feature = "loom")), feature = "bench"))]
     #[inline(always)]
     pub const fn as_ptr(&self) -> *mut u8 {
         self.data_ptr().as_ptr()
@@ -1295,7 +1295,7 @@ impl ExternalOwner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "loom")))]
 mod tests {
     use super::*;
     use crate::iobuf::page_size;

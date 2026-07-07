@@ -1795,7 +1795,7 @@ impl BufferPool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "loom")))]
 mod tests {
     use super::*;
     use crate::{

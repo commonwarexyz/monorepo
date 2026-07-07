@@ -2812,7 +2812,7 @@ pub trait EncodeExt: EncodeSize + Write {
 
 impl<T: EncodeSize + Write> EncodeExt for T {}
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "loom")))]
 mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};

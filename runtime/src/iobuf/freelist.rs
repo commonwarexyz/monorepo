@@ -769,7 +769,7 @@ impl SlotBitmapProbe {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "loom")))]
 pub(super) mod tests {
     use super::*;
     use commonware_utils::{NZUsize, NZU32};
