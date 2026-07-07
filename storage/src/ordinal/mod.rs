@@ -55,10 +55,11 @@
 //!
 //! To recover existing data, pass `Some(bits)` to [Ordinal::init]. The bits identify which records
 //! were durably committed by the caller. [Ordinal] validates required records using their CRC32 and
-//! rebuilds the in-memory [crate::rmap::RMap]. Stored sections omitted from `bits` are removed, and
-//! stored records whose bits are unset are cleared before replay. Missing or invalid required records
-//! fail initialization. Passing `Some(BTreeMap::new())` or `None` removes all stored sections and
-//! starts empty.
+//! rebuilds the in-memory [crate::rmap::RMap]. Stored sections omitted from `bits` are removed.
+//! Stored records whose bits are unset are ignored and left on disk untouched; only `bits` governs
+//! what [Ordinal::has] and [Ordinal::get] observe. Missing or invalid required records fail
+//! initialization. Passing `Some(BTreeMap::new())` or `None` removes all stored sections and starts
+//! empty.
 //!
 //! # Example
 //!
@@ -1822,20 +1823,26 @@ mod tests {
                 );
             }
 
-            // Unselected records in a retained section are physically cleared.
+            // Unselected records in a retained section are left on disk untouched, so a later
+            // commit of one of them recovers the value it was originally written with.
             {
                 let mut bitmap = BitMap::zeroes(10);
                 bitmap.set(0, true); // Index 10
                 let bitmap_option = Some(bitmap);
                 let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
                 bits_map.insert(1, &bitmap_option);
-                let result = Ordinal::<_, FixedBytes<32>>::init(
+                let store = Ordinal::<_, FixedBytes<32>>::init(
                     context.child("third"),
                     cfg.clone(),
                     Some(bits_map),
                 )
-                .await;
-                assert!(matches!(result, Err(Error::MissingRecord(10))));
+                .await
+                .expect("Failed to initialize store with bits");
+                assert!(store.has(10));
+                assert_eq!(
+                    store.get(10).await.unwrap().unwrap(),
+                    FixedBytes::new([10u8; 32])
+                );
             }
         });
     }

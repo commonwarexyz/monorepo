@@ -174,27 +174,6 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 }
             }
 
-            // Replay ignores records outside the committed bits, but recovery clears them so
-            // stored blobs match the checkpointed view
-            let empty = vec![0u8; Record::<V>::SIZE];
-            for (section, (blob, size)) in &blobs {
-                // A section with no bitmap requires every record, so nothing is cleared
-                let Some(Some(bits)) = bits.get(section) else {
-                    continue;
-                };
-                let mut modified = false;
-                for bit_index in 0..(*size / record_size) {
-                    if bit_index >= bits.len() || !bits.get(bit_index) {
-                        blob.write_at(bit_index * record_size, empty.clone())
-                            .await?;
-                        modified = true;
-                    }
-                }
-                if modified {
-                    blob.sync().await?;
-                }
-            }
-
             // Rebuild intervals from the committed records
             for (section, bits) in bits {
                 if let Some(bits) = bits {
