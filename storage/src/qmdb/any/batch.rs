@@ -1111,6 +1111,7 @@ where
     /// Values the caller has computed for earlier staged slots are not visible until they are passed
     /// to [`merkleize`](Staged::merkleize). Callers that need speculative read-your-writes behavior
     /// should maintain their own overlay while deciding which staged slots to update.
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.batch.expand",
         level = "info",
@@ -1427,6 +1428,7 @@ where
     /// [`expand`](Staged::expand) appends another index range. Unlike
     /// [`get_many`](Self::get_many), the resolved locations are reused at merkleize, so keys
     /// that are read and then written skip the index re-probe and journal re-read.
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.batch.stage",
         level = "info",
