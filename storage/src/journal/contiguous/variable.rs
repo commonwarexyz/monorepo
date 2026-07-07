@@ -865,6 +865,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 hits += 1;
             }
         }
+        self.metrics.record_cache_hits(hits);
         self.metrics.items_read.inc_by(hits);
         resolved
     }
@@ -1066,6 +1067,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         let mut result: Vec<Option<V>> = (0..misses.len()).map(|_| None).collect();
         self.read_misses(&mut result, None, &positions, &offsets)
             .await?;
+        self.metrics.record_cache_misses(positions.len() as u64);
         self.metrics.items_read.inc_by(positions.len() as u64);
         Ok(result
             .into_iter()
@@ -1097,6 +1099,7 @@ impl<'r, E: Context, V: CodecShared> super::Contiguous for Reader<'r, E, V> {
         if let Some(offset) = cached_offset {
             let mut buf = Vec::new();
             if let Some(item) = self.try_read_frame_sync(position, offset, &mut buf) {
+                self.metrics.record_cache_hits(1);
                 self.metrics.items_read.inc();
                 return Ok(item);
             }
@@ -1111,6 +1114,7 @@ impl<'r, E: Context, V: CodecShared> super::Contiguous for Reader<'r, E, V> {
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))
             .expect("position in bounds maps to a retained blob");
+        self.metrics.record_cache_misses(1);
         let item = self.read_at_offset(&blob, offset).await?;
         self.metrics.items_read.inc();
         Ok(item)
@@ -1132,6 +1136,7 @@ impl<'r, E: Context, V: CodecShared> super::Contiguous for Reader<'r, E, V> {
         let offset = self.offsets.try_read_sync(position)?;
         let mut buf = Vec::new();
         let item = self.try_read_frame_sync(position, offset, &mut buf)?;
+        self.metrics.record_cache_hits(1);
         self.metrics.items_read.inc();
         Some(item)
     }
@@ -2399,6 +2404,16 @@ mod tests {
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
 
+    /// Extract a metric counter's value from encoded metrics output.
+    fn counter(buffer: &str, name: &str) -> u64 {
+        buffer
+            .lines()
+            .find(|l| l.contains(name) && !l.starts_with('#'))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|v| v.parse().ok())
+            .expect("counter missing")
+    }
+
     #[test_traced]
     fn test_variable_init_syncs_adopted_data_before_offsets_watermark_advance() {
         let executor = deterministic::Runner::default();
@@ -2873,10 +2888,32 @@ mod tests {
                 .iter()
                 .map(|&p| items[p as usize].clone())
                 .collect();
+            let before = context.encode();
             assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
 
+            // The batch's hit/miss accounting must match the staged interleave exactly.
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "second_cache_hits") - counter(&before, "second_cache_hits"),
+                4
+            );
+            assert_eq!(
+                counter(&after, "second_cache_misses") - counter(&before, "second_cache_misses"),
+                misses.len() as u64
+            );
+
             // A second pass serves the now-cached positions through the hit path and must agree.
+            let before = context.encode();
             assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "second_cache_hits") - counter(&before, "second_cache_hits"),
+                positions.len() as u64
+            );
+            assert_eq!(
+                counter(&after, "second_cache_misses"),
+                counter(&before, "second_cache_misses")
+            );
             drop(reader);
 
             journal.destroy().await.unwrap();
@@ -6779,17 +6816,13 @@ mod tests {
                 "variable_metrics_read_many_duration_count 1",
                 "variable_metrics_commit_duration_count 1",
                 "variable_metrics_sync_duration_count 1",
+                "variable_metrics_cache_hits_total 4",
+                "variable_metrics_cache_misses_total 0",
                 "variable_metrics_data_tracked",
                 "variable_metrics_offsets_size 4",
                 "variable_metrics_offsets_blobs_tracked",
             ] {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
-            }
-            for unexpected in [
-                "variable_metrics_cache_hits_total",
-                "variable_metrics_cache_misses_total",
-            ] {
-                assert!(!buffer.contains(unexpected), "{unexpected}\n{buffer}");
             }
 
             journal.destroy().await.unwrap();

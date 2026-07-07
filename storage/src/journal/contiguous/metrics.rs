@@ -9,14 +9,23 @@ use commonware_runtime::{
 };
 use std::{ops::Deref, sync::Arc};
 
-/// Metrics registered only for fixed-size journals.
+/// Page-cache metrics registered for contiguous journals.
 pub(super) struct CacheMetrics {
-    /// Fixed items read without async storage fallback.
+    /// Items read without async storage fallback.
     hits: Counter,
-    /// Fixed items that fell back to a blob read in `read`, `read_many`, and probe completion
+    /// Items that fell back to a blob read in `read`, `read_many`, and probe completion
     /// (`Probed::fetch` and `Probed::fetch_missing`). Declined probes (`try_read_sync` and
     /// `try_read_many_sync`) count hits only, never misses.
     misses: Counter,
+}
+
+impl CacheMetrics {
+    /// Create and register page-cache metrics.
+    fn new<E: RuntimeMetrics>(context: &E) -> Self {
+        let hits = context.counter("cache_hits", "Number of items served without a blob read");
+        let misses = context.counter("cache_misses", "Number of items requiring a blob read");
+        Self { hits, misses }
+    }
 }
 
 /// Metrics registered for durable commits.
@@ -211,14 +220,7 @@ impl<E: RuntimeMetrics + Clock> FixedMetrics<E> {
     /// Create and register metrics for a fixed-size journal.
     pub(super) fn new(context: E) -> Self {
         let context = Arc::new(context);
-        let hits = context.as_ref().counter(
-            "cache_hits",
-            "Number of fixed items served without a blob read",
-        );
-        let misses = context.as_ref().counter(
-            "cache_misses",
-            "Number of fixed items requiring a blob read",
-        );
+        let cache = CacheMetrics::new(context.as_ref());
         let calls = context
             .as_ref()
             .counter("commit_calls", "Number of commit calls");
@@ -230,7 +232,7 @@ impl<E: RuntimeMetrics + Clock> FixedMetrics<E> {
         let common = CommonMetrics::new(context);
         Self {
             common,
-            cache: CacheMetrics { hits, misses },
+            cache,
             commit: CommitMetrics {
                 calls,
                 duration: Timed::new(duration),
@@ -268,6 +270,7 @@ impl<E: Clock> Deref for FixedMetrics<E> {
 /// Metrics for variable-size contiguous journals.
 pub(super) struct VariableMetrics<E: Clock> {
     common: CommonMetrics<E>,
+    cache: CacheMetrics,
     commit: CommitMetrics,
 }
 
@@ -275,6 +278,7 @@ impl<E: RuntimeMetrics + Clock> VariableMetrics<E> {
     /// Create and register metrics for a variable-size journal.
     pub(super) fn new(context: E) -> Self {
         let context = Arc::new(context);
+        let cache = CacheMetrics::new(context.as_ref());
         let calls = context
             .as_ref()
             .counter("commit_calls", "Number of commit calls");
@@ -285,6 +289,7 @@ impl<E: RuntimeMetrics + Clock> VariableMetrics<E> {
         );
         Self {
             common: CommonMetrics::new(context),
+            cache,
             commit: CommitMetrics {
                 calls,
                 duration: Timed::new(duration),
@@ -294,6 +299,14 @@ impl<E: RuntimeMetrics + Clock> VariableMetrics<E> {
 }
 
 impl<E: Clock> VariableMetrics<E> {
+    pub(super) fn record_cache_hits(&self, hits: u64) {
+        self.cache.hits.inc_by(hits);
+    }
+
+    pub(super) fn record_cache_misses(&self, misses: u64) {
+        self.cache.misses.inc_by(misses);
+    }
+
     pub(super) fn commit_timer(&self) -> ScopedTimer<E> {
         self.commit.duration.scoped(&self.common.clock)
     }
