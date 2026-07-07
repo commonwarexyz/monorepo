@@ -2783,6 +2783,76 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_fetch_missing_reuses_deduped_offset() {
+        // Merged probes can duplicate a position with one unresolved and one resolved frame
+        // offset. Dedup must surface the resolved offset so completion never consults the
+        // offsets journal for it.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Sections of 128 make section 0's offsets exactly fill two flushed pages, so a
+            // section-0 offset lookup can genuinely miss (a sealed blob serves a partial
+            // trailing page from memory, never the page cache).
+            let cfg = Config {
+                partition: "probe-dedup-offset-reuse".into(),
+                items_per_section: NZU64!(128),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(4)),
+                write_buffer: NZUsize!(1024),
+            };
+            let items = (0..140)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal.sync().await.unwrap();
+            let reader = journal.snapshot().await.unwrap();
+
+            // Churn the 4-page pool with section-1 frames (five data pages) so every
+            // section-0 page is evicted.
+            reader
+                .read_many(&(128..136).collect::<Vec<u64>>())
+                .await
+                .unwrap();
+
+            // Probe position 0 while both its offset and its frame are cold: the miss
+            // carries no resolved offset.
+            let cold = reader.try_read_many_sync(&[0]);
+            assert!(cold.items()[0].is_none());
+            assert!(cold.misses[0].offset.is_none());
+
+            // Reading position 4 warms the offsets page shared by positions 0..64 without
+            // touching position 0's frame page (302-byte frames put frame 0 in page 0 and
+            // frame 4 in page 2). Re-probing then resolves the offset but still misses the
+            // frame.
+            reader.read(4).await.unwrap();
+            let warm = reader.try_read_many_sync(&[0]);
+            assert!(warm.items()[0].is_none());
+            assert_eq!(warm.misses[0].offset, Some(0));
+
+            // Completing the merged probes serves the duplicate through the resolved
+            // offset: the offsets journal is never consulted.
+            let before = context.encode();
+            let (positions, fetched) = Probed::merge(vec![cold, warm])
+                .fetch_missing()
+                .await
+                .unwrap();
+            assert_eq!(positions, vec![0]);
+            assert_eq!(fetched, vec![items[0].clone()]);
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "offsets_items_read_total"),
+                counter(&before, "offsets_items_read_total")
+            );
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_variable_read_many_consecutive_after_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
