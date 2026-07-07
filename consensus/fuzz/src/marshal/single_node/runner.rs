@@ -149,14 +149,20 @@ fn block_available(
 /// ensure none of the pre-event-ready heights were dispatched before this event,
 /// so each is orphaned in this drain rather than pre-existing. When the pre-event
 /// `ready_prefix < floor_height` nothing above the floor was ready and the range
-/// is empty (single live dispatch, no orphans).
+/// is empty (single live dispatch, no orphans). Only entries observed in the
+/// application queue after already-stale handles are added to the stale queue.
 fn queue_floor_orphaned_acks(
     stale_to_skip: &mut VecDeque<Height>,
+    pending_acks: &[Height],
     floor_height: u64,
     ready_prefix: u64,
 ) {
-    for h in floor_height..=ready_prefix {
-        stale_to_skip.push_back(Height::new(h));
+    let mut pending_iter = pending_acks.iter().skip(stale_to_skip.len());
+    for expected in (floor_height..=ready_prefix).map(Height::new) {
+        if pending_iter.next().copied() != Some(expected) {
+            break;
+        }
+        stale_to_skip.push_back(expected);
     }
 }
 
@@ -1297,16 +1303,22 @@ where
                 );
             }
 
+            context.sleep(EVENT_SETTLE).await;
+
             if let Some(floor_height) = floor_orphaned_from {
                 // A MailboxBurst floor shares a drain with earlier dispatches. Only
                 // heights already dispatchable before this event get a pre-clear copy
                 // (orphaned); heights the floor newly makes ready are dispatched once
-                // (live). Bound the orphan set by the pre-event ready prefix so the
-                // floor's own newly-ready heights are not marked stale.
-                queue_floor_orphaned_acks(&mut stale_to_skip, floor_height, ready_prefix_before);
+                // (live). Observe the application queue after the drain so speculative
+                // floor bookkeeping does not create unmatched strict stale entries.
+                let pending_acks = application.pending_ack_heights();
+                queue_floor_orphaned_acks(
+                    &mut stale_to_skip,
+                    &pending_acks,
+                    floor_height,
+                    ready_prefix_before,
+                );
             }
-
-            context.sleep(EVENT_SETTLE).await;
         }
 
         // Final drain: pull every remaining pending entry. Stale entries
