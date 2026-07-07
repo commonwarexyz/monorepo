@@ -3043,6 +3043,48 @@ mod tests {
     }
 
     #[test]
+    fn test_thread_exit_batch_flush_outlives_pool() {
+        // The batch return path (TlsSizeClassCache::drop -> return_global_batch)
+        // must park every buffer before releasing the lease references. Drop
+        // the pool while a worker's TLS cache holds several entries so the
+        // flush's lease releases are the last strong references: the final
+        // release drops the SizeClass, whose freelist must reclaim the
+        // just-parked buffers.
+        let page = page_size();
+        let pool = test_pool(test_config(page, page, 8));
+
+        let (cached_tx, cached_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let worker_pool = pool.clone();
+        let handle = thread::spawn(move || {
+            let class_index = worker_pool
+                .class_index(page)
+                .expect("class exists for page-sized buffer");
+            let class = &worker_pool.inner.classes[class_index];
+            assert!(class.thread_cache_capacity >= MIN_TLS_BATCH_CAPACITY);
+
+            // Fill this thread's local cache so the exit flush takes the
+            // multi-entry batch path.
+            let bufs = (0..MIN_TLS_BATCH_CAPACITY)
+                .map(|_| worker_pool.try_alloc(page).expect("tracked allocation"))
+                .collect::<Vec<_>>();
+            drop(bufs);
+            assert_eq!(get_local_len(class), MIN_TLS_BATCH_CAPACITY);
+
+            drop(worker_pool);
+            cached_tx.send(()).expect("signal cached buffers");
+            release_rx.recv().expect("wait for pool drop");
+        });
+
+        cached_rx.recv().expect("worker cached buffers");
+        // Every pool handle is gone before the worker exits, so the worker's
+        // cached leases are the only remaining size-class references.
+        drop(pool);
+        release_tx.send(()).expect("release worker");
+        handle.join().expect("worker thread should exit cleanly");
+    }
+
+    #[test]
     fn test_pooled_ops_inside_tls_destructor_fall_back_to_global() {
         // Pooled operations that run inside another thread_local's destructor
         // may find the pool's TLS registry already destroyed. The push/pop
