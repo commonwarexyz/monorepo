@@ -1183,14 +1183,13 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         }
 
         let items_per_blob = self.items_per_blob.get();
-        let chunk_size = A::SIZE;
 
         // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
         // maximal runs that share one blob. Each group goes through the blob's batched read,
         // which serves page-cache and tip-buffer hits under a single lock acquisition and reads only
         // true misses from the blob (concurrently).
         let mut result: Vec<A> = Vec::with_capacity(positions.len());
-        let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
+        let mut reusable_buf = vec![0u8; positions.len() * A::SIZE];
 
         // The buffer is pre-sized for every position, so each group can own a disjoint slice and
         // all groups can read concurrently.
@@ -1205,7 +1204,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                 .blobs
                 .get(blob_num)
                 .expect("positions in bounds map to a retained blob");
-            let (buf, rest) = remaining_buf.split_at_mut(group.len() * chunk_size);
+            let (buf, rest) = remaining_buf.split_at_mut(group.len() * A::SIZE);
             remaining_buf = rest;
             reads.push(async move {
                 blob.read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
@@ -1218,7 +1217,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .map(|group_hits| group_hits as u64)
             .sum();
 
-        for slice in reusable_buf.chunks_exact(chunk_size) {
+        for slice in reusable_buf.chunks_exact(A::SIZE) {
             result.push(A::decode(slice).map_err(Error::Codec)?);
         }
 
@@ -1249,7 +1248,6 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     /// decode, or fall outside `bounds()`.
     pub(super) fn probe_items(&self, positions: &[u64]) -> Vec<Option<A>> {
         crate::journal::assert_positions_increasing(positions);
-        let chunk_size = A::SIZE;
         let mut out: Vec<Option<A>> = (0..positions.len()).map(|_| None).collect();
 
         // Sorted positions put pruned ones in a prefix and out-of-range ones in a suffix, so
@@ -1267,7 +1265,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         let items_per_blob = self.items_per_blob.get();
         let mut scratch =
             Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
-        let need = valid.len() * chunk_size;
+        let need = valid.len() * A::SIZE;
         if scratch.len() < need {
             scratch.resize(need, 0);
         }
@@ -1286,11 +1284,11 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             let Some(blob) = self.blobs.get(blob_num) else {
                 continue;
             };
-            let buf = &mut buf[..group.len() * chunk_size];
+            let buf = &mut buf[..group.len() * A::SIZE];
             let misses =
                 blob.try_read_many_sync_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE);
             let mut misses = misses.into_iter().peekable();
-            for (idx, slice) in buf.chunks_exact(chunk_size).enumerate() {
+            for (idx, slice) in buf.chunks_exact(A::SIZE).enumerate() {
                 if misses.peek() == Some(&idx) {
                     misses.next();
                     continue;
