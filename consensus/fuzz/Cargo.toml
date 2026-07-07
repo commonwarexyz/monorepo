@@ -65,6 +65,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_reporter_filtering"
+path = "fuzz_targets/simplex_reporter_filtering.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "attributable_map"
 path = "fuzz_targets/attributable_map.rs"
 test = false
