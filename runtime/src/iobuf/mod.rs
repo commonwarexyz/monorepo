@@ -749,9 +749,8 @@ impl IoBufMut {
     /// deallocates the aligned allocation immediately.
     ///
     /// For alignments above the owner header alignment (8 bytes) the usable
-    /// region rounds the request up to that alignment, so a
-    /// [`freeze`](Self::freeze)/[`try_into_mut`](IoBuf::try_into_mut) round
-    /// trip may report up to 7 bytes of additional capacity.
+    /// region rounds the request up to that alignment, so `capacity()` may
+    /// exceed the request by up to 7 bytes.
     ///
     /// # Panics
     ///
@@ -761,17 +760,21 @@ impl IoBufMut {
         if capacity == 0 {
             return Self::default();
         }
-        let (ptr, owner) = HeapOwner::allocate_aligned_mut(capacity, alignment.get(), false);
+        let (ptr, cap, owner) = HeapOwner::allocate_aligned_mut(capacity, alignment.get(), false);
         Self {
             ptr,
             len: 0,
-            cap: capacity,
+            cap,
             owner,
         }
     }
 
     /// Create a zero-initialized untracked aligned buffer with the given
     /// length and alignment.
+    ///
+    /// For alignments above the owner header alignment (8 bytes) the usable
+    /// region rounds the request up to that alignment, so `capacity()` may
+    /// exceed `len` by up to 7 (zero-initialized) bytes.
     ///
     /// # Panics
     ///
@@ -781,11 +784,11 @@ impl IoBufMut {
         if len == 0 {
             return Self::default();
         }
-        let (ptr, owner) = HeapOwner::allocate_aligned_mut(len, alignment.get(), true);
+        let (ptr, cap, owner) = HeapOwner::allocate_aligned_mut(len, alignment.get(), true);
         Self {
             ptr,
             len,
-            cap: len,
+            cap,
             owner,
         }
     }
@@ -4892,6 +4895,33 @@ mod tests {
         assert!(zeroed.is_empty());
         assert_eq!(zeroed.len(), 0);
         assert_eq!(zeroed.capacity(), 0);
+    }
+
+    #[test]
+    fn test_iobufmut_aligned_capacity_stable_across_recovery() {
+        // High-alignment requests round the usable region up to the header
+        // alignment; the handle must report that capacity from construction
+        // so a freeze/try_into_mut round trip cannot grow it.
+        let alignment = NonZeroUsize::new(4096).expect("non-zero alignment");
+        let mut buf = IoBufMut::with_alignment(100, alignment);
+        assert_eq!(buf.capacity(), 104);
+
+        buf.put_slice(b"data");
+        let recovered = buf
+            .freeze()
+            .try_into_mut()
+            .expect("unique native view recovers");
+        assert_eq!(recovered.capacity(), 104);
+
+        // Zeroed variant: the rounded tail is writable and zero-initialized,
+        // while len stays at the request.
+        let zeroed = IoBufMut::zeroed_with_alignment(100, alignment);
+        assert_eq!(zeroed.len(), 100);
+        assert_eq!(zeroed.capacity(), 104);
+
+        // Multiple-of-8 requests stay exact.
+        let exact = IoBufMut::with_alignment(128, alignment);
+        assert_eq!(exact.capacity(), 128);
     }
 
     #[test]

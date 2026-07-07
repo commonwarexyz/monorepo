@@ -1048,6 +1048,12 @@ impl HeapOwner {
     /// tail owner layout from [`Self::allocate_aligned`] so the returned data
     /// pointer keeps the requested alignment.
     ///
+    /// Returns the data pointer, the usable capacity (the request itself on
+    /// the front layout; rounded up to the header alignment, at most
+    /// `align_of::<Self>() - 1` bytes more, on the tail layout), and the
+    /// owner. Handles must adopt the returned capacity so a later
+    /// `try_into_mut` recovery reports the same value.
+    ///
     /// # Panics
     ///
     /// Panics if `capacity == 0` or `alignment` is not a power of two.
@@ -1056,15 +1062,14 @@ impl HeapOwner {
         capacity: usize,
         alignment: usize,
         zeroed: bool,
-    ) -> (NonNull<u8>, OwnerRef) {
+    ) -> (NonNull<u8>, usize, OwnerRef) {
         assert!(capacity > 0, "capacity must be greater than zero");
         assert!(
             alignment.is_power_of_two(),
             "alignment must be a power of two"
         );
         if alignment > align_of::<Self>() {
-            let (ptr, _, owner) = Self::allocate_aligned(capacity, alignment, zeroed);
-            return (ptr, owner);
+            return Self::allocate_aligned(capacity, alignment, zeroed);
         }
 
         let layout = Self::front_layout(capacity);
@@ -1082,7 +1087,7 @@ impl HeapOwner {
         // allocation owned by this owner ref. The contents are left uninitialized
         // and written before the owner is shared (`from_heap` reads nothing).
         let owner = unsafe { OwnerRef::from_heap(header) };
-        (data, owner)
+        (data, capacity, owner)
     }
 
     /// Tries to adopt `vec`'s allocation as a native heap buffer.
@@ -1391,14 +1396,16 @@ mod tests {
 
     #[test]
     fn test_front_heap_mut_drop_does_not_read_reserved_header() {
-        let (data, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
+        let (data, cap, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
+        assert_eq!(cap, 64);
         assert!((data.as_ptr() as usize).is_multiple_of(align_of::<HeapOwner>()));
         assert!(owner.is_front_heap_for_mut(data));
         // SAFETY: owner is unique and must be released by this test. This path
         // must not read the uninitialized front header.
         unsafe { owner.release_unique_mut_at(data, 64) };
 
-        let (data, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
+        let (data, cap, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
+        assert_eq!(cap, 64);
         // SAFETY: `17 <= 64`, so the advanced pointer stays within the
         // allocation's usable region.
         let advanced = unsafe { data.add(17) };
@@ -1410,7 +1417,7 @@ mod tests {
 
     #[test]
     fn test_front_heap_materializes_before_shared_owner() {
-        let (data, mut owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
+        let (data, _, mut owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
         // SAFETY: `17 <= 64`, so the advanced pointer stays within the
         // allocation's usable region.
         let advanced = unsafe { data.add(17) };
@@ -1433,7 +1440,8 @@ mod tests {
     #[test]
     fn test_mut_allocator_uses_tail_header_for_high_alignment() {
         let page = page_size();
-        let (data, owner) = HeapOwner::allocate_aligned_mut(64, page, false);
+        let (data, cap, owner) = HeapOwner::allocate_aligned_mut(64, page, false);
+        assert_eq!(cap, 64);
         assert!((data.as_ptr() as usize).is_multiple_of(page));
         assert!(!owner.is_front_heap_for_mut(data));
         // SAFETY: owner is unique and must be released by this test.
@@ -1442,7 +1450,7 @@ mod tests {
 
     #[test]
     fn test_front_heap_zeroed_exposes_zeroed_data_region() {
-        let (data, owner) = HeapOwner::allocate_aligned_mut(64, 1, true);
+        let (data, _, owner) = HeapOwner::allocate_aligned_mut(64, 1, true);
         // SAFETY: data points at a zeroed usable region of length 64.
         let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), 64) };
         assert_eq!(bytes, &[0u8; 64]);
