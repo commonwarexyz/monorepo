@@ -34,7 +34,7 @@ use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::metrics::{
-    histogram::{duration_histogram, ScopedTimer, Timed},
+    histogram::{ScopedTimer, Timed},
     Counter, Gauge, GaugeExt as _, MetricsExt as _,
 };
 use commonware_utils::{
@@ -54,8 +54,6 @@ const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 /// Metrics for the Current layer.
 pub(crate) struct Metrics<E: Context> {
-    /// Clock used for duration timers.
-    clock: Arc<E>,
     /// Pruned bitmap chunks.
     pruned_chunks: Gauge,
     /// Most recent safe sync/prune boundary location.
@@ -72,37 +70,28 @@ pub(crate) struct Metrics<E: Context> {
     pub prune_calls: Counter,
     /// Duration of Current-layer prune calls.
     prune_duration: Timed,
+    /// Clock used by the duration timers.
+    clock: Arc<E>,
 }
 
 impl<E: Context> Metrics<E> {
-    /// Create and register metrics.
+    /// Register the full metric set under `context`, retaining it as the timers' clock.
     pub fn new(context: E) -> Self {
-        let pruned_chunks = context.gauge("pruned_chunks", "Number of pruned bitmap chunks");
-        let sync_boundary =
-            context.gauge("sync_boundary", "Most recent safe sync boundary location");
-        let apply_batch_calls = context.counter("apply_batch_calls", "Number of apply-batch calls");
-        let apply_batch_duration = duration_histogram(
-            &context,
-            "apply_batch_duration",
-            "Duration of apply-batch calls",
-        );
-        let sync_calls = context.counter("sync_calls", "Number of sync calls");
-        let sync_duration = duration_histogram(&context, "sync_duration", "Duration of sync calls");
-        let prune_calls = context.counter("prune_calls", "Number of prune calls");
-        let prune_duration =
-            duration_histogram(&context, "prune_duration", "Duration of prune calls");
-        let clock = Arc::new(context);
-
         Self {
-            clock,
-            pruned_chunks,
-            sync_boundary,
-            apply_batch_calls,
-            apply_batch_duration: Timed::new(apply_batch_duration),
-            sync_calls,
-            sync_duration: Timed::new(sync_duration),
-            prune_calls,
-            prune_duration: Timed::new(prune_duration),
+            pruned_chunks: context.gauge("pruned_chunks", "Number of pruned bitmap chunks"),
+            sync_boundary: context
+                .gauge("sync_boundary", "Most recent safe sync boundary location"),
+            apply_batch_calls: context.counter("apply_batch_calls", "Number of apply-batch calls"),
+            apply_batch_duration: Timed::register(
+                &context,
+                "apply_batch_duration",
+                "Duration of apply-batch calls",
+            ),
+            sync_calls: context.counter("sync_calls", "Number of sync calls"),
+            sync_duration: Timed::register(&context, "sync_duration", "Duration of sync calls"),
+            prune_calls: context.counter("prune_calls", "Number of prune calls"),
+            prune_duration: Timed::register(&context, "prune_duration", "Duration of prune calls"),
+            clock: Arc::new(context),
         }
     }
 

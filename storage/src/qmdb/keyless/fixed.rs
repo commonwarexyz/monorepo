@@ -180,7 +180,7 @@ mod test {
                 "db_last_commit 2",
                 "db_get_calls_total 1",
                 "db_get_many_calls_total 1",
-                "db_locations_requested_total 2",
+                "db_lookups_requested_total 2",
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 2",
                 "db_commit_calls_total 1",

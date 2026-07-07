@@ -102,7 +102,7 @@ use super::{
 use crate::{journal::authenticated, merkle};
 use crate::{
     journal::{
-        contiguous::{metrics::FixedMetrics as Metrics, Many, Mutable},
+        contiguous::{metrics::Metrics, Many, Mutable},
         Error,
     },
     Context,
@@ -797,7 +797,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// crash after this call doesn't require any recovery.
     pub async fn commit(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
-        self.metrics.record_commit();
+        self.metrics.commit_calls.inc();
         self.flush_dirty_blobs().await?;
         self.dirty_from_blob = None;
         Ok(())
@@ -1222,9 +1222,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             result.push(A::decode(slice).map_err(Error::Codec)?);
         }
 
-        self.metrics.record_cache_hits(hits);
+        self.metrics.cache_hits.inc_by(hits);
         self.metrics
-            .record_cache_misses(positions.len() as u64 - hits);
+            .cache_misses
+            .inc_by(positions.len() as u64 - hits);
         self.metrics.items_read.inc_by(positions.len() as u64);
         Ok(result)
     }
@@ -1302,7 +1303,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                 }
             }
         }
-        self.metrics.record_cache_hits(hits);
+        self.metrics.cache_hits.inc_by(hits);
         self.metrics.items_read.inc_by(hits);
         out
     }
@@ -1424,7 +1425,7 @@ impl<'r, E: Context, A: CodecFixedShared> super::Contiguous for Reader<'r, E, A>
 
         let _timer = self.metrics.read_timer();
         let (blob, offset) = self.locate(pos)?;
-        self.metrics.record_cache_misses(1);
+        self.metrics.cache_misses.inc();
         let bufs = blob.read_at(offset, A::SIZE).await?;
         let item = A::decode(bufs.coalesce()).map_err(Error::Codec)?;
         self.metrics.items_read.inc();
@@ -1449,7 +1450,7 @@ impl<'r, E: Context, A: CodecFixedShared> super::Contiguous for Reader<'r, E, A>
             _ => None,
         };
         if item.is_some() {
-            self.metrics.record_cache_hits(1);
+            self.metrics.cache_hits.inc();
             self.metrics.items_read.inc();
         }
         item

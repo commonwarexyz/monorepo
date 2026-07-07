@@ -14,7 +14,7 @@ use crate::{
     qmdb::{
         bitmap::Shared,
         build_snapshot_from_log, delete_known_loc,
-        metrics::{KeyReadMetrics, OperationMetrics, StateMetrics},
+        metrics::Metrics,
         operation::Operation as OperationTrait,
         update_known_loc, Error,
     },
@@ -36,28 +36,6 @@ type ShardReads<'a, T, L> = (
     Vec<(usize, u64)>,
     <L as Contiguous>::Probed<'a>,
 );
-
-/// Metrics for Any QMDBs.
-pub(crate) struct Metrics<E: Context> {
-    /// State gauges.
-    pub state: StateMetrics,
-    /// Write and durability metrics.
-    pub operations: OperationMetrics<E>,
-    /// Key read metrics.
-    pub reads: KeyReadMetrics<E>,
-}
-
-impl<E: Context> Metrics<E> {
-    /// Create and register metrics.
-    pub fn new(context: E) -> Self {
-        let context = Arc::new(context);
-        Self {
-            state: StateMetrics::new(context.as_ref()),
-            operations: OperationMetrics::new(context.clone()),
-            reads: KeyReadMetrics::new(context),
-        }
-    }
-}
 
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C, H, S>;
@@ -208,9 +186,9 @@ where
 
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
-        let _timer = self.metrics.reads.get_timer();
-        self.metrics.reads.get_calls.inc();
-        self.metrics.reads.keys_requested.inc();
+        let _timer = self.metrics.get_timer();
+        self.metrics.get_calls.inc();
+        self.metrics.lookups_requested.inc();
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
         let mut result = None;
@@ -250,9 +228,9 @@ where
             return Ok(Vec::new());
         }
 
-        let _timer = self.metrics.reads.get_many_timer();
-        self.metrics.reads.get_many_calls.inc();
-        self.metrics.reads.keys_requested.inc_by(keys.len() as u64);
+        let _timer = self.metrics.get_many_timer();
+        self.metrics.get_many_calls.inc();
+        self.metrics.lookups_requested.inc_by(keys.len() as u64);
 
         // One fused pass resolves everything the page cache can serve: probe the index, sort
         // candidate locations, read cached operations, and match them back to keys, collecting
@@ -400,7 +378,7 @@ where
     /// Update state gauges from the current database state.
     pub(crate) fn update_metrics(&self) {
         let bounds = self.log.bounds();
-        self.metrics.state.set(
+        self.metrics.update(
             bounds.end,
             bounds.start,
             *self.inactivity_floor_loc,
@@ -475,8 +453,8 @@ where
         ),
     )]
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), crate::qmdb::Error<F>> {
-        let _timer = self.metrics.operations.prune_timer();
-        self.metrics.operations.prune_calls.inc();
+        let _timer = self.metrics.prune_timer();
+        self.metrics.prune_calls.inc();
         let actual_pruned = self.prune_log(prune_loc).await?;
         self.prune_bitmap(actual_pruned);
         self.update_metrics();
@@ -853,8 +831,8 @@ where
         ),
     )]
     pub async fn sync(&mut self) -> Result<(), crate::qmdb::Error<F>> {
-        let _timer = self.metrics.operations.sync_timer();
-        self.metrics.operations.sync_calls.inc();
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
         self.log.sync().await?;
         Ok(())
     }
@@ -872,8 +850,8 @@ where
         ),
     )]
     pub async fn commit(&mut self) -> Result<(), crate::qmdb::Error<F>> {
-        let _timer = self.metrics.operations.commit_timer();
-        self.metrics.operations.commit_calls.inc();
+        let _timer = self.metrics.commit_timer();
+        self.metrics.commit_calls.inc();
         self.log.commit().await?;
         Ok(())
     }

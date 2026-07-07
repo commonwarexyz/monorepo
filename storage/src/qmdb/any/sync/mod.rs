@@ -14,7 +14,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            db::{Db, Metrics},
+            db::Db,
             operation::{update::Update, Operation},
             ordered::{
                 fixed::{
@@ -37,6 +37,7 @@ use crate::{
             },
             FixedConfig, FixedValue, VariableConfig, VariableValue,
         },
+        metrics::Metrics,
         operation::{Committable, Key},
     },
     translator::Translator,

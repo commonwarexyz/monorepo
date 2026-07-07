@@ -7,7 +7,7 @@ use super::{
     blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     fixed,
-    metrics::VariableMetrics as Metrics,
+    metrics::Metrics,
     position_to_blob, Contiguous, Many, Mutable,
 };
 #[commonware_macros::stability(ALPHA)]
@@ -865,7 +865,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 hits += 1;
             }
         }
-        self.metrics.record_cache_hits(hits);
+        self.metrics.cache_hits.inc_by(hits);
         self.metrics.items_read.inc_by(hits);
         resolved
     }
@@ -1067,7 +1067,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         let mut result: Vec<Option<V>> = (0..misses.len()).map(|_| None).collect();
         self.read_misses(&mut result, None, &positions, &offsets)
             .await?;
-        self.metrics.record_cache_misses(positions.len() as u64);
+        self.metrics.cache_misses.inc_by(positions.len() as u64);
         self.metrics.items_read.inc_by(positions.len() as u64);
         Ok(result
             .into_iter()
@@ -1099,7 +1099,7 @@ impl<'r, E: Context, V: CodecShared> super::Contiguous for Reader<'r, E, V> {
         if let Some(offset) = cached_offset {
             let mut buf = Vec::new();
             if let Some(item) = self.try_read_frame_sync(position, offset, &mut buf) {
-                self.metrics.record_cache_hits(1);
+                self.metrics.cache_hits.inc();
                 self.metrics.items_read.inc();
                 return Ok(item);
             }
@@ -1114,7 +1114,7 @@ impl<'r, E: Context, V: CodecShared> super::Contiguous for Reader<'r, E, V> {
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))
             .expect("position in bounds maps to a retained blob");
-        self.metrics.record_cache_misses(1);
+        self.metrics.cache_misses.inc();
         let item = self.read_at_offset(&blob, offset).await?;
         self.metrics.items_read.inc();
         Ok(item)
@@ -1136,7 +1136,7 @@ impl<'r, E: Context, V: CodecShared> super::Contiguous for Reader<'r, E, V> {
         let offset = self.offsets.try_read_sync(position)?;
         let mut buf = Vec::new();
         let item = self.try_read_frame_sync(position, offset, &mut buf)?;
-        self.metrics.record_cache_hits(1);
+        self.metrics.cache_hits.inc();
         self.metrics.items_read.inc();
         Some(item)
     }
@@ -1693,7 +1693,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// the previous `sync()`.
     pub async fn commit(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
-        self.metrics.record_commit();
+        self.metrics.commit_calls.inc();
         self.flush_dirty_data().await?;
         self.dirty_from_blob = None;
         Ok(())

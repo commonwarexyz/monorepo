@@ -2289,8 +2289,8 @@ where
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
-        let _timer = self.metrics.operations.apply_batch_timer();
-        self.metrics.operations.apply_batch_calls.inc();
+        let _timer = self.metrics.apply_batch_timer();
+        self.metrics.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
         batch
             .bounds
@@ -2358,9 +2358,7 @@ where
         let end_loc = Location::new(*self.last_commit_loc + 1);
         let range = start_loc..end_loc;
         self.update_metrics();
-        self.metrics
-            .operations
-            .operations_applied
+        self.metrics.operations_applied
             .inc_by(*range.end - *range.start);
         Ok(range)
     }

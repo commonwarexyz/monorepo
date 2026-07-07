@@ -38,7 +38,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            db::{Db as AnyDb, Metrics as AnyMetrics},
+            db::Db as AnyDb,
             operation::{update::Update, Operation},
             ordered::{
                 fixed::{Operation as OrderedFixedOp, Update as OrderedFixedUpdate},
@@ -61,6 +61,7 @@ use crate::{
             },
             FixedConfig, VariableConfig,
         },
+        metrics::Metrics as AnyMetrics,
         operation::{Committable, Key, Operation as _},
         sync::{resolver::fetch_operations, Database, DatabaseConfig as Config},
     },

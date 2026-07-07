@@ -73,6 +73,7 @@ use crate::{
     qmdb::{
         any::operation::{Operation, Update},
         bitmap::Shared,
+        metrics::Metrics,
         operation::Committable,
         ROOT_BAGGING,
     },
@@ -178,7 +179,7 @@ where
     }
 
     let index = I::new(context.child("index"), cfg.translator);
-    let metrics = db::Metrics::new(context);
+    let metrics = Metrics::new(context);
     db::Db::init_from_log(index, log, bitmap, cfg.init_cache_size, metrics).await
 }
 
