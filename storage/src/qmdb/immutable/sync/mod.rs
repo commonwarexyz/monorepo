@@ -145,7 +145,6 @@ where
         target: &sync::Target<F, Self::Digest>,
         journal: &Self::Journal,
     ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
-        let merkle_config = config.merkle_config.clone();
         if target.range.start() == Location::new(0)
             || !sync::journal_covers_range(journal.bounds(), &target.range)
         {
@@ -160,8 +159,13 @@ where
             })
             .await?;
 
-        sync::local_pinned_nodes::<F, _, H, S>(context, merkle_config, target, inactivity_floor)
-            .await
+        sync::local_pinned_nodes::<F, _, H, S>(
+            context,
+            config.merkle_config.clone(),
+            target,
+            inactivity_floor,
+        )
+        .await
     }
 
     fn root(&self) -> Self::Digest {
