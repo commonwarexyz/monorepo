@@ -105,14 +105,6 @@ pub const fn cache_line_size() -> usize {
 }
 
 /// Benchmark-only re-exports of internal pool machinery.
-///
-/// This is not a supported public API: the exported types carry ownership
-/// contracts (documented on their methods) that the pool normally enforces
-/// internally, and misusing them corrupts memory (for example, returning a
-/// buffer to a freelist that did not create it marks that freelist's
-/// same-numbered slot free, later handing out a dangling or already-owned
-/// allocation). The surface exists solely so `benches/` can drive the
-/// freelist directly.
 #[doc(hidden)]
 #[cfg(feature = "bench")]
 pub mod bench {
@@ -182,8 +174,6 @@ impl Clone for IoBuf {
 }
 
 impl Drop for IoBuf {
-    // Inlined so consumer crates (which build without LTO) keep the drop on
-    // the handle hot path instead of an outlined cross-crate call.
     #[inline]
     fn drop(&mut self) {
         // SAFETY: dropping an immutable view releases exactly one shared owner
@@ -321,19 +311,6 @@ impl IoBuf {
     /// external-backed views (`Bytes` cannot back a mutable handle). An empty
     /// view that still holds a shared or external owner declines like any
     /// other view.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use commonware_runtime::{BufMut, IoBufMut};
-    ///
-    /// let mut buf = IoBufMut::with_capacity(16);
-    /// buf.put_slice(b"data");
-    /// let frozen = buf.freeze();
-    ///
-    /// let recovered = frozen.try_into_mut().expect("unique native view");
-    /// assert_eq!(recovered.capacity(), 16);
-    /// ```
     pub fn try_into_mut(self) -> Result<IoBufMut, Self> {
         if self.owner.is_empty() {
             return if self.len == 0 {
@@ -635,13 +612,6 @@ impl EncodeSize for IoBuf {
 impl Read for IoBuf {
     type Cfg = RangeCfg<usize>;
 
-    /// Reads a length-prefixed buffer.
-    ///
-    /// Zero payload copies when the payload is contiguous in the source:
-    /// `copy_to_bytes` extracts owned [`Bytes`] without copying from `IoBuf`,
-    /// `Bytes`, and `IoBufs` sources whose first chunk contains the whole
-    /// payload, and `Self::from` wraps them zero-copy. A payload that spans
-    /// chunks is copied into one contiguous allocation.
     #[inline]
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
@@ -714,8 +684,6 @@ impl std::fmt::Debug for IoBufMut {
 }
 
 impl Drop for IoBufMut {
-    // Inlined so consumer crates (which build without LTO) keep the drop on
-    // the handle hot path instead of an outlined cross-crate call.
     #[inline]
     fn drop(&mut self) {
         // SAFETY: mutable buffers uniquely own their allocation.
@@ -870,20 +838,6 @@ impl IoBufMut {
     /// refcount sentinel, before the owner is shared). Freezing an empty
     /// buffer releases the allocation immediately so empty immutable views
     /// never pin pool memory.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use commonware_runtime::{BufMut, IoBuf, IoBufMut};
-    ///
-    /// let mut buf = IoBufMut::with_capacity(8);
-    /// buf.put_slice(b"frozen");
-    /// let frozen: IoBuf = buf.freeze();
-    ///
-    /// // Clones and slices of the immutable view share the allocation.
-    /// let clone = frozen.clone();
-    /// assert_eq!(clone.as_ref().as_ptr(), frozen.as_ref().as_ptr());
-    /// ```
     #[inline]
     pub fn freeze(self) -> IoBuf {
         let mut me = ManuallyDrop::new(self);
@@ -1160,13 +1114,10 @@ impl<const N: usize> From<&[u8; N]> for IoBufMut {
 
 /// Create a mutable buffer by copying `vec`.
 ///
-/// Copies the readable bytes into a fresh buffer with exactly the vec's
-/// capacity, so reuse patterns like passing `Vec::with_capacity(len)` to
-/// [`Blob::read_at_buf`](crate::Blob::read_at_buf) work. Zero-copy adoption
-/// is not used because it would reserve owner header space inside the vec's
-/// allocation, shrinking the writable capacity below `vec.capacity()`. Use
-/// `From<Vec<u8>> for IoBuf` for zero-copy immutable conversion (and
-/// [`IoBuf::try_into_mut`] to recover mutability).
+/// Zero-copy adoption is not used because it would reserve owner header space
+/// inside the vec's allocation, shrinking the writable capacity below
+/// `vec.capacity()`. Use `From<Vec<u8>> for IoBuf` for zero-copy immutable
+/// conversion (and [`IoBuf::try_into_mut`] to recover mutability).
 impl From<Vec<u8>> for IoBufMut {
     fn from(vec: Vec<u8>) -> Self {
         let mut buf = Self::with_capacity(vec.capacity());
@@ -1875,7 +1826,7 @@ impl From<&'static [u8]> for IoBufs {
 ///   with no readable bytes by popping it, so a never-filled chunk ordered
 ///   before readable data loses its capacity when a read crosses it.
 /// - The same paths pop any chunk whose readable bytes a read fully
-///   consumes, releasing its writable tail. The two- and three-chunk shapes
+///   consumes, releasing its writable tail. The two and three-chunk shapes
 ///   advance in place and retain such tails, so `remaining_mut()` after an
 ///   identical read can differ by shape.
 /// - A `copy_to_bytes` that exactly drains the front chunk's readable bytes

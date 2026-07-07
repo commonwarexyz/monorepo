@@ -66,10 +66,6 @@ use thiserror::Error;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
-        // Under the loom feature the pool's shared ownership (including the
-        // class strong count behind SizeClassToken) is loom-tracked, so the
-        // pool models explore teardown races. loom's Arc mirrors the std
-        // raw-count API used by the token.
         use loom::sync::Arc;
     } else {
         use std::sync::Arc;
@@ -498,8 +494,8 @@ unsafe impl Sync for SizeClass {}
 ///
 /// ```text
 ///                      lease_into: retain class ref into slot lease
-/// +-------------------+ --------------------------> +-----------------+
-/// | parked in global  |                             | checked out     |
+/// +-------------------+                             +-----------------+
+/// | parked in global  | --------------------------> | checked out     |
 /// | freelist          |                             | (pooled view)   |
 /// | (no per-buffer    |                             +-----------------+
 /// | ref: the pool's   |                       cache pop ^   | move buffer,
@@ -522,10 +518,7 @@ unsafe impl Sync for SizeClass {}
 ///
 /// This is the one raw pointer shape used by all pool-owned, pooled view, and
 /// thread-local references to a [`SizeClass`]. The pointer is always derived
-/// from [`Arc::into_raw`]. Under the `loom` feature the strong count lives in
-/// a loom-tracked `Arc` instead, so the pool loom models explore
-/// class-teardown races (park-before-release ordering) that std's untracked
-/// count cannot.
+/// from [`Arc::into_raw`].
 ///
 /// `SizeClassToken` itself owns nothing. It is only an identity token and raw
 /// pointer accepted by the `Arc` refcount APIs:
@@ -1603,6 +1596,7 @@ impl BufferPool {
     /// return an untracked aligned allocation instead.
     ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`.
+    ///
     /// Zero-capacity requests return a detached empty buffer without touching
     /// the pool.
     ///
@@ -1649,6 +1643,7 @@ impl BufferPool {
     /// matching the semantics of [`IoBufMut::with_capacity`] and
     /// [`bytes::BytesMut::with_capacity`]. Use [`bytes::BufMut::put_slice`] or
     /// other [`bytes::BufMut`] methods to write data to the buffer.
+    ///
     /// Zero-capacity requests return a detached empty buffer without touching
     /// the pool.
     ///
@@ -1666,23 +1661,6 @@ impl BufferPool {
     ///
     /// The returned buffer contains **uninitialized memory**. Do not read from
     /// it until data has been written.
-    ///
-    /// # Examples
-    ///
-    /// Pools are owned by the runtime and reached through
-    /// [`BufferPooler`](crate::BufferPooler):
-    ///
-    /// ```
-    /// use commonware_runtime::{deterministic, BufMut, BufferPooler, Runner};
-    ///
-    /// let executor = deterministic::Runner::default();
-    /// executor.start(|context| async move {
-    ///     let mut buf = context.storage_buffer_pool().alloc(1024);
-    ///     assert!(buf.is_pooled());
-    ///     buf.put_slice(b"payload");
-    ///     drop(buf); // the buffer returns to the pool for reuse
-    /// });
-    /// ```
     #[inline]
     pub fn alloc(&self, capacity: usize) -> IoBufMut {
         self.try_alloc(capacity).unwrap_or_else(|_| {
