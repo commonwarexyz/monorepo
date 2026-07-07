@@ -44,7 +44,7 @@ pub trait Journal<F: Family>: Sized + Send {
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Get the number of operations in the journal
-    fn size(&self) -> impl Future<Output = u64> + Send;
+    fn size(&self) -> u64;
 
     /// Append an operation to the journal
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>> + Send;
@@ -81,7 +81,7 @@ where
         Self::sync(self).await
     }
 
-    async fn size(&self) -> u64 {
+    fn size(&self) -> u64 {
         Contiguous::bounds(self).end
     }
 
@@ -148,7 +148,7 @@ where
         Self::sync(self).await
     }
 
-    async fn size(&self) -> u64 {
+    fn size(&self) -> u64 {
         Contiguous::bounds(self).end
     }
 
