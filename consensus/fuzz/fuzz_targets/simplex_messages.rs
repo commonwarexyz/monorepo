@@ -449,7 +449,7 @@ fn structured<S>(
         StructuredKind::ArtifactCertification => {
             assert_artifact_roundtrip(
                 &schemes[0],
-                Artifact::Certification(proposal.round, signer % 2 == 0),
+                Artifact::Certification(proposal.round, signer.is_multiple_of(2)),
             );
         }
         StructuredKind::ActivityNotarize => {
