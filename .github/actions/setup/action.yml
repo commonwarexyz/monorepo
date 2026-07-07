@@ -134,7 +134,8 @@ runs:
     # compiler outputs. That makes it useful when the target cache is missing,
     # stale, cleaned, or split across many CI partitions. It can also hit for
     # unchanged crates when rust-cache misses its coarser key after Cargo.lock
-    # or workflow matrix changes. The same jobs allowed to save rust-cache on
+    # or workflow matrix changes. It uses sccache's S3-compatible backend
+    # against a shared R2 bucket. The same jobs allowed to save rust-cache on
     # main write to the compiler cache; all other jobs read without replacing
     # shared entries.
     - name: Setup sccache
@@ -150,16 +151,24 @@ runs:
           sccache_rw_mode="READ_ONLY"
         fi
 
-        sccache_config="${RUNNER_TEMP}/sccache-config.toml"
-        cat > "$sccache_config" <<EOF
-        server_startup_timeout_ms = 60000
+        if [ -z "${SCCACHE_R2_BUCKET:-}" ] \
+          || [ -z "${SCCACHE_R2_ENDPOINT:-}" ] \
+          || [ -z "${SCCACHE_R2_ACCESS_KEY_ID:-}" ] \
+          || [ -z "${SCCACHE_R2_SECRET_ACCESS_KEY:-}" ]; then
+          echo "::warning::R2 sccache environment is incomplete, sccache disabled for this job."
+          exit 0
+        fi
 
-        [cache.gha]
-        enabled = true
-        version = ""
-        rw_mode = "$sccache_rw_mode"
-        EOF
+        AWS_ACCESS_KEY_ID="$SCCACHE_R2_ACCESS_KEY_ID" \
+        AWS_SECRET_ACCESS_KEY="$SCCACHE_R2_SECRET_ACCESS_KEY" \
+        SCCACHE_BUCKET="$SCCACHE_R2_BUCKET" \
+        SCCACHE_ENDPOINT="$SCCACHE_R2_ENDPOINT" \
+        SCCACHE_IDLE_TIMEOUT=0 \
+        SCCACHE_REGION=auto \
+        SCCACHE_S3_RW_MODE="$sccache_rw_mode" \
+        SCCACHE_S3_USE_SSL=true \
+        sccache --start-server
 
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_CONF=$sccache_config" >> "$GITHUB_ENV"
+        echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "$GITHUB_ENV"
