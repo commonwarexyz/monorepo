@@ -326,8 +326,7 @@ fn fuzz(input: FuzzInput) {
                         Bitmap::Merkleized(bitmap) => bitmap,
                         Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&hasher).unwrap(),
                     };
-                    let size =
-                        <TestMerkleizedBitMap as MerkleStorage<mmr::Family>>::size(&bitmap);
+                    let size = <TestMerkleizedBitMap as MerkleStorage<mmr::Family>>::size(&bitmap);
                     if size > 0 {
                         let safe_pos = position % size.as_u64();
                         let _ = <TestMerkleizedBitMap as MerkleStorage<mmr::Family>>::get_node(
