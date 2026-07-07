@@ -36,6 +36,22 @@ inputs:
     description: "Whether this job should save rust-cache entries when running on main."
     required: false
     default: "true"
+  sccache-r2-bucket:
+    description: "The Cloudflare R2 bucket to use for sccache."
+    required: false
+    default: ""
+  sccache-r2-endpoint:
+    description: "The Cloudflare R2 endpoint to use for sccache."
+    required: false
+    default: ""
+  sccache-r2-access-key-id:
+    description: "The R2 access key ID to use for sccache."
+    required: false
+    default: ""
+  sccache-r2-secret-access-key:
+    description: "The R2 secret access key to use for sccache."
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -123,3 +139,53 @@ runs:
         cache-workspace-crates: false
         workspaces: . -> ${{ steps.rust-cache-workspace.outputs.target }}
         cache-bin: true
+
+    # rust-cache and sccache cover different parts of the build. rust-cache
+    # restores Cargo state: downloaded crates, git dependencies, installed
+    # binaries, and dependency artifacts in target. It is keyed by the job,
+    # toolchain, Cargo files, and the matrix-specific cache key above, so it is
+    # a good coarse restore for a job's expected build graph.
+    #
+    # sccache sits underneath Cargo as RUSTC_WRAPPER and caches individual
+    # compiler outputs. That makes it useful when the target cache is missing,
+    # stale, cleaned, or split across many CI partitions. It can also hit for
+    # unchanged crates when rust-cache misses its coarser key after Cargo.lock
+    # or workflow matrix changes. It uses sccache's S3-compatible backend
+    # against a shared R2 bucket. The same jobs allowed to save rust-cache on
+    # main write to the compiler cache; all other jobs read without replacing
+    # shared entries.
+    - name: Setup sccache
+      if: inputs.rust-cache-enabled == 'true'
+      uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+    - name: Configure sccache
+      if: inputs.rust-cache-enabled == 'true'
+      shell: bash
+      env:
+        SCCACHE_BUCKET: ${{ inputs.sccache-r2-bucket }}
+        SCCACHE_ENDPOINT: ${{ inputs.sccache-r2-endpoint }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.sccache-r2-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.sccache-r2-secret-access-key }}
+      run: |
+        if [ -z "${SCCACHE_BUCKET:-}" ] \
+          || [ -z "${SCCACHE_ENDPOINT:-}" ] \
+          || [ -z "${AWS_ACCESS_KEY_ID:-}" ] \
+          || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+          echo "::warning::R2 sccache environment is incomplete, sccache disabled for this job."
+          exit 0
+        fi
+
+        if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "${{ inputs.rust-cache-save }}" = "true" ]; then
+          sccache_rw_mode="READ_WRITE"
+        else
+          sccache_rw_mode="READ_ONLY"
+        fi
+
+        SCCACHE_IDLE_TIMEOUT=0 \
+        SCCACHE_REGION=auto \
+        SCCACHE_S3_RW_MODE="$sccache_rw_mode" \
+        SCCACHE_S3_USE_SSL=true \
+        sccache --start-server
+
+        echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "$GITHUB_ENV"

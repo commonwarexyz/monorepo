@@ -619,7 +619,7 @@ pub async fn gen_random_kv<F, M>(
                 db.commit().await.unwrap();
                 commits += 1;
                 if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
-                    let boundary = db.sync_boundary().await;
+                    let boundary = db.sync_boundary();
                     db.prune(boundary).await.unwrap();
                 }
                 batch = db.new_batch();
@@ -659,7 +659,7 @@ pub async fn gen_random_kv<F, M>(
                     db.commit().await.unwrap();
                     commits += 1;
                     if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
-                        let boundary = db.sync_boundary().await;
+                        let boundary = db.sync_boundary();
                         db.prune(boundary).await.unwrap();
                     }
                     batch = db.new_batch();

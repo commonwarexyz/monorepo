@@ -426,8 +426,8 @@ impl<
 {
     type Digest = H::Digest;
 
-    async fn size(&self) -> Position<F> {
-        self.ops_tree.size().await
+    fn size(&self) -> Position<F> {
+        self.ops_tree.size()
     }
 
     async fn get_node(&self, pos: Position<F>) -> Result<Option<H::Digest>, merkle::Error<F>> {
@@ -866,7 +866,7 @@ mod tests {
             {
                 let combined =
                     Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
-                assert_eq!(combined.size().await, ops_mmr.size());
+                assert_eq!(combined.size(), ops_mmr.size());
 
                 // Compute the grafted root by iterating ops peaks.
                 let grafted_root = {
@@ -1027,7 +1027,7 @@ mod tests {
 
             let combined =
                 Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
-            assert_eq!(combined.size().await, ops_mmr.size());
+            assert_eq!(combined.size(), ops_mmr.size());
 
             // Compute the grafted root.
             let grafted_root = {

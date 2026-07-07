@@ -208,7 +208,7 @@ fn time_init(cfg: &Config, cache_size: Option<NonZeroUsize>) -> (Duration, u64) 
             .unwrap();
         let elapsed = start.elapsed();
         let end: u64 = *db.bounds().end;
-        let floor: u64 = *db.inactivity_floor_loc().await;
+        let floor: u64 = *db.inactivity_floor_loc();
         (elapsed, end.saturating_sub(floor))
     })
 }

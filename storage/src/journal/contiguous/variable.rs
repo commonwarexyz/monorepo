@@ -29,7 +29,7 @@ use commonware_runtime::{
     Blob as RBlob, Buf, IoBuf,
 };
 use commonware_utils::NZUsize;
-use futures::Stream;
+use futures::{future::try_join_all, Stream};
 use std::{
     collections::BTreeMap,
     io::Cursor,
@@ -740,9 +740,10 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 other => other,
             })?;
 
-        // Group runs of consecutive positions that fall into the same blob and perform a consecutive
-        // read for each run.
+        // Group runs of consecutive positions that fall into the same blob, then read all runs
+        // concurrently.
         let items_per_blob = self.items_per_blob.get();
+        let mut runs = Vec::new();
         let mut group_start = 0;
         while group_start < miss_positions.len() {
             let blob = position_to_blob(miss_positions[group_start], items_per_blob);
@@ -767,17 +768,20 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
                 {
                     run_end += 1;
                 }
-
-                let items = self
-                    .read_consecutive(&blob_handle, blob, &miss_offsets[run_start..run_end])
-                    .await?;
-
-                for (item, &miss_idx) in items.into_iter().zip(&miss_indices[run_start..run_end]) {
-                    result[miss_idx] = Some(item);
-                }
+                runs.push((run_start, run_end, blob, blob_handle.clone()));
                 run_start = run_end;
             }
             group_start = group_end;
+        }
+
+        let run_items = try_join_all(runs.iter().map(|(run_start, run_end, blob, handle)| {
+            self.read_consecutive(handle, *blob, &miss_offsets[*run_start..*run_end])
+        }))
+        .await?;
+        for ((run_start, run_end, _, _), items) in runs.iter().zip(run_items) {
+            for (item, &miss_idx) in items.into_iter().zip(&miss_indices[*run_start..*run_end]) {
+                result[miss_idx] = Some(item);
+            }
         }
 
         self.metrics.items_read.inc_by(positions.len() as u64);
@@ -2322,6 +2326,83 @@ mod tests {
             let positions: Vec<u64> = (3..10).collect();
             let items = reader.read_many(&positions).await.unwrap();
             assert_eq!(items, vec![300, 400, 500, 600, 700, 800, 900]);
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_scattered_single_runs_across_blobs() {
+        // Read a batch where cache hits are interleaved with non-consecutive misses spanning
+        // several blobs. The misses split into many small runs that are fetched separately, and
+        // each run's items must land in the correct result slots between the cached items. Every
+        // item's payload encodes its position, so a wrong run boundary or a misplaced result
+        // fails the value assertions.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "read-many-scattered-runs".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(16)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Each item's frame is 302 bytes, so a 5-item blob spans two full 512-byte pages plus
+            // a partial page. Full pages are served through the page cache and go cold on reopen,
+            // which is what lets this test stage misses at all.
+            let items = (0..30)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal =
+                Journal::<_, FixedBytes<300>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            for item in &items {
+                journal.append(item).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen with a fresh page cache so sealed-blob full pages are cold.
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(16)),
+                ..cfg
+            };
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            let reader = journal.snapshot().await.unwrap();
+
+            // Warm blobs 1 (positions 5..10) and 3 (positions 15..20) with one read each. The
+            // faulted pages cover the neighboring positions asserted below.
+            reader.read(6).await.unwrap();
+            reader.read(16).await.unwrap();
+
+            // Prove the interleave the batch will see: warm-blob positions are sync hits, and the
+            // scattered positions in blobs 0, 2, and 4 are misses. The hit pass in read_many runs
+            // before any miss I/O, so this is exactly the hit/miss split the call resolves.
+            for hit in [5, 6, 15, 17] {
+                assert!(reader.try_read_sync(hit).is_some(), "position {hit}");
+            }
+            let misses = [0, 3, 10, 12, 20, 21, 23];
+            for miss in misses {
+                assert!(reader.try_read_sync(miss).is_none(), "position {miss}");
+            }
+
+            // The misses decompose into runs [0], [3], [10], [12], [20, 21], [23]: four single-item
+            // runs and one consecutive pair across three blobs, with hits interleaved between them.
+            let positions = [0, 3, 5, 6, 10, 12, 15, 17, 20, 21, 23];
+            let expected: Vec<_> = positions
+                .iter()
+                .map(|&p| items[p as usize].clone())
+                .collect();
+            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+
+            // A second pass serves the now-cached positions through the hit path and must agree.
+            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
             drop(reader);
 
             journal.destroy().await.unwrap();

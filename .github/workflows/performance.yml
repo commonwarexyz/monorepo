@@ -62,6 +62,10 @@ jobs:
         uses: ./.github/actions/setup
         with:
           toolchain: nightly
+          sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+          sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+          sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Run benchmark tracking
         id: run
