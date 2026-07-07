@@ -9,9 +9,6 @@
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     pub mod rng;
     pub use rng::{test_rng, test_rng_seeded, FuzzRng};
-
-    pub mod thread_local;
-    pub use thread_local::Cached;
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
@@ -223,6 +220,9 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod concurrency;
     pub mod futures;
     pub mod sync;
+
+    pub mod thread_local;
+    pub use thread_local::Cached;
 });
 #[cfg(not(any(
     commonware_stability_GAMMA,
