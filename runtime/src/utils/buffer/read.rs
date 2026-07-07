@@ -131,7 +131,13 @@ impl<B: Blob> Read<B> {
                 reusable.clear();
                 reusable
             }
-            Ok(_) | Err(_) => self.pool.alloc(bytes_to_read),
+            Ok(too_small) => {
+                // Release the undersized buffer before allocating so a tight
+                // pool can reuse its slot for the replacement.
+                drop(too_small);
+                self.pool.alloc(bytes_to_read)
+            }
+            Err(_) => self.pool.alloc(bytes_to_read),
         };
         let read_result = self
             .blob
