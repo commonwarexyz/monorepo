@@ -11,7 +11,7 @@ use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{ordered::Set, Faults, N3f1, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{collections::BTreeMap, hint::black_box};
 
 type V = MinSig;
@@ -23,7 +23,7 @@ struct Bench {
 }
 
 impl Bench {
-    fn new(mut rng: impl CryptoRngCore, reshare: bool, n: u32) -> Self {
+    fn new(mut rng: impl CryptoRng, reshare: bool, n: u32) -> Self {
         let private_keys = (0..n)
             .map(|_| PrivateKey::random(&mut rng))
             .collect::<Vec<_>>();

@@ -9,14 +9,11 @@ use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
-use core::{fmt::Display, ops::Deref};
-use rand_core::{
-    impls::{next_u32_via_fill, next_u64_via_fill},
-    CryptoRng, CryptoRngCore, RngCore,
-};
+use core::{convert::Infallible, fmt::Display, ops::Deref};
+use rand_core::{CryptoRng, TryCryptoRng, TryRng};
 use zeroize::ZeroizeOnDrop;
 
-/// Provides an implementation of [CryptoRngCore].
+/// Provides an implementation of [CryptoRng].
 ///
 /// We intentionally don't expose this struct, to make the impl returned by
 /// [Transcript::noise] completely opaque.
@@ -37,22 +34,28 @@ impl Rng {
     }
 }
 
-impl RngCore for Rng {
-    fn next_u32(&mut self) -> u32 {
-        next_u32_via_fill(self)
+impl TryRng for Rng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut bytes = [0u8; 4];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
     }
 
-    fn next_u64(&mut self) -> u64 {
-        next_u64_via_fill(self)
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut bytes = [0u8; 8];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         let dest_len = dest.len();
         let remaining = &self.buf[self.start..];
         if remaining.len() >= dest_len {
             dest.copy_from_slice(&remaining[..dest_len]);
             self.start += dest_len;
-            return;
+            return Ok(());
         }
 
         let (start, mut dest) = dest.split_at_mut(remaining.len());
@@ -71,15 +74,12 @@ impl RngCore for Rng {
             dest.copy_from_slice(&self.buf[..dest_len]);
             self.start = dest_len;
         }
-    }
 
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.fill_bytes(dest);
         Ok(())
     }
 }
 
-impl CryptoRng for Rng {}
+impl TryCryptoRng for Rng {}
 
 fn flush(hasher: &mut blake3::Hasher, pending: u64) {
     let mut pending_bytes = [0u8; 9];
@@ -238,7 +238,7 @@ impl Transcript {
     ///
     /// The label will also affect the noise. Changing the label will change
     /// the stream of bytes generated.
-    pub fn noise(&self, label: &'static [u8]) -> impl CryptoRngCore {
+    pub fn noise(&self, label: &'static [u8]) -> impl CryptoRng {
         let mut out = Self::start(StartTag::Noise, Some(self.summarize()));
         out.commit(label);
         Rng::new(out.hasher.finalize_xof())
@@ -393,7 +393,7 @@ impl crate::Digest for Summary {
 }
 
 impl Random for Summary {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         let mut bytes = [0u8; blake3::OUT_LEN];
         rng.fill_bytes(&mut bytes[..]);
         Self {
@@ -419,6 +419,7 @@ mod test {
     use commonware_codec::{DecodeExt as _, Encode};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
+    use rand_core::Rng;
 
     #[test]
     fn test_namespace_affects_summary() {

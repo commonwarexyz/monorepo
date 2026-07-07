@@ -1,6 +1,7 @@
 use super::*;
 use crate::bitmap::Prunable;
 use commonware_formatting::hex;
+use rand::RngExt as _;
 
 /// Test basic dirty lifecycle: creation, operations, commit, and abort.
 #[test]
@@ -879,11 +880,11 @@ fn test_randomized_helper<R: rand::Rng>(rng: &mut R) {
 
         for _ in 0..OPERATIONS_PER_COMMIT {
             // Pick a random operation based on probability distribution
-            let op_choice = rng.gen_range(0..100);
+            let op_choice = rng.random_range(0..100);
 
             // Special case: if bitmap is empty, we can only push
             if current_len == 0 {
-                let bit_value = rng.gen_bool(0.5);
+                let bit_value = rng.random_bool(0.5);
                 dirty.push(bit_value);
                 ground_truth.push(bit_value);
                 current_len += 1;
@@ -892,15 +893,15 @@ fn test_randomized_helper<R: rand::Rng>(rng: &mut R) {
 
             // Operation: PUSH (55% probability)
             if op_choice < PROB_PUSH {
-                let bit_value = rng.gen_bool(0.5);
+                let bit_value = rng.random_bool(0.5);
                 dirty.push(bit_value);
                 ground_truth.push(bit_value);
                 current_len += 1;
             }
             // Operation: MODIFY existing bit (20% probability)
             else if op_choice < PROB_MODIFY {
-                let bit = rng.gen_range(0..current_len);
-                let new_value = rng.gen_bool(0.5);
+                let bit = rng.random_range(0..current_len);
+                let new_value = rng.random_bool(0.5);
 
                 // Safety: Only modify bits that aren't pruned
                 let chunk_idx = Prunable::<4>::to_chunk_index(bit);
@@ -924,7 +925,7 @@ fn test_randomized_helper<R: rand::Rng>(rng: &mut R) {
                 // Only prune if there's at least one unpruned complete chunk we can prune
                 if max_prune_chunk > current_pruned {
                     // Randomly pick a chunk boundary to prune to (between current_pruned+1 and max)
-                    let prune_chunk = rng.gen_range((current_pruned + 1)..=max_prune_chunk);
+                    let prune_chunk = rng.random_range((current_pruned + 1)..=max_prune_chunk);
                     let prune_to = (prune_chunk as u64) * CHUNK_SIZE_BITS;
 
                     dirty.prune_to_bit(prune_to);

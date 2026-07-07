@@ -29,7 +29,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::ordered::{Quorum, Set};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::collections::BTreeMap;
 use tracing::{debug, info_span, trace, Span};
 
@@ -43,7 +43,7 @@ struct Current {
 
 pub struct Actor<E, S, B, D, Re, Rl, T>
 where
-    E: Spawner + Metrics + Clock + CryptoRngCore,
+    E: Spawner + Metrics + Clock + CryptoRng,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
@@ -80,7 +80,7 @@ where
 
 impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
 where
-    E: Spawner + Metrics + Clock + CryptoRngCore,
+    E: Spawner + Metrics + Clock + CryptoRng,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,

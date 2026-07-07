@@ -6,7 +6,7 @@ use commonware_storage::journal::contiguous::{
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use criterion::criterion_main;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 mod fixed_append;

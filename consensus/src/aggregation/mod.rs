@@ -124,7 +124,7 @@ mod tests {
         test_rng, NZUsize, NonZeroDuration, NZU16,
     };
     use futures::future::join_all;
-    use rand::{rngs::StdRng, Rng};
+    use rand::{rngs::StdRng, RngExt as _};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -560,7 +560,8 @@ mod tests {
                             });
 
                     // Random shutdown timing to simulate unclean shutdown
-                    let shutdown_wait = context.gen_range(shutdown_range_min..shutdown_range_max);
+                    let shutdown_wait =
+                        context.random_range(shutdown_range_min..shutdown_range_max);
                     select! {
                         _ = context.sleep(shutdown_wait) => {
                             debug!(shutdown_wait = ?shutdown_wait, "Simulating unclean shutdown");

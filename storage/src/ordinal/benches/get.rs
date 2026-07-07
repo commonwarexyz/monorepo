@@ -8,7 +8,7 @@ use commonware_storage::utils::bits_for_indices;
 use commonware_utils::NZU64;
 use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
@@ -19,7 +19,7 @@ pub fn select_indices(count: usize, items: u64) -> Vec<u64> {
     let mut rng = StdRng::seed_from_u64(42);
     let mut selected_indices = Vec::with_capacity(count);
     for _ in 0..count {
-        selected_indices.push(rng.gen_range(0..items));
+        selected_indices.push(rng.random_range(0..items));
     }
     selected_indices
 }

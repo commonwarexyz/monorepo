@@ -529,7 +529,7 @@ pub mod tests {
     use commonware_utils::{bitmap::Readable, NZUsize, NZU16, NZU64};
     use core::future::Future;
     use ordered::tests::test_build_small_close_reopen as test_ordered_build_small_close_reopen;
-    use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         num::{NonZeroU16, NonZeroUsize},
         sync::Arc,

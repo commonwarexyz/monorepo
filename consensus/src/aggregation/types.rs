@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{channel::oneshot, union, N3f1};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::hash::Hash;
 
 /// Error that may be encountered when interacting with `aggregation`.
@@ -183,7 +183,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     /// Domain separation is automatically applied to prevent signature reuse.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_attestation::<_, D>(rng, &self.item, &self.attestation, strategy)
@@ -334,7 +334,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Verifies the recovered certificate for the item.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D, N3f1>(rng, &self.item, &self.certificate, strategy)

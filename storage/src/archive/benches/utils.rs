@@ -8,7 +8,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::num::{NonZeroU16, NonZeroUsize};
 
 /// Number of bytes that can be buffered in a section before being written to a

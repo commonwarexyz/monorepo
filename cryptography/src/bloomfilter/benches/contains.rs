@@ -2,7 +2,7 @@ use commonware_cryptography::{blake3::Blake3, sha256::Sha256, BloomFilter, Hashe
 use commonware_utils::rational::BigRationalExt;
 use criterion::{criterion_group, Criterion};
 use num_rational::BigRational;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashSet, hint::black_box, num::NonZeroUsize};
 
 const ITEM_SIZES: [usize; 3] = [32, 2048, 4096];

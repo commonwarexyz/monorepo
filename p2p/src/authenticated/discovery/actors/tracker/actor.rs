@@ -252,7 +252,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Truncate to a random selection of peers if we have too many infos
                 let max = self.peer_gossip_max_count;
                 if infos.len() > max {
-                    infos.partial_shuffle(self.context.as_mut(), max);
+                    let _ = infos.partial_shuffle(self.context.as_mut(), max);
                     infos.truncate(max);
                 }
 

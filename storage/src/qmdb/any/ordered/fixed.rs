@@ -156,7 +156,7 @@ pub(crate) mod test {
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZU64};
     use futures::StreamExt as _;
-    use rand::{rngs::StdRng, seq::IteratorRandom, RngCore, SeedableRng};
+    use rand::{rngs::StdRng, seq::IteratorRandom, Rng, SeedableRng};
     use std::collections::{BTreeMap, HashMap};
 
     /// A generic type alias for an Any database parameterized by merkle family.

@@ -21,7 +21,7 @@ use commonware_runtime::{
     Clock, Metrics,
 };
 use commonware_utils::futures::Aborter;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     mem::{replace, take},
@@ -90,7 +90,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest> {
+pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest> {
     context: E,
     scheme: S,
     elector: L::Elector,
@@ -113,7 +113,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     nullifications: CounterFamily<Leader<S::PublicKey>>,
 }
 
-impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
+impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
     State<E, S, L, D>
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {

@@ -7,7 +7,7 @@ use commonware_runtime::{
 use commonware_storage::freezer::Identifier;
 use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
@@ -26,7 +26,7 @@ pub fn select_keys(count: usize, keys: &[Key]) -> Vec<Key> {
     let mut rng = StdRng::seed_from_u64(42);
     let mut selected_keys = Vec::with_capacity(count);
     for _ in 0..count {
-        let idx = rng.gen_range(0..keys.len());
+        let idx = rng.random_range(0..keys.len());
         selected_keys.push(keys[idx].clone());
     }
     selected_keys

@@ -26,7 +26,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64};
 use harnesses::VariableMmrHarness as H;
-use rand::RngCore as _;
+use rand::Rng as _;
 use std::{
     collections::VecDeque,
     future::Future,

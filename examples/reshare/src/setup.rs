@@ -15,11 +15,7 @@ use commonware_utils::{
     ordered::{Map, Set},
     Faults, N3f1, TryCollect, NZU32,
 };
-use rand::{
-    rngs::{OsRng, StdRng},
-    seq::IteratorRandom,
-    SeedableRng,
-};
+use rand::{rngs::StdRng, seq::IteratorRandom, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -122,7 +118,7 @@ impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
         }
         let mut rng = StdRng::seed_from_u64(round);
         p_iter
-            .choose_multiple(&mut rng, to_choose)
+            .sample(&mut rng, to_choose)
             .into_iter()
             .try_collect()
             .unwrap()
@@ -182,8 +178,9 @@ fn generate_identities(
     Vec<(PrivateKey, Option<Share>)>,
 ) {
     // Generate p2p private keys
+    let mut rng = rand::make_rng::<StdRng>();
     let peer_signers = (0..num_peers)
-        .map(|_| PrivateKey::random(&mut OsRng))
+        .map(|_| PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
 
     // Generate consensus key
@@ -197,7 +194,7 @@ fn generate_identities(
         (None, Map::default())
     } else {
         let (output, shares) = deal::<MinSig, _, N3f1>(
-            OsRng,
+            &mut rng,
             Default::default(),
             all_participants
                 .iter()
@@ -226,10 +223,11 @@ fn generate_configs(
     output: Option<&Output<MinSig, PublicKey>>,
     identities: &[(PrivateKey, Option<Share>)],
 ) -> Vec<PathBuf> {
+    let mut rng = rand::make_rng::<StdRng>();
     let bootstrappers = identities
         .iter()
         .enumerate()
-        .choose_multiple(&mut OsRng, args.num_bootstrappers)
+        .sample(&mut rng, args.num_bootstrappers)
         .into_iter()
         .map(|(i, (signer, _))| {
             (

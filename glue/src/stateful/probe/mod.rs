@@ -347,7 +347,7 @@ mod test {
             strategy: &impl ParallelStrategy,
         ) -> bool
         where
-            R: rand_core::CryptoRngCore,
+            R: rand_core::CryptoRng,
             D: commonware_cryptography::Digest,
             M: commonware_utils::Faults,
         {
@@ -415,7 +415,7 @@ mod test {
             strategy: &impl ParallelStrategy,
         ) -> bool
         where
-            R: rand_core::CryptoRngCore,
+            R: rand_core::CryptoRng,
             D: commonware_cryptography::Digest,
         {
             let attestation = Attestation::<Scheme> {

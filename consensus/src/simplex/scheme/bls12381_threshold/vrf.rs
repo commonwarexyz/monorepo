@@ -60,7 +60,7 @@ use commonware_macros::stability;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults};
 use rand::{rngs::StdRng, SeedableRng};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::{BTreeSet, HashMap},
     fmt::Debug,
@@ -246,7 +246,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// from a certificate of the target round (i.e. notarization, finalization,
     /// or nullification).
     #[stability(ALPHA)]
-    pub fn encrypt<R: CryptoRngCore>(
+    pub fn encrypt<R: CryptoRng>(
         &self,
         rng: &mut R,
         target: Round,
@@ -269,7 +269,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// from a certificate of the target round (i.e. notarization, finalization,
 /// or nullification).
 #[stability(ALPHA)]
-pub fn encrypt<R: CryptoRngCore, V: Variant>(
+pub fn encrypt<R: CryptoRng, V: Variant>(
     rng: &mut R,
     identity: V::Public,
     namespace: &[u8],
@@ -296,7 +296,7 @@ pub fn fixture<V, R>(
 >
 where
     V: Variant,
-    R: rand::RngCore + rand::CryptoRng,
+    R: rand::Rng + rand::CryptoRng,
 {
     commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
         rng,
@@ -562,7 +562,7 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         M: Faults,
     {
@@ -591,7 +591,7 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
         M: Faults,
@@ -691,7 +691,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         strategy: &impl Strategy,
     ) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
     {
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
@@ -730,7 +730,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         strategy: &impl Strategy,
     ) -> Verification<Self>
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,

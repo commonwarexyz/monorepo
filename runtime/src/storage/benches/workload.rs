@@ -14,7 +14,7 @@ use commonware_runtime::{tokio::Context, Blob as _, Storage as _};
 use futures::{stream::FuturesUnordered, TryStreamExt};
 use rand::{
     rngs::{SmallRng, StdRng},
-    Rng, SeedableRng,
+    RngExt as _, SeedableRng,
 };
 use std::{
     sync::{
@@ -291,7 +291,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
             async move {
                 let random_block = || {
                     let total_blocks = current_len.load(Ordering::Relaxed) / io_size;
-                    rng.gen_range(0..total_blocks)
+                    rng.random_range(0..total_blocks)
                 };
                 run_read_loop(blob, deadline, cfg.io_size, random_block).await
             }

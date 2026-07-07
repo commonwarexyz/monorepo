@@ -28,7 +28,7 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use rand::{distributions::Distribution, rngs::StdRng, RngCore, SeedableRng};
+use rand::{distr::Distribution, rngs::StdRng, Rng, SeedableRng};
 use rand_distr::Zipf;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
@@ -639,7 +639,8 @@ pub async fn gen_random_kv<F, M>(
         // Sample over the full keyspace (which may exceed the seeded set, so some samples hit unseeded
         // keys and insert them). `Zipf::new` samples a rank in `[1, space]`; map it to a 0-based index.
         let space = keyspace.unwrap_or(num_elements);
-        let zipf = key_zipf_exponent.map(|s| Zipf::new(space, s).expect("valid zipf parameters"));
+        let zipf =
+            key_zipf_exponent.map(|s| Zipf::new(space as f64, s).expect("valid zipf parameters"));
         let mut batch = db.new_batch();
         for _ in 0u64..num_operations {
             let idx = match &zipf {

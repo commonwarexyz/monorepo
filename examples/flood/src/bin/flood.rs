@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;
-use rand::{rngs::SmallRng, RngCore, SeedableRng};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},

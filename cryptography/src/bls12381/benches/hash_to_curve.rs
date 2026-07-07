@@ -5,7 +5,7 @@ use commonware_cryptography::bls12381::primitives::{
 use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{thread_rng, Rng};
+use rand::{rng, RngExt as _};
 use std::hint::black_box;
 
 fn bench_hash_to_curve(c: &mut Criterion) {
@@ -15,7 +15,7 @@ fn bench_hash_to_curve(c: &mut Criterion) {
         let mut msgs: Vec<[u8; 32]> = Vec::with_capacity(n);
         for _ in 0..n {
             let mut msg = [0u8; 32];
-            thread_rng().fill(&mut msg);
+            rng().fill(&mut msg);
             msgs.push(msg);
         }
 

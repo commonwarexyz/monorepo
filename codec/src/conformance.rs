@@ -7,7 +7,7 @@
 use crate::Encode;
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_conformance::Conformance;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::{fmt::Debug, marker::PhantomData};
 

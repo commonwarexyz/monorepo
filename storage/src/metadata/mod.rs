@@ -91,7 +91,7 @@ mod tests {
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics as _, Runner, Storage, Supervisor as _};
     use commonware_utils::sequence::U64;
-    use rand::{Rng, RngCore};
+    use rand::{Rng, RngExt as _};
 
     #[test_traced]
     fn test_put_get_clear() {
@@ -1071,13 +1071,13 @@ mod tests {
                 metadata.put(key, value);
 
                 // Sync occasionally
-                if context.gen_bool(0.1) {
+                if context.random_bool(0.1) {
                     metadata.sync().await.unwrap();
                 }
 
                 // Update some existing keys
-                if context.gen_bool(0.1) {
-                    let selected_index = context.gen_range(0..=i);
+                if context.random_bool(0.1) {
+                    let selected_index = context.random_range(0..=i);
                     let update_key = U64::new(selected_index as u64);
                     let mut new_value = vec![0u8; 64];
                     context.fill_bytes(&mut new_value);
@@ -1085,15 +1085,15 @@ mod tests {
                 }
 
                 // Remove some keys
-                if context.gen_bool(0.1) {
-                    let selected_index = context.gen_range(0..=i);
+                if context.random_bool(0.1) {
+                    let selected_index = context.random_range(0..=i);
                     let remove_key = U64::new(selected_index as u64);
                     metadata.remove(&remove_key);
                 }
 
                 // Use get_mut occasionally
-                if context.gen_bool(0.1) {
-                    let selected_index = context.gen_range(0..=i);
+                if context.random_bool(0.1) {
+                    let selected_index = context.random_range(0..=i);
                     let mut_key = U64::new(selected_index as u64);
                     if let Some(value) = metadata.get_mut(&mut_key) {
                         if !value.is_empty() {

@@ -77,7 +77,7 @@ use crate::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::ordered::Set;
-use rand::{seq::SliceRandom, Rng};
+use rand::{seq::SliceRandom, Rng, RngExt as _};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -1207,7 +1207,7 @@ fn sample_unique_indices(rng: &mut impl Rng, total: u128, samples: usize) -> Vec
     let mut sampled = Vec::with_capacity(samples);
     let mut seen = HashSet::with_capacity(samples);
     for idx in (total - samples as u128)..total {
-        let candidate = rng.gen_range(0..=idx);
+        let candidate = rng.random_range(0..=idx);
         if seen.insert(candidate) {
             sampled.push(candidate);
         } else {

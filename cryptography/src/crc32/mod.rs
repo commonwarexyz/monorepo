@@ -36,7 +36,7 @@ use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// Size of a CRC32 checksum in bytes.
 const SIZE: usize = 4;
@@ -178,7 +178,7 @@ impl crate::Digest for Digest {
 }
 
 impl Random for Digest {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         let mut array = [0u8; SIZE];
         rng.fill_bytes(&mut array);
         Self(array)

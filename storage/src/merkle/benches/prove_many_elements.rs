@@ -5,7 +5,7 @@ use commonware_storage::merkle::{
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use futures::executor::block_on;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::ops::Range;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
@@ -44,7 +44,7 @@ fn make_test_data<F: Family>(
     let max_start = n as u64 - range;
     let mut samples: Vec<Sample<F>> = Vec::with_capacity(SAMPLE_SIZE);
     while samples.len() < SAMPLE_SIZE {
-        let start_index = sampler.gen_range(0..max_start);
+        let start_index = sampler.random_range(0..max_start);
         let leaf_range = Location::<F>::new(start_index)..Location::<F>::new(start_index + range);
         if samples
             .iter()

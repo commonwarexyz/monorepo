@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::thread_rng;
+use rand::rng;
 use std::hint::black_box;
 
 fn bench_combine_public_keys(c: &mut Criterion) {
@@ -10,7 +10,7 @@ fn bench_combine_public_keys(c: &mut Criterion) {
                 || {
                     let mut public_keys = Vec::with_capacity(n);
                     for _ in 0..n {
-                        let public_key = ops::keypair::<_, MinSig>(&mut thread_rng()).1;
+                        let public_key = ops::keypair::<_, MinSig>(&mut rng()).1;
                         public_keys.push(public_key);
                     }
                     public_keys
