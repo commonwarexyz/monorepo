@@ -376,7 +376,7 @@ where
 }
 
 /// Run the marshal fuzz driver against `H` (StandardHarness or CodingHarness).
-pub fn fuzz_marshal<H: TestHarness>(input: MarshalFuzzInput)
+pub fn fuzz_marshal_single_node<H: TestHarness>(input: MarshalFuzzInput)
 where
     H::ValidatorExtra: VariantPublish<H::TestBlock>,
     H::TestBlock: Clone + Send + 'static,

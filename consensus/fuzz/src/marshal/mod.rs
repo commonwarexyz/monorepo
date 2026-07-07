@@ -9,16 +9,16 @@
 //!   restarts) and asserting per-actor delivery invariants. Generic over the
 //!   marshal variant (`StandardHarness` / `CodingHarness`), mirroring how
 //!   marshal itself splits into `standard` and `coding`. Targets:
-//!   `marshal_standard`, `marshal_coding`.
+//!   `marshal_single_node_standard`, `marshal_single_node_coding`.
 //! - [`multi_node`]: runs a live `N4F1C3` cluster (three honest nodes
 //!   plus one byzantine `Disrupter`) wired to real simplex consensus, and
 //!   checks marshal liveness (every honest node delivers a target number of
 //!   ordered finalized blocks sampled within a single-epoch bound) plus
 //!   cross-node agreement. Also per-variant. Targets:
-//!   `marshal_liveness_standard`, `marshal_liveness_coding`.
-//! - [`inline`]: drives the standard inline block path. Target: `marshal_inline`.
+//!   `marshal_multi_node_liveness_standard`, `marshal_multi_node_liveness_coding`.
+//! - [`inline`]: drives the standard inline block path. Target: `marshal_inline_standard`.
 //! - [`store`]: drives the marshal block/certificate store directly. Target:
-//!   `marshal_store`.
+//!   `marshal_store_standard`.
 //!
 //! # Goals, pros, and cons
 //!
@@ -40,5 +40,5 @@ pub mod store;
 
 pub use inline::{fuzz_marshal_inline, MarshalInlineInput};
 pub use multi_node::{fuzz_marshal_liveness, MarshalLivenessInput};
-pub use single_node::{fuzz_marshal, MarshalEvent, MarshalFuzzInput, VariantPublish};
+pub use single_node::{fuzz_marshal_single_node, MarshalEvent, MarshalFuzzInput, VariantPublish};
 pub use store::{fuzz_marshal_store, MarshalStoreInput};
