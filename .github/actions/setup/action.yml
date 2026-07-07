@@ -145,11 +145,12 @@ runs:
       if: inputs.rust-cache-enabled == 'true'
       shell: bash
       run: |
-        if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "${{ inputs.rust-cache-save }}" = "true" ]; then
-          sccache_rw_mode="READ_WRITE"
-        else
-          sccache_rw_mode="READ_ONLY"
-        fi
+        # if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "${{ inputs.rust-cache-save }}" = "true" ]; then
+        #   sccache_rw_mode="READ_WRITE"
+        # else
+        #   sccache_rw_mode="READ_ONLY"
+        # fi
+        sccache_rw_mode="READ_WRITE"
 
         if [ -z "${SCCACHE_R2_BUCKET:-}" ] \
           || [ -z "${SCCACHE_R2_ENDPOINT:-}" ] \
