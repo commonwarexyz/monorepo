@@ -244,10 +244,7 @@ mod tests {
             ];
             for (offset, len) in cases {
                 let read = sealed.read_at(offset, len).await.unwrap().coalesce();
-                assert_eq!(
-                    read.as_ref(),
-                    &data[offset as usize..offset as usize + len]
-                );
+                assert_eq!(read.as_ref(), &data[offset as usize..offset as usize + len]);
             }
         });
     }
@@ -788,5 +785,4 @@ mod tests {
             assert_eq!(buf, data);
         });
     }
-
 }
