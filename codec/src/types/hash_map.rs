@@ -383,7 +383,8 @@ mod tests {
         1u32.write(&mut malicious_buf); // 1 key
         100u64.write(&mut malicious_buf); // 1 value
 
-        let result = HashMap::<u32, u64>::decode_cfg(malicious_buf.freeze(), &((..).into(), ((), ())));
+        let result =
+            HashMap::<u32, u64>::decode_cfg(malicious_buf.freeze(), &((..).into(), ((), ())));
         assert!(matches!(result, Err(Error::EndOfBuffer)));
     }
 
