@@ -141,20 +141,15 @@ commonware_macros::stability_scope!(BETA {
             T: Send + 'static;
 
         /// Runs either a serial or parallel body.
+        ///
+        /// Both bodies must produce the same result; the strategy picks whichever it
+        /// expects to complete faster for `len` work items.
         #[track_caller]
-        fn run<R, SEQ, PAR>(
-            &self,
-            _len: usize,
-            serial: SEQ,
-            _parallel: PAR,
-        ) -> R
+        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
         where
             R: Send,
             SEQ: FnOnce() -> R + Send,
-            PAR: FnOnce() -> R + Send,
-        {
-            serial()
-        }
+            PAR: FnOnce() -> R + Send;
 
         /// Reduces a collection to a single value with per-partition initialization.
         ///
@@ -775,6 +770,15 @@ commonware_macros::stability_scope!(BETA {
         {
             let result = f(self.clone());
             async move { result }
+        }
+
+        fn run<R, SEQ, PAR>(&self, _len: usize, serial: SEQ, _parallel: PAR) -> R
+        where
+            R: Send,
+            SEQ: FnOnce() -> R + Send,
+            PAR: FnOnce() -> R + Send,
+        {
+            serial()
         }
 
         fn fold_init<I, INIT, T, R, ID, F, RD>(
