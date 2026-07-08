@@ -5,12 +5,35 @@
 
 use super::Error;
 use commonware_codec::{
+    util::at_least,
     varint::{UInt, MAX_U32_VARINT_SIZE},
-    Codec, EncodeSize, ReadExt as _, Write as _,
+    Codec, Decode as _, EncodeSize, Read, ReadExt as _, Write as _,
 };
 use commonware_runtime::{buffer::paged::Writer, Blob, Buf, IoBufMut, IoBufs};
 use std::{future::Future, io::Cursor};
 use zstd::{bulk::compress, decode_all};
+
+/// Decodes a varint length prefix followed by exactly that many payload bytes. Used to fuse
+/// header parsing and item decoding into a single page-cache decode on the synchronous,
+/// uncompressed read path.
+///
+/// Matches [find_frame]'s varint semantics (u32 range, max 5 bytes, same overflow handling) by
+/// using the same [UInt] reader.
+pub(super) struct PrefixedItem<V>(pub(super) V);
+
+impl<V: Read> Read for PrefixedItem<V> {
+    type Cfg = V::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let data_len = UInt::<u32>::read(buf)?.0 as usize;
+        // The at_least guard must stay: it ensures every V (even a decoder driven by
+        // `remaining()`) sees exactly `data_len` bytes in both the sync and async paths,
+        // rather than successfully decoding a short prefix when a gather is truncated
+        // mid-payload.
+        at_least(buf, data_len)?;
+        V::decode_cfg(buf.take(data_len), cfg).map(Self)
+    }
+}
 
 /// Read access needed to decode a frame at a known offset.
 pub(super) trait FrameReader {
@@ -234,6 +257,124 @@ mod tests {
         let mut buf = Vec::new();
         encode_frame_into(compression, item, &mut buf).unwrap();
         buf
+    }
+
+    /// A decoder driven by `remaining()` rather than the bytes it consumes: it greedily
+    /// swallows everything available and always succeeds. Used to prove [PrefixedItem]'s
+    /// `at_least` guard rejects short windows before such a decoder can misread them.
+    struct Greedy(Vec<u8>);
+
+    impl Read for Greedy {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            let mut data = vec![0u8; buf.remaining()];
+            buf.copy_to_slice(&mut data);
+            Ok(Self(data))
+        }
+    }
+
+    #[test]
+    fn test_prefixed_item_roundtrip() {
+        let buf = frame(None, &42u64);
+        let mut cursor = &buf[..];
+        let item = PrefixedItem::<u64>::read_cfg(&mut cursor, &()).unwrap();
+        assert_eq!(item.0, 42);
+        // The frame is consumed exactly: varint prefix plus payload.
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn test_prefixed_item_trailing_bytes_preserved() {
+        // Two frames back to back: decoding the first must stop exactly at its end.
+        let mut buf = frame(None, &1u64);
+        buf.extend_from_slice(&frame(None, &2u64));
+        let mut cursor = &buf[..];
+        assert_eq!(
+            PrefixedItem::<u64>::read_cfg(&mut cursor, &()).unwrap().0,
+            1
+        );
+        assert_eq!(
+            PrefixedItem::<u64>::read_cfg(&mut cursor, &()).unwrap().0,
+            2
+        );
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn test_prefixed_item_zero_length_payload() {
+        // A frame declaring zero payload bytes leaves the payload decoder with nothing.
+        let buf = [0x00u8];
+        let mut cursor = &buf[..];
+        assert!(matches!(
+            PrefixedItem::<u64>::read_cfg(&mut cursor, &()),
+            Err(commonware_codec::Error::EndOfBuffer)
+        ));
+    }
+
+    #[test]
+    fn test_prefixed_item_varint_exceeds_u32() {
+        // 5-byte varint encoding a value larger than u32::MAX must fail like find_frame does.
+        let buf = [0xFFu8, 0xFF, 0xFF, 0xFF, 0x7F];
+        let mut cursor = &buf[..];
+        assert!(PrefixedItem::<u64>::read_cfg(&mut cursor, &()).is_err());
+        let mut cursor = &buf[..];
+        assert!(find_frame(&mut cursor, 0).is_err());
+    }
+
+    #[test]
+    fn test_prefixed_item_truncated_varint() {
+        // A lone continuation byte is an incomplete varint.
+        let buf = [0x80u8];
+        let mut cursor = &buf[..];
+        assert!(PrefixedItem::<u64>::read_cfg(&mut cursor, &()).is_err());
+    }
+
+    #[test]
+    fn test_prefixed_item_payload_exceeds_window() {
+        // The prefix declares 5 payload bytes but only 3 are available: the decode must fail
+        // with EndOfBuffer so a truncated cache gather classifies as a miss.
+        let buf = [0x05u8, 1, 2, 3];
+        let mut cursor = &buf[..];
+        assert!(matches!(
+            PrefixedItem::<u64>::read_cfg(&mut cursor, &()),
+            Err(commonware_codec::Error::EndOfBuffer)
+        ));
+    }
+
+    #[test]
+    fn test_prefixed_item_under_consumption() {
+        // The prefix declares 8 payload bytes but a u32 consumes only 4: the leftover bytes
+        // inside the declared window must be reported as ExtraData, matching decode_cfg.
+        let mut buf = vec![0x08u8];
+        buf.extend_from_slice(&7u32.to_be_bytes());
+        buf.extend_from_slice(&[0u8; 4]);
+        let mut cursor = &buf[..];
+        assert!(matches!(
+            PrefixedItem::<u32>::read_cfg(&mut cursor, &()),
+            Err(commonware_codec::Error::ExtraData(4))
+        ));
+    }
+
+    #[test]
+    fn test_prefixed_item_guards_greedy_decoder_on_short_window() {
+        // The at_least guard must reject a window shorter than the declared payload BEFORE
+        // handing it to the payload decoder. A remaining()-driven decoder would otherwise
+        // successfully consume the short window (Buf::take clamps to the bytes available)
+        // and silently return a wrong, shorter value.
+        let buf = [0x05u8, 1, 2, 3];
+        let mut cursor = &buf[..];
+        assert!(matches!(
+            PrefixedItem::<Greedy>::read_cfg(&mut cursor, &()),
+            Err(commonware_codec::Error::EndOfBuffer)
+        ));
+
+        // With the full window available the greedy decoder sees exactly the declared bytes.
+        let buf = [0x05u8, 1, 2, 3, 4, 5, 99];
+        let mut cursor = &buf[..];
+        let item = PrefixedItem::<Greedy>::read_cfg(&mut cursor, &()).unwrap();
+        assert_eq!(item.0 .0, vec![1, 2, 3, 4, 5]);
+        assert_eq!(cursor, &[99u8][..]);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::{
     journal::{
         frame::{
             decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
-            FrameInfo,
+            FrameInfo, PrefixedItem,
         },
         Error,
     },
@@ -370,6 +370,13 @@ impl<C> Config<C> {
 /// This journal manages blob assignment automatically, allowing callers to append items
 /// sequentially without manually tracking blob indexes.
 ///
+/// # Synchronous Reads
+///
+/// When compression is disabled, read paths opportunistically decode items in place from the
+/// page cache (or the write buffer) while holding the page-cache read lock, which appends
+/// contend on when flushing pages. `V`'s `Read` implementation must therefore be cheap and
+/// parse-only: no blocking and no expensive work.
+///
 /// # Repair
 ///
 /// Like
@@ -562,17 +569,44 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
     /// Read the varint-framed item for `position` at byte `offset` from cached bytes, returning
     /// `None` on any miss.
-    fn try_read_frame_sync(&self, position: u64, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
+    fn try_read_frame_sync(&self, position: u64, offset: u64) -> Option<V> {
         let blob = self
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))?;
         let remaining = blob.size().checked_sub(offset)?;
-        let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
-        if header_len == 0 {
+        if remaining == 0 {
             return None;
         }
 
+        // Compressed items cannot be decoded from borrowed page slices (decompression must
+        // not run under the cache lock), so they keep the two-phase copy path.
+        if self.compressed {
+            return self.try_read_frame_sync_compressed(&blob, offset, remaining);
+        }
+
+        // Fuse the varint header parse and the item decode into a single lock acquisition,
+        // decoding in place from cached page bytes. Despite the large max_len, lock-held work
+        // stays bounded because gathering is capped by page residency and a fixed page budget.
+        // Items exceeding the budget simply fall back to the async path.
+        let max_len = usize::try_from(remaining).unwrap_or(usize::MAX);
+        match blob.try_decode_prefix_sync::<PrefixedItem<V>>(offset, max_len, &self.codec_config) {
+            // Decode failures on the sync path are reported as misses, and the async path
+            // surfaces any real corruption.
+            Some(Ok((item, _))) => Some(item.0),
+            _ => None,
+        }
+    }
+
+    /// Synchronous read of a compressed item: copy the header and item bytes out of the cache,
+    /// then decompress and decode outside any locks.
+    fn try_read_frame_sync_compressed(
+        &self,
+        blob: &Blob<'_, E::Blob>,
+        offset: u64,
+        remaining: u64,
+    ) -> Option<V> {
         // Read the varint header to determine item size.
+        let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
         let mut header = [0u8; MAX_U32_VARINT_SIZE];
         if !blob.try_read_sync_into(&mut header[..header_len], offset) {
             return None;
@@ -601,20 +635,21 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             return decode_item::<V>(
                 &header[varint_len..varint_len + data_len],
                 &self.codec_config,
-                self.compressed,
+                true,
             )
             .ok();
         }
 
-        // Otherwise try reading the full item from cache.
-        buf.resize(item_len, 0);
-        if !blob.try_read_sync_into(buf, offset) {
+        // Otherwise try reading the full item from cache. The per-call allocation is
+        // acceptable here because decompression dominates the cost of this path.
+        let mut buf = vec![0u8; item_len];
+        if !blob.try_read_sync_into(&mut buf, offset) {
             return None;
         }
         decode_item::<V>(
             &buf[varint_len..varint_len + data_len],
             &self.codec_config,
-            self.compressed,
+            true,
         )
         .ok()
     }
@@ -861,9 +896,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
 
         // Per-frame path for frames whose extent is unknown.
-        let mut frame_buf = Vec::new();
         for (idx, offset) in singles {
-            if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut frame_buf) {
+            if let Some(item) = self.try_read_frame_sync(positions[idx], offset) {
                 out[idx] = Some(item);
                 hits += 1;
             }
@@ -994,8 +1028,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         // offsets journal is not consulted twice.
         let cached_offset = self.offsets.try_read_sync(position);
         if let Some(offset) = cached_offset {
-            let mut buf = Vec::new();
-            if let Some(item) = self.try_read_frame_sync(position, offset, &mut buf) {
+            if let Some(item) = self.try_read_frame_sync(position, offset) {
                 self.metrics.cache_hits.inc();
                 self.metrics.items_read.inc();
                 return Ok(item);
@@ -1031,8 +1064,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
     fn try_read_sync(&self, position: u64) -> Option<V> {
         self.validate_readable(position).ok()?;
         let offset = self.offsets.try_read_sync(position)?;
-        let mut buf = Vec::new();
-        let item = self.try_read_frame_sync(position, offset, &mut buf)?;
+        let item = self.try_read_frame_sync(position, offset)?;
         self.metrics.cache_hits.inc();
         self.metrics.items_read.inc();
         Some(item)
@@ -2310,6 +2342,64 @@ mod tests {
             .and_then(|l| l.split_whitespace().last())
             .and_then(|v| v.parse().ok())
             .expect("counter missing")
+    }
+
+    #[test_traced]
+    fn test_corrupt_resident_frames_decline_to_misses() {
+        // Write frames through a FixedBytes<1> journal, then reopen the partition as a bool
+        // journal: position 3 carries a 0xFF payload, which is not a valid bool encoding.
+        // The sync paths must decline the corruption to misses while the async paths
+        // surface Error::Codec. Init only frame-scans the newest item-bearing blob, so the
+        // corruption sits in sealed blob 0 while valid frames fill blob 1.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "corrupt-decline-variable".into(),
+                items_per_section: NZU64!(60),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut writer = Journal::<_, FixedBytes<1>>::init(context.child("w"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0u8..64 {
+                let byte = if i == 3 { 0xFF } else { 0x01 };
+                writer.append(&FixedBytes::new([byte])).await.unwrap();
+            }
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4)),
+                ..cfg
+            };
+            let mut journal = Journal::<_, bool>::init(context.child("r"), cfg)
+                .await
+                .unwrap();
+            let reader = journal.snapshot().await.unwrap();
+
+            // Warm page 0 through a valid frame, then verify the corrupt resident frame
+            // declines to a sync miss while the async read errors.
+            assert!(reader.read(0).await.unwrap());
+            assert_eq!(reader.try_read_sync(0), Some(true));
+            assert_eq!(reader.try_read_sync(3), None);
+            assert!(matches!(reader.read(3).await, Err(Error::Codec(_))));
+
+            // Batched paths agree: the corrupt position stays a miss synchronously and the
+            // async batch read surfaces the error.
+            let served = reader.try_read_many_sync(&[0, 3]);
+            assert_eq!(served[0], Some(true));
+            assert_eq!(served[1], None);
+            assert!(matches!(
+                reader.read_many(&[0, 3]).await,
+                Err(Error::Codec(_))
+            ));
+
+            drop(reader);
+            journal.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]
