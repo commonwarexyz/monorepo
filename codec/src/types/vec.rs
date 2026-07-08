@@ -123,7 +123,6 @@ mod tests {
             Err(Error::ExtraData(1))
         ));
 
-        // Regression test for CWE-789 (Allocation Before Validation)
         // Construct a buffer advertising a very large length but containing minimal payload.
         let mut malicious_buf = BytesMut::new();
         1_000_000usize.write(&mut malicious_buf);
