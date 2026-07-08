@@ -345,10 +345,21 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             let size = blob.size();
             drop(blob);
 
-            // Remove blob from storage
-            self.context
+            // Remove blob from storage. A missing blob is treated as already
+            // pruned rather than as an error: a straggling file operation from
+            // a previous incarnation of the same journal (e.g. across an
+            // in-process restart) can remove a section that this incarnation
+            // listed at init, and only sections below the prune floor are ever
+            // affected.
+            match self
+                .context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
+                .await
+            {
+                Ok(()) => {}
+                Err(RError::BlobMissing(_, _)) => {}
+                Err(err) => return Err(Error::Runtime(err)),
+            }
             pruned = true;
 
             debug!(section, size, "pruned blob");
@@ -753,6 +764,41 @@ mod tests {
                 commonware_runtime::reschedule().await;
             }
             let manager = waiter.await.expect("prune task failed");
+            assert!(manager.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_prune_tolerates_externally_removed_blob() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let wait_for_syncs = Arc::new(AtomicUsize::new(0));
+            let cfg = test_config(pending, wait_for_syncs);
+            let mut manager = Manager::init(context.child("manager"), cfg)
+                .await
+                .expect("failed to initialize manager");
+
+            manager
+                .get_or_create(1)
+                .await
+                .expect("failed to create section");
+            manager
+                .get_or_create(2)
+                .await
+                .expect("failed to create section");
+
+            // Remove section 1's blob behind the manager's back, as a
+            // straggling file operation from a previous incarnation of the
+            // same journal (e.g. across an in-process restart) would.
+            context
+                .remove("test", Some(&1u64.to_be_bytes()))
+                .await
+                .expect("failed to remove blob externally");
+
+            // The missing blob is already the outcome pruning wants, so the
+            // prune must succeed and remove the remaining section as usual.
+            assert!(manager.prune(3).await.expect("prune failed"));
             assert!(manager.is_empty());
         });
     }
