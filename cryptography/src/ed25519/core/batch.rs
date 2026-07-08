@@ -233,7 +233,7 @@ impl Verifier {
         let mut B_coeff = Scalar::ZERO;
 
         for (vk, payload, sig) in items {
-            let k = super::scalar_from_hash(
+            let k = Scalar::from_hash(
                 Sha512::default()
                     .chain(&sig.R_bytes[..])
                     .chain(vk.as_bytes())
