@@ -270,6 +270,9 @@ jobs:
       with:
         tool: just@1.43.0,cargo-cooldown@${{ env.CARGO_COOLDOWN_VERSION }}
     - name: Check dependency cooldown
+      env:
+        COOLDOWN_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        COOLDOWN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: just cooldown
 
   Lock:
