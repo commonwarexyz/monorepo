@@ -7,11 +7,12 @@
 //!
 //! The tuner only arbitrates small cases. Choosing parallel for work that is better run
 //! serially costs microseconds of dispatch overhead, while running big work serially forfeits
-//! the pool's entire speedup, so the serial path is only ever executed where a live estimate
-//! bounds its cost under [`SERIAL_SAMPLE_BUDGET_NS`]: a serial seed or probe requires the
-//! projected serial cost (parallel's wall time multiplied by pool parallelism, an upper bound)
-//! to fit the budget, and a measured serial estimate at or over the budget biases to parallel
-//! outright. Big cases therefore always run parallel and never pay a serial sample.
+//! the pool's entire speedup, so serial is gated by a live estimate in both of its roles.
+//! Sampling serial (the seed and every probe) requires the projected serial cost, parallel's
+//! wall time multiplied by pool parallelism, to fit under [`SERIAL_SAMPLE_BUDGET_NS`].
+//! Preferring serial in steady state requires both the projected and the measured serial
+//! cost to fit under the same budget. Big cases therefore always run parallel and never pay
+//! a serial sample.
 //!
 //! Every gate reads a live quantity, so no state is absorbing. The projection is derived from
 //! the parallel estimate, which keeps refreshing (every [`PREFERRED_SAMPLE_INTERVAL`] calls)
@@ -21,12 +22,16 @@
 //! doubles the interval, up to `RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT` calls. Probes are
 //! never suppressed by the loser's own (stale) estimate, so an estimate poisoned by transient
 //! conditions (pool contention at startup, an early-exit error path) converges back to the
-//! truth over a handful of probes. Every sample blends into its path's EWMA, so a single
-//! outlier moves an estimate by at most a fifth of the gap.
+//! truth over a handful of probes. After a path's first sample initializes its estimate,
+//! every later sample blends into the EWMA, so a single outlier moves an established
+//! estimate by at most a fifth of the gap.
 //!
 //! Timing is coarse by design: each measured call records one wall-clock sample. Queueing on a
 //! shared pool is included in a parallel sample's elapsed time, so contention pushes the
-//! parallel estimate up and steers concurrent callers back toward serial. Both paths produce
+//! parallel estimate up and steers concurrent callers back toward serial. Calls that abort
+//! early on error record their short wall time like any other sample, so garbage inputs can
+//! transiently drag an estimate down and unlock a serial sample of genuine work. The refresh
+//! cadence corrects any resulting mispricing within a few blends. Both paths produce
 //! identical results, so a misjudged call only costs throughput, never correctness.
 //!
 //! State updates are serialized per policy entry, but calls do not hold the entry lock while work
@@ -45,13 +50,12 @@ const PREFERRED_SAMPLE_INTERVAL: u32 = 10;
 // Probe the losing path this often when its estimate is within 2x of the winner's.
 const RESAMPLE_INTERVAL: u32 = 100;
 // Each additional multiple of the winner's wall time doubles the probe interval, up to this
-// shift (100 << 5 = 3,200 calls). Slowdowns are bounded by pool parallelism, so a capped
-// probe adds well under 1% amortized overhead on typical pools while keeping every path
-// discoverable.
+// shift (100 << 5 = 3,200 calls). The cap keeps every path discoverable while the interval
+// amortizes the cost of a mispriced probe (including pool queueing, which a parallel probe
+// pays in full) across thousands of calls.
 const MAX_RESAMPLE_SHIFT: u32 = 5;
-// The tuner only arbitrates cases where a serial run is provably cheap: serial is seeded or
-// probed only when its projected cost fits this budget, and a measured serial estimate at or
-// over it biases to parallel outright.
+// The tuner only arbitrates cases where a serial run is provably cheap: serial is seeded,
+// probed, or preferred only when its projected and measured costs fit this budget.
 const SERIAL_SAMPLE_BUDGET_NS: u64 = 10_000_000;
 // Track a short EWMA so recent measurements outweigh old startup noise.
 const EWMA_PREVIOUS_WEIGHT: u64 = 4;
@@ -147,11 +151,14 @@ struct Entry {
 }
 
 impl Entry {
-    // Returns the path to prefer: the faster estimate, except that a measured serial estimate
-    // at or over the budget biases to parallel (the tuner only arbitrates small cases). Ties
-    // go to serial (equal wall time for fewer busy workers).
-    const fn preferred(serial_ns: u64, parallel_ns: u64) -> Execution {
-        if serial_ns >= SERIAL_SAMPLE_BUDGET_NS || parallel_ns < serial_ns {
+    // Returns the path to prefer: the faster estimate, provided both the projected and
+    // measured serial cost fit under the budget (the tuner only arbitrates small cases).
+    // Ties go to serial (equal wall time for fewer busy workers).
+    const fn preferred(serial_ns: u64, parallel_ns: u64, projected_serial: u64) -> Execution {
+        if projected_serial >= SERIAL_SAMPLE_BUDGET_NS
+            || serial_ns >= SERIAL_SAMPLE_BUDGET_NS
+            || parallel_ns < serial_ns
+        {
             Execution::Parallel
         } else {
             Execution::Serial
@@ -167,51 +174,43 @@ impl Entry {
         };
 
         // A serial pass of work that parallel finishes in `parallel_ns` can take up to
-        // `parallel_ns * parallelism`. The projection is live: parallel keeps refreshing
-        // whenever it executes, so a case that shrinks into the budget unlocks on its own.
+        // `parallel_ns * parallelism`. The projection gates serial in both sampling and
+        // preference: a case whose projection exceeds the budget never runs serial. It is
+        // live: parallel keeps refreshing whenever it executes, so a case that shrinks into
+        // the budget unlocks on its own.
         let projected_serial =
             parallel_ns.saturating_mul(u64::try_from(parallelism).unwrap_or(u64::MAX));
-        let serial_affordable = projected_serial < SERIAL_SAMPLE_BUDGET_NS;
+        let can_sample_serial = projected_serial < SERIAL_SAMPLE_BUDGET_NS;
 
+        // Until serial is sampled, parallel is preferred by default and the boundary doubles
+        // as the seed slot. Once both estimates exist, the boundary probes the losing path on
+        // an interval that doubles for each multiple of the winner's wall time it is behind,
+        // so a close race is re-checked often while a blowout is re-checked rarely.
+        let (preferred, interval) =
+            self.serial_ns
+                .map_or((Execution::Parallel, RESAMPLE_INTERVAL), |serial_ns| {
+                    let preferred = Self::preferred(serial_ns, parallel_ns, projected_serial);
+                    let (winner_ns, loser_ns) = match preferred {
+                        Execution::Serial => (serial_ns, parallel_ns),
+                        Execution::Parallel => (parallel_ns, serial_ns),
+                    };
+                    let slowdown = loser_ns / winner_ns.max(1);
+                    let shift = slowdown
+                        .saturating_sub(1)
+                        .min(u64::from(MAX_RESAMPLE_SHIFT)) as u32;
+                    (preferred, RESAMPLE_INTERVAL << shift)
+                });
+
+        // Exactly one caller crosses the boundary, and a serial seed whose sample never lands
+        // is simply offered again at the next boundary. A serial seed or probe must fit the
+        // live projection. A parallel probe is always allowed: it pays the true parallel wall
+        // (including any pool queueing), which the capped interval amortizes.
         self.since_probe = self.since_probe.saturating_add(1);
-
-        // Seed the serial estimate at the probe boundary once its projected cost fits the
-        // budget. Exactly one caller crosses the boundary, and a seed whose sample never
-        // lands is simply offered again at the next boundary.
-        let Some(serial_ns) = self.serial_ns else {
-            if self.since_probe >= RESAMPLE_INTERVAL {
-                self.since_probe = 0;
-                if serial_affordable {
-                    return (Execution::Serial, true);
-                }
-                return (Execution::Parallel, true);
-            }
-            return (
-                Execution::Parallel,
-                self.since_probe.is_multiple_of(PREFERRED_SAMPLE_INTERVAL),
-            );
-        };
-
-        // Probe the losing path on an interval that doubles for each multiple of the winner's
-        // wall time it is behind, so a close race is re-checked often while a blowout is
-        // re-checked rarely. A parallel probe is always allowed because its cost is on the
-        // order of the (in-budget) serial wall. A serial probe must fit the live projection.
-        let preferred = Self::preferred(serial_ns, parallel_ns);
-        let (winner_ns, loser_ns) = match preferred {
-            Execution::Serial => (serial_ns, parallel_ns),
-            Execution::Parallel => (parallel_ns, serial_ns),
-        };
-        let slowdown = loser_ns / winner_ns.max(1);
-        let shift = u32::try_from(slowdown.saturating_sub(1))
-            .unwrap_or(MAX_RESAMPLE_SHIFT)
-            .min(MAX_RESAMPLE_SHIFT);
-        let interval = RESAMPLE_INTERVAL << shift;
-
         if self.since_probe >= interval {
             self.since_probe = 0;
             match preferred {
                 Execution::Serial => return (Execution::Parallel, true),
-                Execution::Parallel if serial_affordable => return (Execution::Serial, true),
+                Execution::Parallel if can_sample_serial => return (Execution::Serial, true),
                 Execution::Parallel => return (Execution::Parallel, true),
             }
         }
@@ -224,7 +223,7 @@ impl Entry {
 
     // The first sample of each path initializes its estimate, and every later sample blends
     // into the EWMA, so a single outlier (an error-aborted call, a contended pool) moves an
-    // estimate by at most a fifth of the gap.
+    // established estimate by at most a fifth of the gap.
     fn record(&mut self, execution: Execution, elapsed: Duration) {
         let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
         let estimate = match execution {
@@ -267,7 +266,11 @@ mod tests {
     }
 
     fn preferred(entry: &Entry) -> Execution {
-        Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap())
+        let serial_ns = entry.serial_ns.unwrap();
+        let parallel_ns = entry.parallel_ns.unwrap();
+        let projected_serial =
+            parallel_ns.saturating_mul(u64::try_from(PARALLELISM).unwrap_or(u64::MAX));
+        Entry::preferred(serial_ns, parallel_ns, projected_serial)
     }
 
     #[test]
@@ -331,6 +334,21 @@ mod tests {
 
         for _ in 0..(2 * RESAMPLE_INTERVAL) {
             let (execution, _) = choose(&mut entry);
+            assert_eq!(execution, Execution::Parallel);
+        }
+    }
+
+    #[test]
+    fn projection_gates_preferred_serial() {
+        // A workload grew within its bucket: parallel is now 25ms on a 12-thread pool
+        // (projection 300ms, well over budget), but a stale serial estimate from a smaller
+        // input claims 8ms. The live projection must keep serial from running.
+        let mut entry = Entry::default();
+        entry.record(Execution::Parallel, Duration::from_millis(25));
+        entry.record(Execution::Serial, Duration::from_millis(8));
+
+        for _ in 0..(2 * RESAMPLE_INTERVAL) {
+            let (execution, _) = entry.choose(12);
             assert_eq!(execution, Execution::Parallel);
         }
     }
@@ -416,6 +434,23 @@ mod tests {
     }
 
     #[test]
+    fn seeds_serial_once_projection_shrinks_into_budget() {
+        // The projection is live: a key that starts over budget seeds serial at the first
+        // boundary after refreshes shrink the parallel estimate into the budget.
+        let mut entry = Entry::default();
+        entry.record(Execution::Parallel, Duration::from_millis(10));
+
+        for _ in 1..RESAMPLE_INTERVAL {
+            let (execution, measure) = choose(&mut entry);
+            assert_eq!(execution, Execution::Parallel);
+            if measure {
+                entry.record(Execution::Parallel, Duration::from_micros(100));
+            }
+        }
+        assert_eq!(choose(&mut entry), (Execution::Serial, true));
+    }
+
+    #[test]
     fn resamples_other_execution() {
         let mut entry = Entry::default();
         entry.record(Execution::Parallel, Duration::from_micros(100));
@@ -480,17 +515,18 @@ mod tests {
 
     #[test]
     fn recovers_from_poisoned_estimate() {
-        // Startup contention left parallel looking 30ms while serial measured 8ms, so serial
-        // is preferred. The true parallel cost is 3ms: exponential probes blend the estimate
-        // back down geometrically until the preference flips.
+        // Startup contention left parallel looking 2ms while serial measured 1ms, so serial
+        // is preferred. The projection is still under budget (2ms x 4 = 8ms). The true
+        // parallel cost is 0.5ms: probes blend the estimate down geometrically until the
+        // preference flips.
         let mut entry = Entry::default();
-        entry.record(Execution::Parallel, Duration::from_millis(30));
-        entry.record(Execution::Serial, Duration::from_millis(8));
+        entry.record(Execution::Parallel, Duration::from_millis(2));
+        entry.record(Execution::Serial, Duration::from_millis(1));
         assert_eq!(preferred(&entry), Execution::Serial);
 
         let mut probes = 0;
         let mut flipped_at = None;
-        for i in 1..=2_000 {
+        for i in 1..=1_000 {
             if preferred(&entry) == Execution::Parallel {
                 flipped_at = Some(i - 1);
                 break;
@@ -500,20 +536,21 @@ mod tests {
                 Execution::Parallel => {
                     assert!(measure);
                     probes += 1;
-                    entry.record(Execution::Parallel, Duration::from_millis(3));
+                    entry.record(Execution::Parallel, Duration::from_micros(500));
                 }
                 Execution::Serial => {
                     if measure {
-                        entry.record(Execution::Serial, Duration::from_millis(8));
+                        entry.record(Execution::Serial, Duration::from_millis(1));
                     }
                 }
             }
         }
 
-        // The estimate converges 30 -> 24.6 -> 20.28 -> 16.82 -> 14.06 -> 11.85 -> 10.08 ->
-        // 8.66 -> 7.53ms over eight probes whose intervals shrink as the ratio narrows.
-        assert_eq!(probes, 8);
-        assert_eq!(flipped_at, Some(1_600));
+        // The estimate converges 2 -> 1.7 -> 1.46 -> 1.268 -> 1.1144 -> 0.99152ms over five
+        // probes. The first probe interval is 200 (slowdown 2x) and shrinks to 100 once the
+        // ratio drops below 2x, so the flip happens at call 600.
+        assert_eq!(probes, 5);
+        assert_eq!(flipped_at, Some(600));
     }
 
     #[test]
