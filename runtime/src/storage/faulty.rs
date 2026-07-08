@@ -1,6 +1,8 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
 use crate::{deterministic::BoxDynRng, Error, Handle, IoBufs, IoBufsMut};
+#[commonware_macros::stability(BETA)]
+use crate::{BlobHeaderLayout, BlobInfo};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::Rng;
@@ -239,16 +241,15 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        layout: BlobHeaderLayout,
+    ) -> Result<(Self::Blob, BlobInfo), Error> {
         if self.ctx.should_fail(Op::Open) {
             return Err(injected_io_error().into());
         }
         self.inner
-            .open_versioned(partition, name, versions)
+            .open_versioned(partition, name, versions, layout)
             .await
-            .map(|(blob, len, blob_version)| {
-                (Blob::new(self.ctx.clone(), blob, len), len, blob_version)
-            })
+            .map(|(blob, info)| (Blob::new(self.ctx.clone(), blob, info.size), info))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {

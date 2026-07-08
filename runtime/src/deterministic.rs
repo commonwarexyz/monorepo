@@ -66,6 +66,8 @@ use crate::{
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Name, Panicked,
     Spawner as _, Supervisor as _, METRICS_PREFIX,
 };
+#[commonware_macros::stability(BETA)]
+use crate::{BlobHeaderLayout, BlobInfo};
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
@@ -1527,8 +1529,11 @@ impl crate::Storage for Context {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
-        self.storage.open_versioned(partition, name, versions).await
+        layout: BlobHeaderLayout,
+    ) -> Result<(Self::Blob, BlobInfo), Error> {
+        self.storage
+            .open_versioned(partition, name, versions, layout)
+            .await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {

@@ -4,7 +4,7 @@ use commonware_storage::journal::contiguous::{
     variable::{Config as VariableConfig, Journal as VariableJournal},
     Mutable,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use criterion::criterion_main;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
@@ -29,7 +29,7 @@ criterion_main!(
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
 
 /// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroU16 = NZU16!(8_192);
+const PAGE_SIZE: NonZeroU16 = commonware_runtime::buffer::paged::page_size(4096);
 
 /// The number of pages to cache in the page cache. Make it big enough to be
 /// fast, but not so big we avoid any page faults for the larger benchmarks.

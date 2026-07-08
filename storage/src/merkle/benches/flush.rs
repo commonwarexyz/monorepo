@@ -19,7 +19,7 @@ use commonware_runtime::{
     BufferPooler, Supervisor as _,
 };
 use commonware_storage::merkle::{self, full, Bagging::ForwardFold, Family};
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::{
@@ -30,7 +30,7 @@ use std::{
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
-const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
+const PAGE_SIZE: NonZeroU16 = commonware_runtime::buffer::paged::page_size(4096);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 

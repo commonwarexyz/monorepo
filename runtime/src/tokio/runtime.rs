@@ -26,6 +26,8 @@ use crate::{
     iouring,
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
+#[commonware_macros::stability(BETA)]
+use crate::{BlobHeaderLayout, BlobInfo};
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
@@ -806,8 +808,11 @@ impl crate::Storage for Context {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
-        self.storage.open_versioned(partition, name, versions).await
+        layout: BlobHeaderLayout,
+    ) -> Result<(Self::Blob, BlobInfo), Error> {
+        self.storage
+            .open_versioned(partition, name, versions, layout)
+            .await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
