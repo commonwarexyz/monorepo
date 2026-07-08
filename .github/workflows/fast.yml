@@ -411,7 +411,7 @@ jobs:
         run: zepter run check
 
   build:
-    name: "Build (toolchain: ${{ matrix.toolchain }})"
+    name: "Build (toolchain: ${{ matrix.toolchain }}, partition: ${{ matrix.partition.name }})"
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -421,6 +421,23 @@ jobs:
           - msrv
           - stable
           - nightly
+        # commonware-runtime dominates the feature powerset (~80% of all
+        # combinations), so it is split into four partitions that fix the
+        # loom and tokio-console features on or off and enumerate the
+        # powerset of the remaining features. The union of the runtime
+        # partitions and `rest` (every other crate) is identical to the
+        # full workspace powerset (`just hack check`).
+        partition:
+          - name: runtime-0
+            args: -p commonware-runtime --features loom,tokio-console
+          - name: runtime-1
+            args: -p commonware-runtime --features loom --exclude-features tokio-console
+          - name: runtime-2
+            args: -p commonware-runtime --features tokio-console --exclude-features loom
+          - name: runtime-3
+            args: -p commonware-runtime --exclude-features loom,tokio-console
+          - name: rest
+            args: --workspace --exclude commonware-runtime
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -438,6 +455,7 @@ jobs:
         uses: ./.github/actions/setup
         with:
           toolchain: ${{ steps.toolchain.outputs.version }}
+          rust-cache-save: ${{ matrix.partition.name == 'rest' }}
           sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
           sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
           sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
@@ -449,4 +467,18 @@ jobs:
       - name: Print Rust version
         run: rustc --version
       - name: Check feature powerset
-        run: RUSTFLAGS="-D warnings" just hack check
+        run: RUSTFLAGS="-D warnings" just hack ${{ matrix.partition.args }} check
+
+  Build-Gate:
+    name: "Builds"
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+      - name: Check build results
+        run: |
+          if [ "${{ needs.build.result }}" != "success" ]; then
+            echo "Builds failed or were cancelled"
+            exit 1
+          fi
+          echo "All builds passed successfully!"

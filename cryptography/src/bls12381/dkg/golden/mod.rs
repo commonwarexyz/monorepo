@@ -1553,6 +1553,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::{N3f1, N5f1};
+    use rstest::rstest;
     use std::{sync::LazyLock, time::Duration};
 
     const TEST_NAMESPACE: &[u8] = b"test";
@@ -2205,12 +2206,16 @@ mod tests {
         assert!(signed.identify(&other_faults).is_none());
     }
 
+    #[rstest]
+    #[case()]
+    #[case()]
+    #[case()]
+    #[case()]
     #[test_group("slow")]
-    #[test]
     fn fuzz_plan() {
         minifuzz::Builder::default()
             .with_min_iterations(0)
-            .with_search_time(Duration::from_secs(600))
+            .with_search_time(Duration::from_secs(150))
             .test(|u| {
                 let plan: Plan = u.arbitrary()?;
                 let seed: u64 = u.arbitrary()?;

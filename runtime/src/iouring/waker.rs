@@ -1147,6 +1147,7 @@ mod loom_tests {
         thread,
     };
     use rand::Rng;
+    use rstest::rstest;
 
     // This module uses loom to model the waker's producer/loop protocol over
     // the packed atomic state word. The model keeps the production sequence and
@@ -1860,7 +1861,11 @@ mod loom_tests {
         });
     }
 
-    fn generated_producer_only_programs(cases: usize, seed: u64) {
+    #[rstest]
+    #[case(8, 0)]
+    #[case(8, 1)]
+    #[case(8, 2)]
+    fn generated_producer_only_programs(#[case] cases: usize, #[case] seed: u64) {
         // Generate deterministic producer-only programs before entering loom,
         // then model each case with two concurrent producers. Each producer
         // runs a short sequence of `publish()` and out-of-band `wake()` calls
@@ -1927,21 +1932,6 @@ mod loom_tests {
         }
     }
 
-    #[test]
-    fn generated_producer_only_programs_0() {
-        generated_producer_only_programs(8, 0);
-    }
-
-    #[test]
-    fn generated_producer_only_programs_1() {
-        generated_producer_only_programs(8, 1);
-    }
-
-    #[test]
-    fn generated_producer_only_programs_2() {
-        generated_producer_only_programs(8, 2);
-    }
-
     fn generated_loop_programs(
         cases: usize,
         ops_per_program: usize,
@@ -1996,7 +1986,11 @@ mod loom_tests {
         }
     }
 
-    fn generated_eventfd_loop_programs(cases: usize, seed: u64) {
+    #[rstest]
+    #[case(32, 10)]
+    #[case(32, 11)]
+    #[case(32, 12)]
+    fn generated_eventfd_loop_programs(#[case] cases: usize, #[case] seed: u64) {
         // Generate deterministic single-producer programs before entering loom,
         // then model each case with one producer and the eventfd loop simulator.
         // The producer may interleave out-of-band `wake()` calls before,
@@ -2012,22 +2006,11 @@ mod loom_tests {
         generated_loop_programs(cases, OPS_PER_PROGRAM, seed, simulate_eventfd_loop_until);
     }
 
-    #[test]
-    fn generated_eventfd_loop_programs_0() {
-        generated_eventfd_loop_programs(32, 10);
-    }
-
-    #[test]
-    fn generated_eventfd_loop_programs_1() {
-        generated_eventfd_loop_programs(32, 11);
-    }
-
-    #[test]
-    fn generated_eventfd_loop_programs_2() {
-        generated_eventfd_loop_programs(32, 12);
-    }
-
-    fn generated_futex_loop_programs(cases: usize, seed: u64) {
+    #[rstest]
+    #[case(6, 20)]
+    #[case(5, 21)]
+    #[case(5, 22)]
+    fn generated_futex_loop_programs(#[case] cases: usize, #[case] seed: u64) {
         // Generate deterministic single-producer programs before entering loom,
         // then model each case with one producer and the futex idle loop
         // simulator. The producer may interleave out-of-band `wake()` calls
@@ -2040,20 +2023,5 @@ mod loom_tests {
         const OPS_PER_PROGRAM: usize = 3;
 
         generated_loop_programs(cases, OPS_PER_PROGRAM, seed, simulate_futex_loop_until);
-    }
-
-    #[test]
-    fn generated_futex_loop_programs_0() {
-        generated_futex_loop_programs(6, 20);
-    }
-
-    #[test]
-    fn generated_futex_loop_programs_1() {
-        generated_futex_loop_programs(5, 21);
-    }
-
-    #[test]
-    fn generated_futex_loop_programs_2() {
-        generated_futex_loop_programs(5, 22);
     }
 }

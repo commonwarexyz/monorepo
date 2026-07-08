@@ -151,9 +151,10 @@ runs:
     # stale, cleaned, or split across many CI partitions. It can also hit for
     # unchanged crates when rust-cache misses its coarser key after Cargo.lock
     # or workflow matrix changes. It uses sccache's S3-compatible backend
-    # against a shared R2 bucket. The same jobs allowed to save rust-cache on
-    # main write to the compiler cache; all other jobs read without replacing
-    # shared entries.
+    # against a shared R2 bucket. Every job with credentials writes: entries
+    # are keyed by the full compile inputs, so concurrent writers store
+    # identical content and repeat pushes of a PR reuse the previous push's
+    # work.
     - name: Setup sccache
       if: inputs.rust-cache-enabled == 'true'
       uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
@@ -174,15 +175,9 @@ runs:
           exit 0
         fi
 
-        if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "${{ inputs.rust-cache-save }}" = "true" ]; then
-          sccache_rw_mode="READ_WRITE"
-        else
-          sccache_rw_mode="READ_ONLY"
-        fi
-
         SCCACHE_IDLE_TIMEOUT=0 \
         SCCACHE_REGION=auto \
-        SCCACHE_S3_RW_MODE="$sccache_rw_mode" \
+        SCCACHE_S3_RW_MODE="READ_WRITE" \
         SCCACHE_S3_USE_SSL=true \
         sccache --start-server
 
