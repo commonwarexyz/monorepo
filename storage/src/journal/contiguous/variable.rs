@@ -1188,13 +1188,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         }
         let encoded = IoBuf::from(encoded);
 
-        // Reject the append before writing anything (to either the data blobs or offsets
-        // journal) if it would push the size past `u64::MAX`.
-        self.bounds
-            .end
-            .checked_add(items_count as u64)
-            .ok_or(Error::SizeOverflow)?;
-
         let items_per_blob = self.items_per_blob.get();
 
         // A dropped append can record offsets without advancing `bounds.end`. An item's data
@@ -1205,6 +1198,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             self.mark_dirty_from(position_to_blob(self.bounds.end, items_per_blob));
             self.bounds.end = offsets_size;
         }
+
+        // Reject the append before writing anything (to either the data blobs or offsets
+        // journal) if it would push the size past `u64::MAX`.
+        self.bounds
+            .end
+            .checked_add(items_count as u64)
+            .ok_or(Error::SizeOverflow)?;
 
         // A dropped append can leave a full tail unsealed with bounds already advanced; seal it
         // before appending more.

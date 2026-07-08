@@ -5124,9 +5124,15 @@ mod tests {
                 "append did not park at the tail flush"
             );
 
+            // The stray successor blob exists on disk, untracked by the journal.
+            let stray = 1u64.to_be_bytes().to_vec();
+            assert!(scan_partition(&context, &blob_partition(&cfg))
+                .await
+                .contains(&stray));
+
             // Reset far past the stray, then use the journal normally.
             journal.clear_to_size(20).await.unwrap();
-            journal.append(&items[1]).await.unwrap();
+            assert_eq!(journal.append(&items[1]).await.unwrap(), 20);
             journal.sync().await.unwrap();
             drop(journal);
 
