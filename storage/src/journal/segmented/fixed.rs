@@ -1639,6 +1639,72 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_segmented_fixed_dropped_prune_does_not_recreate_deleted_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Two sections, with an in-flight sync parked on section 2. Pruning waits for a
+            // section's in-flight sync before removing it, so the parked sync gives prune a
+            // suspension point between deleting section 1 and deleting section 2.
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            journal
+                .append(2, &test_digest(1))
+                .await
+                .expect("failed to append");
+            let handle = journal.start_sync(2).await.expect("failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            // One poll carries prune(3) through section 1's deletion and parks it on section
+            // 2's sync; dropping it there models a caller canceling the prune mid-flight.
+            {
+                let fut = journal.prune(3);
+                pin_mut!(fut);
+                assert!(futures::poll!(&mut fut).is_pending());
+            }
+
+            // The dropped prune got exactly as far as claimed: section 1 is gone from both
+            // tracking and storage, while section 2's blob survives with its sync still
+            // parked.
+            assert_eq!(journal.oldest_section(), Some(2));
+            let remaining = context
+                .scan(&cfg.partition)
+                .await
+                .expect("failed to scan partition");
+            assert_eq!(remaining, vec![2u64.to_be_bytes().to_vec()]);
+            assert!(!pending.lock().is_empty());
+
+            // Section 1 is gone from storage, so the prune guard must already cover it:
+            // appending must fail rather than silently recreate the deleted section.
+            let err = journal.append(1, &test_digest(2)).await;
+            assert!(matches!(err, Err(Error::AlreadyPrunedToSection(3))));
+
+            // The guard fences everything below the requested minimum, including section 2:
+            // it survived the dropped prune, but the caller already declared it pruned.
+            let err = journal.get(2, 0).await;
+            assert!(matches!(err, Err(Error::AlreadyPrunedToSection(3))));
+
+            // Un-park section 2's sync so the caller-held handle resolves cleanly.
+            release_pending_syncs(&pending);
+            handle
+                .await
+                .expect("sync handle should complete despite pruning");
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
     fn test_segmented_fixed_destroy_waits_for_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

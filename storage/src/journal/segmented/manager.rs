@@ -357,6 +357,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
                 break;
             }
 
+            // Publish the new floor before the removal awaits: if this future is dropped
+            // mid-removal, the guard must already reject recreating the section.
+            self.oldest_retained_section = section + 1;
             let size = self.remove_blob(section).await?;
             pruned = true;
             debug!(section, size, "pruned blob");
