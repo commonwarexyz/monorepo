@@ -17,7 +17,7 @@ pub(crate) use journal::Journal;
 
 mod database;
 pub(crate) use database::{
-    journal_covers_range, local_pinned_nodes, Config as DatabaseConfig, Database,
+    journal_covers_range, local_boundary_nodes, Config as DatabaseConfig, Database,
 };
 
 pub mod resolver;

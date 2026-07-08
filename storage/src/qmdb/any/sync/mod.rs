@@ -163,8 +163,8 @@ macro_rules! impl_sync_database {
                 }
 
                 // The target's range starts at the inactivity floor.
-                qmdb::sync::local_pinned_nodes::<F, _, H, S>(
-                    context,
+                qmdb::sync::local_boundary_nodes::<F, _, H, S>(
+                    context.child("recovery"),
                     config.merkle_config.clone(),
                     target,
                     target.range.start(),

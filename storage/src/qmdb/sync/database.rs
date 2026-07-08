@@ -88,11 +88,11 @@ pub(crate) fn journal_covers_range<F: Family>(
 }
 
 /// Shared body for [`Database::local_boundary_nodes`] implementations backed by a persisted
-/// [`full::Merkle`]: reopen it from `config` and return the boundary nodes at
+/// [`full::Merkle`]: reopen it from `config` under `context` and return the boundary nodes at
 /// `target.range.start()` if the persisted bounds cover the target and the root, computed with
 /// `inactivity_floor`, matches `target.root`. Returns `Ok(None)` when the persisted state
 /// cannot authenticate the target.
-pub(crate) async fn local_pinned_nodes<F, E, H, S>(
+pub(crate) async fn local_boundary_nodes<F, E, H, S>(
     context: E,
     config: full::Config<S>,
     target: &Target<F, H::Digest>,
@@ -105,9 +105,7 @@ where
     S: Strategy,
 {
     let hasher = crate::qmdb::hasher::<H>();
-    let merkle =
-        full::Merkle::<F, _, _, S>::init(context.child("local_boundary_merkle"), &hasher, config)
-            .await?;
+    let merkle = full::Merkle::<F, _, _, S>::init(context, &hasher, config).await?;
     let bounds = merkle.bounds();
     if bounds.start > target.range.start() || bounds.end != target.range.end() {
         return Ok(None);

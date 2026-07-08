@@ -137,8 +137,8 @@ where
             })
             .await?;
 
-        sync::local_pinned_nodes::<F, _, H, S>(
-            context,
+        sync::local_boundary_nodes::<F, _, H, S>(
+            context.child("recovery"),
             config.merkle.clone(),
             target,
             inactivity_floor,
