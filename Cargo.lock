@@ -1591,6 +1591,7 @@ version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
+ "cfg-if",
  "commonware-codec",
  "commonware-conformance",
  "commonware-invariants",

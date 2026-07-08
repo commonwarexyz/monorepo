@@ -2,6 +2,7 @@ use crate::algebra::{Additive, FieldNTT, Ring};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::bitmap::BitMap;
 use core::{
     num::NonZeroU32,
@@ -152,6 +153,85 @@ fn ntt<const FORWARD: bool, F: FieldNTT, M: IndexMut<(usize, usize), Output = F>
                         // (a + w_j * b) - (a - w_j * b) = 2 * w_j * b.
                         // w_j in this branch is the inverse of w_j in the other branch.
                         matrix[(index_b, k)] = ((a - &b) * &w_j).div_2();
+                    }
+                }
+                w_j *= &w;
+            }
+            i += 2 * skip;
+        }
+    }
+}
+
+/// Validate a dense NTT's shape and return `log2(rows)`.
+pub(crate) fn dense_ntt_lg_rows(rows: usize, cols: usize, data_len: usize) -> usize {
+    assert!(
+        rows.is_power_of_two(),
+        "rows should be a non-zero power of 2"
+    );
+    let expected_len = rows.checked_mul(cols).expect("rows * cols overflows usize");
+    assert_eq!(data_len, expected_len, "data length must equal rows * cols");
+    rows.ilog2() as usize
+}
+
+/// In-place NTT (inverse when `FORWARD` is false) over a dense, row-major
+/// `rows x cols` slice, treating each column as an independent lane.
+///
+/// This is the default kernel behind [`crate::algebra::FieldNTT::ntt_dense`] and is
+/// equivalent to running [`ntt`] over a row-major [`Matrix`]. It operates on whole
+/// row slices (rather than an indexable view) so that a field can override
+/// `ntt_dense` with a vectorized kernel over the contiguous columns. Single-column
+/// and partial-segment NTTs continue to use [`ntt`].
+pub(crate) fn ntt_dense_scalar<const FORWARD: bool, F: FieldNTT>(
+    rows: usize,
+    cols: usize,
+    data: &mut [F],
+) {
+    let lg_rows = dense_ntt_lg_rows(rows, cols, data.len());
+    let w = {
+        let w = F::root_of_unity(lg_rows as u8).expect("too many rows to perform NTT");
+        if FORWARD {
+            w
+        } else {
+            w.exp(&[(1 << lg_rows) - 1])
+        }
+    };
+    let stages = {
+        let mut out = vec![(0usize, F::zero()); lg_rows];
+        let mut w_i = w;
+        for i in (0..lg_rows).rev() {
+            out[i] = (i, w_i.clone());
+            w_i = w_i.clone() * &w_i;
+        }
+        if !FORWARD {
+            out.reverse();
+        }
+        out
+    };
+    for (stage, w) in stages.into_iter() {
+        let skip = 1 << stage;
+        let mut i = 0;
+        while i < rows {
+            let mut w_j = F::one();
+            for j in 0..skip {
+                let index_a = i + j;
+                let index_b = index_a + skip;
+                // `index_a < index_b`, so the two row slices are disjoint.
+                let (left, right) = data.split_at_mut(index_b * cols);
+                let a = &mut left[index_a * cols..index_a * cols + cols];
+                let b = &mut right[..cols];
+                if FORWARD {
+                    for k in 0..cols {
+                        let w_j_b = w_j.clone() * &b[k];
+                        let a_k = a[k].clone();
+                        a[k] = a_k.clone() + &w_j_b;
+                        b[k] = a_k - &w_j_b;
+                    }
+                } else {
+                    for k in 0..cols {
+                        let a_k = a[k].clone();
+                        let b_k = b[k].clone();
+                        a[k] = (a_k.clone() + &b_k).div_2();
+                        b[k] = ((a_k - &b_k) * &w_j).div_2();
                     }
                 }
                 w_j *= &w;
@@ -825,11 +905,112 @@ impl<F: Additive> Matrix<F> {
         }
         out
     }
+
+    /// Like [Self::mul], but computing the (independent) output rows across `strategy`.
+    pub fn mul_with<S: Strategy>(&self, other: &Self, strategy: &S) -> Self
+    where
+        F: Clone + Ring,
+    {
+        if strategy.parallelism_hint() <= 1 {
+            return self.mul(other);
+        }
+        assert_eq!(self.cols, other.rows);
+        let out_cols = other.cols;
+        if self.rows == 0 || out_cols == 0 {
+            return Self {
+                rows: self.rows,
+                cols: out_cols,
+                data: Vec::new(),
+            };
+        }
+        let num_blocks = strategy.parallelism_hint().clamp(1, self.rows);
+        let block_rows = self.rows.div_ceil(num_blocks);
+        let num_blocks = self.rows.div_ceil(block_rows);
+        let blocks: Vec<Vec<F>> = strategy.map_collect_vec(0..num_blocks, |b| {
+            let row_start = b * block_rows;
+            let row_end = (row_start + block_rows).min(self.rows);
+            let mut block = vec![F::zero(); (row_end - row_start) * out_cols];
+            for (local_i, i) in (row_start..row_end).enumerate() {
+                let row = &mut block[local_i * out_cols..(local_i + 1) * out_cols];
+                for j in 0..self.cols {
+                    let c = self[(i, j)].clone();
+                    let other_j = &other[j];
+                    for (k, out_k) in row.iter_mut().enumerate() {
+                        *out_k += &(c.clone() * &other_j[k]);
+                    }
+                }
+            }
+            block
+        });
+        let mut data = Vec::with_capacity(self.rows * out_cols);
+        for block in blocks {
+            data.extend(block);
+        }
+        Self {
+            rows: self.rows,
+            cols: out_cols,
+            data,
+        }
+    }
+}
+
+/// Perform a (possibly parallel) NTT over the columns of a [`Matrix`].
+///
+/// Each column is an independent NTT lane (the per-stage butterflies mix rows, never
+/// columns), so transforming the columns in groups is identical to running the dense
+/// NTT over the whole matrix. We split the columns into one contiguous block per
+/// worker (per [`Strategy::parallelism_hint`]) and let `strategy` run the blocks
+/// concurrently, applying the per-field [`FieldNTT::ntt_dense`] kernel (which may be
+/// SIMD-accelerated) to each block. A sequential strategy hints a single block, so it
+/// runs `ntt_dense` over the matrix in place with no copies. Each parallel block is
+/// copied out as a small row-major sub-matrix so both the copy and the transform stay
+/// on contiguous memory (a strided, column-at-a-time gather is an order of magnitude
+/// slower). This composes thread-level parallelism (across blocks) with SIMD (within
+/// each block's `ntt_dense`).
+fn par_matrix_ntt<const FORWARD: bool, F: FieldNTT, S: Strategy>(
+    data: &mut Matrix<F>,
+    strategy: &S,
+) {
+    let rows = data.rows;
+    let cols = data.cols;
+    let num_blocks = strategy.parallelism_hint().clamp(1, cols.max(1));
+    if num_blocks <= 1 {
+        F::ntt_dense::<FORWARD>(rows, cols, &mut data.data);
+        return;
+    }
+    let block_cols = cols.div_ceil(num_blocks);
+    let num_blocks = cols.div_ceil(block_cols);
+    let blocks: Vec<Matrix<F>> = {
+        let src: &Matrix<F> = data;
+        strategy.map_collect_vec(0..num_blocks, |b| {
+            let c0 = b * block_cols;
+            let cn = block_cols.min(cols - c0);
+            let mut buf = Vec::with_capacity(rows * cn);
+            for i in 0..rows {
+                buf.extend_from_slice(&src[i][c0..c0 + cn]);
+            }
+            let mut block = Matrix {
+                rows,
+                cols: cn,
+                data: buf,
+            };
+            // Each worker runs the (possibly SIMD) per-field dense NTT on its block.
+            F::ntt_dense::<FORWARD>(rows, cn, &mut block.data);
+            block
+        })
+    };
+    for (b, block) in blocks.into_iter().enumerate() {
+        let c0 = b * block_cols;
+        let cn = block.cols;
+        for i in 0..rows {
+            data[i][c0..c0 + cn].clone_from_slice(&block[i]);
+        }
+    }
 }
 
 impl<F: FieldNTT> Matrix<F> {
-    fn ntt<const FORWARD: bool>(&mut self) {
-        ntt::<FORWARD, F, Self>(self.rows, self.cols, self)
+    fn ntt_with<const FORWARD: bool, S: Strategy>(&mut self, strategy: &S) {
+        par_matrix_ntt::<FORWARD, F, S>(self, strategy)
     }
 }
 
@@ -954,8 +1135,13 @@ impl<F: Additive> PolynomialVector<F> {
 
 impl<F: FieldNTT> PolynomialVector<F> {
     /// Evaluate each polynomial in this vector over all points in an interpolation domain.
-    pub fn evaluate(mut self) -> EvaluationVector<F> {
-        self.data.ntt::<true>();
+    pub fn evaluate(self) -> EvaluationVector<F> {
+        self.evaluate_with(&Sequential)
+    }
+
+    /// Like [Self::evaluate], but spreading the per-column NTTs across `strategy`.
+    pub fn evaluate_with<S: Strategy>(mut self, strategy: &S) -> EvaluationVector<F> {
+        self.data.ntt_with::<true, S>(strategy);
         let active_rows = VanishingPoints::all_non_vanishing(self.data.rows().ilog2());
         EvaluationVector {
             data: self.data,
@@ -1025,7 +1211,11 @@ impl<F: FieldNTT> PolynomialVector<F> {
     ///
     /// If `q` doesn't divide a partiular polynomial in this vector, the result
     /// for that polynomial is not guaranteed to be anything meaningful.
-    fn divide(&mut self, mut q: PolynomialColumn<F>) {
+    fn divide(&mut self, q: PolynomialColumn<F>) {
+        self.divide_with(q, &Sequential)
+    }
+
+    fn divide_with<S: Strategy>(&mut self, mut q: PolynomialColumn<F>, strategy: &S) {
         // The algorithm operates column wise.
         //
         // You can compute P(X) / Q(X) by evaluating each polynomial, then computing
@@ -1054,7 +1244,7 @@ impl<F: FieldNTT> PolynomialVector<F> {
         let skew_inv = F::coset_shift_inv();
         self.divide_roots(skew.clone());
         q.divide_roots(skew);
-        ntt::<true, F, _>(self.data.rows, self.data.cols, &mut self.data);
+        par_matrix_ntt::<true, F, S>(&mut self.data, strategy);
         ntt::<true, F, _>(
             q.coefficients.len(),
             1,
@@ -1075,7 +1265,7 @@ impl<F: FieldNTT> PolynomialVector<F> {
             }
         }
         // Interpolate back, using the inverse skew
-        ntt::<false, F, _>(self.data.rows, self.data.cols, &mut self.data);
+        par_matrix_ntt::<false, F, S>(&mut self.data, strategy);
         self.divide_roots(skew_inv);
     }
 }
@@ -1119,8 +1309,12 @@ impl<F: FieldNTT> EvaluationVector<F> {
     /// i.e. the inverse of [PolynomialVector::evaluate].
     ///
     /// (This makes all the rows count as filled).
-    fn interpolate(mut self) -> PolynomialVector<F> {
-        self.data.ntt::<false>();
+    fn interpolate(self) -> PolynomialVector<F> {
+        self.interpolate_with(&Sequential)
+    }
+
+    fn interpolate_with<S: Strategy>(mut self, strategy: &S) -> PolynomialVector<F> {
+        self.data.ntt_with::<false, S>(strategy);
         PolynomialVector { data: self.data }
     }
 
@@ -1147,6 +1341,20 @@ impl<F: FieldNTT> EvaluationVector<F> {
         if non_vanishing == 0 || non_vanishing == self.data.rows as u64 {
             return self.interpolate();
         }
+        // See [Self::recover_with] for the algorithm; this is the sequential path.
+        let (_, vanishing) = EvaluationColumn::vanishing(&self.active_rows);
+        self.multiply(&vanishing);
+        let mut out = self.interpolate();
+        out.divide(vanishing.interpolate());
+        out
+    }
+
+    /// Like [Self::recover], but spreading the per-column NTTs across `strategy`.
+    pub fn recover_with<S: Strategy>(mut self, strategy: &S) -> PolynomialVector<F> {
+        let non_vanishing = self.active_rows.count_non_vanishing();
+        if non_vanishing == 0 || non_vanishing == self.data.rows as u64 {
+            return self.interpolate_with(strategy);
+        }
 
         // If we had all of the rows, we could simply call [Self::interpolate],
         // in order to recover the original polynomial. If we do this while missing some
@@ -1162,8 +1370,8 @@ impl<F: FieldNTT> EvaluationVector<F> {
         // with the same vanishing polynomial.
         let (_, vanishing) = EvaluationColumn::vanishing(&self.active_rows);
         self.multiply(&vanishing);
-        let mut out = self.interpolate();
-        out.divide(vanishing.interpolate());
+        let mut out = self.interpolate_with(strategy);
+        out.divide_with(vanishing.interpolate(), strategy);
         out
     }
 }
@@ -1494,6 +1702,34 @@ mod test {
                 "matrix element count does not match dimensions"
             ))
         ));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn strategy_methods_match_sequential() {
+        use commonware_parallel::Rayon;
+        use core::num::NonZeroUsize;
+
+        let strategy = Rayon::new(NonZeroUsize::new(3).unwrap()).unwrap();
+        let matrix = Matrix::init(16, 5, (0..80).map(|i| F::from((i * 7 + 3) as u64)));
+        let polynomial = matrix.as_polynomials(16).unwrap();
+
+        assert_eq!(
+            polynomial.clone().evaluate_with(&strategy),
+            polynomial.clone().evaluate()
+        );
+
+        let mut parallel = polynomial.clone().evaluate_with(&strategy);
+        parallel.remove_row(3);
+        parallel.remove_row(12);
+        let mut sequential = polynomial.evaluate();
+        sequential.remove_row(3);
+        sequential.remove_row(12);
+        assert_eq!(parallel.recover_with(&strategy), sequential.recover());
+
+        let left = Matrix::init(5, 3, (0..15).map(|i| F::from(i + 1)));
+        let right = Matrix::init(3, 4, (0..12).map(|i| F::from((i * 7 + 3) as u64)));
+        assert_eq!(left.mul_with(&right, &strategy), left.mul(&right));
     }
 
     fn assert_vanishing_points_correct(points: &VanishingPoints) {
