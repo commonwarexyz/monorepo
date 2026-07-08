@@ -414,7 +414,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 M: commonware_utils::Faults,
             {
@@ -432,7 +432,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 M: commonware_utils::Faults,
@@ -486,7 +486,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
             {
                 self.generic
@@ -501,7 +501,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
             {
@@ -543,7 +543,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::{ordered::BiMap, test_rng, Faults, N3f1, TryCollect};
-    use rand_core::CryptoRng;
+    use rand::CryptoRng;
 
     const NAMESPACE: &[u8] = b"test-secp256r1";
     const MESSAGE: &[u8] = b"test message";

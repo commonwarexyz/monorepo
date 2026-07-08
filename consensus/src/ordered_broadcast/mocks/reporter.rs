@@ -14,7 +14,7 @@ use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_parallel::Sequential;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{channel::oneshot, NZUsize};
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet, VecDeque};
 
 #[allow(clippy::large_enum_variant)]

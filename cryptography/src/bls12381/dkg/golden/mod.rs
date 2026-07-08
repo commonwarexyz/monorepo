@@ -148,7 +148,7 @@ use commonware_utils::{
 };
 pub use evrf::{PrivateKey, PublicKey, Setup};
 use evrf::{Signature, VrfCommitments};
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU32};
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_GOLDEN_DKG";

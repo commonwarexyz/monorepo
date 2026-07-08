@@ -13,7 +13,7 @@ use commonware_utils::{
     Faults, Participant,
 };
 use core::fmt;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
@@ -387,7 +387,7 @@ where
     where
         S: Scheme<Certificate = U64>,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: rand_core::CryptoRng,
+        R: rand::CryptoRng,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a U64)>,
         M: Faults,
@@ -574,7 +574,7 @@ macro_rules! impl_certificate_mock {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 M: commonware_utils::Faults,
             {
@@ -589,7 +589,7 @@ macro_rules! impl_certificate_mock {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 M: commonware_utils::Faults,
@@ -658,7 +658,7 @@ macro_rules! impl_certificate_mock {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
             {
                 self.generic
@@ -673,7 +673,7 @@ macro_rules! impl_certificate_mock {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
             {

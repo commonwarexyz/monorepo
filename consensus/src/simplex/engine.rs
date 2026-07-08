@@ -15,7 +15,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.

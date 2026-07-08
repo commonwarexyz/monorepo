@@ -31,7 +31,7 @@ use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use zeroize::Zeroize;
 
 /// Re-export [blake3::Hasher] as `CoreBlake3` for external use if needed.

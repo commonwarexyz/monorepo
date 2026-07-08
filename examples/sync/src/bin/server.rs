@@ -28,7 +28,7 @@ use commonware_utils::{
     channel::mpsc,
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
-    DurationExt,
+    sys_rng, DurationExt,
 };
 use rand::{Rng, RngExt as _};
 use std::{
@@ -926,7 +926,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .to_string();
             // Only add suffix if using the default value
             if storage_dir == "/tmp/commonware-sync/server" {
-                let suffix: u64 = rand::rng().random();
+                let suffix: u64 = sys_rng().random();
                 format!("{storage_dir}-{suffix}")
             } else {
                 storage_dir

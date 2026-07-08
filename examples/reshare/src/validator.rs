@@ -187,8 +187,7 @@ mod test {
         channel::{mpsc, oneshot},
         test_rng_seeded, union, N3f1, TryCollect,
     };
-    use rand::seq::IndexedRandom;
-    use rand_core::CryptoRng;
+    use rand::{seq::IndexedRandom, CryptoRng};
     use std::{
         collections::{btree_map::Entry, BTreeMap, HashSet},
         future::Future,

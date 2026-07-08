@@ -321,7 +321,7 @@ use commonware_utils::{
     Faults, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{borrow::Cow, collections::BTreeMap, marker::PhantomData};
 use thiserror::Error;
 

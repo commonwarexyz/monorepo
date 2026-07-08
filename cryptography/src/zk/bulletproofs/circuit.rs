@@ -140,7 +140,7 @@ use commonware_math::{
     synthetic::Synthetic,
 };
 use commonware_parallel::{Sequential, Strategy};
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{
     collections::BTreeMap,
     ops::{Index, IndexMut, Mul},
@@ -358,7 +358,7 @@ mod zkc {
     use crate::zk::circuit as zk;
     use commonware_math::algebra::{Field, Random, Ring};
     use commonware_utils::ordered::Map;
-    use rand_core::CryptoRng;
+    use rand::CryptoRng;
     use std::{borrow::Cow, collections::BTreeMap};
 
     /// A column of the bulletproofs weight matrix.

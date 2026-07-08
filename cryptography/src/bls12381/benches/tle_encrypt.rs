@@ -3,11 +3,11 @@ use commonware_cryptography::bls12381::{
     tle::{encrypt, Block},
 };
 use criterion::{criterion_group, Criterion};
-use rand::rng;
+use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;
 
 fn bench_tle_encrypt(c: &mut Criterion) {
-    let mut rng = rng();
+    let mut rng = StdRng::seed_from_u64(0);
     let (_, master_public) = keypair::<_, MinSig>(&mut rng);
     let target = 10u64.to_be_bytes();
     let message = Block::new([0x42u8; 32]);

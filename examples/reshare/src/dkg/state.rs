@@ -35,7 +35,7 @@ use commonware_storage::{
 };
 use commonware_utils::{Faults, NZUsize, NZU16};
 use futures::StreamExt;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},

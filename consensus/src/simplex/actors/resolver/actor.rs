@@ -25,7 +25,7 @@ use commonware_runtime::{
     Metrics, Spawner,
 };
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::{debug, info_span};
 

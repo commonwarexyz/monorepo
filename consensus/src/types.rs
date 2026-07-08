@@ -729,7 +729,7 @@ commonware_macros::stability_scope!(ALPHA {
             num::NonZeroU16,
             ops::{Deref, Range},
         };
-        use rand_core::CryptoRng;
+        use rand::CryptoRng;
 
         /// A [`Digest`] containing a coding commitment, encoded [`CodingConfig`], and context hash.
         ///
@@ -1710,7 +1710,7 @@ mod tests {
         struct Digest([u8; Self::SIZE]);
 
         impl Random for Digest {
-            fn random(mut rng: impl rand_core::CryptoRng) -> Self {
+            fn random(mut rng: impl rand::CryptoRng) -> Self {
                 let mut buf = [0u8; Self::SIZE];
                 rng.fill_bytes(&mut buf);
                 Self(buf)

@@ -53,7 +53,7 @@ use curve25519_dalek::{
     traits::{IsIdentity, VartimeMultiscalarMul},
 };
 use hashbrown::HashMap;
-use rand_core::{CryptoRng, Rng};
+use rand::{CryptoRng, Rng};
 use sha2::{digest::Update, Sha512};
 
 const NOISE_BATCH_VERIFY: &[u8] = b"batch_verify";

@@ -29,9 +29,9 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
-use commonware_utils::{sync::Mutex, NZUsize};
+use commonware_utils::{sync::Mutex, sys_rng, NZUsize};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng, TryCryptoRng, TryRng};
+use rand::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
@@ -175,7 +175,7 @@ pub struct Config {
 impl Config {
     /// Returns a new [Config] with default values.
     pub fn new() -> Self {
-        let rng = UnwrapErr(SysRng).next_u64();
+        let rng = sys_rng().next_u64();
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
         Self {
             worker_threads: 2,
@@ -783,15 +783,15 @@ impl TryRng for Context {
     type Error = Infallible;
 
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        Ok(UnwrapErr(SysRng).next_u32())
+        Ok(sys_rng().next_u32())
     }
 
     fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        Ok(UnwrapErr(SysRng).next_u64())
+        Ok(sys_rng().next_u64())
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
-        UnwrapErr(SysRng).fill_bytes(dest);
+        sys_rng().fill_bytes(dest);
         Ok(())
     }
 }

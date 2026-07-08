@@ -7,7 +7,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::NonZeroDuration;
 use discovery::Discovery;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::num::NonZeroUsize;
 
 mod discovery;

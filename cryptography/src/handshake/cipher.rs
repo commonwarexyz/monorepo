@@ -1,6 +1,6 @@
 use super::error::Error;
 use crate::Secret;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::vec::Vec;
 use zeroize::Zeroizing;
 

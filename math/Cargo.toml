@@ -28,6 +28,7 @@ std = [
 	"commonware-macros/std",
 	"commonware-parallel/std",
 	"commonware-utils/std",
+	"rand/std",
 ]
 fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 
@@ -39,14 +40,13 @@ commonware-invariants = { workspace = true, optional = true }
 commonware-macros.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
-rand_core.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 criterion.workspace = true
-rand.workspace = true
 rand_chacha.workspace = true
 
 [lib]

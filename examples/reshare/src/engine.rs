@@ -35,7 +35,7 @@ use commonware_runtime::{
 use commonware_storage::archive::immutable;
 use commonware_utils::{union, NZUsize, NZU16, NZU32, NZU64};
 use futures::future::try_join_all;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{
     marker::PhantomData,
     num::{NonZero, NonZeroU16, NonZeroUsize},

@@ -28,7 +28,7 @@ use commonware_utils::{
     sync::Mutex,
     N3f1,
 };
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,

@@ -22,8 +22,10 @@ use commonware_runtime::{
     StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use rand::seq::{IndexedRandom, SliceRandom};
-use rand_core::CryptoRng;
+use rand::{
+    seq::{IndexedRandom, SliceRandom},
+    CryptoRng,
+};
 use std::time::Duration;
 use tracing::debug;
 

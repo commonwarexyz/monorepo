@@ -1,12 +1,13 @@
 use commonware_cryptography::{secp256r1, PrivateKey};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rng, RngExt as _};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::hint::black_box;
 
 fn bench_signature_generation<S: PrivateKey>(variant: impl AsRef<str>, c: &mut Criterion) {
+    let mut rng = StdRng::seed_from_u64(0);
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
-    rng().fill(&mut msg);
+    rng.fill(&mut msg);
     c.bench_function(
         &format!(
             "{}/variant={} ns_len={} msg_len={}",
@@ -17,7 +18,7 @@ fn bench_signature_generation<S: PrivateKey>(variant: impl AsRef<str>, c: &mut C
         ),
         |b| {
             b.iter_batched(
-                || S::random(rng()),
+                || S::random(&mut rng),
                 |signer| {
                     black_box(signer.sign(namespace, &msg));
                 },

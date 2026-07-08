@@ -22,7 +22,7 @@ use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Map, union_unique, Faults, Participant};
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 
 /// Prepares partial signature evaluations for threshold recovery.
 fn prepare_evaluations<'a, V: Variant>(

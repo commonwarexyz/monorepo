@@ -34,7 +34,7 @@ use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use sha2::{Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 

@@ -28,7 +28,7 @@ use commonware_codec::{types::lazy::Lazy, Error, FixedSize, Read, ReadExt, Write
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults, Participant};
 use core::fmt::Debug;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -601,7 +601,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 M: commonware_utils::Faults,
             {
@@ -616,7 +616,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 M: commonware_utils::Faults,
@@ -670,7 +670,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
             {
                 self.generic
@@ -685,7 +685,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 I::IntoIter: Send

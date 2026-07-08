@@ -1117,7 +1117,6 @@ dependencies = [
  "commonware-stream",
  "commonware-utils",
  "rand 0.10.2",
- "rand_core 0.10.1",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1335,7 +1334,6 @@ dependencies = [
  "pin-project",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
- "rand_core 0.10.1",
  "rand_distr",
  "rayon",
  "rstest",
@@ -1362,7 +1360,6 @@ dependencies = [
  "libfuzzer-sys",
  "proptest",
  "rand 0.10.2",
- "rand_core 0.10.1",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1405,7 +1402,6 @@ dependencies = [
  "p256 0.14.0",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
- "rand_core 0.10.1",
  "rayon",
  "rstest",
  "sha2 0.11.0",
@@ -1535,7 +1531,6 @@ dependencies = [
  "futures",
  "prometheus-client",
  "rand 0.10.2",
- "rand_core 0.10.1",
  "thiserror 2.0.17",
  "tracing",
  "tracing-subscriber",
@@ -1550,7 +1545,6 @@ dependencies = [
  "commonware-macros",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
- "rand_core 0.10.1",
  "rstest",
 ]
 
@@ -1616,7 +1610,6 @@ dependencies = [
  "criterion",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
- "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1650,7 +1643,6 @@ dependencies = [
  "num-rational",
  "num-traits",
  "rand 0.10.2",
- "rand_core 0.10.1",
  "rand_distr",
  "thiserror 2.0.17",
  "tracing",
@@ -1707,7 +1699,6 @@ dependencies = [
  "commonware-utils",
  "futures",
  "rand 0.10.2",
- "rand_core 0.10.1",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
@@ -1773,7 +1764,6 @@ dependencies = [
  "pin-project",
  "prometheus-client",
  "rand 0.10.2",
- "rand_core 0.10.1",
  "rayon",
  "rstest",
  "serde_json",
@@ -1870,7 +1860,6 @@ dependencies = [
  "criterion",
  "futures",
  "rand 0.10.2",
- "rand_core 0.10.1",
  "thiserror 2.0.17",
  "x25519-dalek",
  "zeroize",
@@ -1889,7 +1878,6 @@ dependencies = [
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
- "rand_core 0.10.1",
 ]
 
 [[package]]

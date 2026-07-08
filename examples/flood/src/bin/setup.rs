@@ -5,7 +5,8 @@ use commonware_deployer::aws;
 use commonware_flood::Config;
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
-use rand::{rand_core::UnwrapErr, rngs::SysRng, seq::IteratorRandom};
+use commonware_utils::sys_rng;
+use rand::seq::IteratorRandom;
 use std::num::NonZeroUsize;
 use tracing::info;
 use uuid::Uuid;
@@ -122,9 +123,9 @@ fn main() {
         bootstrappers <= peers,
         "bootstrappers must be less than peers"
     );
-    let mut rng = UnwrapErr(SysRng);
+    let mut rng = sys_rng();
     let peer_schemes = (0..peers)
-        .map(|_| ed25519::PrivateKey::random(&mut rng))
+        .map(|_| ed25519::PrivateKey::random(rng))
         .collect::<Vec<_>>();
     let allowed_peers: Vec<String> = peer_schemes
         .iter()

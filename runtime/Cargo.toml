@@ -36,7 +36,6 @@ opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
 prometheus-client.workspace = true
 rand = { workspace = true, features = ["std_rng", "sys_rng"] }
-rand_core.workspace = true
 rayon.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
@@ -67,7 +66,6 @@ tokio = { workspace = true, features = ["full"] }
 
 [dev-dependencies]
 clap = { workspace = true, features = ["derive"] }
-rand = { workspace = true, features = ["sys_rng"] }
 rstest.workspace = true
 serde_json.workspace = true
 

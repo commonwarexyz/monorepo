@@ -16,7 +16,7 @@ use commonware_runtime::{
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{channel::ring, concurrency::Limiter, net::SubnetMask, IpAddrExt, NZUsize};
 use futures::{Sink, StreamExt};
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{
     collections::HashSet,
     fmt,

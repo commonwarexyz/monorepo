@@ -6,8 +6,7 @@ use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, N3f1, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
-use rand_core::CryptoRng;
+use rand::{rngs::StdRng, CryptoRng, SeedableRng};
 use std::{collections::BTreeMap, hint::black_box, num::NonZeroU32, sync::LazyLock};
 
 const BENCH_NAMESPACE: &[u8] = b"bench";

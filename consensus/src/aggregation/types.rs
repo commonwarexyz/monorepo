@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{channel::oneshot, union, N3f1};
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::hash::Hash;
 
 /// Error that may be encountered when interacting with `aggregation`.

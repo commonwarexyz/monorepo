@@ -10,7 +10,7 @@ use core::{
     iter,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 
 /// Yield all the bits in a u64, from lowest to highest.
 fn yield_bits_le(x: u64) -> impl Iterator<Item = bool> {

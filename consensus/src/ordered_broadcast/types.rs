@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{channel::oneshot, ordered::Set, union, N3f1};
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{
     hash::{Hash, Hasher},
     sync::Arc,

@@ -23,7 +23,7 @@ use commonware_sync::{
 };
 use commonware_utils::{
     channel::mpsc::{self, error::TrySendError},
-    DurationExt,
+    sys_rng, DurationExt,
 };
 use rand::RngExt as _;
 use std::{
@@ -536,7 +536,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
             .to_string();
         // Only add suffix if using the default value
         if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
-            let suffix: u64 = rand::rng().random();
+            let suffix: u64 = sys_rng().random();
             format!("{storage_dir}-{suffix}")
         } else {
             storage_dir

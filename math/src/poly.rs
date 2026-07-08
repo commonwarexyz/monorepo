@@ -12,7 +12,7 @@ use core::{
     num::NonZeroU32,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 

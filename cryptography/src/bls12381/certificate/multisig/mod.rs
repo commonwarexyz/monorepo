@@ -24,7 +24,7 @@ use commonware_utils::{
     ordered::{BiMap, Quorum, Set},
     Faults, Participant,
 };
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -487,7 +487,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 M: commonware_utils::Faults,
             {
@@ -502,7 +502,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 M: commonware_utils::Faults,
@@ -555,7 +555,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
             {
                 self.generic
@@ -570,7 +570,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
-                R: rand_core::CryptoRng,
+                R: rand::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 I::IntoIter: Send

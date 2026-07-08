@@ -12,8 +12,7 @@ use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, IoBuf, Spawner};
-use rand::{Rng, RngExt as _};
-use rand_core::CryptoRng;
+use rand::{CryptoRng, Rng, RngExt as _};
 use std::{collections::VecDeque, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_millis(100);

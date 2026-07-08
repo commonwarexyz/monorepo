@@ -232,7 +232,7 @@ mod tests {
         ordered::{Map, Set},
         Hostname, NZUsize, TryCollect, NZU32,
     };
-    use rand_core::{CryptoRng, Rng};
+    use rand::{CryptoRng, Rng};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},

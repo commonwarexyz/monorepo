@@ -39,7 +39,6 @@ once_cell = { workspace = true, features = ["alloc", "race"] }
 p256 = { workspace = true, features = ["ecdsa"] }
 rand.workspace = true
 rand_chacha.workspace = true
-rand_core.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 x25519-dalek = { workspace = true, features = ["static_secrets", "zeroize"] }

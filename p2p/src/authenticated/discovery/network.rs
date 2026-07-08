@@ -15,7 +15,7 @@ use commonware_runtime::{
 };
 use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::union;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed by the tracker.

@@ -10,7 +10,7 @@ use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Controls whether and how the engine proactively forwards certified blocks

@@ -19,7 +19,7 @@ use commonware_utils::{
     ordered::{Quorum, Set},
     N3f1,
 };
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use tracing::{info_span, Span};
 
 /// Per-view state for vote accumulation and certificate tracking.

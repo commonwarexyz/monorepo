@@ -59,8 +59,7 @@ use commonware_cryptography::{
 use commonware_macros::stability;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults};
-use rand::{rngs::StdRng, SeedableRng};
-use rand_core::CryptoRng;
+use rand::{rngs::StdRng, CryptoRng, SeedableRng};
 use std::{
     collections::{BTreeSet, HashMap},
     fmt::Debug,

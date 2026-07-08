@@ -26,7 +26,7 @@ use commonware_actor::Feedback;
 use commonware_cryptography::{certificate, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::Mutex;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::sync::Arc;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.

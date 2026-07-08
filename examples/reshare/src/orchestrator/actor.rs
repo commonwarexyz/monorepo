@@ -28,7 +28,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info, warn};
 

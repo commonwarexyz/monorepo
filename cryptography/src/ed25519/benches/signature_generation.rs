@@ -1,13 +1,14 @@
 use commonware_cryptography::{ed25519, Signer as _};
 use commonware_math::algebra::Random;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rng, RngExt as _};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::hint::black_box;
 
 fn bench_signature_generation(c: &mut Criterion) {
+    let mut rng = StdRng::seed_from_u64(0);
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
-    rng().fill(&mut msg);
+    rng.fill(&mut msg);
     c.bench_function(
         &format!(
             "{}/ns_len={} msg_len={}",
@@ -17,7 +18,7 @@ fn bench_signature_generation(c: &mut Criterion) {
         ),
         |b| {
             b.iter_batched(
-                || ed25519::PrivateKey::random(rng()),
+                || ed25519::PrivateKey::random(&mut rng),
                 |private_key| {
                     black_box(private_key.sign(namespace, &msg));
                 },

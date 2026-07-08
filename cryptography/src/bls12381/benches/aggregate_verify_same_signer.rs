@@ -2,15 +2,16 @@ use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rng, RngExt as _};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 
 fn bench_aggregate_verify_same_signer(c: &mut Criterion) {
+    let mut rng = StdRng::seed_from_u64(0);
     let namespace = b"namespace";
     for n in [2, 10, 100, 1000, 10000].into_iter() {
         let mut msgs = Vec::with_capacity(n);
         for _ in 0..n {
             let mut msg = [0u8; 32];
-            rng().fill(&mut msg);
+            rng.fill(&mut msg);
             msgs.push(msg);
         }
         for concurrency in [1, 8].into_iter() {
@@ -20,7 +21,7 @@ fn bench_aggregate_verify_same_signer(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let (private, public) = ops::keypair::<_, MinSig>(&mut rng());
+                            let (private, public) = ops::keypair::<_, MinSig>(&mut rng);
                             let sigs: Vec<_> = msgs
                                 .iter()
                                 .map(|msg| ops::sign_message::<MinSig>(&private, namespace, msg))

@@ -18,7 +18,7 @@ use commonware_runtime::{
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
 use futures::{FutureExt as _, StreamExt as _};
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 

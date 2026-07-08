@@ -11,7 +11,7 @@ use commonware_cryptography::bls12381::primitives::{
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{N3f1, Participant};
 use libfuzzer_sys::fuzz_target;
-use rand::rng;
+use rand::{rngs::StdRng, SeedableRng};
 use std::num::NonZeroUsize;
 
 mod common;
@@ -229,6 +229,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 }
 
 fn fuzz(op: FuzzOperation) {
+    let mut rng = StdRng::seed_from_u64(0);
     match op {
         FuzzOperation::SignProofOfPossessionMinPk {
             public,
@@ -293,7 +294,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_signer::<_, MinPk, _>(
-                    &mut rng(),
+                    &mut rng,
                     &public,
                     index,
                     &entries_refs,
@@ -323,7 +324,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_signer::<_, MinSig, _>(
-                    &mut rng(),
+                    &mut rng,
                     &public,
                     index,
                     &entries_refs,
@@ -347,7 +348,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_message::<_, MinPk, _>(
-                    &mut rng(),
+                    &mut rng,
                     &public,
                     &namespace,
                     &message,
@@ -372,7 +373,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_message::<_, MinSig, _>(
-                    &mut rng(),
+                    &mut rng,
                     &public,
                     &namespace,
                     &message,

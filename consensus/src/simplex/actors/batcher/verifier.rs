@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Verification, Digest};
 use commonware_parallel::Strategy;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
 ///

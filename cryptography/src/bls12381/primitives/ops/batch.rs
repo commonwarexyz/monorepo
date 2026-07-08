@@ -21,7 +21,7 @@ use super::{
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
-use rand_core::CryptoRng;
+use rand::CryptoRng;
 
 /// Segment tree for batch verification bisection.
 ///
