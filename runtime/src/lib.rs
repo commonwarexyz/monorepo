@@ -667,6 +667,11 @@ stability_scope!(BETA {
         /// Removals and opens of the same blob name are mutually ordered, even when a caller
         /// drops a future mid-flight: a dropped removal never unlinks a blob recreated by a
         /// later open, and a dropped open never recreates a name removed by a later removal.
+        ///
+        /// This guarantee is scoped to a single [`Storage`] instance. Storages constructed
+        /// independently over the same underlying directory (e.g. two runtimes or two
+        /// processes) are not ordered against each other; a storage directory must be owned
+        /// by one live [`Storage`] instance at a time.
         fn remove(
             &self,
             partition: &str,

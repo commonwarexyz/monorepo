@@ -171,7 +171,9 @@ pub struct Storage {
     /// Dropping a future does not stop its task: the unlink or create keeps running in the
     /// background. Keeping it here lets the next operation wait for it, so an orphaned
     /// unlink can never delete a recreated blob and an orphaned create can never resurrect
-    /// a removed name (the ordering contract on [crate::Storage::remove]).
+    /// a removed name (the ordering contract on [crate::Storage::remove]). The barrier is
+    /// per-instance: independently constructed storages over the same directory are not
+    /// coordinated (also per that contract).
     inflight: Arc<Mutex<Option<task::JoinHandle<()>>>>,
     cfg: Config,
     pool: BufferPool,
