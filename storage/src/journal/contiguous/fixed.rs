@@ -112,7 +112,6 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Writer},
     Blob as RBlob, Buf, IoBuf,
 };
-use commonware_utils::Cached;
 use futures::{future::try_join_all, Stream};
 use std::{
     collections::BTreeMap,
@@ -123,11 +122,6 @@ use std::{
     sync::Arc,
 };
 use tracing::warn;
-
-// Reusable scratch for [`Reader::probe_items`], grown to the largest probe served on the
-// thread. Probes run per shard on the hot read path, where a fresh zeroed allocation per call
-// contends under the pool's fan-out.
-commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
@@ -314,6 +308,13 @@ pub struct Config {
 }
 
 /// Implementation of [super::Mutable] for fixed-size value journals.
+///
+/// # Synchronous Reads
+///
+/// Read paths opportunistically decode items in place from the page cache (or the write
+/// buffer) while holding the page-cache read lock, which appends contend on when flushing
+/// pages. `A`'s `Read` implementation must therefore be cheap and parse-only: no blocking and
+/// no expensive work.
 ///
 /// # Repair
 ///
@@ -1186,41 +1187,53 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
 
         let items_per_blob = self.items_per_blob.get();
 
-        // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
-        // maximal runs that share one blob. Each group goes through the blob's batched read,
-        // which serves page-cache and tip-buffer hits under a single lock acquisition and reads only
-        // true misses from the blob (concurrently).
-        let mut result: Vec<A> = Vec::with_capacity(positions.len());
-        let mut reusable_buf = vec![0u8; positions.len() * A::SIZE];
+        // Phase 1: drain page-cache hits synchronously, decoding items in place from cached
+        // pages (one batched decode per blob group).
+        let (mut result, mut hits) = self.probe_items_inner(positions);
 
-        // The buffer is pre-sized for every position, so each group can own a disjoint slice and
-        // all groups can read concurrently.
-        let mut reads = Vec::new();
-        let mut remaining_buf = reusable_buf.as_mut_slice();
-        for group in positions.chunk_by(|a, b| {
-            super::position_to_blob(*a, items_per_blob)
-                == super::position_to_blob(*b, items_per_blob)
-        }) {
-            let (blob_num, blob_offsets) = self.locate_group(group)?;
-            let blob = self
-                .blobs
-                .get(blob_num)
-                .expect("positions in bounds map to a retained blob");
-            let (buf, rest) = remaining_buf.split_at_mut(group.len() * A::SIZE);
-            remaining_buf = rest;
-            reads.push(async move {
-                blob.read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
-                    .await
-            });
+        // Collect cache misses for the async phase. Items decoded in phase 1 count as hits,
+        // as does anything the batched fallback below serves without a blob read.
+        let mut miss_indices: Vec<usize> = Vec::new();
+        let mut miss_positions: Vec<u64> = Vec::new();
+        for (i, item) in result.iter().enumerate() {
+            if item.is_none() {
+                miss_indices.push(i);
+                miss_positions.push(positions[i]);
+            }
         }
-        let hits: u64 = try_join_all(reads)
-            .await?
-            .into_iter()
-            .map(|group_hits| group_hits as u64)
-            .sum();
 
-        for slice in reusable_buf.chunks_exact(A::SIZE) {
-            result.push(A::decode(slice).map_err(Error::Codec)?);
+        // Phase 2: read cache misses grouped by blob (concurrently). Positions are sorted, so
+        // `chunk_by` splits the misses into maximal runs that share one blob, and the buffer is
+        // pre-sized for every miss so each group can own a disjoint slice.
+        if !miss_positions.is_empty() {
+            let mut reusable_buf = vec![0u8; miss_positions.len() * A::SIZE];
+            let mut reads = Vec::new();
+            let mut remaining_buf = reusable_buf.as_mut_slice();
+            for group in miss_positions.chunk_by(|a, b| {
+                super::position_to_blob(*a, items_per_blob)
+                    == super::position_to_blob(*b, items_per_blob)
+            }) {
+                let (blob_num, blob_offsets) = self.locate_group(group)?;
+                let blob = self
+                    .blobs
+                    .get(blob_num)
+                    .expect("positions in bounds map to a retained blob");
+                let (buf, rest) = remaining_buf.split_at_mut(group.len() * A::SIZE);
+                remaining_buf = rest;
+                reads.push(async move {
+                    blob.read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
+                        .await
+                });
+            }
+            hits += try_join_all(reads)
+                .await?
+                .into_iter()
+                .map(|group_hits| group_hits as u64)
+                .sum::<u64>();
+
+            for (slice, &miss_idx) in reusable_buf.chunks_exact(A::SIZE).zip(&miss_indices) {
+                result[miss_idx] = Some(A::decode(slice).map_err(Error::Codec)?);
+            }
         }
 
         self.metrics.cache_hits.inc_by(hits);
@@ -1228,7 +1241,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .cache_misses
             .inc_by(positions.len() as u64 - hits);
         self.metrics.items_read.inc_by(positions.len() as u64);
-        Ok(result)
+        Ok(result
+            .into_iter()
+            .map(|item| item.expect("all slots filled"))
+            .collect())
     }
 
     /// Resolve `pos` to its blob and byte offset within the blob.
@@ -1247,8 +1263,17 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
 
     /// Probe `positions` (strictly increasing) against the page cache, returning one slot per
     /// position: `Some(item)` for sync hits and `None` for positions that require I/O, fail to
-    /// decode, or fall outside `bounds()`.
+    /// decode, or fall outside `bounds()`. Records cache-hit metrics.
     pub(super) fn probe_items(&self, positions: &[u64]) -> Vec<Option<A>> {
+        let (out, hits) = self.probe_items_inner(positions);
+        self.metrics.cache_hits.inc_by(hits);
+        self.metrics.items_read.inc_by(hits);
+        out
+    }
+
+    /// Like [Self::probe_items] but leaves metrics to the caller, returning the slots and the
+    /// number of sync hits.
+    fn probe_items_inner(&self, positions: &[u64]) -> (Vec<Option<A>>, u64) {
         assert!(
             positions.is_sorted_by(|a, b| a < b),
             "positions must be strictly increasing"
@@ -1262,21 +1287,15 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         let end = positions.partition_point(|&pos| pos < self.bounds.end);
         let valid = &positions[start..end];
         if valid.is_empty() {
-            return out;
+            return (out, 0);
         }
 
-        // Serve the probe from the per-thread scratch buffer. Stale bytes from a previous probe
-        // are harmless: slots the cache cannot serve are reported as misses and never decoded.
+        // Decode each blob group in place from the page cache (or tip buffer), one batched
+        // decode per group (positions are sorted, so groups are contiguous runs).
         let items_per_blob = self.items_per_blob.get();
-        let mut scratch =
-            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
-        let need = valid.len() * A::SIZE;
-        if scratch.len() < need {
-            scratch.resize(need, 0);
-        }
-        let buf = &mut scratch[..need];
         let mut hits = 0u64;
         let mut group_base = start;
+        let mut decoded: Vec<Option<A>> = Vec::new();
         for group in valid.chunk_by(|a, b| {
             super::position_to_blob(*a, items_per_blob)
                 == super::position_to_blob(*b, items_per_blob)
@@ -1289,26 +1308,24 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             let Some(blob) = self.blobs.get(blob_num) else {
                 continue;
             };
-            let buf = &mut buf[..group.len() * A::SIZE];
-            let misses =
-                blob.try_read_many_sync_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE);
-            let mut misses = misses.into_iter().peekable();
-            for (idx, slice) in buf.chunks_exact(A::SIZE).enumerate() {
-                if misses.peek() == Some(&idx) {
-                    misses.next();
-                    continue;
-                }
-                // A decode failure declines to a miss: the async completion re-reads the
-                // item and bubbles the failure as [Error::Codec], like every async read path.
-                if let Ok(item) = A::decode(slice) {
-                    out[base + idx] = Some(item);
+            decoded.clear();
+            if blob
+                .try_decode_sync_many::<A>(&blob_offsets, A::SIZE, &(), &mut decoded)
+                .is_err()
+            {
+                // A decode failure declines the whole group to misses: the async completion
+                // re-reads the items and bubbles the failure as [Error::Codec], like every
+                // async read path.
+                continue;
+            }
+            for (idx, item) in decoded.drain(..).enumerate() {
+                if item.is_some() {
+                    out[base + idx] = item;
                     hits += 1;
                 }
             }
         }
-        self.metrics.cache_hits.inc_by(hits);
-        self.metrics.items_read.inc_by(hits);
-        out
+        (out, hits)
     }
 }
 
@@ -1346,11 +1363,11 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
-        let mut buf = vec![0u8; A::SIZE];
+        // Decode in place from the page cache (or tip buffer) when the bytes are resident.
+        // Decode failures on the sync path are reported as misses, and the async path
+        // surfaces any real error.
         let item = match self.locate(pos) {
-            Ok((blob, offset)) if blob.try_read_sync_into(&mut buf, offset) => {
-                A::decode(&buf[..]).ok()
-            }
+            Ok((blob, offset)) => blob.try_decode_sync::<A>(offset, A::SIZE, &())?.ok(),
             _ => None,
         };
         if item.is_some() {
@@ -1487,7 +1504,7 @@ mod tests {
         Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
         Supervisor as _,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};
     use std::num::NonZeroU16;
 
@@ -4703,6 +4720,100 @@ mod tests {
                 assert_eq!(batch[pos as usize], single);
             }
             drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_corrupt_resident_items_decline_to_misses() {
+        // Write raw bytes through a FixedBytes<1> journal, then reopen the partition as a
+        // bool journal: position 2 holds 0xFF, which is not a valid bool encoding. Sync
+        // probes must decline the corruption to misses (declining the whole blob group in
+        // the batched probe) while the async paths surface Error::Codec.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // One full 44-byte page plus a tip, all in blob 0.
+            let cfg = test_cfg(&context, NZU64!(64));
+            let mut writer = Journal::<_, FixedBytes<1>>::init(context.child("w"), cfg)
+                .await
+                .unwrap();
+            for i in 0u64..46 {
+                let byte = if i == 2 { 0xFF } else { 0x01 };
+                writer.append(&FixedBytes::new([byte])).await.unwrap();
+            }
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            let cfg = test_cfg(&context, NZU64!(64));
+            let mut journal = Journal::<_, bool>::init(context.child("r"), cfg)
+                .await
+                .unwrap();
+            let reader = journal.snapshot().await.unwrap();
+
+            // Warm page 0 through a valid position, then verify the corrupt position
+            // declines to a sync miss while the async read errors.
+            assert!(reader.read(0).await.unwrap());
+            assert_eq!(reader.try_read_sync(0), Some(true));
+            assert_eq!(reader.try_read_sync(2), None);
+            assert!(matches!(reader.read(2).await, Err(Error::Codec(_))));
+
+            // The batched probe declines the whole blob group containing the corruption,
+            // and a batch entirely out of bounds is all misses.
+            let served = reader.try_read_many_sync(&[0, 1, 2, 3]);
+            assert_eq!(served, vec![None, None, None, None]);
+            assert_eq!(reader.try_read_many_sync(&[1000]), vec![None]);
+
+            // The batched read surfaces the corruption through its async phase.
+            assert!(matches!(
+                reader.read_many(&[0, 1, 2, 3]).await,
+                Err(Error::Codec(_))
+            ));
+
+            drop(reader);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_mixes_sync_hits_and_async_misses() {
+        // A cache too small for the whole journal forces read_many to serve some items
+        // via the synchronous in-place decode phase and the rest via the async fallback,
+        // with the hit/miss metrics accounting for every item exactly once.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "rm-cold-hot".into(),
+                items_per_blob: NZU64!(4),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::init(context.child("rm_metrics"), cfg)
+                .await
+                .unwrap();
+
+            // Two full blobs of 4 items each (128 bytes per blob, 44-byte pages). The
+            // 2-page cache cannot hold both blobs' flushed pages, so some reads must
+            // fall back to storage while recently-touched pages hit.
+            for i in 0..8u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let positions: Vec<u64> = (0..8).collect();
+            let reader = journal.snapshot().await.unwrap();
+            let batch = reader.read_many(&positions).await.unwrap();
+            for &pos in &positions {
+                assert_eq!(batch[pos as usize], test_digest(pos));
+            }
+            drop(reader);
+
+            let buffer = context.encode();
+            let hits = counter(&buffer, "rm_metrics_cache_hits_total");
+            let misses = counter(&buffer, "rm_metrics_cache_misses_total");
+            assert_eq!(hits + misses, positions.len() as u64, "{buffer}");
+            assert!(hits > 0, "expected some sync hits\n{buffer}");
+            assert!(misses > 0, "expected some misses\n{buffer}");
 
             journal.destroy().await.unwrap();
         });

@@ -4,6 +4,7 @@ use crate::{
     journal::{frame::FrameReader, Error},
     Context,
 };
+use commonware_codec::Read as CodecRead;
 use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
@@ -539,21 +540,9 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
-    /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
-    /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
-    pub(super) fn try_read_many_sync_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Vec<usize> {
-        match self {
-            Self::Writer(writer) => writer.try_read_many_sync_into(buf, offsets, item_size),
-            Self::Sealed(sealed) => sealed.try_read_many_sync_into(buf, offsets, item_size),
-        }
-    }
-
-    /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges.
+    /// Like [`Self::read_many_into`], but synchronous and cache-only, for variable-length
+    /// `(offset, len)` ranges. Returns the indices of ranges that require a blob read. Their
+    /// slots in `buf` hold unspecified bytes.
     pub(super) fn try_read_ranges_sync_into(
         &self,
         buf: &mut [u8],
@@ -562,6 +551,53 @@ impl<'a, B: RBlob> Blob<'a, B> {
         match self {
             Self::Writer(writer) => writer.try_read_ranges_sync_into(buf, ranges),
             Self::Sealed(sealed) => sealed.try_read_ranges_sync_into(buf, ranges),
+        }
+    }
+
+    /// Decode a `T` from the bytes starting at `offset`, letting the decoder consume up to
+    /// `max_len` bytes, without performing I/O. See
+    /// [`Writer::try_decode_prefix_sync`] for the full contract, including the requirements on
+    /// `T`'s decoder.
+    #[inline]
+    pub(super) fn try_decode_prefix_sync<T: CodecRead>(
+        &self,
+        offset: u64,
+        max_len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<(T, usize), commonware_codec::Error>> {
+        match self {
+            Self::Writer(writer) => writer.try_decode_prefix_sync::<T>(offset, max_len, cfg),
+            Self::Sealed(sealed) => sealed.try_decode_prefix_sync::<T>(offset, max_len, cfg),
+        }
+    }
+
+    /// Like [`Self::try_decode_prefix_sync`] but requires the encoding to occupy exactly `len`
+    /// bytes. See [`Writer::try_decode_sync`].
+    #[inline]
+    pub(super) fn try_decode_sync<T: CodecRead>(
+        &self,
+        offset: u64,
+        len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<T, commonware_codec::Error>> {
+        match self {
+            Self::Writer(writer) => writer.try_decode_sync::<T>(offset, len, cfg),
+            Self::Sealed(sealed) => sealed.try_decode_sync::<T>(offset, len, cfg),
+        }
+    }
+
+    /// Decode multiple items of exactly `len` bytes each at sorted, non-overlapping offsets
+    /// without performing I/O. See [`Writer::try_decode_sync_many`].
+    pub(super) fn try_decode_sync_many<T: CodecRead>(
+        &self,
+        offsets: &[u64],
+        len: usize,
+        cfg: &T::Cfg,
+        out: &mut Vec<Option<T>>,
+    ) -> Result<(), commonware_codec::Error> {
+        match self {
+            Self::Writer(writer) => writer.try_decode_sync_many::<T>(offsets, len, cfg, out),
+            Self::Sealed(sealed) => sealed.try_decode_sync_many::<T>(offsets, len, cfg, out),
         }
     }
 }

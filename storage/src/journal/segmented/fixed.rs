@@ -60,6 +60,13 @@ pub struct Config {
 ///
 /// Each section is stored in a separate blob. Within each blob, items are fixed-size.
 ///
+/// # Synchronous Reads
+///
+/// Read paths opportunistically decode items in place from the page cache (or the write
+/// buffer) while holding the page-cache read lock, which appends contend on when flushing
+/// pages. `A`'s `Read` implementation must therefore be cheap and parse-only: no blocking and
+/// no expensive work.
+///
 /// # Repair
 ///
 /// Like
@@ -153,6 +160,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             .checked_mul(Self::CHUNK_SIZE_U64)
             .ok_or(Error::ItemOutOfRange(position))?;
 
+        // Decode in place from the page cache (or tip buffer) when the bytes are resident.
+        if let Some(result) = blob.try_decode_sync::<A>(offset, Self::CHUNK_SIZE, &()) {
+            return result.map_err(Error::Codec);
+        }
+
         // The read validates bounds against the blob's logical size.
         let buf = blob
             .read_at(offset, Self::CHUNK_SIZE)
@@ -165,10 +177,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
-    /// Read multiple items from the same section into a caller buffer.
+    /// Read multiple items from the same section.
     ///
-    /// `buf` must be at least `positions.len() * CHUNK_SIZE` bytes. All positions must be
-    /// strictly increasing and within the section's bounds.
+    /// All positions must be strictly increasing and within the section's bounds.
     ///
     /// Returns the decoded items and the number served without a blob read (page cache or tip
     /// buffer hits).
@@ -176,7 +187,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         &self,
         section: u64,
         positions: &[u64],
-        buf: &mut [u8],
     ) -> Result<(Vec<A>, usize), Error> {
         assert!(
             positions.is_sorted_by(|a, b| a < b),
@@ -185,11 +195,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         if positions.is_empty() {
             return Ok((Vec::new(), 0));
         }
-        assert!(
-            buf.len() >= positions.len() * Self::CHUNK_SIZE,
-            "get_many requires buf.len() >= positions.len() * CHUNK_SIZE"
-        );
-        let buf = &mut buf[..positions.len() * Self::CHUNK_SIZE];
         let blob = self
             .manager
             .get(section)?
@@ -203,15 +208,36 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             })
             .collect::<Result<_, _>>()?;
 
-        let hits = blob
-            .read_many_into(buf, &offsets, NZUsize!(Self::CHUNK_SIZE))
-            .await?;
-
-        let mut items = Vec::with_capacity(positions.len());
-        for i in 0..positions.len() {
-            let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
-            items.push(A::decode(slice).map_err(Error::Codec)?);
+        // Decode in place from the page cache (or tip buffer) when bytes are resident,
+        // then read only the misses from storage. The fallback can still serve items
+        // without a blob read (e.g. ranges straddling the flushed/tip boundary), so its
+        // hit count is added to the in-place decode hits.
+        let mut out: Vec<Option<A>> = Vec::with_capacity(positions.len());
+        blob.try_decode_sync_many::<A>(&offsets, Self::CHUNK_SIZE, &(), &mut out)
+            .map_err(Error::Codec)?;
+        let misses: Vec<(usize, u64)> = out
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.is_none())
+            .map(|(i, _)| (i, offsets[i]))
+            .collect();
+        let mut hits = positions.len() - misses.len();
+        if !misses.is_empty() {
+            // Miss offsets are a subset of the sorted offsets, so they remain sorted and
+            // non-overlapping as read_many_into requires.
+            let miss_offsets: Vec<u64> = misses.iter().map(|&(_, offset)| offset).collect();
+            let mut buf = vec![0u8; misses.len() * Self::CHUNK_SIZE];
+            hits += blob
+                .read_many_into(&mut buf, &miss_offsets, NZUsize!(Self::CHUNK_SIZE))
+                .await?;
+            for (slice, &(i, _)) in buf.chunks_exact(Self::CHUNK_SIZE).zip(&misses) {
+                out[i] = Some(A::decode(slice).map_err(Error::Codec)?);
+            }
         }
+        let items = out
+            .into_iter()
+            .map(|item| item.expect("all slots filled"))
+            .collect();
         Ok((items, hits))
     }
 
@@ -223,11 +249,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
-        let mut buf = vec![0u8; Self::CHUNK_SIZE];
-        if !blob.try_read_sync_into(&mut buf, offset) {
-            return None;
-        }
-        A::decode(&buf[..]).ok()
+        // Decode failures on the sync path are reported as misses, and the async path
+        // surfaces any real error.
+        blob.try_decode_sync::<A>(offset, Self::CHUNK_SIZE, &())?
+            .ok()
     }
 
     /// Read the last item in a section, if any.
@@ -251,6 +276,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
         let offset = last_position * Self::CHUNK_SIZE_U64;
+
+        // Decode in place from the page cache (or tip buffer) when the bytes are resident.
+        if let Some(result) = blob.try_decode_sync::<A>(offset, Self::CHUNK_SIZE, &()) {
+            return result.map_err(Error::Codec).map(Some);
+        }
+
         let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
         A::decode(buf.coalesce()).map_err(Error::Codec).map(Some)
     }
@@ -439,7 +470,7 @@ mod tests {
         mocks::{fail_pending_syncs, release_pending_syncs, DelayedSyncContext, PendingSyncs},
         BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};
     use std::sync::{
@@ -1465,8 +1496,7 @@ mod tests {
             journal.append(0, &test_digest(0)).await.unwrap();
             assert_eq!(journal.section_len(0).unwrap(), 1);
 
-            let mut buf = [];
-            let (items, hits) = journal.get_many(0, &[], &mut buf).await.unwrap();
+            let (items, hits) = journal.get_many(0, &[]).await.unwrap();
             assert!(items.is_empty());
             assert_eq!(hits, 0);
 
@@ -1486,14 +1516,8 @@ mod tests {
             }
             assert_eq!(journal.section_len(0).unwrap(), 5);
 
-            // Read all 5 items in one call. The reusable buffer is intentionally oversized:
-            // get_many slices it to the exact length the batch needs.
-            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
-            let mut buf = vec![0u8; 6 * chunk];
-            let (items, _) = journal
-                .get_many(0, &[0, 1, 2, 3, 4], &mut buf)
-                .await
-                .unwrap();
+            // Read all 5 items in one call.
+            let (items, _) = journal.get_many(0, &[0, 1, 2, 3, 4]).await.unwrap();
 
             for (i, item) in items.iter().enumerate() {
                 assert_eq!(*item, test_digest(i as u64));
@@ -1516,10 +1540,8 @@ mod tests {
             }
             assert_eq!(journal.section_len(0).unwrap(), 10);
 
-            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
             let positions = [1, 4, 7, 9];
-            let mut buf = vec![0u8; positions.len() * chunk];
-            let (items, _) = journal.get_many(0, &positions, &mut buf).await.unwrap();
+            let (items, _) = journal.get_many(0, &positions).await.unwrap();
 
             for (i, &pos) in positions.iter().enumerate() {
                 assert_eq!(items[i], test_digest(pos));
@@ -1538,9 +1560,85 @@ mod tests {
                 .await
                 .unwrap();
 
-            let mut buf = vec![0u8; 64];
-            let err = journal.get_many(99, &[0], &mut buf).await.unwrap_err();
+            let err = journal.get_many(99, &[0]).await.unwrap_err();
             assert!(matches!(err, Error::SectionOutOfRange(99)));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_try_get_sync_hits_and_corrupt_decline() {
+        // Write raw bytes through a FixedBytes<1> journal, then reopen the partition as a
+        // bool journal: 0xFF is not a valid bool encoding, so the reopened journal holds
+        // resident-but-corrupt bytes. The sync paths must decline them to misses while the
+        // async paths surface the corruption as an error.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Fill one full 44-byte page plus a 2-byte tip. Item 2 (page 0) and item 45
+            // (tip) are corrupt.
+            let cfg = test_cfg(&context);
+            let mut writer = Journal::<_, FixedBytes<1>>::init(context.child("w"), cfg)
+                .await
+                .unwrap();
+            for i in 0u64..46 {
+                let byte = if i == 2 || i == 45 { 0xFF } else { 0x01 };
+                writer.append(0, &FixedBytes::new([byte])).await.unwrap();
+            }
+            writer.sync(0).await.unwrap();
+            drop(writer);
+
+            let cfg = test_cfg(&context);
+            let journal = Journal::<_, bool>::init(context.child("r"), cfg)
+                .await
+                .unwrap();
+
+            // The tip is in-memory, so valid tip items hit synchronously right away while
+            // the corrupt tip item declines to a miss and errors through the async path.
+            assert_eq!(journal.try_get_sync(0, 44), Some(true));
+            assert_eq!(journal.try_get_sync(0, 45), None);
+            assert!(matches!(journal.get(0, 45).await, Err(Error::Codec(_))));
+
+            // Page 0 is cold: the probe misses, the async read warms it, and the corrupt
+            // resident item then declines to a miss while get surfaces the error.
+            assert_eq!(journal.try_get_sync(0, 0), None);
+            assert!(journal.get(0, 0).await.unwrap());
+            assert_eq!(journal.try_get_sync(0, 0), Some(true));
+            assert_eq!(journal.try_get_sync(0, 2), None);
+            assert!(matches!(journal.get(0, 2).await, Err(Error::Codec(_))));
+
+            // Batched reads surface sync-detected corruption as an error as well.
+            assert!(matches!(
+                journal.get_many(0, &[0, 1, 2]).await,
+                Err(Error::Codec(_))
+            ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_last_falls_back_to_async_on_cold_cache() {
+        // A journal whose size is page-aligned keeps no tip in memory, so on reopen the
+        // last item is neither cached nor buffered and must be served by the async path.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut writer = Journal::<_, FixedBytes<1>>::init(context.child("w"), cfg)
+                .await
+                .unwrap();
+            for _ in 0..44 {
+                writer.append(0, &FixedBytes::new([0x01])).await.unwrap();
+            }
+            writer.sync(0).await.unwrap();
+            drop(writer);
+
+            let cfg = test_cfg(&context);
+            let journal = Journal::<_, bool>::init(context.child("r"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.try_get_sync(0, 43), None);
+            assert_eq!(journal.last(0).await.unwrap(), Some(true));
 
             journal.destroy().await.unwrap();
         });
@@ -1560,10 +1658,8 @@ mod tests {
             assert_eq!(journal.section_len(0).unwrap(), 8);
             journal.sync_all().await.unwrap();
 
-            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
             let positions: Vec<u64> = (0..8).collect();
-            let mut buf = vec![0u8; positions.len() * chunk];
-            let (batch, _) = journal.get_many(0, &positions, &mut buf).await.unwrap();
+            let (batch, _) = journal.get_many(0, &positions).await.unwrap();
 
             for pos in &positions {
                 let single = journal.get(0, *pos).await.unwrap();
