@@ -274,6 +274,9 @@ commonware_macros::stability_scope!(BETA {
         /// applying `fold_op` after an error is observed. When more than one partition fails,
         /// any error may be returned.
         ///
+        /// Adaptive strategies must only record elapsed time when the fold succeeds, so
+        /// abort-early error paths cannot poison the policy's estimates.
+        ///
         /// # Arguments
         ///
         /// - `iter`: The collection to fold over
@@ -294,21 +297,7 @@ commonware_macros::stability_scope!(BETA {
             E: Send,
             ID: Fn() -> R + Send + Sync,
             F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            self.fold(
-                iter,
-                || Ok(identity()),
-                |acc, item| match acc {
-                    Ok(acc) => fold_op(acc, item),
-                    Err(error) => Err(error),
-                },
-                |a, b| match a {
-                    Ok(a) => b.map(|b| reduce_op(a, b)),
-                    Err(error) => Err(error),
-                },
-            )
-        }
+            RD: Fn(R, R) -> R + Send + Sync;
 
         /// Maps each element and collects results into a `Vec`.
         ///
