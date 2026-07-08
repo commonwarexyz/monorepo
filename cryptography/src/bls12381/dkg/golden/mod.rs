@@ -2205,12 +2205,10 @@ mod tests {
         assert!(signed.identify(&other_faults).is_none());
     }
 
-    #[test_group("slow")]
-    #[test]
     fn fuzz_plan() {
         minifuzz::Builder::default()
             .with_min_iterations(0)
-            .with_search_time(Duration::from_secs(600))
+            .with_search_time(Duration::from_secs(150))
             .test(|u| {
                 let plan: Plan = u.arbitrary()?;
                 let seed: u64 = u.arbitrary()?;
@@ -2218,5 +2216,29 @@ mod tests {
                     .expect("plan should not panic");
                 Ok(())
             });
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn fuzz_plan_0() {
+        fuzz_plan();
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn fuzz_plan_1() {
+        fuzz_plan();
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn fuzz_plan_2() {
+        fuzz_plan();
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn fuzz_plan_3() {
+        fuzz_plan();
     }
 }
