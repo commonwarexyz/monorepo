@@ -181,6 +181,8 @@ pub enum Error<F: Family> {
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
     /// The batch was created from a different database state than the current one.
+    ///
+    /// See [`batch_chain`] for more details on staleness detection.
     #[error(
         "stale batch: db has {db_size} ops, batch requires {batch_db_size}, {batch_base_size}, or an ancestor boundary"
     )]

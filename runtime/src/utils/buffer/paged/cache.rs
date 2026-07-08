@@ -99,9 +99,25 @@ impl Drop for PageFetchGuard {
 /// policy, a lightweight approximation of LRU. All page buffers are pre-allocated from `pool` at
 /// construction (via [Clock::prefill]) and reused in place, so caching never allocates after
 /// construction.
+///
+/// Reads first resolve pages through `hints`, a fixed-size direct-mapped array from
+/// [Self::hint_index] to the [Clock] slot the page was last cached in: a lookup is one array
+/// load instead of a hash-table probe chain, which the out-of-order core cannot overlap across
+/// items. Hints are best-effort, never truth: [Clock::get_at] only resolves a slot that still
+/// holds the page's key live, so entries staled by eviction, invalidation, or hint collisions
+/// read as misses and fall back to the [Clock]'s own lookup. Hints need no maintenance on
+/// eviction or invalidation, and their memory is fixed at construction, so no blob offset can
+/// grow them.
 struct Cache {
     /// Maps each (blob id, page number) to its logical page buffer.
     cache: Clock<(u64, u64), IoBufMut>,
+
+    /// Direct-mapped [Clock] slot hints, indexed by [Self::hint_index]. Initialized
+    /// out-of-range so untouched entries read as misses. The length is a power of two so
+    /// [Self::hint_index] can wrap with a mask instead of a division, and at least twice the
+    /// cache capacity: a full cache has one live page per `capacity`, so sizing at capacity
+    /// makes hint collisions (and their slower fallback lookups) common.
+    hints: Vec<usize>,
 
     /// Size of each page in bytes.
     page_size: usize,
@@ -216,22 +232,46 @@ impl CacheRef {
     /// blob.
     pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut Vec<(&mut [u8], u64)>) {
         let page_cache = self.cache.read();
-        ranges.retain_mut(|(buf, logical_offset)| {
-            let mut remaining = buf.len();
-            let mut offset = *logical_offset;
-            let mut dst = 0;
-            while remaining > 0 {
-                let count = page_cache.read_at(blob_id, &mut buf[dst..], offset);
-                if count == 0 {
-                    break;
-                }
-                offset += count as u64;
-                dst += count;
-                remaining -= count;
-            }
+        let page_size = page_cache.page_size;
 
-            // Keep cache misses in `ranges`; drop fully-cached entries.
-            remaining > 0
+        // Resolve every range's first page before copying any data. The lookups are
+        // independent, so batching them lets the core overlap their memory latency instead of
+        // stalling each lookup behind the previous range's copy.
+        let mut srcs: Vec<Option<&[u8]>> = Vec::with_capacity(ranges.len());
+        for (buf, offset) in ranges.iter() {
+            let (page_num, offset_in_page) = Cache::offset_to_page(page_size as u64, *offset);
+            let offset_in_page = offset_in_page as usize;
+            let seg = std::cmp::min(buf.len(), page_size - offset_in_page);
+            srcs.push(
+                page_cache
+                    .get_page(blob_id, page_num)
+                    .map(|page| &page.as_ref()[offset_in_page..offset_in_page + seg]),
+            );
+        }
+
+        // Copy resolved pages, dropping fully-cached ranges and keeping misses. A range whose
+        // first page missed is kept untouched, and one that continues past its first page reads
+        // the rest page by page, staying a miss if any later page faults.
+        let mut next = 0;
+        ranges.retain_mut(|(buf, offset)| {
+            let src = srcs[next];
+            next += 1;
+            if buf.is_empty() {
+                return false;
+            }
+            let Some(src) = src else {
+                return true;
+            };
+            buf[..src.len()].copy_from_slice(src);
+            let mut done = src.len();
+            while done < buf.len() {
+                let count = page_cache.read_at(blob_id, &mut buf[done..], *offset + done as u64);
+                if count == 0 {
+                    return true;
+                }
+                done += count;
+            }
+            false
         });
     }
 
@@ -412,8 +452,10 @@ impl Cache {
         let page_size = page_size.get() as usize;
         let mut cache = Clock::new(capacity);
         cache.prefill(|| pool.alloc_zeroed(page_size));
+        let hints = capacity.get().saturating_mul(2).next_power_of_two();
         Self {
             cache,
+            hints: vec![usize::MAX; hints],
             page_size,
             pool,
             page_fetches: AHashMap::new(),
@@ -433,7 +475,7 @@ impl Cache {
     fn read_at(&self, blob_id: u64, buf: &mut [u8], logical_offset: u64) -> usize {
         let (page_num, offset_in_page) =
             Self::offset_to_page(self.page_size as u64, logical_offset);
-        let Some(page) = self.cache.get(&(blob_id, page_num)) else {
+        let Some(page) = self.get_page(blob_id, page_num) else {
             return 0;
         };
         let page = page.as_ref();
@@ -445,15 +487,42 @@ impl Cache {
         bytes_to_copy
     }
 
-    /// Put the given `page` into the page cache.
+    /// Put the given `page` into the page cache and record its slot hint.
     fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
         assert_eq!(page.len(), self.page_size);
         let pool = &self.pool;
         let page_size = self.page_size;
-        let buf = self
+        let (slot, buf) = self
             .cache
             .get_or_insert_mut((blob_id, page_num), || pool.alloc_zeroed(page_size));
         buf.as_mut().copy_from_slice(page);
+        let hint = self.hint_index(blob_id, page_num);
+        self.hints[hint] = slot;
+    }
+
+    /// The hint slot for `(blob_id, page_num)`: the page number offset by a per-blob salt,
+    /// wrapped to the array.
+    ///
+    /// Adding (rather than hashing in) the page number keeps consecutive pages in consecutive
+    /// hint entries, so the sorted batches issued by [CacheRef::read_cached_many] walk the
+    /// array sequentially instead of taking a cache miss per lookup. The salt spreads blobs'
+    /// ranges apart; two blobs whose ranges still overlap only evict each other's hints, which
+    /// [Self::get_page] repairs through the fallback lookup.
+    #[inline]
+    const fn hint_index(&self, blob_id: u64, page_num: u64) -> usize {
+        let salted = page_num.wrapping_add(blob_id.wrapping_mul(commonware_utils::GOLDEN_RATIO));
+        (salted & (self.hints.len() as u64 - 1)) as usize
+    }
+
+    /// Look up a page, preferring its direct-mapped slot hint over the [Clock]'s own lookup.
+    #[inline]
+    fn get_page(&self, blob_id: u64, page_num: u64) -> Option<&IoBufMut> {
+        let key = (blob_id, page_num);
+        let slot = self.hints[self.hint_index(blob_id, page_num)];
+        if let Some(page) = self.cache.get_at(slot, &key) {
+            return Some(page);
+        }
+        self.cache.get(&key)
     }
 
     /// Drop any cached pages for `blob_id` at `page_num >= start_page`.
@@ -1232,6 +1301,144 @@ mod tests {
         assert!(buf2 == page2);
         // Missed page's buffer should be untouched (still zeroed).
         assert!(buf1.iter().all(|b| *b == 0));
+    }
+
+    #[test_traced]
+    fn test_read_cached_many_stale_hint_after_eviction() {
+        // Insert one page past capacity so the CLOCK evicts page 0 and reuses its slot for
+        // page 2. Page 0's hint now points at a slot holding page 2's key, so the batched
+        // read must report page 0 as a miss (never page 2's bytes) while still serving the
+        // live pages.
+        let pool = test_pool();
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(2));
+        let blob_id = cache_ref.next_id();
+        let page_size = PAGE_SIZE.get() as usize;
+        {
+            let mut cache = cache_ref.cache.write();
+            for page in 0u64..3 {
+                cache.cache(blob_id, &vec![page as u8 + 1; page_size], page);
+            }
+        }
+
+        let mut bufs: Vec<Vec<u8>> = (0..3).map(|_| vec![0u8; page_size]).collect();
+        let mut iter = bufs.iter_mut();
+        let mut ranges: Vec<(&mut [u8], u64)> = (0..3u64)
+            .map(|page| (iter.next().unwrap().as_mut_slice(), page * PAGE_SIZE_U64))
+            .collect();
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+
+        // Page 0 was evicted: it must be the one remaining miss, untouched.
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].1, 0);
+        drop(ranges);
+        assert!(bufs[0].iter().all(|b| *b == 0));
+        assert_eq!(bufs[1], vec![2u8; page_size]);
+        assert_eq!(bufs[2], vec![3u8; page_size]);
+    }
+
+    #[test_traced]
+    fn test_read_cached_many_cross_blob_hint_collision() {
+        // Two blobs whose salted ranges overlap share a hint entry, and the later insert
+        // overwrites the earlier blob's hint. The hint only proposes a slot: [Clock::get_at]
+        // validates the full (blob, page) key, so each blob reads back its own bytes (the
+        // clobbered one through the fallback lookup), never the other's.
+        let pool = test_pool();
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(4));
+        let blob_a = cache_ref.next_id();
+        let blob_b = cache_ref.next_id();
+        let page_size = PAGE_SIZE.get() as usize;
+        let page_a = 5u64;
+        let page_b = {
+            let mut cache = cache_ref.cache.write();
+
+            // Solve hint_index(blob_b, page_b) == hint_index(blob_a, page_a) for page_b.
+            let mask = cache.hints.len() as u64 - 1;
+            let page_b = page_a
+                .wrapping_add(blob_a.wrapping_mul(commonware_utils::GOLDEN_RATIO))
+                .wrapping_sub(blob_b.wrapping_mul(commonware_utils::GOLDEN_RATIO))
+                & mask;
+            assert_eq!(
+                cache.hint_index(blob_a, page_a),
+                cache.hint_index(blob_b, page_b)
+            );
+            cache.cache(blob_a, &vec![0xAA; page_size], page_a);
+            cache.cache(blob_b, &vec![0xBB; page_size], page_b);
+            page_b
+        };
+
+        for (blob, page, byte) in [(blob_a, page_a, 0xAAu8), (blob_b, page_b, 0xBB)] {
+            let mut buf = vec![0u8; page_size];
+            let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf, page * PAGE_SIZE_U64)];
+            cache_ref.read_cached_many(blob, &mut ranges);
+            assert!(
+                ranges.is_empty(),
+                "blob {blob} page {page} should be cached"
+            );
+            drop(ranges);
+            assert_eq!(buf, vec![byte; page_size]);
+        }
+    }
+
+    #[test_traced]
+    fn test_read_cached_many_sparse_page_number_keeps_hints_fixed() {
+        // Hint memory is fixed at construction: caching at an extreme page number must not
+        // grow any structure, and the page is still served through the hint path.
+        let pool = test_pool();
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(2));
+        let blob_id = cache_ref.next_id();
+        let page_size = PAGE_SIZE.get() as usize;
+        let page_num = u64::MAX / PAGE_SIZE_U64 - 1;
+        {
+            let mut cache = cache_ref.cache.write();
+            let hints = cache.hints.len();
+            cache.cache(blob_id, &vec![0x5A; page_size], page_num);
+            assert_eq!(cache.hints.len(), hints);
+        }
+
+        let mut buf = vec![0u8; page_size];
+        let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf, page_num * PAGE_SIZE_U64)];
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+        assert!(ranges.is_empty());
+        drop(ranges);
+        assert_eq!(buf, vec![0x5A; page_size]);
+    }
+
+    #[test_traced]
+    fn test_read_cached_many_invalidated_page_is_a_miss() {
+        // Invalidated pages free their slots but keep their keys. Their hints need no
+        // cleanup: a freed slot is not live, so the dropped page reads as a miss until
+        // re-cached.
+        let pool = test_pool();
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(4));
+        let blob_id = cache_ref.next_id();
+        let page_size = PAGE_SIZE.get() as usize;
+        {
+            let mut cache = cache_ref.cache.write();
+            for page in 0u64..4 {
+                cache.cache(blob_id, &vec![page as u8 + 1; page_size], page);
+            }
+        }
+        cache_ref.invalidate_from(blob_id, 2);
+
+        let read_page = |page: u64| {
+            let mut buf = vec![0u8; page_size];
+            let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf, page * PAGE_SIZE_U64)];
+            cache_ref.read_cached_many(blob_id, &mut ranges);
+            let hit = ranges.is_empty();
+            drop(ranges);
+            hit.then_some(buf)
+        };
+        assert_eq!(read_page(0), Some(vec![1u8; page_size]));
+        assert_eq!(read_page(1), Some(vec![2u8; page_size]));
+        assert_eq!(read_page(2), None);
+        assert_eq!(read_page(3), None);
+
+        // Re-caching a dropped page restores it through the hint path.
+        {
+            let mut cache = cache_ref.cache.write();
+            cache.cache(blob_id, &vec![0xCC; page_size], 2);
+        }
+        assert_eq!(read_page(2), Some(vec![0xCC; page_size]));
     }
 
     #[rstest]

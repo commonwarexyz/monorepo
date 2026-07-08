@@ -146,7 +146,8 @@ mod test {
     };
     use commonware_cryptography::{
         certificate::{
-            self, mocks::Fixture, Attestation, ConstantProvider, Provider, Scoped, Verifier,
+            self, mocks::Fixture, Attestation, ConstantProvider, Provider, Scoped, Verification,
+            Verifier,
         },
         ed25519,
         sha256::Digest as Sha256Digest,
@@ -354,6 +355,22 @@ mod test {
                 .verify_certificate::<_, D, M>(rng, subject, certificate, strategy)
         }
 
+        fn verify_certificates<'a, R, D, I, M>(
+            &self,
+            rng: &mut R,
+            certificates: I,
+            strategy: &impl ParallelStrategy,
+        ) -> bool
+        where
+            R: rand_core::CryptoRngCore,
+            D: commonware_cryptography::Digest,
+            I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+            M: commonware_utils::Faults,
+        {
+            self.inner
+                .verify_certificates::<_, D, _, M>(rng, certificates, strategy)
+        }
+
         fn is_batchable() -> bool {
             Scheme::is_batchable()
         }
@@ -407,6 +424,35 @@ mod test {
             };
             self.inner
                 .verify_attestation(rng, subject, &attestation, strategy)
+        }
+
+        fn verify_attestations<R, D, I>(
+            &self,
+            rng: &mut R,
+            subject: Self::Subject<'_, D>,
+            attestations: I,
+            strategy: &impl ParallelStrategy,
+        ) -> Verification<Self>
+        where
+            R: rand_core::CryptoRngCore,
+            D: commonware_cryptography::Digest,
+            I: IntoIterator<Item = Attestation<Self>>,
+            I::IntoIter: Send,
+        {
+            let verification = self.inner.verify_attestations(
+                rng,
+                subject,
+                attestations.into_iter().map(Self::unwrap_attestation),
+                strategy,
+            );
+            Verification::new(
+                verification
+                    .verified
+                    .into_iter()
+                    .map(Self::wrap_attestation)
+                    .collect(),
+                verification.invalid,
+            )
         }
 
         fn assemble<I, M>(

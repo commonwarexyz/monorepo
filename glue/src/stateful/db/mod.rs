@@ -206,9 +206,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Prune the database to a previously finalized sync target.
     ///
-    /// Databases that do not retain pruneable operation history may keep the
-    /// default no-op implementation. This call makes changes durable and
-    /// ensures they will be present on startup without replay.
+    /// Databases that do not retain pruneable operation history can rely on
+    /// the default no-op. This call makes changes durable and ensures they
+    /// will be present on startup without replay.
     fn prune(
         &mut self,
         _target: &Self::SyncTarget,

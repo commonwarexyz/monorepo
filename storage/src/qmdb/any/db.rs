@@ -12,11 +12,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        bitmap::Shared,
-        build_snapshot_from_log, delete_known_loc,
-        metrics::{KeyReadMetrics, OperationMetrics, StateMetrics},
-        operation::Operation as OperationTrait,
-        update_known_loc, Error,
+        bitmap::Shared, build_snapshot_from_log, delete_known_loc, metrics::Metrics,
+        operation::Operation as OperationTrait, update_known_loc, Error,
     },
     Context,
 };
@@ -28,27 +25,9 @@ use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
 
-/// Metrics for Any QMDBs.
-pub(crate) struct Metrics<E: Context> {
-    /// State gauges.
-    pub state: StateMetrics,
-    /// Write and durability metrics.
-    pub operations: OperationMetrics<E>,
-    /// Key read metrics.
-    pub reads: KeyReadMetrics<E>,
-}
-
-impl<E: Context> Metrics<E> {
-    /// Create and register metrics.
-    pub fn new(context: E) -> Self {
-        let context = Arc::new(context);
-        Self {
-            state: StateMetrics::new(context.as_ref()),
-            operations: OperationMetrics::new(context.clone()),
-            reads: KeyReadMetrics::new(context),
-        }
-    }
-}
+/// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
+/// keys plus `(global key index, position)` pairs for page-cache misses.
+type ShardReads<T> = (Vec<Option<T>>, Vec<(usize, u64)>);
 
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C, H, S>;
@@ -199,9 +178,9 @@ where
 
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
-        let _timer = self.metrics.reads.get_timer();
-        self.metrics.reads.get_calls.inc();
-        self.metrics.reads.keys_requested.inc();
+        let _timer = self.metrics.get_timer();
+        self.metrics.get_calls.inc();
+        self.metrics.lookups_requested.inc();
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
         let mut result = None;
@@ -232,90 +211,143 @@ where
 
     /// Like [`Self::get_many`] but maps each matched update through `map`, which also
     /// receives the committed location the update was read from.
-    pub(crate) async fn get_many_map<T>(
+    pub(crate) async fn get_many_map<T: Send>(
         &self,
         keys: &[&U::Key],
-        map: impl Fn(&U, Location<F>) -> T,
+        map: impl Fn(&U, Location<F>) -> T + Send + Sync,
     ) -> Result<Vec<Option<T>>, crate::qmdb::Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
 
-        let _timer = self.metrics.reads.get_many_timer();
-        self.metrics.reads.get_many_calls.inc();
-        self.metrics.reads.keys_requested.inc_by(keys.len() as u64);
+        let _timer = self.metrics.get_many_timer();
+        self.metrics.get_many_calls.inc();
+        self.metrics.lookups_requested.inc_by(keys.len() as u64);
 
-        // Phase 1: Collect candidate locations from the in-memory index. Each key may map to
-        // multiple locations due to hash collisions. The index is read-only and Send+Sync, so
-        // for large batches the probe is sharded across the strategy pool; each candidate carries
-        // its global key index, so partition order does not matter.
+        // One fused pass resolves everything the page cache can serve: probe the index, sort
+        // candidate locations, read cached operations, and match them back to keys, collecting
+        // misses. The strategy policy decides per batch size whether the pass runs on the
+        // calling thread or sharded across the pool.
         let strategy = self.strategy();
-        let mut candidates: Vec<(usize, u64)> = strategy.run(
+        let (mut results, mut misses) = strategy.run(
             keys.len(),
-            || {
-                let mut candidates = Vec::with_capacity(keys.len());
-                self.snapshot
-                    .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
-                candidates
-            },
+            || self.resolve_cached(keys, &map, 0),
             || {
                 let manual = strategy.manual();
-                let parallelism = manual.parallelism_hint();
-                let chunk = keys.len().div_ceil(parallelism);
-                let snapshot = &self.snapshot;
-                manual
-                    .map_collect_vec(
-                        keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
-                        |(ci, chunk_keys)| {
-                            let base = ci * chunk;
-                            let mut local: Vec<(usize, u64)> = Vec::with_capacity(chunk_keys.len());
-                            snapshot.get_many(chunk_keys, |key_idx, &loc| {
-                                local.push((base + key_idx, *loc))
-                            });
-                            local
-                        },
-                    )
-                    .into_iter()
-                    .flatten()
-                    .collect()
+                let chunk = keys.len().div_ceil(manual.parallelism_hint());
+                let shards = manual.map_collect_vec(
+                    keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
+                    |(ci, shard_keys)| self.resolve_cached(shard_keys, &map, ci * chunk),
+                );
+                let mut results = Vec::with_capacity(keys.len());
+                let mut misses = Vec::new();
+                for (shard_results, shard_misses) in shards {
+                    results.extend(shard_results);
+                    misses.extend(shard_misses);
+                }
+                (results, misses)
             },
         );
-
-        let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
-        if candidates.is_empty() {
+        if misses.is_empty() {
             return Ok(results);
         }
 
-        // Phase 2: Sort by position for batched journal reads, then deduplicate.
-        candidates.sort_unstable_by_key(|&(_, pos)| pos);
+        // Fallback: read each distinct missed position once with one batched read, which also
+        // validates the missed positions: every candidate position is decoded by exactly one of
+        // the two passes, so corruption detection does not depend on cache state.
+        misses.sort_unstable_by_key(|&(_, pos)| pos);
+        let positions = Self::dedup_positions(&misses);
+        let ops = self.log.read_many(&positions).await?;
+        Self::match_read_ops(
+            keys,
+            &misses,
+            &positions,
+            |i| Some(&ops[i]),
+            &map,
+            &mut results,
+            |_, pos| unreachable!("read_many returns one operation per position, pos={pos}"),
+        );
+        Ok(results)
+    }
 
-        let mut positions: Vec<u64> = Vec::with_capacity(candidates.len());
-        for &(_, pos) in &candidates {
+    /// Probe the index for `keys`, serve page-cache hits synchronously, and match them back to
+    /// keys. Returns per-key results plus `(base + key index, position)` pairs for positions
+    /// the cache could not serve. A miss is recorded even when its key already resolved so the
+    /// fallback read still validates the position.
+    fn resolve_cached<T: Send>(
+        &self,
+        keys: &[&U::Key],
+        map: &(impl Fn(&U, Location<F>) -> T + Send + Sync),
+        base: usize,
+    ) -> ShardReads<T> {
+        // Probe the in-memory index. Each key may map to multiple locations due to hash
+        // collisions.
+        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
+        self.snapshot
+            .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
+
+        // Sort by position and deduplicate for the batched cache read.
+        candidates.sort_unstable_by_key(|&(_, pos)| pos);
+        let positions = Self::dedup_positions(&candidates);
+
+        let served = self.log.try_read_many_sync(&positions);
+        let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
+        let mut misses: Vec<(usize, u64)> = Vec::new();
+        Self::match_read_ops(
+            keys,
+            &candidates,
+            &positions,
+            |i| served[i].as_ref(),
+            map,
+            &mut results,
+            |key_idx, pos| misses.push((base + key_idx, pos)),
+        );
+        (results, misses)
+    }
+
+    /// Collapse position-sorted `(key index, position)` candidates into deduplicated positions.
+    fn dedup_positions(candidates: &[(usize, u64)]) -> Vec<u64> {
+        let mut positions = Vec::with_capacity(candidates.len());
+        for &(_, pos) in candidates {
             if positions.last() != Some(&pos) {
                 positions.push(pos);
             }
         }
+        positions
+    }
 
-        // Phase 3: Batch-read from the journal (one reader acquisition, one I/O batch).
-        let ops = self.log.read_many(&positions).await?;
-
-        // Phase 4: Match operations back to keys via binary search (no HashMap).
-        for &(key_idx, pos) in &candidates {
-            if results[key_idx].is_some() {
-                continue;
+    /// Match operations read for deduplicated `positions` back to their position-sorted
+    /// `(key index, position)` candidates, filling each unresolved key slot whose operation
+    /// carries its exact key. `op` returns the operation read for a deduplicated position
+    /// index, or `None` when the page cache could not serve it, which is reported to `on_miss`
+    /// with the candidate's key index and position.
+    fn match_read_ops<'o, T>(
+        keys: &[&U::Key],
+        candidates: &[(usize, u64)],
+        positions: &[u64],
+        op: impl Fn(usize) -> Option<&'o Operation<F, U>>,
+        map: &impl Fn(&U, Location<F>) -> T,
+        results: &mut [Option<T>],
+        mut on_miss: impl FnMut(usize, u64),
+    ) where
+        F: 'o,
+        U: 'o,
+    {
+        let mut op_idx = 0;
+        for &(key_idx, pos) in candidates {
+            while positions[op_idx] < pos {
+                op_idx += 1;
             }
-            let op_idx = positions
-                .binary_search(&pos)
-                .expect("position was deduped from candidates");
-            let Operation::Update(data) = &ops[op_idx] else {
-                panic!("location does not reference update operation. loc={pos}");
-            };
-            if data.key() == keys[key_idx] {
-                results[key_idx] = Some(map(data, Location::new(pos)));
+            match op(op_idx) {
+                Some(Operation::Update(data)) => {
+                    if results[key_idx].is_none() && data.key() == keys[key_idx] {
+                        results[key_idx] = Some(map(data, Location::new(pos)));
+                    }
+                }
+                Some(_) => panic!("location does not reference update operation. loc={pos}"),
+                None => on_miss(key_idx, pos),
             }
         }
-
-        Ok(results)
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
@@ -328,7 +360,7 @@ where
     /// Update state gauges from the current database state.
     pub(crate) fn update_metrics(&self) {
         let bounds = self.log.bounds();
-        self.metrics.state.set(
+        self.metrics.update(
             bounds.end,
             bounds.start,
             *self.inactivity_floor_loc,
@@ -403,8 +435,8 @@ where
         ),
     )]
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), crate::qmdb::Error<F>> {
-        let _timer = self.metrics.operations.prune_timer();
-        self.metrics.operations.prune_calls.inc();
+        let _timer = self.metrics.prune_timer();
+        self.metrics.prune_calls.inc();
         let actual_pruned = self.prune_log(prune_loc).await?;
         self.prune_bitmap(actual_pruned);
         self.update_metrics();
@@ -781,8 +813,8 @@ where
         ),
     )]
     pub async fn sync(&mut self) -> Result<(), crate::qmdb::Error<F>> {
-        let _timer = self.metrics.operations.sync_timer();
-        self.metrics.operations.sync_calls.inc();
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
         self.log.sync().await?;
         Ok(())
     }
@@ -800,8 +832,8 @@ where
         ),
     )]
     pub async fn commit(&mut self) -> Result<(), crate::qmdb::Error<F>> {
-        let _timer = self.metrics.operations.commit_timer();
-        self.metrics.operations.commit_calls.inc();
+        let _timer = self.metrics.commit_timer();
+        self.metrics.commit_calls.inc();
         self.log.commit().await?;
         Ok(())
     }

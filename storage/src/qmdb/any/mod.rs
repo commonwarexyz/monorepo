@@ -73,6 +73,7 @@ use crate::{
     qmdb::{
         any::operation::{Operation, Update},
         bitmap::Shared,
+        metrics::Metrics,
         operation::Committable,
         ROOT_BAGGING,
     },
@@ -178,7 +179,7 @@ where
     }
 
     let index = I::new(context.child("index"), cfg.translator);
-    let metrics = db::Metrics::new(context);
+    let metrics = Metrics::new(context);
     db::Db::init_from_log(index, log, bitmap, cfg.init_cache_size, metrics).await
 }
 
@@ -218,6 +219,17 @@ pub(crate) mod test {
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T, Sequential> {
+        fixed_db_config_with_strategy(suffix, pooler, Sequential)
+    }
+
+    pub(crate) fn fixed_db_config_with_strategy<
+        T: Translator + Default,
+        S: commonware_parallel::Strategy,
+    >(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+        strategy: S,
+    ) -> FixedConfig<T, S> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
@@ -225,7 +237,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                strategy: Sequential,
+                strategy,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {

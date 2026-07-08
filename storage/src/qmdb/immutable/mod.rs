@@ -84,13 +84,7 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{
-        any::ValueEncoding,
-        build_snapshot_from_log,
-        metrics::{KeyReadMetrics, OperationMetrics, StateMetrics},
-        operation::Key,
-        Error,
-    },
+    qmdb::{any::ValueEncoding, build_snapshot_from_log, metrics::Metrics, operation::Key, Error},
     translator::Translator,
     Context,
 };
@@ -102,28 +96,6 @@ use commonware_parallel::Strategy;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{ops::Range, sync::Arc};
 use tracing::warn;
-
-/// Metrics for Immutable QMDBs.
-pub(crate) struct Metrics<E: Context> {
-    /// State gauges.
-    pub state: StateMetrics,
-    /// Write and durability metrics.
-    pub operations: OperationMetrics<E>,
-    /// Key read metrics.
-    pub reads: KeyReadMetrics<E>,
-}
-
-impl<E: Context> Metrics<E> {
-    /// Create and register metrics.
-    pub fn new(context: E) -> Self {
-        let context = Arc::new(context);
-        Self {
-            state: StateMetrics::new(context.as_ref()),
-            operations: OperationMetrics::new(context.clone()),
-            reads: KeyReadMetrics::new(context),
-        }
-    }
-}
 
 pub mod batch;
 mod compact;
@@ -298,7 +270,7 @@ where
     /// Update state gauges from the current database state.
     fn update_metrics(&self) {
         let bounds = self.journal.bounds();
-        self.metrics.state.set(
+        self.metrics.update(
             bounds.end,
             bounds.start,
             *self.inactivity_floor_loc,
@@ -316,9 +288,9 @@ where
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
     /// has been pruned.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let _timer = self.metrics.reads.get_timer();
-        self.metrics.reads.get_calls.inc();
-        self.metrics.reads.keys_requested.inc();
+        let _timer = self.metrics.get_timer();
+        self.metrics.get_calls.inc();
+        self.metrics.lookups_requested.inc();
         let iter = self.snapshot.get(key);
         let oldest = self.journal.bounds().start;
         let mut result = None;
@@ -343,9 +315,9 @@ where
             return Ok(Vec::new());
         }
 
-        let _timer = self.metrics.reads.get_many_timer();
-        self.metrics.reads.get_many_calls.inc();
-        self.metrics.reads.keys_requested.inc_by(keys.len() as u64);
+        let _timer = self.metrics.get_many_timer();
+        self.metrics.get_many_calls.inc();
+        self.metrics.lookups_requested.inc_by(keys.len() as u64);
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
         let mut results: Vec<Option<V::Value>> = vec![None; keys.len()];
 
@@ -508,8 +480,8 @@ where
     /// - Returns [crate::merkle::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
     #[tracing::instrument(name = "qmdb.immutable.db.prune", level = "info", skip_all)]
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
-        let _timer = self.metrics.operations.prune_timer();
-        self.metrics.operations.prune_calls.inc();
+        let _timer = self.metrics.prune_timer();
+        self.metrics.prune_calls.inc();
         if loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
                 loc,
@@ -643,8 +615,8 @@ where
     /// recover the database on restart.
     #[tracing::instrument(name = "qmdb.immutable.db.sync", level = "info", skip_all)]
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
-        let _timer = self.metrics.operations.sync_timer();
-        self.metrics.operations.sync_calls.inc();
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
         self.journal.sync().await?;
         Ok(())
     }
@@ -652,8 +624,8 @@ where
     /// Durably commit the journal state published by prior [`Immutable::apply_batch`] calls.
     #[tracing::instrument(name = "qmdb.immutable.db.commit", level = "info", skip_all)]
     pub async fn commit(&mut self) -> Result<(), Error<F>> {
-        let _timer = self.metrics.operations.commit_timer();
-        self.metrics.operations.commit_calls.inc();
+        let _timer = self.metrics.commit_timer();
+        self.metrics.commit_calls.inc();
         self.journal.commit().await?;
         Ok(())
     }
@@ -675,13 +647,15 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`].
+    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
+    /// more details).
     ///
     /// Returns the range of locations written.
     ///
     /// # Errors
     ///
-    /// - [`Error::StaleBatch`] if the batch was created from a stale DB state.
+    /// - [`Error::StaleBatch`] if the batch is detected as stale (see
+    ///   [`crate::qmdb::batch_chain`] for more details).
     /// - [`Error::FloorRegressed`] if any commit in the chain (the tip or any
     ///   unapplied ancestor) declares an inactivity floor below the previous
     ///   commit's floor (or, for the oldest unapplied commit, below the
@@ -702,8 +676,8 @@ where
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V, S>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
-        let _timer = self.metrics.operations.apply_batch_timer();
-        self.metrics.operations.apply_batch_calls.inc();
+        let _timer = self.metrics.apply_batch_timer();
+        self.metrics.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
         batch
             .bounds
@@ -760,7 +734,6 @@ where
         let range = start_loc..Location::new(batch.bounds.total_size);
         self.update_metrics();
         self.metrics
-            .operations
             .operations_applied
             .inc_by(*range.end - *range.start);
         Ok(range)

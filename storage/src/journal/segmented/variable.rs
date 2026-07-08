@@ -482,12 +482,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
     /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
     pub fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
-        let mut buf = Vec::new();
-        self.try_get_sync_into(section, offset, &mut buf)
-    }
-
-    /// Get an item synchronously using caller-provided buffer.
-    pub fn try_get_sync_into(&self, section: u64, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
         let blob = self.manager.get(section).ok()??;
         let remaining = blob.size().checked_sub(offset)?;
         let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
@@ -497,7 +491,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // Read the varint header to determine item size.
         let mut header = [0u8; MAX_U32_VARINT_SIZE];
-        if !blob.try_read_sync(offset, &mut header[..header_len]) {
+        if !blob.try_read_sync_into(&mut header[..header_len], offset) {
             return None;
         }
         let mut cursor = Cursor::new(&header[..header_len]);
@@ -530,8 +524,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         }
 
         // Otherwise try reading the full item from cache.
-        buf.resize(item_len, 0);
-        if !blob.try_read_sync(offset, buf) {
+        let mut buf = vec![0u8; item_len];
+        if !blob.try_read_sync_into(&mut buf, offset) {
             return None;
         }
         decode_item::<V>(

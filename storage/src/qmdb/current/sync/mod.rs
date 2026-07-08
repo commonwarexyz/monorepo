@@ -38,7 +38,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            db::{Db as AnyDb, Metrics as AnyMetrics},
+            db::Db as AnyDb,
             operation::{update::Update, Operation},
             ordered::{
                 fixed::{Operation as OrderedFixedOp, Update as OrderedFixedUpdate},
@@ -61,6 +61,7 @@ use crate::{
             },
             FixedConfig, VariableConfig,
         },
+        metrics::Metrics as AnyMetrics,
         operation::{Committable, Key, Operation as _},
         sync::{resolver::fetch_operations, Database, DatabaseConfig as Config},
     },
@@ -290,17 +291,14 @@ macro_rules! impl_current_sync_database {
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
                 journal: &Self::Journal,
             ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-                if target.range.start() == Location::new(0) {
-                    return Ok(None);
-                }
-
-                let bounds = journal.bounds();
-                if Location::new(bounds.start) > target.range.start()
-                    || Location::new(bounds.end) != target.range.end()
+                if target.range.start() == Location::new(0)
+                    || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
                 {
                     return Ok(None);
                 }
 
+                // The inactivity floor is carried by the last commit operation rather than
+                // being the target range's start.
                 let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(
                     journal,
                     target.range.end(),
@@ -308,31 +306,13 @@ macro_rules! impl_current_sync_database {
                 )
                 .await?;
 
-                let hasher = qmdb::hasher::<H>();
-                let merkle = Merkle::<F, _, _, S>::init(
-                    context.child("local_boundary_merkle"),
-                    &hasher,
+                qmdb::sync::local_boundary_nodes::<F, _, H, S>(
+                    context,
                     config.merkle_config.clone(),
-                )
-                .await?;
-                let bounds = merkle.bounds();
-                if bounds.start > target.range.start() || bounds.end != target.range.end() {
-                    return Ok(None);
-                }
-
-                let inactive_peaks = F::inactive_peaks(
-                    F::location_to_position(target.range.end()),
+                    target,
                     inactivity_floor,
-                );
-                if merkle.root(&hasher, inactive_peaks)? != target.root {
-                    return Ok(None);
-                }
-
-                merkle
-                    .pinned_nodes_at(target.range.start())
-                    .await
-                    .map(Some)
-                    .map_err(Into::into)
+                )
+                .await
             }
 
             /// Returns the ops root (not the canonical root), since the sync engine verifies
