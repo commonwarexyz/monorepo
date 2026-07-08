@@ -36,7 +36,7 @@ use commonware_storage::journal::segmented::variable::{Config as JConfig, Journa
 use commonware_utils::{channel::oneshot, futures::AbortablePool};
 use core::{future::Future, panic};
 use futures::{pin_mut, StreamExt};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     num::NonZeroUsize,
     pin::Pin,
@@ -95,7 +95,7 @@ impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
-    E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
+    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -127,7 +127,7 @@ pub struct Actor<
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
+        E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,

@@ -72,6 +72,7 @@ commonware_macros::stability_scope!(BETA {
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
+            use core::convert::Infallible;
             use futures::{
                 channel::oneshot,
                 future::{self, Either},
@@ -142,19 +143,24 @@ commonware_macros::stability_scope!(BETA {
 
         /// Runs either a serial or parallel body.
         #[track_caller]
-        fn run<R, SEQ, PAR>(
-            &self,
-            _len: usize,
-            serial: SEQ,
-            _parallel: PAR,
-        ) -> R
+        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
         where
             R: Send,
             SEQ: FnOnce() -> R + Send,
-            PAR: FnOnce() -> R + Send,
-        {
-            serial()
-        }
+            PAR: FnOnce() -> R + Send;
+
+        /// Like [`run`](Self::run), but for fallible work.
+        ///
+        /// The strategy chooses and runs either the serial or parallel body, returning the
+        /// first error produced by the chosen body. Elapsed time is only recorded on success,
+        /// so abort-early error paths cannot poison the adaptive policy's estimates.
+        #[track_caller]
+        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send;
 
         /// Reduces a collection to a single value with per-partition initialization.
         ///
@@ -269,6 +275,9 @@ commonware_macros::stability_scope!(BETA {
         /// applying `fold_op` after an error is observed. When more than one partition fails,
         /// any error may be returned.
         ///
+        /// Adaptive strategies must only record elapsed time when the fold succeeds, so
+        /// abort-early error paths cannot poison the policy's estimates.
+        ///
         /// # Arguments
         ///
         /// - `iter`: The collection to fold over
@@ -289,21 +298,7 @@ commonware_macros::stability_scope!(BETA {
             E: Send,
             ID: Fn() -> R + Send + Sync,
             F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            self.fold(
-                iter,
-                || Ok(identity()),
-                |acc, item| match acc {
-                    Ok(acc) => fold_op(acc, item),
-                    Err(error) => Err(error),
-                },
-                |a, b| match a {
-                    Ok(a) => b.map(|b| reduce_op(a, b)),
-                    Err(error) => Err(error),
-                },
-            )
-        }
+            RD: Fn(R, R) -> R + Send + Sync;
 
         /// Maps each element and collects results into a `Vec`.
         ///
@@ -616,6 +611,22 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[track_caller]
+        fn try_run<R, E, SEQ, PAR>(
+            &self,
+            len: usize,
+            serial: SEQ,
+            parallel: PAR,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            self.strategy.try_run(len, serial, parallel)
+        }
+
+        #[track_caller]
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
@@ -777,6 +788,25 @@ commonware_macros::stability_scope!(BETA {
             async move { result }
         }
 
+        fn run<R, SEQ, PAR>(&self, _len: usize, serial: SEQ, _parallel: PAR) -> R
+        where
+            R: Send,
+            SEQ: FnOnce() -> R + Send,
+            PAR: FnOnce() -> R + Send,
+        {
+            serial()
+        }
+
+        fn try_run<R, E, SEQ, PAR>(&self, _len: usize, serial: SEQ, _parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            serial()
+        }
+
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
@@ -913,6 +943,21 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             multiplier: usize,
             run: impl FnOnce(policy::Execution) -> R,
         ) -> R {
+            match self.try_execute(len, multiplier, |execution| {
+                Ok::<_, Infallible>(run(execution))
+            }) {
+                Ok(result) => result,
+                Err(e) => match e {},
+            }
+        }
+
+        #[track_caller]
+        fn try_execute<R, E>(
+            &self,
+            len: usize,
+            multiplier: usize,
+            run: impl FnOnce(policy::Execution) -> Result<R, E>,
+        ) -> Result<R, E> {
             let threads = self.thread_pool.current_num_threads();
             let Some(policy) = &self.policy else {
                 let execution = if threads <= 1 {
@@ -924,7 +969,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             };
 
             let work = len.saturating_mul(multiplier);
-            policy.run(Location::caller(), len, work, threads, run)
+            policy.try_run(Location::caller(), len, work, threads, run)
         }
     }
 
@@ -980,6 +1025,25 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             PAR: FnOnce() -> R + Send,
         {
             self.execute(len, 1, |execution| match execution {
+                policy::Execution::Serial => serial(),
+                policy::Execution::Parallel => parallel(),
+            })
+        }
+
+        #[track_caller]
+        fn try_run<R, E, SEQ, PAR>(
+            &self,
+            len: usize,
+            serial: SEQ,
+            parallel: PAR,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            self.try_execute(len, 1, |execution| match execution {
                 policy::Execution::Serial => serial(),
                 policy::Execution::Parallel => parallel(),
             })
@@ -1053,7 +1117,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             E: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(
+            self.try_execute(
                 items.len(),
                 1,
                 |execution| {
@@ -1140,7 +1204,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), 1, |execution| match execution {
+            self.try_execute(items.len(), 1, |execution| match execution {
                 policy::Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
                 policy::Execution::Parallel => self.thread_pool.install(|| {
                     items

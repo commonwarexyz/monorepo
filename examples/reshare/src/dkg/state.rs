@@ -35,7 +35,7 @@ use commonware_storage::{
 };
 use commonware_utils::{Faults, NZUsize, NZU16};
 use futures::StreamExt;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -663,7 +663,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Finalize the player's participation in the DKG round.
     pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = C::PublicKey>>(
         self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
     ) -> Result<

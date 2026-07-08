@@ -31,10 +31,11 @@ use commonware_macros::{select, stability};
 use commonware_parallel::ThreadPool;
 use commonware_utils::{sync::Mutex, NZUsize};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use rand::{rngs::OsRng, CryptoRng, RngCore};
+use rand::{rngs::SysRng, TryCryptoRng, TryRng};
 #[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
+    convert::Infallible,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -174,7 +175,9 @@ pub struct Config {
 impl Config {
     /// Returns a new [Config] with default values.
     pub fn new() -> Self {
-        let rng = OsRng.next_u64();
+        let rng = SysRng
+            .try_next_u64()
+            .expect("failed to generate randomness");
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
         Self {
             worker_threads: 2,
@@ -778,25 +781,30 @@ impl crate::Resolver for Context {
     }
 }
 
-impl RngCore for Context {
-    fn next_u32(&mut self) -> u32 {
-        OsRng.next_u32()
+impl TryRng for Context {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(SysRng
+            .try_next_u32()
+            .expect("failed to generate randomness"))
     }
 
-    fn next_u64(&mut self) -> u64 {
-        OsRng.next_u64()
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(SysRng
+            .try_next_u64()
+            .expect("failed to generate randomness"))
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        OsRng.fill_bytes(dest);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        OsRng.try_fill_bytes(dest)
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        SysRng
+            .try_fill_bytes(dest)
+            .expect("failed to generate randomness");
+        Ok(())
     }
 }
 
-impl CryptoRng for Context {}
+impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;

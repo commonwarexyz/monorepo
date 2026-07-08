@@ -3,7 +3,7 @@ use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{self, mem::Mem, Bagging::ForwardFold, Family, Location};
 use criterion::{criterion_group, BatchSize, Criterion};
 use futures::executor::block_on;
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{rngs::StdRng, seq::IndexedRandom, SeedableRng};
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
@@ -35,7 +35,7 @@ fn make_test_data<F: Family>(n: usize) -> (Mem<F, sha256::Digest>, sha256::Diges
     });
     let root = mem.root(&hasher, 0).unwrap();
     let samples = elements
-        .choose_multiple(&mut sampler, SAMPLE_SIZE)
+        .sample(&mut sampler, SAMPLE_SIZE)
         .cloned()
         .map(|(loc, element)| (Location::<F>::new(loc as u64), element))
         .collect::<Vec<_>>();

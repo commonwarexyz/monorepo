@@ -127,7 +127,6 @@ use commonware_math::{
 };
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{Builder as BmtBuilder, Error as BmtError, Proof};
-use rand::seq::SliceRandom as _;
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
@@ -345,7 +344,7 @@ fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
         .try_into()
         .expect("encoded_rows exceeds u32::MAX; data too large for ZODA");
     let mut out = (0..total).collect::<Vec<_>>();
-    out.shuffle(&mut transcript.noise(b"shuffle"));
+    transcript.shuffle(b"shuffle", &mut out);
     out
 }
 
@@ -354,7 +353,7 @@ fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
 /// This matrix is random, using the transcript as a deterministic source of randomness.
 fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix<F> {
     Matrix::rand(
-        &mut transcript.noise(b"checking matrix"),
+        transcript.noise(b"checking matrix"),
         topology.data_cols,
         topology.column_samples,
     )
@@ -811,9 +810,50 @@ mod tests {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_conformance::Conformance;
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
+        struct EncodeCheck;
+
+        impl Conformance for EncodeCheck {
+            async fn commit(seed: u64) -> Vec<u8> {
+                let config = Config {
+                    minimum_shards: NZU16!(2),
+                    extra_shards: NZU16!(1),
+                };
+                let data: Vec<_> = (0..seed as usize % 768)
+                    .map(|i| (seed as u8).wrapping_add(i as u8))
+                    .collect();
+
+                let (commitment, shards) =
+                    Zoda::<Sha256>::encode(b"conformance", &config, &data[..], &STRATEGY).unwrap();
+
+                let mut log = commitment.encode().to_vec();
+                for (i, shard) in shards.into_iter().enumerate() {
+                    let index: u16 = i.try_into().unwrap();
+                    let (checking_data, _, weak_shard) =
+                        Zoda::<Sha256>::weaken(b"conformance", &config, &commitment, index, shard)
+                            .unwrap();
+                    let checked_shard = Zoda::<Sha256>::check(
+                        &config,
+                        &commitment,
+                        &checking_data,
+                        index,
+                        weak_shard.clone(),
+                    )
+                    .unwrap();
+
+                    log.extend(index.encode());
+                    log.extend(weak_shard.encode());
+                    log.extend(checked_shard.shard.encode());
+                    log.extend(checked_shard.commitment.encode());
+                }
+                log
+            }
+        }
+
         commonware_conformance::conformance_tests! {
+            EncodeCheck => 256,
             CodecConformance<StrongShard<Sha256Digest>>,
             CodecConformance<WeakShard<Sha256Digest>>,
         }

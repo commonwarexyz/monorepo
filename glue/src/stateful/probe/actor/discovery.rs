@@ -25,7 +25,7 @@ use commonware_utils::{
     Faults, N3f1, NonZeroDuration,
 };
 use futures::future::{self, Either};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -36,7 +36,7 @@ use tracing::debug;
 /// (after the floor has been consumed), it hands off to [`Service`].
 pub(super) struct Discovery<E, S, D, V, T, P, B>
 where
-    E: Spawner + CryptoRngCore + Clock + Metrics,
+    E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,
@@ -57,7 +57,7 @@ where
 
 impl<E, S, D, V, T, P, B> Discovery<E, S, D, V, T, P, B>
 where
-    E: Spawner + CryptoRngCore + Clock + Metrics,
+    E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,

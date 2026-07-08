@@ -33,7 +33,7 @@ use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     cmp::max,
     collections::BTreeMap,
@@ -68,7 +68,7 @@ struct DigestRequest<D: Digest> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
+    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -151,7 +151,7 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
+        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Height, Digest = D>,

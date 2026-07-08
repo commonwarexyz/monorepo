@@ -1146,7 +1146,7 @@ mod loom_tests {
         },
         thread,
     };
-    use rand::Rng;
+    use rand::{Rng, RngExt as _};
     use rstest::rstest;
 
     // This module uses loom to model the waker's producer/loop protocol over
@@ -1302,7 +1302,7 @@ mod loom_tests {
         fn generate_program(rng: &mut impl Rng, len: usize) -> Vec<Self> {
             (0..len)
                 .map(|_| {
-                    if rng.gen_bool(0.5) {
+                    if rng.random_bool(0.5) {
                         Self::Publish
                     } else {
                         Self::Wake

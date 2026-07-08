@@ -187,8 +187,8 @@ mod test {
         channel::{mpsc, oneshot},
         test_rng_seeded, union, N3f1, TryCollect,
     };
-    use rand::seq::SliceRandom;
-    use rand_core::CryptoRngCore;
+    use rand::seq::IndexedRandom;
+    use rand_core::CryptoRng;
     use std::{
         collections::{btree_map::Entry, BTreeMap, HashSet},
         future::Future,
@@ -276,7 +276,7 @@ mod test {
     }
 
     impl Team {
-        fn reshare(mut rng: impl CryptoRngCore, total: u32, per_round: &[u32]) -> Self {
+        fn reshare(mut rng: impl CryptoRng, total: u32, per_round: &[u32]) -> Self {
             let mut participants = (0..total)
                 .map(|i| {
                     let sk = PrivateKey::from_seed(i as u64);
@@ -813,7 +813,7 @@ mod test {
                             team.participants.keys().cloned().collect();
                         let crash_count = (*count).min(all_participants.len());
                         let to_crash: Vec<PublicKey> = all_participants
-                            .choose_multiple(&mut ctx, crash_count)
+                            .sample(&mut ctx, crash_count)
                             .cloned()
                             .collect();
                         for pk in to_crash {

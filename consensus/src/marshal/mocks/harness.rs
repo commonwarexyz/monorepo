@@ -54,7 +54,7 @@ use commonware_utils::{test_rng_seeded, vec::NonEmptyVec, NZUsize, NZU16, NZU64}
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
-    Rng,
+    RngExt as _,
 };
 use std::{
     collections::BTreeMap,
@@ -355,7 +355,7 @@ fn contract_runner(seed: u64) -> deterministic::Runner {
 
 fn restart_cycles_for_seed(seed: u64) -> usize {
     let mut rng = test_rng_seeded(seed);
-    rng.gen_range(2..=4)
+    rng.random_range(2..=4)
 }
 
 struct HailstormValidator<H: TestHarness> {
@@ -556,13 +556,13 @@ async fn drive_hailstorm_height_up_to_verify<H: TestHarness>(
 ) -> PendingHailstormHeight<H> {
     let height = Height::new(height_value);
     let active = active_validator_indices(state.validators);
-    let proposer_idx = active[context.gen_range(0..active.len())];
+    let proposer_idx = active[context.random_range(0..active.len())];
     let verifier_count = usize::min(QUORUM as usize, active.len());
     let verifier_indices = active
         .iter()
         .copied()
         .filter(|idx| *idx != proposer_idx)
-        .choose_multiple(context, verifier_count.saturating_sub(1));
+        .sample(context, verifier_count.saturating_sub(1));
     let block = H::make_test_block(
         *state.parent,
         *state.parent_commitment,
@@ -732,7 +732,7 @@ pub fn hailstorm<H: TestHarness>(
         let max_down = max_down.max(1);
 
         for shutdown_idx in 0..shutdowns {
-            let leadup = context.gen_range(1..=max_interval);
+            let leadup = context.random_range(1..=max_interval);
             target_height += leadup;
 
             // Pick validators to crash and compute how far the advance should
@@ -743,13 +743,10 @@ pub fn hailstorm<H: TestHarness>(
             // reported for it.
             let active_pre = active_validator_indices(&validators);
             let down_limit = usize::min(max_down, active_pre.len().saturating_sub(1));
-            let down_count = context.gen_range(1..=down_limit.max(1));
-            let mut selected = active_pre
-                .iter()
-                .copied()
-                .choose_multiple(&mut context, down_count);
+            let down_count = context.random_range(1..=down_limit.max(1));
+            let mut selected = active_pre.iter().copied().sample(&mut context, down_count);
             selected.sort_unstable();
-            let crash_after = context.gen_range(0..=leadup);
+            let crash_after = context.random_range(0..=leadup);
             let persisted_height = target_height - leadup + crash_after;
 
             {
@@ -821,7 +818,7 @@ pub fn hailstorm<H: TestHarness>(
                 "marshal hailstorm shutdown"
             );
 
-            let downtime = context.gen_range(1..=max_interval);
+            let downtime = context.random_range(1..=max_interval);
             target_height += downtime;
             let mut state = HailstormState {
                 validators: &mut validators,
@@ -3101,10 +3098,10 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
 
             let fin = H::make_finalization(proposal, &schemes, QUORUM);
             if quorum_sees_finalization {
-                let do_finalize = context.gen_bool(0.2);
+                let do_finalize = context.random_bool(0.2);
                 for (i, h) in handles
                     .iter_mut()
-                    .choose_multiple(&mut context, NUM_VALIDATORS as usize)
+                    .sample(&mut context, NUM_VALIDATORS as usize)
                     .iter_mut()
                     .enumerate()
                 {
@@ -3117,7 +3114,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
                 }
             } else {
                 for h in handles.iter_mut() {
-                    if context.gen_bool(0.2)
+                    if context.random_bool(0.2)
                         || height.get() == NUM_BLOCKS
                         || height == bounds.last()
                     {

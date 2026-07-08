@@ -20,7 +20,7 @@ use commonware_utils::{
     ordered::{Quorum, Set},
     Faults, Participant,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -124,7 +124,7 @@ impl<N: Namespace> Generic<N> {
     where
         S: Scheme<Signature = Ed25519Signature>,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
     {
@@ -267,7 +267,7 @@ impl<N: Namespace> Generic<N> {
     where
         S: Scheme,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         M: Faults,
     {
@@ -289,7 +289,7 @@ impl<N: Namespace> Generic<N> {
     where
         S: Scheme,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
         M: Faults,
@@ -426,7 +426,7 @@ macro_rules! impl_certificate_ed25519 {
             n: u32,
         ) -> $crate::certificate::mocks::Fixture<Scheme>
         where
-            R: rand::RngCore + rand::CryptoRng,
+            R: rand::Rng + rand::CryptoRng,
         {
             $crate::ed25519::certificate::mocks::fixture(
                 rng,
@@ -496,7 +496,7 @@ macro_rules! impl_certificate_ed25519 {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 M: commonware_utils::Faults,
             {
@@ -511,7 +511,7 @@ macro_rules! impl_certificate_ed25519 {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 M: commonware_utils::Faults,
@@ -562,7 +562,7 @@ macro_rules! impl_certificate_ed25519 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
                 self.generic
@@ -577,7 +577,7 @@ macro_rules! impl_certificate_ed25519 {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
             {
@@ -641,7 +641,7 @@ mod tests {
     // Use the macro to generate the test scheme
     impl_certificate_ed25519!(TestSubject, Vec<u8>);
 
-    fn setup_signers(rng: &mut impl CryptoRngCore, n: u32) -> (Vec<Scheme>, Scheme) {
+    fn setup_signers(rng: &mut impl CryptoRng, n: u32) -> (Vec<Scheme>, Scheme) {
         let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut *rng)).collect();
         let participants: Set<PublicKey> = private_keys
             .iter()

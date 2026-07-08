@@ -6,7 +6,7 @@ use commonware_runtime::{
 };
 use commonware_utils::NZUsize;
 use criterion::Criterion;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::time::Instant;
 
 // Use cache size pages so all data fits in cache (testing buffer performance, not disk).
@@ -45,7 +45,7 @@ where
                     for _ in 0..iters {
                         // Ensure ~1/100 reads are going to be cache misses.
                         for _ in 0..TOTAL_PAGES * 100 {
-                            let offset = rng.gen_range(0..=max_offset) as u64;
+                            let offset = rng.random_range(0..=max_offset) as u64;
                             append.read_into(&mut buf, offset).await.unwrap();
                         }
                     }

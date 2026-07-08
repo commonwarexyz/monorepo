@@ -53,13 +53,13 @@ use curve25519_dalek::{
     traits::{IsIdentity, VartimeMultiscalarMul},
 };
 use hashbrown::HashMap;
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{CryptoRng, Rng};
 use sha2::{digest::Update, Sha512};
 
 const NOISE_BATCH_VERIFY: &[u8] = b"batch_verify";
 
 // Shim to generate a u128 without importing `rand`.
-fn gen_u128<R: RngCore + CryptoRng>(mut rng: R) -> u128 {
+fn gen_u128<R: Rng + CryptoRng>(mut rng: R) -> u128 {
     let mut bytes = [0u8; 16];
     rng.fill_bytes(&mut bytes[..]);
     u128::from_le_bytes(bytes)
@@ -110,7 +110,7 @@ impl Verifier {
     /// verifications. This function does not have the same verification criteria
     /// as individual verification, which may reject some signatures this method
     /// accepts.
-    pub fn verify<R: RngCore + CryptoRng>(
+    pub fn verify<R: Rng + CryptoRng>(
         self,
         mut rng: R,
         strategy: &impl Strategy,
@@ -124,7 +124,7 @@ impl Verifier {
             .map(|_| Summary::random(&mut rng))
             .collect();
 
-        strategy.run(
+        strategy.try_run(
             total,
             // Serial verification checks the whole batch as one equation, so
             // coalescing is global and no partition is needed.
@@ -139,18 +139,17 @@ impl Verifier {
                     .chunks(shard_size)
                     .zip(seeds.iter().copied())
                     .collect();
-                manual.fold(
+                manual.try_fold(
                     shards,
-                    || Ok(()),
-                    |result, (shard, seed)| {
-                        result?;
+                    || (),
+                    |_, (shard, seed)| {
                         Self::verify_shard(
                             shard.iter().map(|&idx| &self.signatures[idx]),
                             shard.len(),
                             seed,
                         )
                     },
-                    |left, right| left.and(right),
+                    |_, _| (),
                 )
             },
         )
@@ -233,7 +232,7 @@ impl Verifier {
         let mut B_coeff = Scalar::ZERO;
 
         for (vk, payload, sig) in items {
-            let k = super::scalar_from_hash(
+            let k = Scalar::from_hash(
                 Sha512::default()
                     .chain(&sig.R_bytes[..])
                     .chain(vk.as_bytes())
@@ -275,7 +274,7 @@ mod tests {
     use super::{super::SigningKey, *};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{test_rng, NZUsize};
-    use rand::Rng;
+    use rand::RngExt as _;
 
     /// Generate `signers` keys with `per_signer` signed messages each.
     fn signatures(

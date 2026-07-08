@@ -1,13 +1,13 @@
 use commonware_utils::bitmap::BitMap;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::hint::black_box;
 
 fn bench_count_ones<const CHUNK_SIZE: usize>(c: &mut Criterion, size: u64) {
     let mut rng = StdRng::seed_from_u64(size);
     let mut bitmap = BitMap::<CHUNK_SIZE>::with_capacity(size);
     for _ in 0..size {
-        bitmap.push(rng.gen::<bool>());
+        bitmap.push(rng.random::<bool>());
     }
     c.bench_function(
         &format!("{}/size={size} chunk_size={CHUNK_SIZE}", module_path!()),

@@ -260,7 +260,7 @@ mod tests {
         storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BufferPoolConfig,
         Storage as _,
     };
-    use rand::{Rng as _, SeedableRng};
+    use rand::RngExt as _;
     use std::env;
 
     fn test_pool() -> BufferPool {
@@ -268,10 +268,16 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
+    fn random_suffix() -> u64 {
+        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
+        rng.random()
+    }
+
     #[tokio::test]
     async fn test_storage() {
-        let mut rng = rand::rngs::StdRng::from_entropy();
-        let storage_directory = env::temp_dir().join(format!("storage_tokio_{}", rng.gen::<u64>()));
+        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_{}", rng.random::<u64>()));
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
         let storage = Storage::new(config, test_pool());
         run_storage_tests(storage).await;
@@ -281,9 +287,9 @@ mod tests {
     /// usable and a later sync still persists data.
     #[tokio::test]
     async fn test_start_sync_dropped_receiver() {
-        let mut rng = rand::rngs::StdRng::from_entropy();
+        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
         let storage_directory =
-            env::temp_dir().join(format!("storage_tokio_start_sync_{}", rng.gen::<u64>()));
+            env::temp_dir().join(format!("storage_tokio_start_sync_{}", rng.random::<u64>()));
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
         let storage = Storage::new(config, test_pool());
 
@@ -305,9 +311,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_header_handling() {
-        let mut rng = rand::rngs::StdRng::from_entropy();
+        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
         let storage_directory =
-            env::temp_dir().join(format!("storage_tokio_header_{}", rng.gen::<u64>()));
+            env::temp_dir().join(format!("storage_tokio_header_{}", rng.random::<u64>()));
         let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
         let storage = Storage::new(config, test_pool());
 
@@ -404,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn test_blob_magic_mismatch() {
         let storage_directory =
-            env::temp_dir().join(format!("test_magic_mismatch_{}", rand::random::<u64>()));
+            env::temp_dir().join(format!("test_magic_mismatch_{}", random_suffix()));
         let storage = Storage::new(
             Config {
                 storage_directory: storage_directory.clone(),
@@ -439,7 +445,7 @@ mod tests {
             let storage_directory = env::temp_dir().join(format!(
                 "test_scan_non_canonical_{}_{}",
                 bad_name.replace([' ', '0', 'x', 'X'], "_"),
-                rand::random::<u64>()
+                random_suffix()
             ));
             let storage = Storage::new(
                 Config {

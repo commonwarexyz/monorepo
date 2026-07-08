@@ -36,8 +36,14 @@ tracing = { workspace = true, optional = true }
 zeroize.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
-# Enable "js" feature when WASM is target
-version = "0.2.15"
+# Enable the JS backend for transitive dependencies that use getrandom on WASM.
+version = "0.4.3"
+features = ["wasm_js"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.getrandom_v2]
+# Enable the JS backend for transitive dependencies that still use getrandom 0.2 on WASM.
+package = "getrandom"
+version = "0.2"
 features = ["js"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom_v3]
@@ -68,6 +74,7 @@ std = [
 	"commonware-macros/std",
 	"futures",
 	"getrandom/std",
+	"getrandom_v2/std",
 	"getrandom_v3/std",
 	"num-bigint",
 	"num-bigint?/std",

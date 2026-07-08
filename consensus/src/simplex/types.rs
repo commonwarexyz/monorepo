@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
@@ -830,7 +830,7 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Signed<K, S, D> {
     /// This ensures that the signature is valid for the claimed payload.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_attestation::<_, D>(rng, self.subject(), &self.attestation, strategy)
@@ -946,7 +946,7 @@ pub fn verify_certificates<'a, R, S, D>(
     strategy: &impl Strategy,
 ) -> Vec<bool>
 where
-    R: CryptoRngCore,
+    R: CryptoRng,
     S: CertificateVerifier<D>,
     D: Digest,
 {
@@ -983,7 +983,7 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Certified<K, S, D> {
     /// Verifies the certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed payload.
-    pub fn verify<R: CryptoRngCore>(
+    pub fn verify<R: CryptoRng>(
         &self,
         rng: &mut R,
         scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
@@ -1273,7 +1273,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     }
 
     /// Verifies the certificates contained in this response against the signing scheme.
-    pub fn verify<R: CryptoRngCore>(
+    pub fn verify<R: CryptoRng>(
         &self,
         rng: &mut R,
         scheme: &S,
@@ -1510,7 +1510,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// This method **always** performs verification regardless of whether the activity has been
     /// previously verified. Callers can use [`Activity::verified`] to check if verification is
     /// necessary before calling this method.
-    pub fn verify<R: CryptoRngCore>(
+    pub fn verify<R: CryptoRng>(
         &self,
         rng: &mut R,
         scheme: &S,
@@ -1795,7 +1795,7 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Conflicting<K, S, D> {
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         self.first.verify(rng, scheme, strategy) && self.second.verify(rng, scheme, strategy)
@@ -1910,7 +1910,7 @@ impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         self.nullify.verify(rng, scheme, strategy) && self.finalize.verify(rng, scheme, strategy)

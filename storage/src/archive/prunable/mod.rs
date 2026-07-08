@@ -232,7 +232,7 @@ mod tests {
         BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, sync::Mutex, NZUsize, NZU16, NZU64};
-    use rand::Rng;
+    use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroU64},

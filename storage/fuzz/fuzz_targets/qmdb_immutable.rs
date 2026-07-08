@@ -17,7 +17,7 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::num::{NonZeroU16, NonZeroU64};
 
 const MAX_OPERATIONS: usize = 50;
@@ -82,16 +82,16 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 fn generate_key(rng: &mut StdRng, seed: u64) -> Digest {
-    let mut data = vec![0u8; rng.gen_range(1..=MAX_KEY_SIZE)];
+    let mut data = vec![0u8; rng.random_range(1..=MAX_KEY_SIZE)];
     for (i, byte) in data.iter_mut().enumerate() {
-        *byte = ((seed >> (i % 8)) & 0xFF) as u8 ^ rng.gen::<u8>();
+        *byte = ((seed >> (i % 8)) & 0xFF) as u8 ^ rng.random::<u8>();
     }
     Sha256::hash(&data)
 }
 
 fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
     let actual_size = size.clamp(1, MAX_VALUE_SIZE);
-    (0..actual_size).map(|_| rng.gen()).collect()
+    (0..actual_size).map(|_| rng.random()).collect()
 }
 
 #[allow(clippy::type_complexity)]

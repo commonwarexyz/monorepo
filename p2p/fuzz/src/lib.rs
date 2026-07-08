@@ -16,7 +16,7 @@ use commonware_utils::{
     ordered::{Map, Set},
     NZUsize, TryCollect, NZU32,
 };
-use rand::{seq::SliceRandom, Rng};
+use rand::{seq::SliceRandom, RngExt as _};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
@@ -414,7 +414,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
         let mut peer_infos = Vec::new();
 
         for i in 0..input.peers {
-            let private_key = ed25519::PrivateKey::from_seed(context.gen());
+            let private_key = ed25519::PrivateKey::from_seed(context.random());
             let public_key = private_key.public_key();
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
 
@@ -609,7 +609,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     // Build a random subset of peer IDs (using a set to avoid duplicates)
                     let mut peer_ids = HashSet::new();
                     for _ in 0..peer_set_size {
-                        let id = context.gen::<usize>() % topology.peers.len();
+                        let id = context.random::<u64>() as usize % topology.peers.len();
                         peer_ids.insert(id as PeerId);
                     }
                     let peer_ids: Vec<_> = peer_ids.into_iter().collect();

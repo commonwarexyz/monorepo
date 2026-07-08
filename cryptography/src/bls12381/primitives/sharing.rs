@@ -509,7 +509,7 @@ mod tests {
             let max_degree = u32::try_from(subset.len() - 1).expect("subset len fits in u32");
             let degree = u.int_in_range(0u32..=max_degree)?;
             let seed: u64 = u.arbitrary()?;
-            let poly: Poly<Scalar> = Poly::new(&mut StdRng::seed_from_u64(seed), degree);
+            let poly: Poly<Scalar> = Poly::new(StdRng::seed_from_u64(seed), degree);
 
             let all_shares = Map::from_iter_dedup((0..total.get()).map(|i| {
                 let participant = Participant::new(i);
@@ -563,7 +563,7 @@ mod fuzz {
             let total: u32 = u.int_in_range(1..=100)?;
             let mode: Mode = u.arbitrary()?;
             let seed: u64 = u.arbitrary()?;
-            let poly = Poly::new(&mut StdRng::seed_from_u64(seed), N3f1::quorum(total) - 1);
+            let poly = Poly::new(StdRng::seed_from_u64(seed), N3f1::quorum(total) - 1);
             Ok(Self::new(
                 mode,
                 NZU32!(total),

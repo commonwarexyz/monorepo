@@ -459,7 +459,7 @@ mod tests {
     use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::future::join_all;
-    use rand::{rngs::StdRng, Rng as _, SeedableRng};
+    use rand::{rngs::StdRng, RngExt as _, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -1585,12 +1585,12 @@ mod tests {
             schemes,
             ..
         } = fixture(&mut rng, &namespace, n);
+        let reporter_seed: [u8; 32] = rng.random();
 
         // Create block relay, shared across restarts.
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, S::PublicKey>::new());
 
         loop {
-            let rng = rng.clone();
             let participants = participants.clone();
             let schemes = schemes.clone();
             let shutdowns = shutdowns.clone();
@@ -1633,7 +1633,8 @@ mod tests {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                     };
-                    let reporter = mocks::reporter::Reporter::new(rng.clone(), reporter_config);
+                    let reporter_rng = StdRng::from_seed(reporter_seed);
+                    let reporter = mocks::reporter::Reporter::new(reporter_rng, reporter_config);
                     reporters.insert(validator.clone(), reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
@@ -1698,7 +1699,7 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    context.gen_range(Duration::from_millis(100)..Duration::from_millis(2_000));
+                    context.random_range(Duration::from_millis(100)..Duration::from_millis(2_000));
                 let result = select! {
                     _ = context.sleep(wait) => {
                         // Collect reporters to check faults
@@ -3882,7 +3883,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Abort a validator
-            let idx = context.gen_range(1..engines.len()); // skip byzantine validator
+            let idx = context.random_range(1..engines.len()); // skip byzantine validator
             let validator = &participants[idx];
             let handle = engines.remove(idx);
             handle.abort();
@@ -5566,7 +5567,7 @@ mod tests {
                 target = target.saturating_add(interval);
 
                 // Select a random engine to shutdown
-                let idx = context.gen_range(0..engine_handlers.len());
+                let idx = context.random_range(0..engine_handlers.len());
                 let validator = &participants[idx];
                 let handle = engine_handlers.remove(&idx).unwrap();
                 handle.abort();
@@ -5854,8 +5855,7 @@ mod tests {
             let trailing_finalizations = campaign.trailing_finalizations;
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
-            let cfg = deterministic::Config::new()
-                .with_rng(Box::new(StdRng::from_rng(&mut *rng).unwrap()));
+            let cfg = deterministic::Config::new().with_rng(Box::new(StdRng::from_rng(&mut *rng)));
             let executor = deterministic::Runner::new(cfg);
             executor.start(|mut context| async move {
                 let Fixture {

@@ -156,7 +156,7 @@ where
         strategy: &impl commonware_parallel::Strategy,
     ) -> bool
     where
-        R: rand_core::CryptoRngCore,
+        R: rand_core::CryptoRng,
         D: Digest,
         M: Faults,
     {
@@ -218,7 +218,7 @@ where
         strategy: &impl commonware_parallel::Strategy,
     ) -> bool
     where
-        R: rand_core::CryptoRngCore,
+        R: rand_core::CryptoRng,
         D: Digest,
     {
         self.inner.verify_attestation(
@@ -237,7 +237,7 @@ where
         strategy: &impl commonware_parallel::Strategy,
     ) -> Verification<Self>
     where
-        R: rand_core::CryptoRngCore,
+        R: rand_core::CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,

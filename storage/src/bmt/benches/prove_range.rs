@@ -2,7 +2,7 @@ use commonware_cryptography::{sha256, Hasher, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
 
@@ -26,7 +26,7 @@ fn bench_prove_range(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        let start = sampler.gen_range(0..(n - SAMPLE_SIZE));
+                        let start = sampler.random_range(0..(n - SAMPLE_SIZE));
                         let end = start + SAMPLE_SIZE;
                         (
                             start,

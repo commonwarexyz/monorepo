@@ -336,7 +336,7 @@ mod tests {
     use super::*;
     use commonware_formatting::hex;
     use num_bigint::BigUint;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 
     #[test]
     fn test_union() {
@@ -415,7 +415,7 @@ mod tests {
         // Test case 3: check equivalence with BigUint
         for i in 0..100 {
             let mut rng = StdRng::seed_from_u64(i);
-            let bytes: [u8; 32] = rng.gen();
+            let bytes: [u8; 32] = rng.random();
 
             // 1-byte modulus
             let n = 11u64;

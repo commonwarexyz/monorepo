@@ -37,7 +37,7 @@ pub fn compute_public<V: Variant>(private: &Private) -> V::Public {
 }
 
 /// Returns a new keypair derived from the provided randomness.
-pub fn keypair<R: rand_core::CryptoRngCore, V: Variant>(rng: &mut R) -> (Private, V::Public) {
+pub fn keypair<R: rand_core::CryptoRng, V: Variant>(rng: &mut R) -> (Private, V::Public) {
     let private = Private::random(rng);
     let public = compute_public::<V>(&private);
     (private, public)
@@ -495,7 +495,7 @@ mod tests {
             // Verify using batch verification
             let hm = hash::<MinPk>(MinPk::MESSAGE, &message);
             let batch_result = MinPk::batch_verify(
-                &mut rand::thread_rng(),
+                &mut rand::rng(),
                 &[public_key],
                 &[hm],
                 &[signature],
@@ -568,7 +568,7 @@ mod tests {
         }
 
         MinPk::batch_verify(
-            &mut rand::thread_rng(),
+            &mut rand::rng(),
             &valid_publics,
             &valid_hms,
             &valid_signatures,
@@ -577,7 +577,7 @@ mod tests {
         .expect("batch verify of valid vectors should succeed");
 
         assert!(MinPk::batch_verify(
-            &mut rand::thread_rng(),
+            &mut rand::rng(),
             &all_publics,
             &all_hms,
             &all_signatures,

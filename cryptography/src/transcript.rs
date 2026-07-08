@@ -8,15 +8,16 @@ use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
+#[commonware_macros::stability(ALPHA)]
+use commonware_utils::NZU64;
 use commonware_utils::{Array, Span};
-use core::{fmt::Display, ops::Deref};
-use rand_core::{
-    impls::{next_u32_via_fill, next_u64_via_fill},
-    CryptoRng, CryptoRngCore, RngCore,
-};
+#[commonware_macros::stability(ALPHA)]
+use core::num::NonZeroU64;
+use core::{convert::Infallible, fmt::Display, ops::Deref};
+use rand_core::{CryptoRng, TryCryptoRng, TryRng};
 use zeroize::ZeroizeOnDrop;
 
-/// Provides an implementation of [CryptoRngCore].
+/// Provides an implementation of [CryptoRng].
 ///
 /// We intentionally don't expose this struct, to make the impl returned by
 /// [Transcript::noise] completely opaque.
@@ -37,22 +38,28 @@ impl Rng {
     }
 }
 
-impl RngCore for Rng {
-    fn next_u32(&mut self) -> u32 {
-        next_u32_via_fill(self)
+impl TryRng for Rng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut bytes = [0u8; 4];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
     }
 
-    fn next_u64(&mut self) -> u64 {
-        next_u64_via_fill(self)
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut bytes = [0u8; 8];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         let dest_len = dest.len();
         let remaining = &self.buf[self.start..];
         if remaining.len() >= dest_len {
             dest.copy_from_slice(&remaining[..dest_len]);
             self.start += dest_len;
-            return;
+            return Ok(());
         }
 
         let (start, mut dest) = dest.split_at_mut(remaining.len());
@@ -71,15 +78,12 @@ impl RngCore for Rng {
             dest.copy_from_slice(&self.buf[..dest_len]);
             self.start = dest_len;
         }
-    }
 
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.fill_bytes(dest);
         Ok(())
     }
 }
 
-impl CryptoRng for Rng {}
+impl TryCryptoRng for Rng {}
 
 fn flush(hasher: &mut blake3::Hasher, pending: u64) {
     let mut pending_bytes = [0u8; 9];
@@ -238,10 +242,51 @@ impl Transcript {
     ///
     /// The label will also affect the noise. Changing the label will change
     /// the stream of bytes generated.
-    pub fn noise(&self, label: &'static [u8]) -> impl CryptoRngCore {
+    pub fn noise(&self, label: &'static [u8]) -> impl CryptoRng {
         let mut out = Self::start(StartTag::Noise, Some(self.summarize()));
         out.commit(label);
         Rng::new(out.hasher.finalize_xof())
+    }
+
+    /// Shuffle a slice deterministically, based on this transcript.
+    ///
+    /// The permutation will depend on all of the messages committed to the
+    /// transcript so far. This is a Fisher-Yates shuffle over [Transcript::noise].
+    ///
+    /// The label will also affect the permutation. Changing the label will
+    /// change the resulting order:
+    /// ```
+    /// # use commonware_cryptography::transcript::Transcript;
+    /// let t = Transcript::new(b"test");
+    /// let mut a = [0u32, 1, 2, 3, 4, 5, 6, 7];
+    /// let mut b = a;
+    /// t.shuffle(b"A", &mut a);
+    /// t.shuffle(b"B", &mut b);
+    /// assert_ne!(a, b);
+    /// ```
+    #[commonware_macros::stability(ALPHA)]
+    pub fn shuffle<T>(&self, label: &'static [u8], items: &mut [T]) {
+        let mut rng = self.noise(label);
+        for i in (1..items.len()).rev() {
+            let j = sample(&mut rng, NZU64!(i as u64 + 1));
+            items.swap(i, j as usize);
+        }
+    }
+
+    /// Sample a uniform value in `0..bound`, based on this transcript.
+    ///
+    /// The value is unbiased, and will depend on all of the messages committed
+    /// to the transcript so far. The label will also affect the value:
+    /// ```
+    /// # use commonware_cryptography::transcript::Transcript;
+    /// # use commonware_utils::NZU64;
+    /// let t = Transcript::new(b"test");
+    /// assert_eq!(t.sample(b"A", NZU64!(100)), t.sample(b"A", NZU64!(100)));
+    /// assert!(t.sample(b"A", NZU64!(100)) < 100);
+    /// ```
+    #[commonware_macros::stability(ALPHA)]
+    pub fn sample(&self, label: &'static [u8], bound: NonZeroU64) -> u64 {
+        sample(self.noise(label), bound)
     }
 
     /// Extract a compact summary from this transcript.
@@ -262,6 +307,22 @@ impl Transcript {
             self.hasher.finalize()
         };
         Summary { hash }
+    }
+}
+
+/// Sample a uniform value in `0..bound` from an infallible RNG.
+#[commonware_macros::stability(ALPHA)]
+fn sample(mut rng: impl CryptoRng, bound: NonZeroU64) -> u64 {
+    let bound = bound.get();
+
+    // Accept only draws below the largest multiple of `bound`, so that the
+    // modulo is unbiased. Fewer than two draws are needed on average.
+    let zone = bound * (u64::MAX / bound);
+    loop {
+        let v = rng.next_u64();
+        if v < zone {
+            return v % bound;
+        }
     }
 }
 
@@ -393,7 +454,7 @@ impl crate::Digest for Summary {
 }
 
 impl Random for Summary {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         let mut bytes = [0u8; blake3::OUT_LEN];
         rng.fill_bytes(&mut bytes[..]);
         Self {
@@ -419,6 +480,7 @@ mod test {
     use commonware_codec::{DecodeExt as _, Encode};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
+    use rand_core::Rng;
 
     #[test]
     fn test_namespace_affects_summary() {
@@ -554,6 +616,56 @@ mod test {
     }
 
     #[test]
+    fn test_shuffle_is_permutation() {
+        let t = Transcript::new(b"test");
+        let mut items: Vec<u32> = (0..1000).collect();
+        t.shuffle(b"shuffle", &mut items);
+        assert_ne!(items, (0..1000).collect::<Vec<_>>());
+        items.sort_unstable();
+        assert_eq!(items, (0..1000).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_shuffle_is_deterministic() {
+        let mut t = Transcript::new(b"test");
+        t.commit(b"DATA".as_slice());
+        let mut s1: Vec<u32> = (0..100).collect();
+        let mut s2 = s1.clone();
+        t.shuffle(b"shuffle", &mut s1);
+        t.shuffle(b"shuffle", &mut s2);
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn test_shuffle_label_and_history_matter() {
+        let t1 = Transcript::new(b"test");
+        let mut t2 = Transcript::new(b"test");
+        t2.commit(b"DATA".as_slice());
+        let mut base: Vec<u32> = (0..100).collect();
+        let (mut a, mut b, mut c) = (base.clone(), base.clone(), base.clone());
+        t1.shuffle(b"A", &mut a);
+        t1.shuffle(b"B", &mut b);
+        t2.shuffle(b"A", &mut c);
+        base.clear();
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_sample_within_bound() {
+        let t = Transcript::new(b"test");
+        let mut rng = t.noise(b"sample");
+        for bound in [1, 2, 3, 7, 100, 1 << 40, u64::MAX] {
+            assert!(sample(&mut rng, NZU64!(bound)) < bound);
+        }
+        assert_eq!(t.sample(b"sample", NZU64!(1)), 0);
+        assert_eq!(
+            t.sample(b"one shot", NZU64!(1000)),
+            sample(t.noise(b"one shot"), NZU64!(1000))
+        );
+    }
+
+    #[test]
     fn test_missing_append() {
         let s1 = Transcript::new(b"foo").append(b"AB".as_slice()).summarize();
         let s2 = Transcript::new(b"foo")
@@ -567,8 +679,114 @@ mod test {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_conformance::Conformance;
+
+        struct TranscriptOps;
+
+        impl Conformance for TranscriptOps {
+            async fn commit(seed: u64) -> Vec<u8> {
+                let seed_bytes = seed.to_le_bytes();
+                let namespace = seed_bytes[..(seed as usize % seed_bytes.len()) + 1].to_vec();
+                let data: Vec<_> = (0..seed as usize % 256)
+                    .map(|i| (seed as u8).wrapping_add((3 * i) as u8))
+                    .collect();
+                let split = data.len() / 2;
+
+                let mut transcript = Transcript::new(&namespace);
+                transcript.append(&data[..split]);
+                transcript.commit(&data[split..]);
+
+                let mut log = transcript.summarize().encode().to_vec();
+                log.extend(
+                    Transcript::new(&namespace)
+                        .commit(&data[..split])
+                        .commit(&data[split..])
+                        .summarize()
+                        .encode(),
+                );
+                log.extend(
+                    Transcript::new(&namespace)
+                        .append(data.as_slice())
+                        .commit([].as_slice())
+                        .summarize()
+                        .encode(),
+                );
+                let resumed = Transcript::resume(transcript.summarize());
+                log.extend(resumed.summarize().encode());
+                log.extend(transcript.fork(b"left").summarize().encode());
+                log.extend(transcript.fork(b"right").summarize().encode());
+
+                let mut noise = [0u8; 80];
+                let mut rng = transcript.noise(b"noise");
+                log.extend(rng.next_u32().encode());
+                log.extend(rng.next_u64().encode());
+                rng.fill_bytes(&mut noise[..31]);
+                rng.fill_bytes(&mut noise[31..]);
+                log.extend(noise);
+
+                let mut indices: Vec<u32> = (0..(seed % 100) as u32).collect();
+                transcript.shuffle(b"shuffle", &mut indices);
+                for index in &indices {
+                    log.extend(index.encode());
+                }
+                log.extend(transcript.sample(b"sample", NZU64!(seed | 1)).encode());
+
+                let private_key = ed25519::PrivateKey::from_seed(seed);
+                let public_key = private_key.public_key();
+                let summary = transcript.summarize();
+                let summary_sig = summary.sign(&private_key);
+                let transcript_sig = transcript.sign(&private_key);
+                log.extend(summary_sig.encode());
+                log.extend(transcript_sig.encode());
+                log.extend(summary.verify(&public_key, &summary_sig).encode());
+                log.extend(transcript.verify(&public_key, &transcript_sig).encode());
+
+                let mut summary_batch = ed25519::Batch::new(1);
+                log.extend(
+                    summary
+                        .add_to_batch(&mut summary_batch, &public_key, &summary_sig)
+                        .encode(),
+                );
+                log.extend(
+                    summary_batch
+                        .verify(&mut transcript.noise(b"summary batch"), &Sequential)
+                        .encode(),
+                );
+
+                let mut transcript_batch = ed25519::Batch::new(1);
+                log.extend(
+                    transcript
+                        .add_to_batch(&mut transcript_batch, &public_key, &transcript_sig)
+                        .encode(),
+                );
+                log.extend(
+                    transcript_batch
+                        .verify(&mut transcript.noise(b"transcript batch"), &Sequential)
+                        .encode(),
+                );
+
+                let mut pending = Transcript::new(&namespace);
+                pending.append(data.as_slice());
+                let pending_summary = pending.summarize();
+                log.extend(pending_summary.encode());
+                log.extend(pending.fork(b"pending fork").summarize().encode());
+
+                let mut pending_noise = [0u8; 37];
+                pending
+                    .noise(b"pending noise")
+                    .fill_bytes(&mut pending_noise);
+                log.extend(pending_noise);
+
+                let pending_sig = pending.sign(&private_key);
+                log.extend(pending_sig.encode());
+                log.extend(pending.verify(&public_key, &pending_sig).encode());
+
+                log
+            }
+        }
 
         commonware_conformance::conformance_tests! {
+            TranscriptOps => 4096,
             CodecConformance<Summary>,
         }
     }

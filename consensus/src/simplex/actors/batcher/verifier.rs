@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Verification, Digest};
 use commonware_parallel::Strategy;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
 ///
@@ -73,7 +73,7 @@ impl<K: Kind<D>, S: Scheme<D>, D: Digest> Pending<K, S, D> {
     ///
     /// Returns the successfully verified votes and the signer indices for whom
     /// verification failed.
-    fn verify<R: CryptoRngCore>(
+    fn verify<R: CryptoRng>(
         &mut self,
         scheme: &S,
         rng: &mut R,
@@ -250,7 +250,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// Returns the successfully verified messages and the signer indices for whom
     /// verification failed.
-    pub fn verify_notarizes<R: CryptoRngCore>(
+    pub fn verify_notarizes<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
@@ -276,7 +276,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// Returns the successfully verified messages and the signer indices for whom
     /// verification failed.
-    pub fn verify_nullifies<R: CryptoRngCore>(
+    pub fn verify_nullifies<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
@@ -294,7 +294,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// Returns the successfully verified messages and the signer indices for whom
     /// verification failed.
-    pub fn verify_finalizes<R: CryptoRngCore>(
+    pub fn verify_finalizes<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,

@@ -12,7 +12,7 @@ use commonware_runtime::{
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use oversized::Record;
-use rand::Rng;
+use rand::RngExt as _;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(4096);
@@ -36,7 +36,7 @@ impl Conformance for ContiguousFixed {
                 .unwrap();
 
             let mut data_to_write =
-                vec![0u64; context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
+                vec![0u64; context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
             context.fill(&mut data_to_write[..]);
 
             for item in data_to_write.iter() {
@@ -70,9 +70,9 @@ impl Conformance for ContiguousVariable {
                     .unwrap();
 
             let mut data_to_write =
-                vec![Vec::new(); context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
+                vec![Vec::new(); context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
             for item in data_to_write.iter_mut() {
-                let size = context.gen_range(0..256);
+                let size = context.random_range(0..256);
                 item.resize(size, 0);
                 context.fill(item.as_mut_slice());
             }
@@ -105,7 +105,7 @@ impl Conformance for SegmentedFixed {
                     .unwrap();
 
             // Write items across multiple sections
-            let items_count = context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
+            let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
             let mut data_to_write = vec![0u64; items_count];
             context.fill(&mut data_to_write[..]);
 
@@ -141,10 +141,10 @@ impl Conformance for SegmentedGlob {
                 .unwrap();
 
             // Write variable-size items across multiple sections
-            let items_count = context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
+            let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
             let mut data_to_write = vec![Vec::new(); items_count];
             for item in data_to_write.iter_mut() {
-                let size = context.gen_range(0..256);
+                let size = context.random_range(0..256);
                 item.resize(size, 0);
                 context.fill(item.as_mut_slice());
             }
@@ -183,10 +183,10 @@ impl Conformance for SegmentedVariable {
                     .unwrap();
 
             // Write variable-size items across multiple sections
-            let items_count = context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
+            let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
             let mut data_to_write = vec![Vec::new(); items_count];
             for item in data_to_write.iter_mut() {
-                let size = context.gen_range(0..256);
+                let size = context.random_range(0..256);
                 item.resize(size, 0);
                 context.fill(item.as_mut_slice());
             }
@@ -276,10 +276,10 @@ impl Conformance for SegmentedOversized {
             .unwrap();
 
             // Write variable-size items across multiple sections
-            let items_count = context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
+            let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
             let mut data_to_write = vec![Vec::new(); items_count];
             for item in data_to_write.iter_mut() {
-                let size = context.gen_range(0..256);
+                let size = context.random_range(0..256);
                 item.resize(size, 0);
                 context.fill(item.as_mut_slice());
             }

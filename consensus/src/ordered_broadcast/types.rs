@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{channel::oneshot, ordered::Set, union, N3f1};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     hash::{Hash, Hasher},
     sync::Arc,
@@ -632,7 +632,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         strategy: &impl Strategy,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         Pr: Provider<Scope = Epoch, Scheme = S>,
         S: scheme::Scheme<P, D>,
     {
@@ -789,7 +789,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// Returns true if the attestation is valid, false otherwise.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<P, D>,
     {
         let ctx = AckSubject {
@@ -1061,7 +1061,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
     /// Returns true if the signature is valid, false otherwise.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<P, D>,
     {
         let ctx = AckSubject {

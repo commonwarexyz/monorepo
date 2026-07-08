@@ -15,7 +15,7 @@ use commonware_cryptography::{certificate, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use commonware_utils::ordered::Quorum;
-use rand::{seq::IteratorRandom, Rng};
+use rand::{seq::IteratorRandom, Rng, RngExt as _};
 use std::{collections::HashSet, sync::Arc};
 
 pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {
@@ -125,8 +125,8 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                 .unwrap();
 
             // Create two different proposals
-            let payload_a = (next_round, parent, self.context.gen::<u64>()).encode();
-            let payload_b = (next_round, parent, self.context.gen::<u64>()).encode();
+            let payload_a = (next_round, parent, self.context.random::<u64>()).encode();
+            let payload_b = (next_round, parent, self.context.random::<u64>()).encode();
 
             // Compute digests
             self.hasher.update(&payload_a);

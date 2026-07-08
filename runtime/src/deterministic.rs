@@ -86,12 +86,12 @@ use futures::{
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
-use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
-use rand_core::CryptoRngCore;
+use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
+    convert::Infallible,
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -183,7 +183,7 @@ impl Auditor {
 }
 
 /// A dynamic RNG that can safely be sent between threads.
-pub type BoxDynRng = Box<dyn CryptoRngCore + Send + 'static>;
+pub type BoxDynRng = Box<dyn CryptoRng + Send + 'static>;
 
 /// Configuration for the `deterministic` runtime.
 pub struct Config {
@@ -1480,44 +1480,38 @@ impl crate::Resolver for Context {
     }
 }
 
-impl RngCore for Context {
-    fn next_u32(&mut self) -> u32 {
+impl TryRng for Context {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
         let result = executor.rng.lock().next_u32();
-        result
+        Ok(result)
     }
 
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
         let result = executor.rng.lock().next_u64();
-        result
+        Ok(result)
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
         executor.rng.lock().fill_bytes(dest);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        let executor = self.executor();
-        executor.auditor.event(b"rand", |hasher| {
-            hasher.update(b"try_fill_bytes");
-        });
-        let result = executor.rng.lock().try_fill_bytes(dest);
-        result
+        Ok(())
     }
 }
 
-impl CryptoRng for Context {}
+impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;

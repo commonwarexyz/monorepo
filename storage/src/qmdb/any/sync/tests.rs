@@ -32,7 +32,7 @@ use commonware_utils::{
     NZU64,
 };
 use futures::{pin_mut, FutureExt};
-use rand::RngCore as _;
+use rand::Rng as _;
 use std::{
     num::NonZeroU64,
     sync::{
@@ -2100,7 +2100,7 @@ mod harnesses {
     use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic::Context, BufferPooler};
     use commonware_utils::test_rng_seeded;
-    use rand::RngCore;
+    use rand::Rng;
 
     // ===== Family-generic op creation helpers =====
     //
