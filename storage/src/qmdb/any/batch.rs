@@ -1171,6 +1171,7 @@ where
         self,
         updates: Vec<(usize, Option<U::Value>)>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
+        strategy: &S,
     ) -> (UnmerkleizedBatch<F, H, U, S>, StagedUpdates<F, U>) {
         let Self {
             mut batch,
@@ -1206,7 +1207,10 @@ where
                 }
             }
         }
-        staged_updates.sort_unstable_by_key(|entry| entry.1);
+
+        // Locations are unique after last-write-wins dedup, so the parallel sort
+        // is deterministic.
+        strategy.sort_by(&mut staged_updates, |a, b| a.1.cmp(&b.1));
         (Self::apply_upserts(batch, upserts), staged_updates)
     }
 }
@@ -1249,7 +1253,7 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let (batch, staged_updates) = self.resolve_updates(updates, upserts);
+        let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
         batch
             .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
@@ -1296,7 +1300,7 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let (batch, staged_updates) = self.resolve_updates(updates, upserts);
+        let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
         batch
             .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
@@ -3353,6 +3357,7 @@ mod tests {
                     (5, Some(fallback)),
                 ],
                 vec![(k2, Some(upsert))],
+                &Sequential,
             );
 
             assert_eq!(
@@ -3445,7 +3450,7 @@ mod tests {
             updates.extend([(2 * n + 1, Some(mut_new)), (2 * n + 3, Some(staged_new))]);
 
             let (batch, staged_updates) =
-                staged.resolve_updates(updates, vec![(overlapped, Some(upsert))]);
+                staged.resolve_updates(updates, vec![(overlapped, Some(upsert))], &Sequential);
 
             let mut expected = vec![(staged_newer, loc(501), (), Some(staged_new))];
             expected
@@ -3558,6 +3563,7 @@ mod tests {
             let (batch, staged_updates) = staged.resolve_updates(
                 vec![(0, None), (1, Some(value_a)), (2, Some(value_b))],
                 Vec::new(),
+                &Sequential,
             );
 
             assert_eq!(
