@@ -124,7 +124,7 @@ impl Verifier {
             .map(|_| Summary::random(&mut rng))
             .collect();
 
-        strategy.run(
+        strategy.try_run(
             total,
             // Serial verification checks the whole batch as one equation, so
             // coalescing is global and no partition is needed.

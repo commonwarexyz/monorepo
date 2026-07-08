@@ -21,18 +21,18 @@
 //! every [`RESAMPLE_INTERVAL`] calls, and each additional multiple of the winner's wall time
 //! doubles the interval, up to `RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT` calls. Probes are
 //! never suppressed by the loser's own (stale) estimate, so an estimate poisoned by transient
-//! conditions (pool contention at startup, an early-exit error path) converges back to the
-//! truth over a handful of probes. After a path's first sample initializes its estimate,
+//! conditions (pool contention at startup) converges back to the truth over a handful of
+//! probes. After a path's first sample initializes its estimate,
 //! every later sample blends into the EWMA, so a single outlier moves an established
 //! estimate by at most a fifth of the gap.
 //!
 //! Timing is coarse by design: each measured call records one wall-clock sample. Queueing on a
 //! shared pool is included in a parallel sample's elapsed time, so contention pushes the
-//! parallel estimate up and steers concurrent callers back toward serial. Calls that abort
-//! early on error record their short wall time like any other sample, so garbage inputs can
-//! transiently drag an estimate down and unlock a serial sample of genuine work. The refresh
-//! cadence corrects any resulting mispricing within a few blends. Both paths produce
-//! identical results, so a misjudged call only costs throughput, never correctness.
+//! parallel estimate up and steers concurrent callers back toward serial. Fallible operations
+//! only record samples on success: error paths often abort early, and recording their short
+//! wall time would let garbage inputs drag an estimate down and unlock a serial sample of
+//! genuine work. Both paths produce identical results, so a misjudged call only costs
+//! throughput, never correctness.
 //!
 //! State updates are serialized per policy entry, but calls do not hold the entry lock while work
 //! executes. Concurrent calls may therefore make decisions from an estimate that another in-flight
@@ -88,6 +88,56 @@ impl Policy {
         parallelism: usize,
         run: impl FnOnce(Execution) -> R,
     ) -> R {
+        self.execute(
+            caller,
+            len,
+            work,
+            parallelism,
+            run,
+            |entry, execution, elapsed, _result| {
+                entry.record(execution, elapsed);
+            },
+        )
+    }
+
+    /// Like [`run`](Self::run), but only records the elapsed time when `run` returns `Ok`.
+    ///
+    /// Error paths often abort early, so recording their short wall time would poison the
+    /// estimate used to choose between serial and parallel execution.
+    pub(super) fn try_run<R, E>(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        work: usize,
+        parallelism: usize,
+        run: impl FnOnce(Execution) -> Result<R, E>,
+    ) -> Result<R, E> {
+        self.execute(
+            caller,
+            len,
+            work,
+            parallelism,
+            run,
+            |entry, execution, elapsed, result| {
+                if result.is_ok() {
+                    entry.record(execution, elapsed);
+                }
+            },
+        )
+    }
+
+    fn execute<R, REC>(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        work: usize,
+        parallelism: usize,
+        run: impl FnOnce(Execution) -> R,
+        record: REC,
+    ) -> R
+    where
+        REC: FnOnce(&mut Entry, Execution, Duration, &R),
+    {
         // A single-threaded pool cannot benefit from rayon scheduling, so always run serial and
         // never spend a measurement on it.
         if parallelism <= 1 {
@@ -99,10 +149,8 @@ impl Policy {
         let start = measure.then(Instant::now);
         let result = run(execution);
         if let Some(start) = start {
-            self.entries
-                .entry(key)
-                .or_default()
-                .record(execution, start.elapsed());
+            let mut entry = self.entries.entry(key).or_default();
+            record(&mut entry, execution, start.elapsed(), &result);
         }
         result
     }
@@ -110,6 +158,18 @@ impl Policy {
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn get_entry(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        work: usize,
+        parallelism: usize,
+    ) -> Option<(Option<u64>, Option<u64>)> {
+        let key = Key::new(caller, len, work, parallelism);
+        self.entries.get(&key).map(|e| (e.serial_ns, e.parallel_ns))
     }
 }
 
@@ -222,8 +282,8 @@ impl Entry {
     }
 
     // The first sample of each path initializes its estimate, and every later sample blends
-    // into the EWMA, so a single outlier (an error-aborted call, a contended pool) moves an
-    // established estimate by at most a fifth of the gap.
+    // into the EWMA, so a single outlier (a contended pool) moves an established estimate by
+    // at most a fifth of the gap.
     fn record(&mut self, execution: Execution, elapsed: Duration) {
         let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
         let estimate = match execution {
@@ -255,9 +315,9 @@ const fn len_bucket(len: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Entry, Execution, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, RESAMPLE_INTERVAL,
+        Entry, Execution, Policy, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, RESAMPLE_INTERVAL,
     };
-    use std::time::Duration;
+    use std::{panic::Location, time::Duration};
 
     const PARALLELISM: usize = 4;
 
@@ -386,8 +446,8 @@ mod tests {
     #[test]
     fn pre_seed_parallel_samples_blend() {
         // Before serial is seeded there is no loser: parallel samples smooth into the EWMA,
-        // so a single outlier (a fast error-abort or a contended call) cannot swing the
-        // projection that gates serial sampling.
+        // so a single outlier (a contended call) cannot swing the projection that gates
+        // serial sampling.
         let mut entry = Entry::default();
         entry.record(Execution::Parallel, Duration::from_millis(10));
         entry.record(Execution::Parallel, Duration::from_millis(20));
@@ -602,8 +662,8 @@ mod tests {
 
     #[test]
     fn poisoned_probe_cannot_flip_preference() {
-        // A garbage batch that error-aborts in microseconds can land on a serial probe, but
-        // its sample blends into the EWMA and cannot flip the preference on its own.
+        // A spuriously fast serial sample (e.g. from a contended probe) blends into the EWMA
+        // and cannot flip the preference on its own.
         let mut entry = Entry::default();
         entry.record(Execution::Parallel, Duration::from_micros(800));
         entry.record(Execution::Serial, Duration::from_millis(3));
@@ -628,5 +688,44 @@ mod tests {
             );
         }
         assert_eq!(choose(&mut entry), (Execution::Parallel, true));
+    }
+
+    #[test]
+    fn try_run_records_success_not_errors() {
+        let policy = Policy::default();
+        let location = Location::caller();
+        let len = 10;
+        let work = 10;
+
+        // An error on the first call creates an entry but leaves both estimates unset.
+        let result: Result<(), ()> = policy.try_run(location, len, work, PARALLELISM, |_| Err(()));
+        assert!(result.is_err());
+        let (serial_ns, parallel_ns) = policy.get_entry(location, len, work, PARALLELISM).unwrap();
+        assert!(serial_ns.is_none() && parallel_ns.is_none());
+
+        // A successful call records the parallel estimate.
+        let result: Result<(), ()> = policy.try_run(location, len, work, PARALLELISM, |_| Ok(()));
+        assert!(result.is_ok());
+        let (serial_ns, parallel_ns) = policy.get_entry(location, len, work, PARALLELISM).unwrap();
+        let parallel_estimate = parallel_ns;
+        assert!(parallel_estimate.is_some());
+        assert!(serial_ns.is_none());
+
+        // Subsequent parallel errors must not overwrite the established estimate.
+        for _ in 0..20 {
+            let _: Result<(), ()> =
+                policy.try_run(
+                    location,
+                    len,
+                    work,
+                    PARALLELISM,
+                    |execution| match execution {
+                        Execution::Parallel => Err(()),
+                        Execution::Serial => Ok(()),
+                    },
+                );
+        }
+        let (_, parallel_ns) = policy.get_entry(location, len, work, PARALLELISM).unwrap();
+        assert_eq!(parallel_ns, parallel_estimate);
     }
 }

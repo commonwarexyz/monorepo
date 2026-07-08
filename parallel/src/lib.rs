@@ -148,6 +148,19 @@ commonware_macros::stability_scope!(BETA {
             SEQ: FnOnce() -> R + Send,
             PAR: FnOnce() -> R + Send;
 
+        /// Like [`run`](Self::run), but for fallible work.
+        ///
+        /// The strategy chooses and runs either the serial or parallel body, returning the
+        /// first error produced by the chosen body. Elapsed time is only recorded on success,
+        /// so abort-early error paths cannot poison the adaptive policy's estimates.
+        #[track_caller]
+        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send;
+
         /// Reduces a collection to a single value with per-partition initialization.
         ///
         /// Similar to [`fold`](Self::fold), but provides a separate initialization value
@@ -608,6 +621,22 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[track_caller]
+        fn try_run<R, E, SEQ, PAR>(
+            &self,
+            len: usize,
+            serial: SEQ,
+            parallel: PAR,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            self.strategy.try_run(len, serial, parallel)
+        }
+
+        #[track_caller]
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
@@ -778,6 +807,16 @@ commonware_macros::stability_scope!(BETA {
             serial()
         }
 
+        fn try_run<R, E, SEQ, PAR>(&self, _len: usize, serial: SEQ, _parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            serial()
+        }
+
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
@@ -927,6 +966,27 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let work = len.saturating_mul(multiplier);
             policy.run(Location::caller(), len, work, threads, run)
         }
+
+        #[track_caller]
+        fn try_execute<R, E>(
+            &self,
+            len: usize,
+            multiplier: usize,
+            run: impl FnOnce(policy::Execution) -> Result<R, E>,
+        ) -> Result<R, E> {
+            let threads = self.thread_pool.current_num_threads();
+            let Some(policy) = &self.policy else {
+                let execution = if threads <= 1 {
+                    policy::Execution::Serial
+                } else {
+                    policy::Execution::Parallel
+                };
+                return run(execution);
+            };
+
+            let work = len.saturating_mul(multiplier);
+            policy.try_run(Location::caller(), len, work, threads, run)
+        }
     }
 
     impl Strategy for Rayon {
@@ -981,6 +1041,25 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             PAR: FnOnce() -> R + Send,
         {
             self.execute(len, 1, |execution| match execution {
+                policy::Execution::Serial => serial(),
+                policy::Execution::Parallel => parallel(),
+            })
+        }
+
+        #[track_caller]
+        fn try_run<R, E, SEQ, PAR>(
+            &self,
+            len: usize,
+            serial: SEQ,
+            parallel: PAR,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            self.try_execute(len, 1, |execution| match execution {
                 policy::Execution::Serial => serial(),
                 policy::Execution::Parallel => parallel(),
             })
@@ -1054,7 +1133,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             E: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(
+            self.try_execute(
                 items.len(),
                 1,
                 |execution| {
@@ -1141,7 +1220,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), 1, |execution| match execution {
+            self.try_execute(items.len(), 1, |execution| match execution {
                 policy::Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
                 policy::Execution::Parallel => self.thread_pool.install(|| {
                     items
