@@ -1,5 +1,5 @@
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::RngExt as _;
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::collections::HashMap;
 
 #[cfg(not(full_bench))]
@@ -21,7 +21,7 @@ fn bench_hashmap_insert(c: &mut Criterion) {
                     || {
                         // Perform all random ops
                         let mut vec: Vec<(Vec<u8>, u64, u32, u32)> = Vec::with_capacity(n);
-                        let mut rng = rand::rng();
+                        let mut rng = StdRng::seed_from_u64((n as u64) ^ (k as u64));
                         let mut key = vec![0; k];
 
                         // Populate vec with dummy data

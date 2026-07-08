@@ -362,7 +362,7 @@ mod test {
             strategy: &impl ParallelStrategy,
         ) -> bool
         where
-            R: rand_core::CryptoRngCore,
+            R: rand_core::CryptoRng,
             D: commonware_cryptography::Digest,
             I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
             M: commonware_utils::Faults,
@@ -434,7 +434,7 @@ mod test {
             strategy: &impl ParallelStrategy,
         ) -> Verification<Self>
         where
-            R: rand_core::CryptoRngCore,
+            R: rand_core::CryptoRng,
             D: commonware_cryptography::Digest,
             I: IntoIterator<Item = Attestation<Self>>,
             I::IntoIter: Send,
