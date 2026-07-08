@@ -2024,5 +2024,4 @@ mod loom_tests {
 
         generated_loop_programs(cases, OPS_PER_PROGRAM, seed, simulate_futex_loop_until);
     }
-
 }
