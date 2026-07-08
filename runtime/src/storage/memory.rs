@@ -1,4 +1,4 @@
-use super::{Header, HeaderError, ParsedHeader};
+use super::{Header, HeaderResolution};
 #[commonware_macros::stability(BETA)]
 use crate::{BlobHeaderLayout, BlobInfo};
 use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut};
@@ -58,52 +58,24 @@ impl crate::Storage for Storage {
         let content = partition_entry.entry(name.into()).or_default();
 
         let raw_len = content.len() as u64;
-        let (info, data_offset) = if Header::missing(raw_len) {
-            // New or corrupted blob - truncate and write the header region with latest version
-            let (region, blob_version, data_offset) = Header::create(&versions, layout);
-            content.clear();
-            content.extend_from_slice(&region);
-            let info = BlobInfo {
-                size: 0,
-                blob_version,
-                layout,
-            };
-            (info, data_offset)
-        } else {
-            // Existing blob - read and validate the header, honoring the layout it records
-            let mut prelude = [0u8; Header::PRELUDE_SIZE];
-            prelude.copy_from_slice(&content[..Header::PRELUDE_SIZE]);
-            let parsed = Header::parse_prelude(prelude, &versions)
-                .map_err(|e| e.into_error(partition, name))?;
-            match parsed {
-                ParsedHeader::V0 { blob_version } => {
-                    let info = BlobInfo {
-                        size: raw_len - Header::PRELUDE_SIZE_U64,
-                        blob_version,
-                        layout: BlobHeaderLayout::V0,
-                    };
-                    (info, Header::PRELUDE_SIZE_U64)
-                }
-                ParsedHeader::NeedsExtension { blob_version } => {
-                    let ext_end = Header::PRELUDE_SIZE + Header::EXTENSION_SIZE;
-                    if content.len() < ext_end {
-                        return Err(HeaderError::TruncatedHeader {
-                            data_offset: ext_end as u64,
-                            raw_len,
-                        }
-                        .into_error(partition, name));
-                    }
-                    let mut extension = [0u8; Header::EXTENSION_SIZE];
-                    extension.copy_from_slice(&content[Header::PRELUDE_SIZE..ext_end]);
-                    let data_offset = Header::parse_extension(prelude, extension, raw_len)
-                        .map_err(|e| e.into_error(partition, name))?;
-                    let info = BlobInfo {
-                        size: raw_len - data_offset,
-                        blob_version,
-                        layout: BlobHeaderLayout::V1,
-                    };
-                    (info, data_offset)
-                }
+        let head_len = (raw_len as usize).min(Header::RESOLVE_SIZE);
+        let resolution = Header::resolve(&content[..head_len], raw_len, &versions)
+            .map_err(|e| e.into_error(partition, name))?;
+        let (info, data_offset) = match resolution {
+            // Existing blob - honor the header it records
+            HeaderResolution::Valid { info, data_offset } => (info, data_offset),
+            // New, torn, or corrupted blob - truncate and write the header region with
+            // latest version
+            HeaderResolution::Recreate => {
+                let (region, blob_version, data_offset) = Header::create(&versions, layout);
+                content.clear();
+                content.extend_from_slice(&region);
+                let info = BlobInfo {
+                    size: 0,
+                    blob_version,
+                    layout,
+                };
+                (info, data_offset)
             }
         };
 
@@ -433,11 +405,17 @@ mod tests {
     async fn test_blob_magic_mismatch() {
         let storage = Storage::new(test_pool());
 
-        // Manually insert a blob with invalid magic bytes
+        // Manually insert a blob with invalid magic bytes. It must exceed the largest
+        // header region a creation writes (V1_DATA_OFFSET): a file within that bound holds
+        // no synced data and is recreated as an interrupted creation, while anything larger
+        // may carry data, so its invalid header is corruption.
         {
             let mut partitions = storage.partitions.lock();
             let partition = partitions.entry("partition".into()).or_default();
-            partition.insert(b"bad_magic".to_vec(), vec![0u8; Header::PRELUDE_SIZE]);
+            partition.insert(
+                b"bad_magic".to_vec(),
+                vec![0u8; Header::V1_DATA_OFFSET as usize + 1],
+            );
         }
 
         // Opening should fail with corrupt error

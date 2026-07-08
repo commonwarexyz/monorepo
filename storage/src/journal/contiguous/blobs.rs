@@ -12,7 +12,7 @@ use commonware_runtime::{
 };
 use futures::future::try_join_all;
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Metrics for a journal's blobs.
 struct Metrics {
@@ -77,21 +77,47 @@ impl<E: Context> Partition<E> {
     }
 
     /// Scan the partition and open every existing blob as a [`Writer`], keyed by blob index.
-    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
+    ///
+    /// A corrupt header on the HIGHEST-indexed blob is not an error here: blob creation is
+    /// not durable until the blob's first sync, so a crash can leave the newest blob with a
+    /// torn header that the runtime cannot heal (its raw length may exceed the header
+    /// region). That blob is skipped and its index returned so the caller can adjudicate
+    /// with its own recovery metadata. Corruption anywhere else stays a hard error.
+    pub(super) async fn open_all(
+        &self,
+    ) -> Result<(BTreeMap<u64, Writer<E::Blob>>, Option<u64>), Error> {
         let stored = Self::scan_names(&self.context, &self.name).await?;
 
-        let mut blobs = BTreeMap::new();
+        // Decode and sort indices so the highest blob is identifiable before opening.
+        let mut indices = Vec::with_capacity(stored.len());
         for name in stored {
             let hex_name = hex(&name);
             let bytes: [u8; 8] = name
                 .try_into()
                 .map_err(|_| Error::InvalidBlobName(hex_name.clone()))?;
-            let index = u64::from_be_bytes(bytes);
-            let writer = self.open(index).await?;
-            debug!(index, blob = hex_name, "loaded blob");
-            blobs.insert(index, writer);
+            indices.push(u64::from_be_bytes(bytes));
         }
-        Ok(blobs)
+        indices.sort_unstable();
+
+        let mut blobs = BTreeMap::new();
+        let mut corrupt_tail = None;
+        for (i, &index) in indices.iter().enumerate() {
+            match self.open(index).await {
+                Ok(writer) => {
+                    debug!(index, "loaded blob");
+                    blobs.insert(index, writer);
+                }
+                Err(Error::Runtime(RError::BlobCorrupt(p, n, reason)))
+                    if i == indices.len() - 1 =>
+                {
+                    warn!(index, %reason, "newest blob header is corrupt; deferring to caller");
+                    corrupt_tail = Some(index);
+                    let _ = (p, n);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok((blobs, corrupt_tail))
     }
 
     /// Remove the given blob.

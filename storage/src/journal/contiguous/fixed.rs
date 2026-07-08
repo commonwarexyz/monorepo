@@ -419,7 +419,33 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             cfg.page_cache,
             cfg.write_buffer,
         );
-        let mut pending = partition.open_all().await?;
+        let (mut pending, corrupt_tail) = partition.open_all().await?;
+
+        // A corrupt header on the newest blob is a torn, never-synced creation if the
+        // checkpoint watermark proves no item inside it was ever durably adopted (creation
+        // is not durable until a blob's first sync). In that case the blob provably holds
+        // nothing committed: remove it and let recovery proceed as if the crash had lost
+        // the file entirely. If the watermark points inside the blob, committed data is at
+        // stake, so fail loudly.
+        if let Some(corrupt) = corrupt_tail {
+            let blob_start = corrupt
+                .checked_mul(cfg.items_per_blob.get())
+                .ok_or(Error::OffsetOverflow)?;
+            if checkpoint.watermark().is_none_or(|w| w <= blob_start) {
+                warn!(
+                    blob = corrupt,
+                    "removing corrupt newest blob: no adopted items inside it"
+                );
+                partition.remove(corrupt).await?;
+            } else {
+                return Err(Error::Runtime(commonware_runtime::Error::BlobCorrupt(
+                    cfg.partition.clone(),
+                    format!("{corrupt}"),
+                    "newest blob header is corrupt and the checkpoint watermark lies inside it"
+                        .into(),
+                )));
+            }
+        }
 
         // Truncate any trailing non-chunk-aligned bytes on every blob before recovery. Items
         // are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is junk
@@ -1491,6 +1517,76 @@ mod tests {
     /// Generate a SHA-256 digest for the given value.
     fn test_digest(value: u64) -> Digest {
         Sha256::hash(&value.to_be_bytes())
+    }
+
+    /// A crash before a new tail blob's first sync can leave it with a torn header the
+    /// runtime cannot heal (raw length beyond the header region). The journal adjudicates
+    /// with its checkpoint watermark: no adopted items inside the blob means it is removed
+    /// and the durable prefix recovers; a watermark inside it means committed data is at
+    /// stake, so init fails loudly. Raw torn bytes below the blob API can only be injected
+    /// through a real filesystem, hence the tokio runtime.
+    #[test_traced]
+    fn test_corrupt_unsynced_tail_blob_recovery() {
+        let storage_directory =
+            std::env::temp_dir().join(format!("journal_torn_tail_{}", rand::random::<u64>()));
+        let runtime_cfg = commonware_runtime::tokio::Config::new()
+            .with_storage_directory(storage_directory.clone());
+
+        // Build a journal with two full blobs (0, 1) and an empty tail (blob 2).
+        commonware_runtime::tokio::Runner::new(runtime_cfg.clone()).start({
+            move |context| async move {
+                let cfg = test_cfg(&context, NZU64!(2));
+                let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+                    .await
+                    .unwrap();
+                for i in 0u64..4 {
+                    journal.append(&test_digest(i)).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+            }
+        });
+
+        // Simulate the post-crash state: the newest blob holds garbage larger than the
+        // header region, which the runtime classifies as corrupt (it may carry data).
+        let blob_path = storage_directory
+            .join("test-partition-blobs")
+            .join(commonware_formatting::hex(&2u64.to_be_bytes()));
+        std::fs::write(&blob_path, vec![0xAAu8; 5000]).unwrap();
+
+        // Reopen: the watermark (4) sits at the corrupt blob's start (2 * 2), so nothing
+        // adopted lives inside it; the journal removes it and recovers the durable prefix.
+        commonware_runtime::tokio::Runner::new(runtime_cfg.clone()).start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(2));
+            let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.size(), 4);
+            for i in 0u64..4 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            // The journal remains fully usable past the recovered prefix.
+            journal.append(&test_digest(4)).await.unwrap();
+            journal.sync().await.unwrap();
+        });
+
+        // Now corrupt the newest blob while the watermark points INSIDE it (5 items were
+        // synced, so position 4 in blob 2 is adopted): init must fail loudly.
+        std::fs::write(&blob_path, vec![0xAAu8; 5000]).unwrap();
+        commonware_runtime::tokio::Runner::new(runtime_cfg).start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(2));
+            let result = Journal::<_, Digest>::init(context.child("j"), cfg).await;
+            let err = result.err().expect("init should fail loudly");
+            assert!(
+                matches!(
+                    &err,
+                    Error::Runtime(RuntimeError::BlobCorrupt(_, _, reason))
+                        if reason.contains("watermark")
+                ),
+                "expected loud corruption, got {err:?}"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
     fn test_cfg(pooler: &impl BufferPooler, items_per_blob: NonZeroU64) -> Config {

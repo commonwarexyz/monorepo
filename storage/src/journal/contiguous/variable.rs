@@ -1095,7 +1095,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             cfg.page_cache,
             cfg.write_buffer,
         );
-        let mut pending = partition.open_all().await?;
+        let (mut pending, corrupt_tail) = partition.open_all().await?;
+        // TODO(prototype): adjudicate a corrupt newest blob with the checkpoint watermark
+        // as the fixed journal does; until then keep the strict behavior.
+        if let Some(corrupt) = corrupt_tail {
+            return Err(Error::Corruption(format!(
+                "newest blob {corrupt} header is corrupt"
+            )));
+        }
 
         // Validate and align the offsets journal to match the data blobs.
         let bounds = Self::align(

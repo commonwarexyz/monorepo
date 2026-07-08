@@ -6,13 +6,63 @@ use std::{
     fs::File,
     io::IoSlice,
     os::{fd::AsRawFd, unix::fs::FileExt},
-    sync::Arc,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use tokio::task;
 
 // Cap iovec batch size: larger iovecs reduce syscall count but increase
 // per-write kernel setup overhead.
 const IOVEC_BATCH_SIZE: usize = 32;
+
+/// Directories whose entries must be durable before this blob's contents are durable:
+/// the partition directory (holds the blob's entry) and the storage root (holds the
+/// partition directory's entry). Creation performs no fsyncs, so the blob's first sync
+/// makes these durable.
+pub struct DirSync {
+    parent: PathBuf,
+    root: PathBuf,
+    synced: AtomicBool,
+}
+
+/// Counts directory fsyncs so tests can assert when durability is established.
+#[cfg(test)]
+pub(super) static DIR_SYNC_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+impl DirSync {
+    pub const fn new(parent: PathBuf, root: PathBuf) -> Self {
+        Self {
+            parent,
+            root,
+            synced: AtomicBool::new(false),
+        }
+    }
+
+    /// Fsync the directory entries once per blob handle (subsequent calls are no-ops).
+    /// Racing first syncs may both fsync; that is harmless.
+    fn sync(&self) -> Result<(), Error> {
+        if self.synced.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        for dir in [&self.parent, &self.root] {
+            #[cfg(test)]
+            DIR_SYNC_CALLS.fetch_add(1, Ordering::Relaxed);
+            File::open(dir).and_then(|d| d.sync_all()).map_err(|e| {
+                Error::BlobSyncFailed(
+                    dir.to_string_lossy().to_string(),
+                    "directory".to_string(),
+                    e.into(),
+                )
+            })?;
+        }
+        self.synced.store(true, Ordering::Release);
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 pub struct Blob {
@@ -22,6 +72,8 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// Directory entries made durable by the first sync (shared across clones).
+    dirs: Arc<DirSync>,
 }
 
 impl Blob {
@@ -31,6 +83,7 @@ impl Blob {
         file: File,
         pool: BufferPool,
         data_offset: u64,
+        dirs: DirSync,
     ) -> Self {
         Self {
             partition,
@@ -38,12 +91,14 @@ impl Blob {
             file: Arc::new(file),
             pool,
             data_offset,
+            dirs: Arc::new(dirs),
         }
     }
 
-    fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
+    fn sync_inner(file: &File, partition: &str, name: &[u8], dirs: &DirSync) -> Result<(), Error> {
         file.sync_all()
-            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))
+            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))?;
+        dirs.sync()
     }
 
     fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -191,9 +246,10 @@ impl crate::Blob for Blob {
             } else {
                 let partition = self.partition.clone();
                 let name = self.name.clone();
+                let dirs = self.dirs.clone();
                 task::spawn_blocking(move || {
                     Self::write_vectored_at(&file, offset, bufs, None)?;
-                    Self::sync_inner(&file, &partition, &name)
+                    Self::sync_inner(&file, &partition, &name, &dirs)
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?
@@ -220,7 +276,8 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
-        task::spawn_blocking(move || Self::sync_inner(&file, &partition, &name))
+        let dirs = self.dirs.clone();
+        task::spawn_blocking(move || Self::sync_inner(&file, &partition, &name, &dirs))
             .await
             .map_err(|e| {
                 let err: std::io::Error = e.into();
@@ -233,8 +290,9 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
+        let dirs = self.dirs.clone();
         task::spawn_blocking(move || {
-            let result = Self::sync_inner(&file, &partition, &name);
+            let result = Self::sync_inner(&file, &partition, &name, &dirs);
             let _ = tx.send(result);
         });
         Handle::from_receiver(rx)

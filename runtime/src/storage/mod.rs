@@ -179,6 +179,30 @@ stability_scope!(BETA {
                 ),
             }
         }
+
+        /// Returns true when this error on a blob of `raw_len` raw bytes indicates a creation
+        /// whose durability was never established, so the blob can be recreated without
+        /// losing anything a caller was promised.
+        ///
+        /// Data lives past the header region and durability is only promised once a
+        /// [crate::Blob::sync] returns (which makes the whole file, header included,
+        /// durable). A file no larger than the largest header region a writer produces
+        /// ([Header::V1_DATA_OFFSET]) whose bytes do not form a header (writes may tear at
+        /// any point) therefore holds no synced data. Two errors never qualify:
+        /// [HeaderError::VersionMismatch] requires a fully valid header and reports a real
+        /// version conflict, and [HeaderError::InvalidDataOffset] requires a CRC-valid
+        /// extension recording an offset no writer produces, so it reports a writer bug
+        /// rather than tearing.
+        pub(crate) const fn interrupted_creation(&self, raw_len: u64) -> bool {
+            raw_len <= Header::V1_DATA_OFFSET
+                && matches!(
+                    self,
+                    Self::InvalidMagic { .. }
+                        | Self::UnsupportedRuntimeVersion { .. }
+                        | Self::InvalidHeaderChecksum
+                        | Self::TruncatedHeader { .. }
+                )
+        }
     }
 
     /// Fixed-size header prelude at the start of each [crate::Blob].
@@ -219,6 +243,19 @@ stability_scope!(BETA {
         NeedsExtension { blob_version: u16 },
     }
 
+    /// Outcome of resolving a blob's header region at open (see [Header::resolve]).
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) enum HeaderResolution {
+        /// The blob needs a fresh header region written: it is new, or an interrupted
+        /// creation left it with a torn header and no synced data.
+        Recreate,
+        /// The header parsed and validated; data begins at `data_offset`.
+        Valid {
+            info: crate::BlobInfo,
+            data_offset: u64,
+        },
+    }
+
     impl Header {
         /// Size of the header prelude in bytes.
         pub(crate) const PRELUDE_SIZE: usize = 8;
@@ -228,6 +265,10 @@ stability_scope!(BETA {
 
         /// Size of the V1 header extension in bytes (data offset + CRC32).
         pub(crate) const EXTENSION_SIZE: usize = 8;
+
+        /// Number of leading blob bytes needed to resolve any header (prelude plus
+        /// extension).
+        pub(crate) const RESOLVE_SIZE: usize = Self::PRELUDE_SIZE + Self::EXTENSION_SIZE;
 
         /// Data offset written when creating a blob with [BlobHeaderLayout::V1]: the header
         /// region occupies exactly one 4096-byte page.
@@ -342,6 +383,68 @@ stability_scope!(BETA {
                 });
             }
             Ok(data_offset)
+        }
+
+        /// Resolves a blob's header region at open, deciding between recreating the blob
+        /// and honoring the header it records.
+        ///
+        /// `head` holds the blob's first `min(raw_len, RESOLVE_SIZE)` raw bytes. Errors are
+        /// classified with [HeaderError::interrupted_creation]: a torn header on a blob that
+        /// cannot hold synced data resolves to [HeaderResolution::Recreate], anything else
+        /// stays a hard error.
+        pub(crate) fn resolve(
+            head: &[u8],
+            raw_len: u64,
+            versions: &RangeInclusive<u16>,
+        ) -> Result<HeaderResolution, HeaderError> {
+            if Self::missing(raw_len) {
+                return Ok(HeaderResolution::Recreate);
+            }
+            match Self::try_parse(head, raw_len, versions) {
+                Ok(resolution) => Ok(resolution),
+                Err(e) if e.interrupted_creation(raw_len) => Ok(HeaderResolution::Recreate),
+                Err(e) => Err(e),
+            }
+        }
+
+        /// Parses and validates a full header (prelude, and extension if the layout has one)
+        /// from a blob's first bytes.
+        fn try_parse(
+            head: &[u8],
+            raw_len: u64,
+            versions: &RangeInclusive<u16>,
+        ) -> Result<HeaderResolution, HeaderError> {
+            let prelude: [u8; Self::PRELUDE_SIZE] =
+                head[..Self::PRELUDE_SIZE].try_into().unwrap();
+            let (blob_version, layout, data_offset) = match Self::parse_prelude(
+                prelude, versions,
+            )? {
+                ParsedHeader::V0 { blob_version } => {
+                    (blob_version, BlobHeaderLayout::V0, Self::PRELUDE_SIZE_U64)
+                }
+                ParsedHeader::NeedsExtension { blob_version } => {
+                    if raw_len < Self::RESOLVE_SIZE as u64 {
+                        return Err(HeaderError::TruncatedHeader {
+                            data_offset: Self::RESOLVE_SIZE as u64,
+                            raw_len,
+                        });
+                    }
+                    let extension: [u8; Self::EXTENSION_SIZE] = head
+                        [Self::PRELUDE_SIZE..Self::RESOLVE_SIZE]
+                        .try_into()
+                        .unwrap();
+                    let data_offset = Self::parse_extension(prelude, extension, raw_len)?;
+                    (blob_version, BlobHeaderLayout::V1, data_offset)
+                }
+            };
+            Ok(HeaderResolution::Valid {
+                info: crate::BlobInfo {
+                    size: raw_len - data_offset,
+                    blob_version,
+                    layout,
+                },
+                data_offset,
+            })
         }
 
         /// Validates the magic bytes, runtime version, and blob version.

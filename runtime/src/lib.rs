@@ -697,7 +697,9 @@ stability_scope!(BETA {
         /// Multiple instances of the same blob can be opened concurrently, however,
         /// writing to the same blob concurrently may lead to undefined behavior.
         ///
-        /// An Ok result indicates the blob is durably created (or already exists).
+        /// Creation is NOT durable until the blob's first [Blob::sync] returns: a crash
+        /// before then may lose the blob (or leave a torn header), and reopening recreates
+        /// it empty. Data written to the blob is likewise only durable after a sync.
         ///
         /// # Versions
         ///
@@ -818,7 +820,9 @@ stability_scope!(BETA {
         /// If the length is less than the current length, the blob is resized.
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Ensure all pending data is durably persisted.
+        /// Ensure all pending data is durably persisted, including (on the first call) the
+        /// blob's directory entries: until a sync returns, neither the blob's contents nor
+        /// its existence are crash-durable.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Request that all pending data is durably persisted.

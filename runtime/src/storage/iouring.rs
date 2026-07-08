@@ -20,7 +20,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
-use super::{Header, HeaderError, ParsedHeader};
+use super::{Header, HeaderResolution};
 use crate::{
     iouring::{self},
     telemetry::metrics::Register,
@@ -37,6 +37,40 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+/// Directories whose entries must be durable before a blob's contents are durable: the
+/// partition directory (holds the blob's entry) and the storage root (holds the partition
+/// directory's entry). Creation performs no fsyncs, so the blob's first sync makes these
+/// durable. Directory fsyncs are rare one-shots, so they run as blocking calls rather than
+/// through the ring.
+struct DirSync {
+    parent: PathBuf,
+    root: PathBuf,
+    synced: std::sync::atomic::AtomicBool,
+}
+
+impl DirSync {
+    const fn new(parent: PathBuf, root: PathBuf) -> Self {
+        Self {
+            parent,
+            root,
+            synced: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Fsync the directory entries once per blob handle (subsequent calls are no-ops).
+    /// Racing first syncs may both fsync; that is harmless.
+    fn sync(&self) -> Result<(), Error> {
+        if self.synced.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        sync_dir(&self.parent)?;
+        sync_dir(&self.root)?;
+        self.synced
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+}
 
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly fsynced.
@@ -126,9 +160,6 @@ impl crate::Storage for Storage {
             .parent()
             .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
 
-        // Check if partition exists before creating
-        let parent_existed = parent.exists();
-
         // Create the partition directory if it does not exist
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
@@ -144,78 +175,41 @@ impl crate::Storage for Storage {
         // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        // Handle header: new/corrupted blobs get a fresh header written,
-        // existing blobs have their header read.
-        let (info, data_offset) = if Header::missing(raw_len) {
-            // New (or corrupted) blob - truncate and write the header region with latest version
-            // Truncate to zero before writing so a torn header write cannot splice old
-            // bytes into a fully valid header with a wrong version: every partial state
-            // stays shorter than the prelude and is recreated on the next open.
-            let (region, blob_version, data_offset) = Header::create(&versions, layout);
-            file.set_len(0)
-                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
-            file.seek(SeekFrom::Start(0))
-                .map_err(|_| Error::WriteFailed)?;
-            file.write_all(&region).map_err(|_| Error::WriteFailed)?;
-            file.sync_all()
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-            // For new files, sync the parent directory to ensure the directory entry is durable.
-            if raw_len == 0 {
-                sync_dir(parent)?;
-                if !parent_existed {
-                    sync_dir(&self.storage_directory)?;
-                }
-            }
-
-            let info = BlobInfo {
-                size: 0,
-                blob_version,
-                layout,
-            };
-            (info, data_offset)
-        } else {
-            // Existing blob - read and validate the header, honoring the layout it records
-            file.seek(SeekFrom::Start(0))
-                .map_err(|_| Error::ReadFailed)?;
-            let mut prelude = [0u8; Header::PRELUDE_SIZE];
-            file.read_exact(&mut prelude)
-                .map_err(|_| Error::ReadFailed)?;
-            let parsed = Header::parse_prelude(prelude, &versions)
-                .map_err(|e| e.into_error(partition, name))?;
-            match parsed {
-                ParsedHeader::V0 { blob_version } => {
-                    let info = BlobInfo {
-                        size: raw_len - Header::PRELUDE_SIZE_U64,
-                        blob_version,
-                        layout: BlobHeaderLayout::V0,
-                    };
-                    (info, Header::PRELUDE_SIZE_U64)
-                }
-                ParsedHeader::NeedsExtension { blob_version } => {
-                    let ext_end = Header::PRELUDE_SIZE_U64 + Header::EXTENSION_SIZE as u64;
-                    if raw_len < ext_end {
-                        return Err(HeaderError::TruncatedHeader {
-                            data_offset: ext_end,
-                            raw_len,
-                        }
-                        .into_error(partition, name));
-                    }
-                    let mut extension = [0u8; Header::EXTENSION_SIZE];
-                    file.read_exact(&mut extension)
-                        .map_err(|_| Error::ReadFailed)?;
-                    let data_offset = Header::parse_extension(prelude, extension, raw_len)
-                        .map_err(|e| e.into_error(partition, name))?;
-                    let info = BlobInfo {
-                        size: raw_len - data_offset,
-                        blob_version,
-                        layout: BlobHeaderLayout::V1,
-                    };
-                    (info, data_offset)
-                }
+        // Resolve the header: torn or missing headers are recreated, valid headers are
+        // honored. Creation performs NO fsyncs: durability (of the file and its directory
+        // entries) is established by the blob's first sync.
+        let mut head = [0u8; Header::RESOLVE_SIZE];
+        let head_len = raw_len.min(Header::RESOLVE_SIZE as u64) as usize;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| Error::ReadFailed)?;
+        file.read_exact(&mut head[..head_len])
+            .map_err(|_| Error::ReadFailed)?;
+        let resolution = Header::resolve(&head[..head_len], raw_len, &versions)
+            .map_err(|e| e.into_error(partition, name))?;
+        let (info, data_offset) = match resolution {
+            // Existing blob - honor the header it records
+            HeaderResolution::Valid { info, data_offset } => (info, data_offset),
+            // New, torn, or corrupted blob - truncate and write the header region. Truncate
+            // to zero first so a torn header write cannot splice old bytes into a fully
+            // valid header with a wrong version: every partial state stays shorter than the
+            // header region and is recreated on the next open.
+            HeaderResolution::Recreate => {
+                let (region, blob_version, data_offset) = Header::create(&versions, layout);
+                file.set_len(0)
+                    .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|_| Error::WriteFailed)?;
+                file.write_all(&region).map_err(|_| Error::WriteFailed)?;
+                let info = BlobInfo {
+                    size: 0,
+                    blob_version,
+                    layout,
+                };
+                (info, data_offset)
             }
         };
 
+        let dirs = DirSync::new(parent.to_path_buf(), self.storage_directory.clone());
         let blob = Blob::new(
             partition.into(),
             name,
@@ -223,6 +217,7 @@ impl crate::Storage for Storage {
             self.io_handle.clone(),
             self.pool.clone(),
             data_offset,
+            dirs,
         );
         Ok((blob, info))
     }
@@ -300,6 +295,8 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// Directory entries made durable by the first sync (shared across clones).
+    dirs: Arc<DirSync>,
 }
 
 impl Clone for Blob {
@@ -311,6 +308,7 @@ impl Clone for Blob {
             io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
             data_offset: self.data_offset,
+            dirs: self.dirs.clone(),
         }
     }
 }
@@ -324,6 +322,7 @@ impl Blob {
         io_handle: iouring::Handle,
         pool: BufferPool,
         data_offset: u64,
+        dirs: DirSync,
     ) -> Self {
         Self {
             partition,
@@ -332,6 +331,7 @@ impl Blob {
             io_handle,
             pool,
             data_offset,
+            dirs: Arc::new(dirs),
         }
     }
 }
@@ -440,16 +440,18 @@ impl crate::Blob for Blob {
             .map_err(|err| match err {
                 Error::Io(e) => Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e),
                 err => err,
-            })
+            })?;
+        self.dirs.sync()
     }
 
     async fn start_sync(&self) -> Handle<()> {
         let partition = self.partition.clone();
         let name = self.name.clone();
         let receiver = self.io_handle.start_sync(self.file.clone()).await;
+        let dirs = self.dirs.clone();
         Handle::from_future(async move {
             match receiver.await {
-                Ok(Ok(())) => Ok(()),
+                Ok(Ok(())) => dirs.sync(),
                 Ok(Err(Error::Io(e))) => Err(Error::BlobSyncFailed(partition, hex(&name), e)),
                 Ok(Err(err)) => Err(err),
                 Err(_) => Err(Error::Closed),
@@ -723,9 +725,16 @@ mod tests {
         let partition_path = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_path).unwrap();
 
-        // Manually create a file with invalid magic bytes
+        // Manually create a file with invalid magic bytes. It must exceed the largest
+        // header region a creation writes (V1_DATA_OFFSET): a file within that bound holds
+        // no synced data and is recreated as an interrupted creation, while anything larger
+        // may carry data, so its invalid header is corruption.
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
-        std::fs::write(&bad_magic_path, vec![0u8; Header::PRELUDE_SIZE]).unwrap();
+        std::fs::write(
+            &bad_magic_path,
+            vec![0u8; Header::V1_DATA_OFFSET as usize + 1],
+        )
+        .unwrap();
 
         // Opening should fail with corrupt error
         let err = storage
@@ -1051,6 +1060,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
+            DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
 
         // Read and write should fail through their wrapper-specific error enums
@@ -1110,6 +1120,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
+            DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
         // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
         let err = blob
@@ -1149,6 +1160,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
+            DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
         let err = blob
             .start_sync()
@@ -1192,6 +1204,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
+            DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
         let err = blob
             .resize(0)
@@ -1230,6 +1243,7 @@ mod tests {
             submitter.clone(),
             pool,
             Header::PRELUDE_SIZE_U64,
+            DirSync::new(std::env::temp_dir(), std::env::temp_dir()),
         );
         // The request should reach the kernel and come back as a wrapped sync failure.
         let err = blob
