@@ -49,12 +49,7 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{
-        any::value::ValueEncoding,
-        batch_chain,
-        metrics::{LocationReadMetrics, OperationMetrics, StateMetrics},
-        Error,
-    },
+    qmdb::{any::value::ValueEncoding, batch_chain, metrics::Metrics, Error},
     Context,
 };
 use commonware_codec::EncodeShared;
@@ -63,28 +58,6 @@ use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
-
-/// Metrics for Keyless QMDBs.
-pub(crate) struct Metrics<E: Context> {
-    /// State gauges.
-    pub state: StateMetrics,
-    /// Write and durability metrics.
-    pub operations: OperationMetrics<E>,
-    /// Location read metrics.
-    pub reads: LocationReadMetrics<E>,
-}
-
-impl<E: Context> Metrics<E> {
-    /// Create and register metrics.
-    pub fn new(context: E) -> Self {
-        let context = Arc::new(context);
-        Self {
-            state: StateMetrics::new(context.as_ref()),
-            operations: OperationMetrics::new(context.clone()),
-            reads: LocationReadMetrics::new(context),
-        }
-    }
-}
 
 pub mod batch;
 mod compact;
@@ -198,9 +171,9 @@ where
     /// Returns [`Error::LocationOutOfBounds`] if `loc` >=
     /// `self.bounds().end`.
     pub async fn get(&self, loc: Location<F>) -> Result<Option<V::Value>, Error<F>> {
-        let _timer = self.metrics.reads.get_timer();
-        self.metrics.reads.get_calls.inc();
-        self.metrics.reads.locations_requested.inc();
+        let _timer = self.metrics.get_timer();
+        self.metrics.get_calls.inc();
+        self.metrics.lookups_requested.inc();
         let op_count = self.journal.bounds().end;
         if loc >= op_count {
             return Err(Error::LocationOutOfBounds(loc, Location::new(op_count)));
@@ -224,12 +197,9 @@ where
             return Ok(Vec::new());
         }
 
-        let _timer = self.metrics.reads.get_many_timer();
-        self.metrics.reads.get_many_calls.inc();
-        self.metrics
-            .reads
-            .locations_requested
-            .inc_by(locs.len() as u64);
+        let _timer = self.metrics.get_many_timer();
+        self.metrics.get_many_calls.inc();
+        self.metrics.lookups_requested.inc_by(locs.len() as u64);
         assert!(
             locs.windows(2).all(|w| w[0] < w[1]),
             "locations must be strictly increasing"
@@ -266,7 +236,7 @@ where
     /// Update state gauges from the current database state.
     fn update_metrics(&self) {
         let bounds = self.journal.bounds();
-        self.metrics.state.set(
+        self.metrics.update(
             bounds.end,
             bounds.start,
             *self.inactivity_floor_loc,
@@ -384,8 +354,8 @@ where
     ///   the last committed batch.
     #[tracing::instrument(name = "qmdb.keyless.db.prune", level = "info", skip_all)]
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
-        let _timer = self.metrics.operations.prune_timer();
-        self.metrics.operations.prune_calls.inc();
+        let _timer = self.metrics.prune_timer();
+        self.metrics.prune_calls.inc();
         if loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
                 loc,
@@ -461,8 +431,8 @@ where
     /// recover the database on restart.
     #[tracing::instrument(name = "qmdb.keyless.db.sync", level = "info", skip_all)]
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
-        let _timer = self.metrics.operations.sync_timer();
-        self.metrics.operations.sync_calls.inc();
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
         self.journal.sync().await?;
         Ok(())
     }
@@ -470,8 +440,8 @@ where
     /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.
     #[tracing::instrument(name = "qmdb.keyless.db.commit", level = "info", skip_all)]
     pub async fn commit(&mut self) -> Result<(), Error<F>> {
-        let _timer = self.metrics.operations.commit_timer();
-        self.metrics.operations.commit_calls.inc();
+        let _timer = self.metrics.commit_timer();
+        self.metrics.commit_calls.inc();
         self.journal.commit().await?;
         Ok(())
     }
@@ -509,7 +479,8 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`].
+    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
+    /// more details).
     ///
     /// Every commit operation in the batch chain (each unapplied ancestor's commit plus the
     /// tip's) must satisfy two per-commit invariants:
@@ -535,8 +506,8 @@ where
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V, S>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
-        let _timer = self.metrics.operations.apply_batch_timer();
-        self.metrics.operations.apply_batch_calls.inc();
+        let _timer = self.metrics.apply_batch_timer();
+        self.metrics.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
         batch
             .bounds
@@ -553,7 +524,6 @@ where
         let range = start_loc..end_loc;
         self.update_metrics();
         self.metrics
-            .operations
             .operations_applied
             .inc_by(*range.end - *range.start);
         Ok(range)

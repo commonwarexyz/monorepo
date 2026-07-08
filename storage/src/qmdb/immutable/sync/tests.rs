@@ -28,6 +28,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64};
+use harnesses::VariableMmrHarness as H;
 use rand::RngCore as _;
 use std::{
     collections::{HashMap, VecDeque},
@@ -1143,6 +1144,60 @@ macro_rules! sync_tests_for_harness {
 
 sync_tests_for_harness!(harnesses::VariableMmrHarness, variable_mmr);
 sync_tests_for_harness!(harnesses::VariableMmbHarness, variable_mmb);
+
+/// A completed sync journal reuses local boundary nodes only when the persisted state can
+/// authenticate the target: a target starting below the local pruning boundary is declined,
+/// while a matching target serves the boundary nodes locally.
+#[commonware_macros::test_traced]
+fn test_immutable_local_boundary_nodes_rejects_target_before_local_lower_bound() {
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let suffix = context.next_u64().to_string();
+        let config = H::config(&suffix, &context);
+        let mut db = H::init_db_with_config(context.child("db"), config.clone()).await;
+        for seed in 0..3u64 {
+            db = H::apply_ops(db, H::create_ops_seeded(100, seed), None).await;
+        }
+        H::prune(&mut db, Location::new(100)).await;
+        H::db_sync(&mut db).await;
+
+        let bounds = H::bounds(&db);
+        let local_start = bounds.start;
+        let local_end = bounds.end;
+        assert!(local_start > Location::new(0));
+        let sync_root = H::db_root(&db);
+
+        let stale_target = Target {
+            root: sync_root,
+            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
+        };
+        assert!(<DbOf<H> as qmdb::sync::Database>::local_boundary_nodes(
+            context.child("probe_stale"),
+            &config,
+            &stale_target,
+            &db.journal.journal,
+        )
+        .await
+        .unwrap()
+        .is_none());
+
+        let matching_target = Target {
+            root: sync_root,
+            range: non_empty_range!(local_start, local_end),
+        };
+        assert!(<DbOf<H> as qmdb::sync::Database>::local_boundary_nodes(
+            context.child("probe_matching"),
+            &config,
+            &matching_target,
+            &db.journal.journal,
+        )
+        .await
+        .unwrap()
+        .is_some());
+
+        H::destroy(db).await;
+    });
+}
 
 mod compact_variable_mmr {
     use super::*;

@@ -26,7 +26,6 @@
 use crate::{Blob, Buf, BufMut, Error, IoBuf};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{crc32, Crc32};
-use std::num::NonZeroUsize;
 
 mod cache;
 mod read;
@@ -45,75 +44,81 @@ const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 const CHECKSUM_SLOT_LEN_SIZE: usize = u16::SIZE;
 const CHECKSUM_SLOT_SIZE: usize = CHECKSUM_SLOT_LEN_SIZE + crc32::Digest::SIZE;
 
-/// Ensure `buf` has one `item_size` slot per offset, offsets are sorted and non-overlapping, and
-/// every requested range lies within the blob's size.
-fn validate_read_many_into(
+/// Ensure every requested range lies within the blob's size.
+///
+/// # Panics
+///
+/// Panics if `buf` does not hold one slot per range totaling its length, or if ranges are not
+/// sorted and non-overlapping.
+fn validate_read_ranges(
     buf_len: usize,
-    offsets: &[u64],
-    item_size: NonZeroUsize,
+    ranges: impl Iterator<Item = (u64, usize)>,
     size: u64,
 ) -> Result<(), Error> {
-    let expected_len = offsets
-        .len()
-        .checked_mul(item_size.get())
-        .ok_or(Error::OffsetOverflow)?;
-    if buf_len != expected_len {
-        return Err(Error::BufferLengthInvalid);
-    }
-
+    let mut expected_len = 0usize;
     let mut previous_end = None;
-    for &offset in offsets {
+    for (offset, len) in ranges {
+        expected_len = expected_len
+            .checked_add(len)
+            .expect("buf must hold one slot per range totaling its length");
         let end = offset
-            .checked_add(item_size.get() as u64)
+            .checked_add(len as u64)
             .ok_or(Error::OffsetOverflow)?;
         if let Some(previous_end) = previous_end {
-            if offset < previous_end {
-                return Err(Error::OffsetsInvalid);
-            }
+            assert!(
+                offset >= previous_end,
+                "ranges must be sorted and non-overlapping"
+            );
         }
         if end > size {
             return Err(Error::BlobInsufficientLength);
         }
         previous_end = Some(end);
     }
+    assert_eq!(
+        buf_len, expected_len,
+        "buf must hold one slot per range totaling its length"
+    );
     Ok(())
 }
 
-/// Partition a batch read into items copied from in-memory tail bytes and items that need
-/// cache/blob reads.
+/// Partition a batch of variable-length range reads into bytes copied from the in-memory tail
+/// and ranges that need cache/blob reads.
 ///
-/// `buf` holds one `item_size` slot per offset (validated by [validate_read_many_into]). `tail`
+/// `buf` holds one slot per range, back to back (validated by [validate_read_ranges]). `tail`
 /// holds the logical bytes at `[tail_offset, tail_offset + tail.len())`; for [Writer] this is the
-/// tip buffer, for [Sealed] the partial last page. Items entirely within `tail` are copied into
-/// place. Items fully or partially below `tail_offset` are returned as `(dest_slice, offset)`
-/// pairs for the caller to read from the page cache or blob. `chunks_exact_mut` yields disjoint
-/// per-item slots, so returned slices never alias.
-fn split_read_many<'a>(
-    buf: &'a mut [u8],
-    offsets: &[u64],
-    item_size: NonZeroUsize,
+/// tip buffer, for [Sealed] the partial last page. Ranges entirely within `tail` are copied into
+/// place. Ranges fully or partially below `tail_offset` are returned as `(dest_slice, offset)`
+/// pairs for the caller to read from the page cache or blob. `split_at_mut` yields disjoint
+/// per-range slots, so returned slices never alias.
+fn split_read_ranges<'a>(
+    mut buf: &'a mut [u8],
+    ranges: impl ExactSizeIterator<Item = (u64, usize)>,
     tail_offset: u64,
     tail: &[u8],
 ) -> Vec<(&'a mut [u8], u64)> {
-    let item_size = item_size.get();
-    let mut cache_ranges = Vec::with_capacity(offsets.len());
-    for (item_buf, &offset) in buf.chunks_exact_mut(item_size).zip(offsets.iter()) {
-        let end = offset
-            .checked_add(item_size as u64)
-            .expect("offset overflow checked by validate_read_many_into");
+    let mut cache_ranges = Vec::with_capacity(ranges.len());
+    for (offset, len) in ranges {
+        let (slot, rest) = buf.split_at_mut(len);
+        buf = rest;
+        if len == 0 {
+            continue;
+        }
+        let end = offset + len as u64;
         if end <= tail_offset {
             // Entirely below the tail bytes, so this needs a cache/blob read.
-            cache_ranges.push((item_buf, offset));
+            cache_ranges.push((slot, offset));
         } else if offset >= tail_offset {
             // Entirely within the tail bytes.
             let src = (offset - tail_offset) as usize;
-            item_buf.copy_from_slice(&tail[src..src + item_size]);
+            slot.copy_from_slice(&tail[src..src + len]);
         } else {
-            // Straddles the boundary: copy the suffix from the tail bytes, record the prefix for
-            // a cache/blob read.
+            // Straddles the boundary: copy the suffix from the tail bytes, record the prefix
+            // for a cache/blob read.
             let prefix_len = (tail_offset - offset) as usize;
-            item_buf[prefix_len..].copy_from_slice(&tail[..item_size - prefix_len]);
-            cache_ranges.push((&mut item_buf[..prefix_len], offset));
+            let (prefix, suffix) = slot.split_at_mut(prefix_len);
+            suffix.copy_from_slice(&tail[..len - prefix_len]);
+            cache_ranges.push((prefix, offset));
         }
     }
     cache_ranges
@@ -409,66 +414,28 @@ impl arbitrary::Arbitrary<'_> for Checksum {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::NZUsize;
     use rstest::rstest;
 
     enum ValidationExpectation {
         Ok,
         OffsetOverflow,
         BlobInsufficientLength,
-        BufferLengthInvalid,
-        OffsetsInvalid,
     }
 
     #[rstest]
-    #[case::empty_offsets_are_a_noop(0, vec![], 4, 0, ValidationExpectation::Ok)]
-    #[case::buffer_len_must_match_items(
-        7,
-        vec![0, 4],
-        4,
-        16,
-        ValidationExpectation::BufferLengthInvalid
-    )]
-    #[case::offsets_must_not_overlap(
-        8,
-        vec![0, 2],
-        4,
-        16,
-        ValidationExpectation::OffsetsInvalid
-    )]
-    #[case::offsets_must_be_sorted(
-        8,
-        vec![8, 4],
-        4,
-        16,
-        ValidationExpectation::OffsetsInvalid
-    )]
-    #[case::offset_plus_item_size_must_not_overflow(
-        4,
-        vec![u64::MAX - 1],
-        4,
-        u64::MAX,
-        ValidationExpectation::OffsetOverflow
-    )]
-    #[case::range_must_stay_within_logical_size(
-        4,
-        vec![8],
-        4,
-        10,
-        ValidationExpectation::BlobInsufficientLength
-    )]
-    #[case::range_may_end_exactly_at_logical_size(2, vec![8], 2, 10, ValidationExpectation::Ok)]
-    fn test_validate_read_many_into(
+    #[case::ok(12, vec![(0, 4), (4, 8)], 16, ValidationExpectation::Ok)]
+    #[case::empty_ranges_are_a_noop(0, vec![], 0, ValidationExpectation::Ok)]
+    #[case::zero_length_range(4, vec![(0, 0), (0, 4)], 16, ValidationExpectation::Ok)]
+    #[case::offset_overflow(4, vec![(u64::MAX, 4)], 16, ValidationExpectation::OffsetOverflow)]
+    #[case::insufficient_length(4, vec![(14, 4)], 16, ValidationExpectation::BlobInsufficientLength)]
+    #[case::range_may_end_exactly_at_logical_size(4, vec![(12, 4)], 16, ValidationExpectation::Ok)]
+    fn test_validate_read_ranges(
         #[case] buf_len: usize,
-        #[case] offsets: Vec<u64>,
-        #[case] item_size: usize,
+        #[case] ranges: Vec<(u64, usize)>,
         #[case] size: u64,
         #[case] expected: ValidationExpectation,
     ) {
-        // These cases pin the shared batch-read contract used by Writer, Reader, and Sealed:
-        // the caller provides one fixed-size output slot per offset, offsets are monotonic and
-        // non-overlapping, and every requested byte must be within the logical blob size.
-        let result = validate_read_many_into(buf_len, &offsets, NZUsize!(item_size), size);
+        let result = validate_read_ranges(buf_len, ranges.iter().copied(), size);
 
         match expected {
             ValidationExpectation::Ok => assert!(result.is_ok()),
@@ -478,13 +445,35 @@ mod tests {
             ValidationExpectation::BlobInsufficientLength => {
                 assert!(matches!(result, Err(Error::BlobInsufficientLength)))
             }
-            ValidationExpectation::BufferLengthInvalid => {
-                assert!(matches!(result, Err(Error::BufferLengthInvalid)))
-            }
-            ValidationExpectation::OffsetsInvalid => {
-                assert!(matches!(result, Err(Error::OffsetsInvalid)))
-            }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "buf must hold one slot per range totaling its length")]
+    fn test_validate_read_ranges_rejects_buffer_len_mismatch() {
+        let _ = validate_read_ranges(7, [(0, 4), (4, 4)].into_iter(), 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "ranges must be sorted and non-overlapping")]
+    fn test_validate_read_ranges_rejects_overlapping_ranges() {
+        let _ = validate_read_ranges(8, [(0, 4), (2, 4)].into_iter(), 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "ranges must be sorted and non-overlapping")]
+    fn test_validate_read_ranges_rejects_unsorted_ranges() {
+        let _ = validate_read_ranges(8, [(8, 4), (4, 4)].into_iter(), 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "buf must hold one slot per range totaling its length")]
+    fn test_validate_read_ranges_rejects_length_overflow() {
+        let _ = validate_read_ranges(
+            usize::MAX,
+            [(0, usize::MAX), (u64::MAX, 1)].into_iter(),
+            u64::MAX,
+        );
     }
 
     #[test]

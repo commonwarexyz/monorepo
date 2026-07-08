@@ -50,10 +50,10 @@ impl<const N: usize> BitMap<N> {
     pub const CHUNK_SIZE_BITS: u64 = (N * 8) as u64;
 
     /// A chunk of all 0s.
-    const EMPTY_CHUNK: [u8; N] = [0u8; N];
+    pub const EMPTY_CHUNK: [u8; N] = [0u8; N];
 
     /// A chunk of all 1s.
-    const FULL_CHUNK: [u8; N] = [u8::MAX; N];
+    pub const FULL_CHUNK: [u8; N] = [u8::MAX; N];
 
     /* Constructors */
 
@@ -679,9 +679,8 @@ impl<const N: usize> BitMap<N> {
 
         // All of these chunks require all of their bits to be checked.
         // If first_chunk == last_chunk, we skip the loop.
-        let zero = [0u8; N];
         for full_chunk in (first_chunk + 1)..last_chunk {
-            if self.chunks[full_chunk] != zero {
+            if self.chunks[full_chunk] != Self::EMPTY_CHUNK {
                 return false;
             }
         }
