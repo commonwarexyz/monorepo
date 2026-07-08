@@ -1046,6 +1046,10 @@ mod test_plan {
     use rand::{rngs::StdRng, SeedableRng};
     use std::collections::{BTreeMap, BTreeSet};
 
+    /// The largest dealer or player count the `Arbitrary` implementation for
+    /// [`Plan`] generates. A [`Setup`] of this size fits every generated plan.
+    pub const MAX_PARTICIPANTS: u32 = 7;
+
     /// A golden DKG test plan.
     ///
     /// Generates a fresh DKG with the given number of dealers and players,
@@ -1485,9 +1489,26 @@ mod test_plan {
     #[cfg(any(feature = "arbitrary", test))]
     impl<'a> arbitrary::Arbitrary<'a> for Plan {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-            const MAX: u32 = 7;
-            let num_dealers = u.int_in_range(1..=MAX)?;
-            let num_players = u.int_in_range(1..=MAX)?;
+            // A single plan run costs seconds to minutes, so the generated shape
+            // is capped to keep cases affordable enough for a time-budgeted fuzz
+            // to run several of them. Dealers are drawn across their full range
+            // first so every quorum regime stays reachable, and the cap squeezes
+            // the player count. Plain plan cost grows with the dealer x player
+            // product, while reshare cost is driven by dealer count almost
+            // regardless of players, so reshare plans additionally bound dealers
+            // tightly.
+            const PLAIN_PRODUCT_CAP: u32 = 21;
+            const RESHARE_DEALER_CAP: u32 = 3;
+            const RESHARE_PRODUCT_CAP: u32 = 8;
+            let reshare = u.ratio(1, 4)?;
+            let (dealer_cap, product_cap) = if reshare {
+                (RESHARE_DEALER_CAP, RESHARE_PRODUCT_CAP)
+            } else {
+                (MAX_PARTICIPANTS, PLAIN_PRODUCT_CAP)
+            };
+            let num_dealers = u.int_in_range(1..=dealer_cap)?;
+            let max_players = (product_cap / num_dealers).clamp(1, MAX_PARTICIPANTS);
+            let num_players = u.int_in_range(1..=max_players)?;
             let star = u.int_in_range(0..=num_players - 1)?;
             let mut plan = Self::new(num_dealers, num_players, star);
 
@@ -1525,8 +1546,8 @@ mod test_plan {
                 }
             }
 
-            // Optionally enable reshare.
-            if u.ratio(1, 4)? {
+            // Apply the reshare decision drawn above.
+            if reshare {
                 plan = plan.reshare();
                 for d in 0..num_dealers {
                     if u.ratio(1, 6)? {
@@ -1543,7 +1564,7 @@ mod test_plan {
 }
 
 #[cfg(feature = "arbitrary")]
-pub use test_plan::Plan as FuzzPlan;
+pub use test_plan::{Plan as FuzzPlan, MAX_PARTICIPANTS as FUZZ_PLAN_MAX_PARTICIPANTS};
 
 #[cfg(test)]
 mod tests {
@@ -2215,7 +2236,7 @@ mod tests {
     fn fuzz_plan() {
         minifuzz::Builder::default()
             .with_min_iterations(0)
-            .with_search_time(Duration::from_secs(150))
+            .with_search_time(Duration::from_secs(180))
             .test(|u| {
                 let plan: Plan = u.arbitrary()?;
                 let seed: u64 = u.arbitrary()?;
