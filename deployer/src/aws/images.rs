@@ -35,14 +35,25 @@ pub(crate) async fn cache_image(
     let tar_str = tar_path.to_string_lossy().into_owned();
     let platform = format!("linux/{}", architecture.as_str());
 
-    // Remove any local copy first so the store holds exactly the platform we pull, then `docker
-    // save` exports that platform regardless of the deployer's image store type (the containerd
-    // store can otherwise keep several platforms under one tag and save the wrong one). Pulling the
-    // platform explicitly also lets the deployer build tarballs for any target architecture; pull
-    // and save never run the image, so the deployer's own architecture is irrelevant.
-    let _ = run_command("docker", &["image", "rm", "-f", image]).await;
+    // Pull and save the target platform explicitly. The containerd image store records a tag's
+    // full multi-platform index even when a pull fetches only one platform's blobs, so a bare
+    // `docker save` attempts to export every manifest in the index and fails on the platforms
+    // that were never pulled. `docker save --platform` (Docker 28+) exports only the pulled
+    // platform and also lets the deployer build tarballs for any target architecture. Pull and
+    // save never run the image, so the deployer's own architecture is irrelevant.
     run_command("docker", &["pull", "--platform", &platform, image]).await?;
-    run_command("docker", &["save", image, "-o", tar_str.as_str()]).await?;
+    run_command(
+        "docker",
+        &[
+            "save",
+            "--platform",
+            &platform,
+            image,
+            "-o",
+            tar_str.as_str(),
+        ],
+    )
+    .await?;
     // `gzip -f` replaces the tar with `{tar}.gz` (== gz_path).
     run_command("gzip", &["-f", tar_str.as_str()]).await?;
 
