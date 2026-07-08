@@ -37,9 +37,15 @@ use std::{
     sync::Arc,
 };
 
+/// Counts [sync_dir] calls so tests can assert directory-entry durability.
+#[cfg(test)]
+static SYNC_DIR_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly fsynced.
 fn sync_dir(path: &Path) -> Result<(), Error> {
+    #[cfg(test)]
+    SYNC_DIR_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = File::open(path).map_err(|e| {
         Error::BlobOpenFailed(
             path.to_string_lossy().to_string(),
@@ -167,13 +173,12 @@ impl crate::Storage for Storage {
                 file.sync_all()
                     .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
 
-                // For new files, sync the parent directory to ensure the directory entry is
-                // durable.
-                if raw_len == 0 {
-                    sync_dir(parent)?;
-                    if !parent_existed {
-                        sync_dir(&self.storage_directory)?;
-                    }
+                // Make the blob name durable. A healed torn creation (raw_len > 0) may be
+                // retrying an attempt that failed before its directory syncs, so its directory
+                // entries cannot be assumed durable even though they exist.
+                sync_dir(parent)?;
+                if !parent_existed || raw_len > 0 {
+                    sync_dir(&self.storage_directory)?;
                 }
 
                 (blob_version, 0)
@@ -601,6 +606,26 @@ mod tests {
         assert!(err
             .to_string()
             .starts_with("blob corrupt: partition/6261645f6d61676963 reason: invalid magic"));
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_torn_header_recreate_syncs_directories() {
+        let (storage, storage_directory) = create_test_storage();
+        let partition_path = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_path).unwrap();
+        std::fs::write(partition_path.join(hex(b"torn")), vec![0u8; Header::SIZE]).unwrap();
+
+        // Healing must also make the blob's directory entries durable: the attempt that left
+        // the torn file may have failed before its own directory syncs.
+        let sync_dirs = SYNC_DIR_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        let (_, size) = storage.open("partition", b"torn").await.unwrap();
+        assert_eq!(size, 0, "torn blob should be recreated empty");
+        assert!(
+            SYNC_DIR_CALLS.load(std::sync::atomic::Ordering::Relaxed) >= sync_dirs + 2,
+            "healing a torn creation should sync its directory entries"
+        );
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

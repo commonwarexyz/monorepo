@@ -16,11 +16,17 @@ mod fallback;
 #[cfg(unix)]
 mod unix;
 
+/// Counts [sync_dir] calls so tests can assert directory-entry durability.
+#[cfg(all(test, unix))]
+static SYNC_DIR_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly
 /// fsynced.
 #[cfg(unix)]
 async fn sync_dir(path: &Path) -> Result<(), Error> {
+    #[cfg(test)]
+    SYNC_DIR_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = fs::File::open(path).await.map_err(|e| {
         Error::BlobOpenFailed(
             path.to_string_lossy().to_string(),
@@ -165,6 +171,17 @@ impl crate::Storage for Storage {
                 file.sync_all()
                     .await
                     .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
+
+                // A healed torn creation (len > 0) may be retrying an attempt that failed
+                // before its directory syncs, so its directory entries cannot be assumed
+                // durable even though they exist. (A brand-new file's entries were synced
+                // above; Windows lacks directory-entry syncing, see issue #2026.)
+                #[cfg(unix)]
+                if len > 0 {
+                    sync_dir(parent).await?;
+                    sync_dir(&self.cfg.storage_directory).await?;
+                }
+
                 (blob_version, 0)
             }
         };
@@ -461,8 +478,17 @@ mod tests {
         for (name, torn) in states {
             std::fs::write(partition_path.join(hex(name)), torn).unwrap();
 
+            // Healing must also make the blob's directory entries durable: the attempt that
+            // left the torn file may have failed before its own directory syncs.
+            #[cfg(unix)]
+            let sync_dirs = SYNC_DIR_CALLS.load(std::sync::atomic::Ordering::Relaxed);
             let (blob, size) = storage.open("partition", name).await.unwrap();
             assert_eq!(size, 0, "torn blob should be recreated empty");
+            #[cfg(unix)]
+            assert!(
+                SYNC_DIR_CALLS.load(std::sync::atomic::Ordering::Relaxed) >= sync_dirs + 2,
+                "healing a torn creation should sync its directory entries"
+            );
             blob.write_at(0, b"hello".to_vec()).await.unwrap();
             blob.sync().await.unwrap();
             drop(blob);
