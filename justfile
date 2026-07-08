@@ -90,8 +90,7 @@ check-publish-order:
 
 # Check that locked dependencies are at least 7 days old
 cooldown:
-    cargo cooldown --workspace --all-features check
-    git diff --exit-code Cargo.lock
+    ./.github/scripts/check_dependency_cooldown.sh
 
 # Run custom Dylint lints
 dylint:
