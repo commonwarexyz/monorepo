@@ -3,13 +3,28 @@
 //!
 //! # Page-oriented structure
 //!
-//! Blob data is stored in _pages_ having a logical `page_size` dictated by the managing page cache.
-//! A _physical page_ consists of `page_size` bytes of data followed by a 12-byte _CRC
-//! record_ containing:
+//! Blob data is stored in _pages_ having a _logical page size_ dictated by the managing page
+//! cache: the payload bytes stored per page. A _physical page_ is what a page occupies on disk:
+//! the logical page followed by a 12-byte _CRC record_ containing:
 //!
 //! ```text
 //! | len1 (2 bytes) |  crc1 (4 bytes) | len2 (2 bytes) | crc2 (4 bytes) |
 //! ```
+//!
+//! Throughout this module, an unqualified page size always denotes the logical size (matching
+//! the configured value); only physical sizes carry a qualified `physical_page_size` name.
+//!
+//! # Storage-page alignment
+//!
+//! Physical page `p` begins at blob offset `p * physical_page_size`, and a blob created with
+//! [crate::BlobHeaderLayout::V1] begins its data on a 4096-byte boundary. Choosing a logical page size
+//! such that the physical page size is a power of two (see [page_size]) therefore keeps
+//! every physical page from crossing a 4096-byte storage-page boundary (and starts every physical
+//! page of at least 4096 bytes exactly on one).
+//!
+//! Alignment is a performance property, not a correctness requirement: any page size works, but
+//! physical pages that straddle storage-page boundaries amplify cold random reads, so
+//! [CacheRef::new] logs a warning when configured with one.
 //!
 //! Two checksums are stored so that partial pages can be re-written without overwriting a valid
 //! checksum for its previously committed contents. A checksum over a page is computed over the
@@ -26,6 +41,7 @@
 use crate::{Blob, Buf, BufMut, Error, IoBuf};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{crc32, Crc32};
+use std::num::NonZeroU16;
 
 mod cache;
 mod read;
@@ -41,8 +57,40 @@ pub use writer::Writer;
 
 // A checksum record contains two slots. Each slot stores one u16 length and one CRC.
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
+
+/// The storage-page granularity physical pages should align to (see the module docs).
+pub(crate) const STORAGE_PAGE_SIZE: u64 = 4096;
 const CHECKSUM_SLOT_LEN_SIZE: usize = u16::SIZE;
 const CHECKSUM_SLOT_SIZE: usize = CHECKSUM_SLOT_LEN_SIZE + crc32::Digest::SIZE;
+
+/// The logical page size whose physical page occupies exactly `physical_page_size` bytes on disk
+/// (see the module docs on storage-page alignment).
+///
+/// # Panics
+///
+/// Panics if `physical_page_size` is not a power of two or does not exceed the CRC record size,
+/// so misconfiguration is caught at construction (or compile time, in const contexts).
+pub const fn page_size(physical_page_size: u16) -> NonZeroU16 {
+    assert!(
+        physical_page_size.is_power_of_two(),
+        "physical page size must be a power of two"
+    );
+    assert!(
+        physical_page_size as u64 > CHECKSUM_SIZE,
+        "physical page size must exceed the CRC record size"
+    );
+    match NonZeroU16::new(physical_page_size - CHECKSUM_SIZE as u16) {
+        Some(size) => size,
+        None => unreachable!(),
+    }
+}
+
+/// Validate a physical page's CRC record, exposing [Checksum::validate_page] to tests elsewhere
+/// in the crate.
+#[cfg(test)]
+pub(crate) fn validate_page_for_tests(page: &[u8]) -> bool {
+    Checksum::validate_page(page).is_some()
+}
 
 /// Ensure every requested range lies within the blob's size.
 ///
@@ -130,9 +178,9 @@ fn split_read_ranges<'a>(
 async fn get_page_from_blob(
     blob: &impl Blob,
     page_num: u64,
-    logical_page_size: u64,
+    page_size: u64,
 ) -> Result<IoBuf, Error> {
-    let (page, _) = get_page_with_checksum_from_blob(blob, page_num, logical_page_size).await?;
+    let (page, _) = get_page_with_checksum_from_blob(blob, page_num, page_size).await?;
     Ok(page)
 }
 
@@ -140,9 +188,9 @@ async fn get_page_from_blob(
 async fn get_page_with_checksum_from_blob(
     blob: &impl Blob,
     page_num: u64,
-    logical_page_size: u64,
+    page_size: u64,
 ) -> Result<(IoBuf, Checksum), Error> {
-    let physical_page_size = logical_page_size
+    let physical_page_size = page_size
         .checked_add(CHECKSUM_SIZE)
         .ok_or(Error::OffsetOverflow)?;
     let physical_page_start = page_num
@@ -239,22 +287,22 @@ impl Checksum {
     /// if what should have been the most recent CRC doesn't validate, in which case it will be
     /// zeroed and the other CRC used as a fallback.
     fn validate_page(buf: &[u8]) -> Option<Self> {
-        let page_size = buf.len() as u64;
-        if page_size < CHECKSUM_SIZE {
+        let physical_page_size = buf.len() as u64;
+        if physical_page_size < CHECKSUM_SIZE {
             error!(
-                page_size,
+                physical_page_size,
                 required = CHECKSUM_SIZE,
                 "read page smaller than CRC record"
             );
             return None;
         }
 
-        let crc_start_idx = (page_size - CHECKSUM_SIZE) as usize;
+        let crc_start_idx = (physical_page_size - CHECKSUM_SIZE) as usize;
         let mut crc_bytes = &buf[crc_start_idx..];
         let mut crc_record = Self::read(&mut crc_bytes).expect("CRC record read should not fail");
         let (len, crc) = crc_record.get_crc();
 
-        // Validate that len is in the valid range [1, logical_page_size].
+        // Validate that len is in the valid range [1, page_size].
         // A page with len=0 is invalid (e.g., all-zero pages from unwritten data).
         let len_usize = len as usize;
         if len_usize == 0 {
@@ -556,8 +604,8 @@ mod tests {
 
     #[test]
     fn test_validate_page_valid() {
-        let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + Checksum::SIZE;
+        let page_size = 64usize;
+        let physical_page_size = page_size + Checksum::SIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write some data
@@ -581,8 +629,8 @@ mod tests {
 
     #[test]
     fn test_validate_page_invalid_crc() {
-        let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + Checksum::SIZE;
+        let page_size = 64usize;
+        let physical_page_size = page_size + Checksum::SIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write some data
@@ -603,8 +651,8 @@ mod tests {
 
     #[test]
     fn test_validate_page_corrupted_data() {
-        let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + Checksum::SIZE;
+        let page_size = 64usize;
+        let physical_page_size = page_size + Checksum::SIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write some data and compute correct CRC
@@ -626,8 +674,8 @@ mod tests {
 
     #[test]
     fn test_validate_page_uses_larger_len() {
-        let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + Checksum::SIZE;
+        let page_size = 64usize;
+        let physical_page_size = page_size + Checksum::SIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write data and compute CRC for the larger portion
@@ -655,8 +703,8 @@ mod tests {
 
     #[test]
     fn test_validate_page_uses_fallback() {
-        let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + Checksum::SIZE;
+        let page_size = 64usize;
+        let physical_page_size = page_size + Checksum::SIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write data
@@ -694,8 +742,8 @@ mod tests {
 
     #[test]
     fn test_validate_page_no_fallback_available() {
-        let logical_page_size = 64usize;
-        let physical_page_size = logical_page_size + Checksum::SIZE;
+        let page_size = 64usize;
+        let physical_page_size = page_size + Checksum::SIZE;
         let mut page = vec![0u8; physical_page_size];
 
         // Write some data

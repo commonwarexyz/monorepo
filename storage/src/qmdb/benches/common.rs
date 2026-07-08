@@ -27,7 +27,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{NZUsize, TestRng, NZU64};
 use rand::{distr::Distribution, Rng};
 use rand_distr::Zipf;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
@@ -40,7 +40,7 @@ pub type Digest = DigestOf<Sha256>;
 pub const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
 pub const CHUNK_SIZE: usize = 32;
 pub const THREADS: NonZeroUsize = NZUsize!(8);
-pub const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
+pub const PAGE_SIZE: NonZeroU16 = commonware_runtime::buffer::paged::page_size(4096);
 pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 pub const DELETE_FREQUENCY: u32 = 10;
 pub const VARIABLE_VALUE_MAX_LEN: usize = 256;
