@@ -29,7 +29,7 @@ commonware-parallel.workspace = true
 commonware-utils.workspace = true
 crc-fast = { workspace = true, features = ["std"], optional = true }
 ctutils.workspace = true
-curve25519-dalek.workspace = true
+curve25519-dalek = { workspace = true, features = ["digest", "rand_core"] }
 ecdsa.workspace = true
 fixedbitset.workspace = true
 hashbrown.workspace = true

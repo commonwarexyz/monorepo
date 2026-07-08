@@ -1,6 +1,33 @@
 use crate::Secret;
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
+use core::convert::Infallible;
 use rand_core::CryptoRngCore;
+
+/// Adapter exposing a `rand_core` 0.6 RNG as a `rand_core` 0.10 `CryptoRng`.
+///
+/// `x25519-dalek` 3.x depends on `rand_core` 0.10, while the rest of the workspace
+/// uses `rand_core` 0.6. This wrapper bridges the two for the single call site that
+/// needs fresh ephemeral randomness.
+struct Rng10<R>(R);
+
+impl<R: CryptoRngCore> curve25519_dalek::rand_core::TryRng for Rng10<R> {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        Ok(self.0.next_u32())
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        Ok(self.0.next_u64())
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+        self.0.fill_bytes(dst);
+        Ok(())
+    }
+}
+
+impl<R: CryptoRngCore> curve25519_dalek::rand_core::TryCryptoRng for Rng10<R> {}
 
 /// A shared secret derived from X25519 key exchange.
 pub struct SharedSecret {
@@ -65,8 +92,9 @@ pub struct SecretKey {
 impl SecretKey {
     /// Generates a new random ephemeral secret key.
     pub fn new(rng: impl CryptoRngCore) -> Self {
+        let mut rng10 = Rng10(rng);
         Self {
-            inner: Secret::new(x25519_dalek::EphemeralSecret::random_from_rng(rng)),
+            inner: Secret::new(x25519_dalek::EphemeralSecret::random_from_rng(&mut rng10)),
         }
     }
 
