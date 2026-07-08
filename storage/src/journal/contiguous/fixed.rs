@@ -5096,6 +5096,49 @@ mod tests {
         });
     }
 
+    /// A cancelled rollover leaves an untracked successor blob on disk; `clear_to_size` must
+    /// remove it so it cannot corrupt a later recovery.
+    #[test_traced]
+    fn test_clear_after_cancelled_rollover_removes_stray_blob() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(1));
+            cfg.partition = "cancel-seal-clear".into();
+            let faults = context.storage_fault_config();
+            faults.write().stall_write = Some((blob_partition(&cfg), 0u64.to_be_bytes().to_vec()));
+
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            let items = [test_digest(0), test_digest(1)];
+
+            // Cancel a boundary-crossing append at the tail flush. seal_tail already created
+            // blob 1 on disk before the roll parked, so an untracked blob is left behind.
+            {
+                let fut = journal.append(&items[0]);
+                pin_mut!(fut);
+                assert!(futures::poll!(&mut fut).is_pending());
+            }
+            assert!(
+                faults.read().stall_write.is_none(),
+                "append did not park at the tail flush"
+            );
+
+            // Reset far past the stray, then use the journal normally.
+            journal.clear_to_size(20).await.unwrap();
+            journal.append(&items[1]).await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // The stray blob must not survive the clear to confuse recovery.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 20..21);
+            assert_eq!(journal.read(20).await.unwrap(), items[1]);
+        });
+    }
+
     /// Prune during a pending rollover must not panic and must not remove the still-installed
     /// full tail; after the rollover completes, a retried prune removes it.
     #[test_traced]

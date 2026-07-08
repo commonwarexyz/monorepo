@@ -1197,6 +1197,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         let items_per_blob = self.items_per_blob.get();
 
+        // A dropped append can record offsets without advancing `bounds.end`. An item's data
+        // always lands before its offset, so recorded offsets index complete items: adopt
+        // them, as recovery would.
+        let offsets_size = self.offsets.size();
+        if offsets_size > self.bounds.end {
+            self.mark_dirty_from(position_to_blob(self.bounds.end, items_per_blob));
+            self.bounds.end = offsets_size;
+        }
+
         // A dropped append can leave a full tail unsealed with bounds already advanced; seal it
         // before appending more.
         if position_to_blob(self.bounds.end, items_per_blob) > self.blobs.tail_blob_index() {
@@ -6714,6 +6723,65 @@ mod tests {
 
             // The next append retries the interrupted rollover first.
             journal.append(&items[1]).await.unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read(0).await.unwrap(), items[0]);
+            assert_eq!(journal.read(1).await.unwrap(), items[1]);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, FixedBytes<32>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read(0).await.unwrap(), items[0]);
+            assert_eq!(journal.read(1).await.unwrap(), items[1]);
+        });
+    }
+
+    /// Cancel an append inside the offsets journal's rollover: the batch's data and offsets
+    /// are already written but `bounds.end` never advanced. The next append must adopt the
+    /// completed batch, as recovery would, and continue normally.
+    #[test_traced]
+    fn test_variable_append_cancelled_at_offsets_rollover() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "cancel-offsets-roll-variable".into(),
+                items_per_section: NZU64!(1),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                write_buffer: NZUsize!(1024),
+            };
+            let faults = context.storage_fault_config();
+            // With one item per section, the offsets journal rolls over on the same append that
+            // fills a data section. Park its successor open inside `offsets.append_many`.
+            faults.write().stall_open = Some((
+                format!("{}-blobs", cfg.offsets_partition()),
+                1u64.to_be_bytes().to_vec(),
+            ));
+
+            let mut journal =
+                Journal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            let items = [FixedBytes::new([1; 32]), FixedBytes::new([2; 32])];
+
+            // The offsets entry is appended (offsets size advances) before `bounds.end` does, so
+            // dropping the parked future leaves the counter behind the written batch.
+            {
+                let fut = journal.append(&items[0]);
+                pin_mut!(fut);
+                assert!(futures::poll!(&mut fut).is_pending());
+            }
+            assert!(
+                faults.read().stall_open.is_none(),
+                "append did not park at the offsets successor open"
+            );
+            assert_eq!(journal.bounds(), 0..0);
+
+            // The retried append adopts the interrupted batch, then appends its own item.
+            assert_eq!(journal.append(&items[1]).await.unwrap(), 1);
             assert_eq!(journal.bounds(), 0..2);
             assert_eq!(journal.read(0).await.unwrap(), items[0]);
             assert_eq!(journal.read(1).await.unwrap(), items[1]);

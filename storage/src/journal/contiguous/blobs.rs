@@ -372,6 +372,15 @@ impl<E: Context> Writable<E> {
         for blob in self.oldest_blob_index..=self.tail_blob_index() {
             self.partition.remove(blob).await?;
         }
+
+        // An interrupted rollover can leave an untracked successor blob on disk; it must not
+        // survive the clear.
+        if let Some(stray) = self.tail_blob_index().checked_add(1) {
+            match self.partition.remove(stray).await {
+                Ok(()) | Err(Error::Runtime(RError::BlobMissing(..))) => {}
+                Err(err) => return Err(err),
+            }
+        }
         let _ = self.metrics.tracked.try_set(0);
         self.tail = self.partition.open(tail_blob).await?;
         self.metrics.tracked.inc();
