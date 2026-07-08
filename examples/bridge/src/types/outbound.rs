@@ -103,7 +103,7 @@ mod tests {
         let mut signature = <MinSig as commonware_cryptography::bls12381::primitives::variant::Variant>::Signature::generator();
         signature *= &scalar;
         Finalization {
-            proposal: Proposal {
+            payload: Proposal {
                 round: Round::new(Epoch::new(333), View::new(12345)),
                 parent: View::new(54321),
                 payload: new_digest(),

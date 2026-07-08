@@ -525,7 +525,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<P,
             .certificate
             .get()
             .expect("verified certificate must decode");
-        Seed::new(self.proposal.round, cert.seed_signature)
+        Seed::new(self.payload.round, cert.seed_signature)
     }
 }
 
@@ -535,7 +535,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P,
             .certificate
             .get()
             .expect("verified certificate must decode");
-        Seed::new(self.proposal.round, cert.seed_signature)
+        Seed::new(self.payload.round, cert.seed_signature)
     }
 }
 
@@ -1390,8 +1390,7 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let notarization =
-            Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap();
+        let notarization = Notarization::from_votes(&schemes[0], &notarizes, &Sequential).unwrap();
 
         let finalizes: Vec<_> = schemes
             .iter()
@@ -1399,8 +1398,7 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let finalization =
-            Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap();
+        let finalization = Finalization::from_votes(&schemes[0], &finalizes, &Sequential).unwrap();
 
         assert_eq!(notarization.seed(), finalization.seed());
         assert!(notarization.seed().verify(&schemes[0]));
@@ -1705,8 +1703,7 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let notarization =
-            Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap();
+        let notarization = Notarization::from_votes(&schemes[0], &notarizes, &Sequential).unwrap();
 
         // Decrypt using the seed
         let seed = notarization.seed();

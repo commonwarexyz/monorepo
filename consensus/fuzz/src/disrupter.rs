@@ -275,7 +275,7 @@ where
         // Update the state for effective fuzzing
         self.last_vote_view = self.last_vote_view.max(vote.view().get());
         if let Vote::Notarize(notarize) = &vote {
-            self.latest_proposals.push_back(notarize.proposal.clone());
+            self.latest_proposals.push_back(notarize.payload.clone());
         }
 
         if !self.is_faulty_view(self.last_vote_view) {
@@ -291,7 +291,7 @@ where
             Vote::Notarize(notarize) => {
                 let proposal = self.strategy.mutate_proposal(
                     self.context.as_mut(),
-                    &notarize.proposal,
+                    &notarize.payload,
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,
@@ -305,7 +305,7 @@ where
             Vote::Finalize(finalize) => {
                 let proposal = self.strategy.mutate_proposal(
                     self.context.as_mut(),
-                    &finalize.proposal,
+                    &finalize.payload,
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,
@@ -325,7 +325,7 @@ where
                     self.last_nullified_view,
                 );
                 let round = Round::new(Epoch::new(EPOCH), View::new(v));
-                if let Some(v) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
+                if let Some(v) = Nullify::<S, Sha256Digest>::sign(&self.scheme, round) {
                     let msg = Vote::<S, Sha256Digest>::Nullify(v).encode();
                     let _ = sender.send(Recipients::All, msg, true);
                 }
@@ -500,7 +500,7 @@ where
                     self.last_nullified_view,
                 );
                 let round = Round::new(Epoch::new(EPOCH), View::new(view));
-                if let Some(vote) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
+                if let Some(vote) = Nullify::<S, Sha256Digest>::sign(&self.scheme, round) {
                     let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode();
                     let _ = sender.send(recipients, msg, true);
                 }

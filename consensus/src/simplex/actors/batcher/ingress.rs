@@ -228,7 +228,7 @@ mod tests {
 
     fn nullify_vote(view: View) -> Vote<TestScheme, Sha256Digest> {
         Vote::Nullify(
-            Nullify::sign::<Sha256Digest>(&scheme(), Round::new(EPOCH, view)).expect("nullify"),
+            Nullify::<_, Sha256Digest>::sign(&scheme(), Round::new(EPOCH, view)).expect("nullify"),
         )
     }
 

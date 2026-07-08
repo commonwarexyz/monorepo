@@ -411,8 +411,8 @@ async fn wait_for_validator_height<H: TestHarness>(
                 height.get()
             );
             assert_eq!(
-                finalization.proposal.payload,
-                expected_finalization.proposal.payload,
+                finalization.payload.payload,
+                expected_finalization.payload.payload,
                 "{label}: wrong finalization payload at height {}",
                 height.get()
             );
@@ -501,8 +501,8 @@ async fn assert_validator_matches_canonical<H: TestHarness>(
             height.get()
         );
         assert_eq!(
-            stored_finalization.proposal.payload,
-            expected_finalization.proposal.payload,
+            stored_finalization.payload.payload,
+            expected_finalization.payload.payload,
             "{label}: stored wrong finalization payload at height {}",
             height.get()
         );
@@ -1998,7 +1998,7 @@ impl TestHarness for StandardHarness {
             .take(quorum as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
+        Finalization::from_votes(&schemes[0], &finalizes, &Sequential).unwrap()
     }
 
     fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
@@ -2007,7 +2007,7 @@ impl TestHarness for StandardHarness {
             .take(quorum as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
+        Notarization::from_votes(&schemes[0], &notarizes, &Sequential).unwrap()
     }
 
     async fn report_finalization(
@@ -2855,7 +2855,7 @@ impl TestHarness for CodingHarness {
             .take(quorum as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
+        Finalization::from_votes(&schemes[0], &finalizes, &Sequential).unwrap()
     }
 
     fn make_notarization(
@@ -2868,7 +2868,7 @@ impl TestHarness for CodingHarness {
             .take(quorum as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
+        Notarization::from_votes(&schemes[0], &notarizes, &Sequential).unwrap()
     }
 
     async fn report_finalization(
@@ -4895,7 +4895,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
                 .get_finalization(Height::new(i))
                 .await
                 .unwrap();
-            assert_eq!(fin.proposal.payload, commitment);
+            assert_eq!(fin.payload.payload, commitment);
             assert_eq!(fin.round().view(), View::new(i));
 
             parent = digest;
@@ -5023,7 +5023,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             .get_finalization(Height::new(5))
             .await
             .expect("finalization should be fetched");
-        assert_eq!(finalization.proposal.round.view(), View::new(5));
+        assert_eq!(finalization.payload.round.view(), View::new(5));
     })
 }
 
@@ -5210,9 +5210,9 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             .unwrap();
 
         // Verify the finalizations have the expected different views
-        assert_eq!(fin0.proposal.payload, commitment);
+        assert_eq!(fin0.payload.payload, commitment);
         assert_eq!(fin0.round().view(), View::new(1));
-        assert_eq!(fin1.proposal.payload, commitment);
+        assert_eq!(fin1.payload.payload, commitment);
         assert_eq!(fin1.round().view(), View::new(2));
 
         // Both validators can retrieve block by height

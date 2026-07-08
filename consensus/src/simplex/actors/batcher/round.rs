@@ -51,7 +51,7 @@ pub struct Round<
     /// Cached certificates for this view.
     /// Once a certificate exists, we stop verifying votes of that type.
     notarization: Option<Notarization<S, D>>,
-    nullification: Option<Nullification<S>>,
+    nullification: Option<Nullification<S, D>>,
     finalization: Option<Finalization<S, D>>,
 
     /// Root span of the view, shared with the voter's round.
@@ -136,7 +136,7 @@ impl<
     }
 
     /// Stores a nullification certificate.
-    pub fn set_nullification(&mut self, nullification: Nullification<S>) {
+    pub fn set_nullification(&mut self, nullification: Nullification<S, D>) {
         self.nullification = Some(nullification);
     }
 
@@ -165,7 +165,7 @@ impl<
                 // Try to reserve
                 match self.pending_votes.notarize(index) {
                     Some(previous) => {
-                        if previous.proposal != notarize.proposal {
+                        if previous.payload != notarize.payload {
                             let activity = ConflictingNotarize::new(previous.clone(), notarize);
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity));
@@ -232,7 +232,7 @@ impl<
                 // Try to reserve
                 match self.pending_votes.finalize(index) {
                     Some(previous) => {
-                        if previous.proposal != finalize.proposal {
+                        if previous.payload != finalize.payload {
                             let activity = ConflictingFinalize::new(previous.clone(), finalize);
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity));
@@ -389,14 +389,14 @@ impl<
         if self
             .pending_votes
             .notarize(participant)
-            .is_some_and(|vote| &vote.proposal == proposal)
+            .is_some_and(|vote| &vote.payload == proposal)
         {
             return false;
         }
 
         self.pending_votes
             .finalize(participant)
-            .is_none_or(|vote| &vote.proposal != proposal)
+            .is_none_or(|vote| &vote.payload != proposal)
     }
 
     /// Returns participant indices whose matching vote for `proposal` was not
@@ -453,7 +453,7 @@ impl<
         )
         .entered();
         let notarization =
-            Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes(), strategy)?;
+            Notarization::from_votes(scheme, self.verified_votes.iter_notarizes(), strategy)?;
         self.set_notarization(notarization.clone());
         Some(notarization)
     }
@@ -465,7 +465,7 @@ impl<
         &mut self,
         scheme: &S,
         strategy: &impl Strategy,
-    ) -> Option<Nullification<S>> {
+    ) -> Option<Nullification<S, D>> {
         if self.has_nullification() {
             return None;
         }
@@ -479,7 +479,7 @@ impl<
         )
         .entered();
         let nullification =
-            Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies(), strategy)?;
+            Nullification::from_votes(scheme, self.verified_votes.iter_nullifies(), strategy)?;
         self.set_nullification(nullification.clone());
         Some(nullification)
     }
@@ -505,7 +505,7 @@ impl<
         )
         .entered();
         let finalization =
-            Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
+            Finalization::from_votes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
         self.set_finalization(finalization.clone());
         Some(finalization)
     }

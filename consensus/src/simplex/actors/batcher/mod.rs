@@ -213,7 +213,7 @@ mod tests {
             .take(count)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(&schemes[0], &votes, &Sequential)
+        Notarization::from_votes(&schemes[0], &votes, &Sequential)
             .expect("notarization requires a quorum of votes")
     }
 
@@ -221,13 +221,13 @@ mod tests {
         schemes: &[S],
         round: Round,
         count: usize,
-    ) -> Nullification<S> {
+    ) -> Nullification<S, Sha256Digest> {
         let votes: Vec<_> = schemes
             .iter()
             .take(count)
-            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
+            .map(|scheme| Nullify::<_, Sha256Digest>::sign(scheme, round).unwrap())
             .collect();
-        Nullification::from_nullifies(&schemes[0], &votes, &Sequential)
+        Nullification::from_votes(&schemes[0], &votes, &Sequential)
             .expect("nullification requires a quorum of votes")
     }
 
@@ -241,7 +241,7 @@ mod tests {
             .take(count)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(&schemes[0], &votes, &Sequential)
+        Finalization::from_votes(&schemes[0], &votes, &Sequential)
             .expect("finalization requires a quorum of votes")
     }
 
@@ -1693,7 +1693,7 @@ mod tests {
                     );
             }
 
-            let active_nullify = Nullify::sign::<Sha256Digest>(&schemes[6], round2).unwrap();
+            let active_nullify = Nullify::<_, Sha256Digest>::sign(&schemes[6], round2).unwrap();
             if let Some(ref mut sender) = participant_senders[6] {
                 sender
                     .send(
@@ -1749,7 +1749,7 @@ mod tests {
                     }
                     voter::Message::Verified { certificate: Certificate::Notarization(n), .. } => {
                         assert_eq!(n.view(), view2);
-                        assert_eq!(n.proposal.payload, proposal_a.payload);
+                        assert_eq!(n.payload.payload, proposal_a.payload);
                         saw_notarization = true;
                         break;
                     }
@@ -2893,7 +2893,7 @@ mod tests {
 
             // Send a nullify vote from the leader in view skip_timeout.
             let round = Round::new(epoch, View::new(skip_timeout));
-            let leader_vote = Nullify::sign::<Sha256Digest>(&schemes[1], round).unwrap();
+            let leader_vote = Nullify::<_, Sha256Digest>::sign(&schemes[1], round).unwrap();
             leader_sender
                 .send(
                     Recipients::One(me.clone()),
@@ -3152,7 +3152,7 @@ mod tests {
                 .send(
                     Recipients::One(me.clone()),
                     Vote::<S, Sha256Digest>::Nullify(
-                        Nullify::sign::<Sha256Digest>(
+                        Nullify::<_, Sha256Digest>::sign(
                             &schemes[usize::from(leader_idx)],
                             Round::new(epoch, buffered_view),
                         )
@@ -3273,7 +3273,7 @@ mod tests {
             batcher_mailbox.update(Span::none(), current_view, leader, View::zero(), None);
 
             let wrong_view = current_view.next();
-            let leader_nullify = Nullify::sign::<Sha256Digest>(
+            let leader_nullify = Nullify::<_, Sha256Digest>::sign(
                 &schemes[usize::from(leader)],
                 Round::new(epoch, wrong_view),
             )
@@ -3593,7 +3593,7 @@ mod tests {
             // Prime leader activity before jumping straight to view 5 so the
             // inactivity heuristic does not interfere with the metric assertions.
             let leader = Participant::new(1);
-            let warmup_vote = Nullify::sign::<Sha256Digest>(
+            let warmup_vote = Nullify::<_, Sha256Digest>::sign(
                 &schemes[usize::from(leader)],
                 Round::new(epoch, View::new(1)),
             )

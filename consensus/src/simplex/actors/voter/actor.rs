@@ -343,7 +343,7 @@ impl<
     }
 
     /// Persists our nullify vote to the journal for crash recovery.
-    async fn handle_nullify(&mut self, nullify: Nullify<S>) {
+    async fn handle_nullify(&mut self, nullify: Nullify<S, D>) {
         self.append_journal(nullify.view(), Artifact::Nullify(nullify))
             .await;
     }
@@ -354,7 +354,7 @@ impl<
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         retry: bool,
-        nullify: Nullify<S>,
+        nullify: Nullify<S, D>,
     ) {
         // Process nullify (and persist it if it is a first attempt)
         if !retry {
@@ -405,7 +405,7 @@ impl<
     /// in the provided view (regardless of whether we built a proposal).
     async fn handle_nullification(
         &mut self,
-        nullification: Nullification<S>,
+        nullification: Nullification<S, D>,
     ) -> Option<Certificate<S, D>> {
         let view = nullification.view();
         let artifact = Artifact::Nullification(nullification.clone());
@@ -499,7 +499,7 @@ impl<
 
         // Broadcast the notarize vote
         debug!(
-            proposal=?notarize.proposal,
+            proposal=?notarize.payload,
             "broadcasting notarize"
         );
         self.broadcast_vote(vote_sender, Vote::Notarize(notarize));
@@ -533,7 +533,7 @@ impl<
         // Persist the certificate before informing others.
         self.sync_journal(view).await;
         // Broadcast the notarization certificate
-        debug!(proposal=?notarization.proposal, "broadcasting notarization");
+        debug!(proposal=?notarization.payload, "broadcasting notarization");
         self.broadcast_certificate(
             certificate_sender,
             Certificate::Notarization(notarization.clone()),
@@ -611,7 +611,7 @@ impl<
 
         // Broadcast the finalize vote.
         debug!(
-            proposal=?finalize.proposal,
+            proposal=?finalize.payload,
             "broadcasting finalize"
         );
         self.broadcast_vote(vote_sender, Vote::Finalize(finalize));
@@ -645,7 +645,7 @@ impl<
         // Persist the proof before broadcasting it.
         self.sync_journal(view).await;
         // Broadcast the finalization certificate.
-        debug!(proposal=?finalization.proposal, "broadcasting finalization");
+        debug!(proposal=?finalization.payload, "broadcasting finalization");
         self.broadcast_certificate(
             certificate_sender,
             Certificate::Finalization(finalization.clone()),

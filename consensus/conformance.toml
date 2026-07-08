@@ -126,11 +126,11 @@ hash = "c78e26f7142aed21d0bb8bef88e007baae0fe34b3a2533d1085f7c2b08464e95"
 n_cases = 65536
 hash = "d115ac2d81886e689a239b6fa8a277d69940876e9bbd1b27964284eb046a99e2"
 
-["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Nullification<Scheme>>"]
+["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Nullification<Scheme,Sha256Digest>>"]
 n_cases = 65536
 hash = "a44138ebc90cfdf8fdce3174ecf08831716245dc20fc666f30b005c6ae2c34d5"
 
-["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Nullify<Scheme>>"]
+["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Nullify<Scheme,Sha256Digest>>"]
 n_cases = 65536
 hash = "d8661e9c02a7c5d6578b48297569075adadd608a2e294c695b965125033204ec"
 

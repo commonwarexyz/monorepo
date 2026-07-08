@@ -287,12 +287,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns `Some((is_retry, nullify))` where `is_retry` is true when this is not the first
     /// nullify emission for `view`. Returns `None` if `view` is not the current view or if we
     /// have already broadcast a finalize vote for this view.
-    pub fn construct_nullify(&mut self, view: View) -> Option<(bool, Nullify<S>)> {
+    pub fn construct_nullify(&mut self, view: View) -> Option<(bool, Nullify<S, D>)> {
         if view != self.view {
             return None;
         }
         let is_retry = self.create_round(view).construct_nullify()?;
-        let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
+        let nullify = Nullify::sign(&self.scheme, Rnd::new(self.epoch, view))?;
         if !is_retry {
             let round = self.create_round(view);
             let reason = if round.proposal().is_some() {
@@ -360,7 +360,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// yet and stopping here could halt the network (stability relies on coming to a shared understanding
     /// of what can be considered a valid parent, otherwise two regions of the network could build on ancestries
     /// the other considers invalid with no way to resolve the conflict).
-    pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
+    pub fn add_nullification(&mut self, nullification: Nullification<S, D>) -> bool {
         let view = nullification.view();
         self.enter_view(view.next());
         self.set_leader(view.next(), Some(&nullification.certificate));
@@ -440,7 +440,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Return a nullification certificate, if one exists.
-    pub fn nullification(&self, view: View) -> Option<&Nullification<S>> {
+    pub fn nullification(&self, view: View) -> Option<&Nullification<S, D>> {
         self.views
             .get(&view)
             .and_then(|round| round.nullification())
@@ -461,7 +461,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Construct a nullification certificate once the round has quorum.
-    pub fn broadcast_nullification(&mut self, view: View) -> Option<Nullification<S>> {
+    pub fn broadcast_nullification(&mut self, view: View) -> Option<Nullification<S, D>> {
         self.views
             .get_mut(&view)
             .and_then(|round| round.broadcast_nullification())
@@ -848,7 +848,7 @@ mod tests {
                 .iter()
                 .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
                 .collect();
-            let finalization = Finalization::from_finalizes(&verifier, votes.iter(), &Sequential)
+            let finalization = Finalization::from_votes(&verifier, votes.iter(), &Sequential)
                 .expect("finalization");
             state.add_finalization(finalization);
             assert_eq!(state.last_finalized(), finalize_view);
@@ -902,7 +902,7 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, notarize_proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
             state.add_notarization(notarization);
 
@@ -917,12 +917,11 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, nullify_round).expect("nullify")
+                    Nullify::<_, Sha256Digest>::sign(scheme, nullify_round).expect("nullify")
                 })
                 .collect();
-            let nullification =
-                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
-                    .expect("nullification");
+            let nullification = Nullification::from_votes(&verifier, &nullify_votes, &Sequential)
+                .expect("nullification");
             state.add_nullification(nullification);
 
             // Produce candidate once
@@ -940,7 +939,7 @@ mod tests {
                 .map(|scheme| Finalize::sign(scheme, finalize_proposal.clone()).unwrap())
                 .collect();
             let finalization =
-                Finalization::from_finalizes(&verifier, finalize_votes.iter(), &Sequential)
+                Finalization::from_votes(&verifier, finalize_votes.iter(), &Sequential)
                     .expect("finalization");
             state.add_finalization(finalization);
 
@@ -1153,7 +1152,7 @@ mod tests {
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
                 .collect();
-            let notarization = Notarization::from_notarizes(&verifier, votes.iter(), &Sequential)
+            let notarization = Notarization::from_votes(&verifier, votes.iter(), &Sequential)
                 .expect("notarization");
             let (added, equivocator) = state.add_notarization(notarization);
             assert!(added);
@@ -1208,12 +1207,12 @@ mod tests {
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(state.epoch(), view_1))
+                    Nullify::<_, Sha256Digest>::sign(scheme, Rnd::new(state.epoch(), view_1))
                         .expect("nullify")
                 })
                 .collect();
             let nullification =
-                Nullification::from_nullifies(&verifier, &votes, &Sequential).expect("nullify");
+                Nullification::from_votes(&verifier, &votes, &Sequential).expect("nullify");
             assert!(state.add_nullification(nullification));
             assert_eq!(state.current_view(), View::new(2));
 
@@ -1271,12 +1270,12 @@ mod tests {
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(state.epoch(), view_1))
+                    Nullify::<_, Sha256Digest>::sign(scheme, Rnd::new(state.epoch(), view_1))
                         .expect("nullify")
                 })
                 .collect();
             let nullification =
-                Nullification::from_nullifies(&verifier, &votes, &Sequential).expect("nullify");
+                Nullification::from_votes(&verifier, &votes, &Sequential).expect("nullify");
             assert!(state.add_nullification(nullification));
 
             let view_2 = state.current_view();
@@ -1387,11 +1386,11 @@ mod tests {
             let current_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, current_round).expect("nullify")
+                    Nullify::<_, Sha256Digest>::sign(scheme, current_round).expect("nullify")
                 })
                 .collect();
             let current_nullification =
-                Nullification::from_nullifies(&verifier, &current_votes, &Sequential)
+                Nullification::from_votes(&verifier, &current_votes, &Sequential)
                     .expect("nullification");
             assert!(state.add_nullification(current_nullification));
             assert_eq!(state.current_view(), next);
@@ -1447,7 +1446,7 @@ mod tests {
                 .map(|scheme| Finalize::sign(scheme, proposal_a.clone()).unwrap())
                 .collect();
             let finalization =
-                Finalization::from_finalizes(&verifier, finalization_votes.iter(), &Sequential)
+                Finalization::from_votes(&verifier, finalization_votes.iter(), &Sequential)
                     .expect("finalization");
             state.add_finalization(finalization);
 
@@ -1517,7 +1516,7 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential)
                     .unwrap();
             state.add_notarization(notarization);
 
@@ -1569,7 +1568,7 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
             state.add_notarization(notarization.clone());
 
@@ -1591,7 +1590,7 @@ mod tests {
                 .map(|scheme| Finalize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let finalization =
-                Finalization::from_finalizes(&verifier, finalize_votes.iter(), &Sequential)
+                Finalization::from_votes(&verifier, finalize_votes.iter(), &Sequential)
                     .expect("finalization");
             state.add_finalization(finalization.clone());
 
@@ -1633,7 +1632,7 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential)
                     .unwrap();
             state.add_notarization(notarization);
             state.create_round(View::new(2));
@@ -1679,12 +1678,12 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), View::new(1)))
+                    Nullify::<_, Sha256Digest>::sign(scheme, Rnd::new(Epoch::new(1), View::new(1)))
                         .unwrap()
                 })
                 .collect();
             let nullification =
-                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential).unwrap();
+                Nullification::from_votes(&verifier, &nullify_votes, &Sequential).unwrap();
             state.add_nullification(nullification);
 
             // Get genesis payload
@@ -1729,7 +1728,7 @@ mod tests {
                 .map(|scheme| Finalize::sign(scheme, proposal_a.clone()).unwrap())
                 .collect();
             let finalization =
-                Finalization::from_finalizes(&verifier, finalization_votes.iter(), &Sequential)
+                Finalization::from_votes(&verifier, finalization_votes.iter(), &Sequential)
                     .expect("finalization");
             state.add_finalization(finalization);
 
@@ -1785,7 +1784,7 @@ mod tests {
                 .map(|scheme| Finalize::sign(scheme, finalized_proposal.clone()).unwrap())
                 .collect();
             let finalization =
-                Finalization::from_finalizes(&verifier, finalization_votes.iter(), &Sequential)
+                Finalization::from_votes(&verifier, finalization_votes.iter(), &Sequential)
                     .expect("finalization");
             state.add_finalization(finalization);
 
@@ -1910,7 +1909,7 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential)
                     .expect("notarization");
             let (added, _) = state.add_notarization(notarization);
             assert!(added);
@@ -1960,7 +1959,7 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
             let (added, equivocator) = state.add_notarization(notarization);
             assert!(added);
@@ -2012,7 +2011,7 @@ mod tests {
                 .take(3)
                 .map(|scheme| Notarize::sign(scheme, proposal_b.clone()).unwrap())
                 .collect();
-            let conflicting = Notarization::from_notarizes(&verifier, votes_b.iter(), &Sequential)
+            let conflicting = Notarization::from_votes(&verifier, votes_b.iter(), &Sequential)
                 .expect("certificate");
             state.add_notarization(conflicting.clone());
             state.replay(&Artifact::Notarization(conflicting.clone()));
@@ -2074,7 +2073,7 @@ mod tests {
                     .iter()
                     .map(|s| Notarize::sign(s, proposal.clone()).unwrap())
                     .collect();
-                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap()
+                Notarization::from_votes(&verifier, votes.iter(), &Sequential).unwrap()
             };
 
             // Helper to create finalization for a view
@@ -2088,7 +2087,7 @@ mod tests {
                     .iter()
                     .map(|s| Finalize::sign(s, proposal.clone()).unwrap())
                     .collect();
-                Finalization::from_finalizes(&verifier, votes.iter(), &Sequential).unwrap()
+                Finalization::from_votes(&verifier, votes.iter(), &Sequential).unwrap()
             };
 
             let mut pool = AbortablePool::<()>::default();
@@ -2195,7 +2194,7 @@ mod tests {
                     .iter()
                     .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
                     .collect();
-                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap()
+                Notarization::from_votes(&verifier, votes.iter(), &Sequential).unwrap()
             };
 
             let make_finalization = |view: View| {
@@ -2208,7 +2207,7 @@ mod tests {
                     .iter()
                     .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
                     .collect();
-                Finalization::from_finalizes(&verifier, votes.iter(), &Sequential).unwrap()
+                Finalization::from_votes(&verifier, votes.iter(), &Sequential).unwrap()
             };
 
             let stale_view = View::new(2);
@@ -2269,7 +2268,7 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
             let (added, _) = state.add_notarization(notarization);
             assert!(added);
@@ -2277,12 +2276,11 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), view)).unwrap()
+                    Nullify::<_, Sha256Digest>::sign(scheme, Rnd::new(Epoch::new(1), view)).unwrap()
                 })
                 .collect();
-            let nullification =
-                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
-                    .expect("nullification");
+            let nullification = Nullification::from_votes(&verifier, &nullify_votes, &Sequential)
+                .expect("nullification");
             assert!(state.add_nullification(nullification));
 
             let candidates = state.certify_candidates();
@@ -2324,7 +2322,7 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
             let (added, _) = state.add_notarization(notarization);
             assert!(added);
@@ -2340,12 +2338,11 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), view)).unwrap()
+                    Nullify::<_, Sha256Digest>::sign(scheme, Rnd::new(Epoch::new(1), view)).unwrap()
                 })
                 .collect();
-            let nullification =
-                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
-                    .expect("nullification");
+            let nullification = Nullification::from_votes(&verifier, &nullify_votes, &Sequential)
+                .expect("nullification");
             assert!(state.add_nullification(nullification));
             assert!(!state.is_certify_aborted(view));
 
@@ -2388,7 +2385,7 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
             let (added, _) = state.add_notarization(notarization);
             assert!(added);
@@ -2396,13 +2393,12 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), parent_view))
+                    Nullify::<_, Sha256Digest>::sign(scheme, Rnd::new(Epoch::new(1), parent_view))
                         .unwrap()
                 })
                 .collect();
-            let nullification =
-                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
-                    .expect("nullification");
+            let nullification = Nullification::from_votes(&verifier, &nullify_votes, &Sequential)
+                .expect("nullification");
             assert!(state.add_nullification(nullification));
 
             // With RoundRobin and 4 participants, epoch=1 implies view=3 leader is index 0 (our signer).
@@ -2461,7 +2457,7 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
             let (added, _) = state.add_notarization(notarization);
             assert!(added);
@@ -2469,13 +2465,12 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), parent_view))
+                    Nullify::<_, Sha256Digest>::sign(scheme, Rnd::new(Epoch::new(1), parent_view))
                         .unwrap()
                 })
                 .collect();
-            let nullification =
-                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
-                    .expect("nullification");
+            let nullification = Nullification::from_votes(&verifier, &nullify_votes, &Sequential)
+                .expect("nullification");
             assert!(state.add_nullification(nullification));
             assert_eq!(state.current_view(), child_view);
             assert_eq!(state.leader_index(child_view), Some(Participant::new(0)));
@@ -2541,7 +2536,7 @@ mod tests {
                 .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
             let (added, _) = state.add_notarization(notarization);
             assert!(added);
@@ -2570,13 +2565,12 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), blocked_view))
+                    Nullify::<_, Sha256Digest>::sign(scheme, Rnd::new(Epoch::new(1), blocked_view))
                         .unwrap()
                 })
                 .collect();
-            let nullification =
-                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
-                    .expect("nullification");
+            let nullification = Nullification::from_votes(&verifier, &nullify_votes, &Sequential)
+                .expect("nullification");
             assert!(state.add_nullification(nullification));
 
             let verified = state.try_verify().expect("verify context should exist");

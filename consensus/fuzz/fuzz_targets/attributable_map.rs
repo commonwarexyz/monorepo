@@ -8,7 +8,9 @@ use commonware_consensus::{
     },
     types::{Epoch, Participant, Round, View},
 };
-use commonware_cryptography::{certificate::Attestation, ed25519::PrivateKey, Signer};
+use commonware_cryptography::{
+    certificate::Attestation, ed25519::PrivateKey, sha256::Digest as Sha256Digest, Signer,
+};
 use commonware_math::algebra::Random;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
@@ -39,9 +41,9 @@ struct FuzzInput {
 fn make_vote(
     data: &VoteData,
     sig: commonware_cryptography::ed25519::Signature,
-) -> Nullify<ed25519::Scheme> {
+) -> Nullify<ed25519::Scheme, Sha256Digest> {
     Nullify {
-        round: Round::new(data.epoch, data.view),
+        payload: Round::new(data.epoch, data.view),
         attestation: Attestation {
             signer: data.signer,
             signature: sig.into(),
@@ -54,7 +56,7 @@ fn fuzz(input: FuzzInput) {
     let signer = PrivateKey::random(&mut rng);
     let dummy_sig = signer.sign(b"fuzz", b"dummy");
 
-    let mut map: AttributableMap<Nullify<ed25519::Scheme>> =
+    let mut map: AttributableMap<Nullify<ed25519::Scheme, Sha256Digest>> =
         AttributableMap::new(input.participants as usize);
     let mut inserted_signers = std::collections::HashSet::new();
 

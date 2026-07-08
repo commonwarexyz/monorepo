@@ -279,11 +279,7 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(
-                    self.context.as_mut(),
-                    &self.scheme,
-                    &self.strategy,
-                ) {
+                if !nullification.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }

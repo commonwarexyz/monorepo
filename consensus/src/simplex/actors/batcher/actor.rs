@@ -461,7 +461,7 @@ where
                     }
                     Certificate::Nullification(nullification) => {
                         // Verify the certificate
-                        if !nullification.verify::<_, D>(
+                        if !nullification.verify(
                             self.context.as_mut(),
                             &self.scheme,
                             &self.strategy,

@@ -58,7 +58,7 @@ pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest>
     pub notarizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<S::PublicKey>>>>,
-    pub nullifications: Arc<Mutex<HashMap<View, Nullification<S>>>>,
+    pub nullifications: Arc<Mutex<HashMap<View, Nullification<S, D>>>>,
     pub finalizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub finalizations: Arc<Mutex<HashMap<View, Finalization<S, D>>>>,
     pub faults: Arc<Mutex<Faults<S, D>>>,
@@ -184,7 +184,7 @@ where
                     .lock()
                     .entry(notarize.view())
                     .or_default()
-                    .entry(notarize.proposal.payload)
+                    .entry(notarize.payload.payload)
                     .or_default()
                     .insert(public_key);
             }
@@ -194,7 +194,7 @@ where
                 if !self.scheme.verify_certificate::<_, D, N3f1>(
                     &mut *self.context.lock(),
                     Subject::Notarize {
-                        proposal: &notarization.proposal,
+                        proposal: &notarization.payload,
                     },
                     &notarization.certificate,
                     &Sequential,
@@ -214,7 +214,7 @@ where
                     return Feedback::Ok;
                 }
                 let encoded = nullify.encode();
-                Nullify::<S>::decode(encoded).unwrap();
+                Nullify::<S, D>::decode(encoded).unwrap();
                 let public_key = self.participants.key(nullify.signer()).unwrap().clone();
                 self.nullifies
                     .lock()
@@ -228,7 +228,7 @@ where
                 if !self.scheme.verify_certificate::<_, D, N3f1>(
                     &mut *self.context.lock(),
                     Subject::Nullify {
-                        round: nullification.round,
+                        round: nullification.payload,
                     },
                     &nullification.certificate,
                     &Sequential,
@@ -237,12 +237,12 @@ where
                     return Feedback::Ok;
                 }
                 let encoded = nullification.encode();
-                Nullification::<S>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
+                Nullification::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
                 self.nullifications
                     .lock()
                     .insert(view, nullification.clone());
-                self.certified(nullification.round, &nullification.certificate);
+                self.certified(nullification.payload, &nullification.certificate);
             }
             Activity::Finalize(finalize) => {
                 if !finalize.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
@@ -256,7 +256,7 @@ where
                     .lock()
                     .entry(finalize.view())
                     .or_default()
-                    .entry(finalize.proposal.payload)
+                    .entry(finalize.payload.payload)
                     .or_default()
                     .insert(public_key);
             }
@@ -266,7 +266,7 @@ where
                 if !self.scheme.verify_certificate::<_, D, N3f1>(
                     &mut *self.context.lock(),
                     Subject::Finalize {
-                        proposal: &finalization.proposal,
+                        proposal: &finalization.payload,
                     },
                     &finalization.certificate,
                     &Sequential,

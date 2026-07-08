@@ -561,7 +561,7 @@ impl EngineDefinition for SingleDbEngine {
         if should_state_sync {
             let finalization = sync_floor.expect("sync floor missing");
             let block = marshal_mailbox
-                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+                .subscribe_by_commitment(finalization.payload.payload, CommitmentFallback::Wait)
                 .await
                 .expect("sync floor block must be available");
             let height = block.height();

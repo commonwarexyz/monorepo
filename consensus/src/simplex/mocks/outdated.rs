@@ -66,7 +66,7 @@ where
             match msg {
                 Vote::Notarize(notarize) => {
                     // Store proposal
-                    self.history.insert(view, notarize.proposal.clone());
+                    self.history.insert(view, notarize.payload.clone());
 
                     // Notarize old digest
                     let view = view.saturating_sub(self.view_delta);
@@ -80,7 +80,7 @@ where
                 }
                 Vote::Finalize(finalize) => {
                     // Store proposal
-                    self.history.insert(view, finalize.proposal.clone());
+                    self.history.insert(view, finalize.payload.clone());
 
                     // Finalize old digest
                     let view = view.saturating_sub(self.view_delta);

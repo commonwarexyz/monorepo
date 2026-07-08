@@ -226,7 +226,7 @@ mod tests {
             })
             .expect("signing failed");
         let notarize = Notarize {
-            proposal,
+            payload: proposal,
             attestation,
         };
 
@@ -271,7 +271,7 @@ mod tests {
             })
             .expect("signing failed");
         let notarize = Notarize {
-            proposal,
+            payload: proposal,
             attestation,
         };
 
@@ -318,7 +318,7 @@ mod tests {
             .expect("failed to assemble certificate");
 
         let notarization = Notarization {
-            proposal,
+            payload: proposal,
             certificate,
         };
 
@@ -359,7 +359,7 @@ mod tests {
             .expect("signing failed");
 
         let notarize = Notarize {
-            proposal,
+            payload: proposal,
             attestation,
         };
 
@@ -395,7 +395,7 @@ mod tests {
             .expect("signing failed");
 
         let notarize = Notarize {
-            proposal,
+            payload: proposal,
             attestation,
         };
 

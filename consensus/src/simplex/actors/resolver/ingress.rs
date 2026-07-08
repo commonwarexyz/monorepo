@@ -352,10 +352,10 @@ mod tests {
         let round = Round::new(EPOCH, view);
         let votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).expect("nullify"))
+            .map(|scheme| Nullify::<_, Sha256Digest>::sign(scheme, round).expect("nullify"))
             .collect();
         Certificate::Nullification(
-            Nullification::from_nullifies(&verifier, &votes, &Sequential).expect("nullification"),
+            Nullification::from_votes(&verifier, &votes, &Sequential).expect("nullification"),
         )
     }
 
@@ -367,7 +367,7 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("finalize"))
             .collect();
         Certificate::Finalization(
-            Finalization::from_finalizes(&verifier, &votes, &Sequential).expect("finalization"),
+            Finalization::from_votes(&verifier, &votes, &Sequential).expect("finalization"),
         )
     }
 

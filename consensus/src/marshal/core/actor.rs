@@ -675,7 +675,7 @@ where
             }
             Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
-                let commitment = notarization.proposal.payload;
+                let commitment = notarization.payload.payload;
                 let digest = V::commitment_to_inner(commitment);
 
                 // Persist the notarization; the certify barrier folds in its
@@ -707,7 +707,7 @@ where
             }
             Message::Finalization { finalization, .. } => {
                 let round = finalization.round();
-                let commitment = finalization.proposal.payload;
+                let commitment = finalization.payload.payload;
                 let digest = V::commitment_to_inner(commitment);
 
                 // Cache finalization by round.
@@ -986,7 +986,7 @@ where
                     debug!(?round, "notarization missing on request");
                     return;
                 };
-                let commitment = notarization.proposal.payload;
+                let commitment = notarization.payload.payload;
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
                     debug!(?commitment, "block missing on request");
                     return;
@@ -1117,7 +1117,7 @@ where
             "floor finalization must verify"
         );
 
-        let commitment = finalization.proposal.payload;
+        let commitment = finalization.payload.payload;
         let digest = V::commitment_to_inner(commitment);
         self.cache
             .put_finalization(round, digest, finalization.clone())
@@ -1398,7 +1398,7 @@ where
                 // TODO(https://github.com/commonwarexyz/monorepo/issues/3938): Apply this pattern
                 // conditionally to `Request::Block` and `Request::Notarized`, if the requester knows
                 // the requested block is certified.
-                let commitment = finalization.proposal.payload;
+                let commitment = finalization.payload.payload;
                 if block.height() != height || block.digest() != V::commitment_to_inner(commitment)
                 {
                     response.send_lossy(false);
@@ -1438,7 +1438,7 @@ where
 
                 // Use the notarization payload to derive the block decode config. Below, the
                 // decoded block is checked against the same payload.
-                let commitment = notarization.proposal.payload;
+                let commitment = notarization.payload.payload;
                 if !V::check_payload(scheme.as_ref(), commitment) {
                     response.send_lossy(false);
                     return false;
@@ -1449,7 +1449,7 @@ where
                     return false;
                 };
 
-                if V::commitment(&block) != notarization.proposal.payload {
+                if V::commitment(&block) != notarization.payload.payload {
                     response.send_lossy(false);
                     return false;
                 }
@@ -1484,13 +1484,13 @@ where
             .map(|item| match item {
                 PendingVerification::Finalized { finalization, .. } => (
                     Subject::Finalize {
-                        proposal: &finalization.proposal,
+                        proposal: &finalization.payload,
                     },
                     &finalization.certificate,
                 ),
                 PendingVerification::Notarized { notarization, .. } => (
                     Subject::Notarize {
-                        proposal: &notarization.proposal,
+                        proposal: &notarization.payload,
                     },
                     &notarization.certificate,
                 ),
@@ -1541,7 +1541,7 @@ where
                 } => {
                     // Valid finalization received.
                     response.send_lossy(true);
-                    let block = V::from_application_block(block, finalization.proposal.payload);
+                    let block = V::from_application_block(block, finalization.payload.payload);
                     let round = finalization.round();
                     let height = block.height();
                     let digest = block.digest();
@@ -1568,7 +1568,7 @@ where
                     // Valid notarization received.
                     response.send_lossy(true);
                     let round = notarization.round();
-                    let commitment = notarization.proposal.payload;
+                    let commitment = notarization.payload.payload;
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");
 
@@ -1787,10 +1787,7 @@ where
         height: Height,
     ) -> Option<(Height, <V::Block as Digestible>::Digest)> {
         if let Some(finalization) = self.get_finalization_by_height(height).await {
-            return Some((
-                height,
-                V::commitment_to_inner(finalization.proposal.payload),
-            ));
+            return Some((height, V::commitment_to_inner(finalization.payload.payload)));
         }
 
         self.get_finalized_block(height)
@@ -1886,7 +1883,7 @@ where
             .expect("finalization missing");
         Some((
             height,
-            V::commitment_to_inner(finalization.proposal.payload),
+            V::commitment_to_inner(finalization.payload.payload),
             finalization.round(),
         ))
     }
@@ -2002,7 +1999,7 @@ where
                     .get_finalization_by_height(last_finalized)
                     .await
                     .expect("finalization missing");
-                let commitment = finalization.proposal.payload;
+                let commitment = finalization.payload.payload;
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     // If found, persist the block.
                     let digest = block.digest();

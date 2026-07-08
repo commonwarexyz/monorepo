@@ -97,7 +97,7 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
 
     /// Returns true when `commitment` is the awaited anchor.
     pub(super) fn matches_pending_anchor(&self, commitment: C) -> bool {
-        matches!(&self.pending, Some(pending) if pending.proposal.payload == commitment)
+        matches!(&self.pending, Some(pending) if pending.payload.payload == commitment)
     }
 
     /// Records a verified floor finalization whose block anchor still needs to arrive.

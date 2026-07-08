@@ -290,13 +290,13 @@ mod tests {
         schemes: &[TestScheme],
         verifier: &TestScheme,
         view: View,
-    ) -> Nullification<TestScheme> {
+    ) -> Nullification<TestScheme, Sha256Digest> {
         let round = Round::new(EPOCH, view);
         let votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
+            .map(|scheme| Nullify::<_, Sha256Digest>::sign(scheme, round).unwrap())
             .collect();
-        Nullification::from_nullifies(verifier, &votes, &Sequential).expect("nullification quorum")
+        Nullification::from_votes(verifier, &votes, &Sequential).expect("nullification quorum")
     }
 
     fn build_notarization(
@@ -313,7 +313,7 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(verifier, &votes, &Sequential).expect("notarization quorum")
+        Notarization::from_votes(verifier, &votes, &Sequential).expect("notarization quorum")
     }
 
     fn build_finalization(
@@ -330,7 +330,7 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(verifier, &votes, &Sequential).expect("finalization quorum")
+        Finalization::from_votes(verifier, &votes, &Sequential).expect("finalization quorum")
     }
 
     fn fetch(view: u64, cause: u64, reason: FetchReason) -> Effect {

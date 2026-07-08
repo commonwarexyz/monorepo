@@ -88,12 +88,12 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
             {
                 Certificate::Notarization(notarization) => (
                     notarization.view(),
-                    notarization.proposal.payload,
+                    notarization.payload.payload,
                     notarization.certificate,
                 ),
                 Certificate::Finalization(finalization) => (
                     finalization.view(),
-                    finalization.proposal.payload,
+                    finalization.payload.payload,
                     finalization.certificate,
                 ),
                 _ => continue, // we don't build on nullifications to avoid tracking complexity

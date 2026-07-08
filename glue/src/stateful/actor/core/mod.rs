@@ -381,7 +381,7 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        Finalization::from_finalizes(&fixture.verifier, &votes, &Sequential)
+        Finalization::from_votes(&fixture.verifier, &votes, &Sequential)
             .expect("finalization quorum")
     }
 

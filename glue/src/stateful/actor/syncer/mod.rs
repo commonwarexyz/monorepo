@@ -336,7 +336,7 @@ where
     // already available.
     let floor = {
         let block = marshal
-            .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+            .subscribe_by_commitment(finalization.payload.payload, CommitmentFallback::Wait)
             .await
             .expect("marshal must yield floor block");
         V::into_inner(block)
@@ -345,7 +345,7 @@ where
     ResolvedFloor {
         anchor: Anchor::from(&floor),
         targets: A::sync_targets(&floor),
-        marker: FloorMarker::new(floor.height(), finalization.proposal.payload),
+        marker: FloorMarker::new(floor.height(), finalization.payload.payload),
     }
 }
 

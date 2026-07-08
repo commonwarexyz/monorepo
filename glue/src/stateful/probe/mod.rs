@@ -728,7 +728,7 @@ mod test {
             finalization: Finalization<Scheme, Sha256Digest>,
         ) {
             let mut marshal = self.nodes[index].marshal.clone();
-            let round = finalization.proposal.round;
+            let round = finalization.payload.round;
             assert!(marshal.proposed(round, block).await);
             let _ = marshal.report(Activity::Finalization(finalization));
         }
@@ -775,7 +775,7 @@ mod test {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
             .collect();
         let finalization =
-            Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).expect("recover");
+            Finalization::from_votes(&schemes[0], &finalizes, &Sequential).expect("recover");
         (block, finalization)
     }
 

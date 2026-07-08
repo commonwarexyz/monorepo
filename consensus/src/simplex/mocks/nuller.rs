@@ -60,7 +60,7 @@ where
                     sender.send(Recipients::All, msg, true);
 
                     // Finalize digest
-                    let proposal = notarize.proposal;
+                    let proposal = notarize.payload;
                     let f = Finalize::<S, _>::sign(&self.scheme, proposal).unwrap();
                     let msg = Vote::Finalize(f).encode();
                     sender.send(Recipients::All, msg, true);

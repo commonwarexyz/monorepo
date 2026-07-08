@@ -956,7 +956,7 @@ mod tests {
                         let Some(digest) = notarized.get(&view) else {
                             continue;
                         };
-                        assert_eq!(&notarization.proposal.payload, digest);
+                        assert_eq!(&notarization.payload.payload, digest);
                     }
                 }
                 {
@@ -1008,7 +1008,7 @@ mod tests {
                         let Some(digest) = finalized.get(&view) else {
                             continue;
                         };
-                        assert_eq!(&finalization.proposal.payload, digest);
+                        assert_eq!(&finalization.payload.payload, digest);
                     }
                 }
             }
@@ -3513,7 +3513,7 @@ mod tests {
                     .take(quorum)
                     .map(|scheme| TNotarize::sign(scheme, proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_votes(&schemes[0], &votes, &Sequential)
                     .expect("notarization requires quorum")
             };
             let finalization = |view: View, parent: View, payload: &[u8]| {
@@ -3524,7 +3524,7 @@ mod tests {
                     .take(quorum)
                     .map(|scheme| TFinalize::sign(scheme, proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_votes(&schemes[0], &votes, &Sequential)
                     .expect("finalization requires quorum")
             };
 
@@ -4993,7 +4993,7 @@ mod tests {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_votes(&schemes[0], &votes, &Sequential)
                     .expect("finalization quorum")
             };
             // Helper: assemble notarization from explicit signer indices
@@ -5001,14 +5001,14 @@ mod tests {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_votes(&schemes[0], &votes, &Sequential)
                     .expect("notarization quorum")
             };
-            let build_nullification = |round: Round| -> TNullification<_> {
+            let build_nullification = |round: Round| -> TNullification<_, D> {
                 let votes: Vec<_> = (0..=quorum)
-                    .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
+                    .map(|i| TNullify::<_, D>::sign(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                TNullification::from_votes(&schemes[0], &votes, &Sequential)
                     .expect("nullification quorum")
             };
             // Choose F=1 and construct B_1, B_2A, B_2B
@@ -5692,7 +5692,7 @@ mod tests {
                         let Some(digest) = notarized.get(&view) else {
                             continue;
                         };
-                        assert_eq!(&notarization.proposal.payload, digest);
+                        assert_eq!(&notarization.payload.payload, digest);
                     }
                 }
                 {
@@ -5737,7 +5737,7 @@ mod tests {
                         let Some(digest) = finalized.get(&view) else {
                             continue;
                         };
-                        assert_eq!(&finalization.proposal.payload, digest);
+                        assert_eq!(&finalization.payload.payload, digest);
                     }
                 }
             }
@@ -6143,7 +6143,7 @@ mod tests {
                 for reporter in reporters.iter().skip(honest_start) {
                     let finalizations = reporter.finalizations.lock();
                     for (view, finalization) in finalizations.iter() {
-                        let digest = finalization.proposal.payload;
+                        let digest = finalization.payload.payload;
                         if let Some(existing) = finalized_at_view.get(view) {
                             assert_eq!(
                                 existing, &digest,

@@ -139,7 +139,7 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Notarization::from_notarizes(&schemes[0], &votes, &Sequential)
+        let certificate = Notarization::from_votes(&schemes[0], &votes, &Sequential)
             .expect("notarization requires a quorum of votes");
         (votes, certificate)
     }
@@ -157,7 +157,7 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Finalization::from_finalizes(&schemes[0], &votes, &Sequential)
+        let certificate = Finalization::from_votes(&schemes[0], &votes, &Sequential)
             .expect("finalization requires a quorum of votes");
         (votes, certificate)
     }
@@ -166,13 +166,16 @@ mod tests {
         schemes: &[S],
         round: Round,
         count: u32,
-    ) -> (Vec<Nullify<S>>, Nullification<S>) {
+    ) -> (
+        Vec<Nullify<S, Sha256Digest>>,
+        Nullification<S, Sha256Digest>,
+    ) {
         let votes: Vec<_> = schemes
             .iter()
             .take(count as usize)
-            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
+            .map(|scheme| Nullify::<_, Sha256Digest>::sign(scheme, round).unwrap())
             .collect();
-        let certificate = Nullification::from_nullifies(&schemes[0], &votes, &Sequential)
+        let certificate = Nullification::from_votes(&schemes[0], &votes, &Sequential)
             .expect("nullification requires a quorum of votes");
         (votes, certificate)
     }
@@ -715,7 +718,7 @@ mod tests {
             let (mut finalizes, journal_finalization) =
                 build_finalization(&schemes, &journal_proposal, quorum);
             let finalize = finalizes.remove(0);
-            let finalized_payload = finalize.proposal.payload;
+            let finalized_payload = finalize.payload.payload;
             seed_voter_journal_artifacts(
                 context.child("seed_journal"),
                 partition.clone(),
@@ -1515,7 +1518,7 @@ mod tests {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
-                    assert_eq!(notarization.proposal, proposal_b);
+                    assert_eq!(notarization.payload, proposal_b);
                     assert_eq!(notarization, notarization_b);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1631,7 +1634,7 @@ mod tests {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
-                    assert_eq!(notarization.proposal, proposal_a);
+                    assert_eq!(notarization.payload, proposal_a);
                 }
                 _ => panic!("unexpected resolver message"),
             }
@@ -1656,7 +1659,7 @@ mod tests {
                 match message {
                     batcher::Message::Constructed(Vote::Finalize(finalize)) => {
                         assert_eq!(
-                            finalize.proposal, proposal_a,
+                            finalize.payload, proposal_a,
                             "finalize should be for certificate's proposal A"
                         );
                         break;
@@ -1807,7 +1810,7 @@ mod tests {
                     certificate: Certificate::Notarization(n),
                     ..
                 } => {
-                    assert_eq!(n.proposal, proposal);
+                    assert_eq!(n.payload, proposal);
                 }
                 _ => panic!("unexpected resolver message"),
             }
@@ -1831,7 +1834,7 @@ mod tests {
                 let message = batcher_receiver.recv().await.unwrap();
                 match message {
                     batcher::Message::Constructed(Vote::Finalize(finalize)) => {
-                        assert_eq!(finalize.proposal, proposal);
+                        assert_eq!(finalize.payload, proposal);
                         break;
                     }
                     batcher::Message::Update { .. } => {}
@@ -2024,7 +2027,7 @@ mod tests {
             while let Ok(message) = batcher_receiver.try_recv() {
                 match message {
                     batcher::Message::Constructed(Vote::Notarize(notarize)) => {
-                        assert!(notarize.proposal == conflicting_proposal);
+                        assert!(notarize.payload == conflicting_proposal);
                     }
                     _ => panic!("unexpected batcher message"),
                 }
@@ -2044,7 +2047,7 @@ mod tests {
                 let message = batcher_receiver.recv().await.unwrap();
                 match message {
                     batcher::Message::Constructed(Vote::Finalize(f)) => {
-                        assert_eq!(f.proposal, conflicting_proposal);
+                        assert_eq!(f.payload, conflicting_proposal);
                         break;
                     }
                     batcher::Message::Update { .. } => {}
@@ -4430,7 +4433,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Notarize(notarize))
                         if notarize.view() == target_view =>
                     {
-                        break notarize.proposal;
+                        break notarize.payload;
                     }
                     batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
@@ -4992,7 +4995,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Notarize(notarize))
                         if notarize.view() == target_view =>
                     {
-                        assert_eq!(notarize.proposal, proposal);
+                        assert_eq!(notarize.payload, proposal);
                         break;
                     }
                     batcher::Message::Update { .. } => {},
@@ -5261,7 +5264,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Notarize(notarize))
                         if notarize.view() == target_view =>
                     {
-                        break notarize.proposal;
+                        break notarize.payload;
                     }
                     batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
@@ -5278,7 +5281,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
                         if finalize.view() == target_view =>
                     {
-                        assert_eq!(finalize.proposal, proposal);
+                        assert_eq!(finalize.payload, proposal);
                         break;
                     }
                     batcher::Message::Constructed(Vote::Nullify(nullify))
@@ -5436,7 +5439,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Notarize(notarize))
                         if notarize.view() == target_view =>
                     {
-                        break notarize.proposal;
+                        break notarize.payload;
                     }
                     batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
@@ -5540,7 +5543,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
                         if finalize.view() == target_view =>
                     {
-                        assert_eq!(finalize.proposal, proposal);
+                        assert_eq!(finalize.payload, proposal);
                         break;
                     }
                     batcher::Message::Constructed(Vote::Nullify(nullify))
@@ -5729,7 +5732,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
                         if finalize.view() == target_view =>
                     {
-                        assert_eq!(finalize.proposal, foreign_proposal);
+                        assert_eq!(finalize.payload, foreign_proposal);
                         break;
                     }
                     batcher::Message::Constructed(Vote::Nullify(nullify))
@@ -6565,7 +6568,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Notarize(n))
                             if n.view() == target_view =>
                         {
-                            break n.proposal.clone();
+                            break n.payload.clone();
                         }
                         batcher::Message::Update { .. } => {}
                         _ => {}

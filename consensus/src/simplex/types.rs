@@ -171,7 +171,7 @@ pub struct VoteTracker<S: Scheme, D: Digest> {
     /// Per-signer notarize votes keyed by validator index.
     notarizes: AttributableMap<Notarize<S, D>>,
     /// Per-signer nullify votes keyed by validator index.
-    nullifies: AttributableMap<Nullify<S>>,
+    nullifies: AttributableMap<Nullify<S, D>>,
     /// Per-signer finalize votes keyed by validator index.
     ///
     /// Finalize votes include the proposal digest so the entire certificate can be
@@ -195,7 +195,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     }
 
     /// Inserts a nullify vote if the signer has not already voted.
-    pub fn insert_nullify(&mut self, vote: Nullify<S>) -> bool {
+    pub fn insert_nullify(&mut self, vote: Nullify<S, D>) -> bool {
         self.nullifies.insert(vote)
     }
 
@@ -210,7 +210,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     }
 
     /// Returns the nullify vote for `signer`, if present.
-    pub fn nullify(&self, signer: Participant) -> Option<&Nullify<S>> {
+    pub fn nullify(&self, signer: Participant) -> Option<&Nullify<S, D>> {
         self.nullifies.get(signer)
     }
 
@@ -225,7 +225,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     }
 
     /// Iterates over nullify votes in signer order.
-    pub fn iter_nullifies(&self) -> impl Iterator<Item = &Nullify<S>> {
+    pub fn iter_nullifies(&self) -> impl Iterator<Item = &Nullify<S, D>> {
         self.nullifies.iter()
     }
 
@@ -305,7 +305,7 @@ pub enum Vote<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
     /// A validator's nullify vote used to skip the current view.
-    Nullify(Nullify<S>),
+    Nullify(Nullify<S, D>),
     /// A validator's finalize vote over a proposal.
     Finalize(Finalize<S, D>),
 }
@@ -414,7 +414,7 @@ pub enum Certificate<S: Scheme, D: Digest> {
     /// A recovered certificate for a notarization.
     Notarization(Notarization<S, D>),
     /// A recovered certificate for a nullification.
-    Nullification(Nullification<S>),
+    Nullification(Nullification<S, D>),
     /// A recovered certificate for a finalization.
     Finalization(Finalization<S, D>),
 }
@@ -542,9 +542,9 @@ pub enum Artifact<S: Scheme, D: Digest> {
     /// A notarization was locally certified.
     Certification(Round, bool),
     /// A validator's nullify vote used to skip the current view.
-    Nullify(Nullify<S>),
+    Nullify(Nullify<S, D>),
     /// A recovered certificate for a nullification.
-    Nullification(Nullification<S>),
+    Nullification(Nullification<S, D>),
     /// A validator's finalize vote over a proposal.
     Finalize(Finalize<S, D>),
     /// A recovered certificate for a finalization.
@@ -817,34 +817,97 @@ where
     }
 }
 
-/// Validator vote that endorses a proposal for notarization.
+/// A phase token: names a vote kind and defines how its payload forms a [Subject].
+///
+/// The implementations ([kind::Notarize], [kind::Nullify], [kind::Finalize]) instantiate
+/// [Signed], [Certified], and [Conflicting] for each vote phase.
+pub trait Kind<D: Digest>: Clone + Debug + Send + Sync + 'static {
+    /// Data attested by votes and certificates of this kind.
+    type Payload: Clone
+        + Debug
+        + PartialEq
+        + Eq
+        + Hash
+        + Write
+        + EncodeSize
+        + Read<Cfg = ()>
+        + Epochable
+        + Viewable
+        + Send
+        + Sync
+        + 'static;
+
+    /// Builds the domain-separated subject covering `payload`.
+    fn subject(payload: &Self::Payload) -> Subject<'_, D>;
+}
+
+/// Phase tokens instantiating [Signed], [Certified], and [Conflicting].
+pub mod kind {
+    use super::{Digest, Proposal, Round, Subject};
+
+    /// Phase token for notarize votes and notarization certificates.
+    #[derive(Clone, Debug)]
+    pub struct Notarize;
+
+    impl<D: Digest> super::Kind<D> for Notarize {
+        type Payload = Proposal<D>;
+
+        fn subject(payload: &Self::Payload) -> Subject<'_, D> {
+            Subject::Notarize { proposal: payload }
+        }
+    }
+
+    /// Phase token for nullify votes and nullification certificates.
+    #[derive(Clone, Debug)]
+    pub struct Nullify;
+
+    impl<D: Digest> super::Kind<D> for Nullify {
+        type Payload = Round;
+
+        fn subject(payload: &Self::Payload) -> Subject<'_, D> {
+            Subject::Nullify { round: *payload }
+        }
+    }
+
+    /// Phase token for finalize votes and finalization certificates.
+    #[derive(Clone, Debug)]
+    pub struct Finalize;
+
+    impl<D: Digest> super::Kind<D> for Finalize {
+        type Payload = Proposal<D>;
+
+        fn subject(payload: &Self::Payload) -> Subject<'_, D> {
+            Subject::Finalize { proposal: payload }
+        }
+    }
+}
+
+/// A validator's vote over a [Kind]-specific payload.
 #[derive(Clone, Debug)]
-pub struct Notarize<S: Scheme, D: Digest> {
-    /// Proposal being notarized.
-    pub proposal: Proposal<D>,
+pub struct Signed<K: Kind<D>, S: Scheme, D: Digest> {
+    /// Payload covered by the vote.
+    pub payload: K::Payload,
     /// Scheme-specific attestation material.
     pub attestation: Attestation<S>,
 }
 
-impl<S: Scheme, D: Digest> Notarize<S, D> {
-    /// Signs a notarize vote for the provided proposal.
-    pub fn sign(scheme: &S, proposal: Proposal<D>) -> Option<Self>
+impl<K: Kind<D>, S: Scheme, D: Digest> Signed<K, S, D> {
+    /// Signs a vote over the provided payload.
+    pub fn sign(scheme: &S, payload: K::Payload) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(Subject::Notarize {
-            proposal: &proposal,
-        })?;
+        let attestation = scheme.sign::<D>(K::subject(&payload))?;
 
         Some(Self {
-            proposal,
+            payload,
             attestation,
         })
     }
 
-    /// Verifies the notarize vote against the provided signing scheme.
+    /// Verifies the vote against the provided signing scheme.
     ///
-    /// This ensures that the notarize signature is valid for the claimed proposal.
+    /// This ensures that the signature is valid for the claimed payload.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRngCore,
@@ -852,95 +915,105 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     {
         scheme.verify_attestation::<_, D>(
             rng,
-            Subject::Notarize {
-                proposal: &self.proposal,
-            },
+            K::subject(&self.payload),
             &self.attestation,
             strategy,
         )
     }
 
-    /// Returns the round associated with this notarize vote.
-    pub const fn round(&self) -> Round {
-        self.proposal.round
+    /// Returns the round associated with this vote.
+    pub fn round(&self) -> Round {
+        Round::new(self.payload.epoch(), self.payload.view())
     }
 }
 
-impl<S: Scheme, D: Digest> PartialEq for Notarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> PartialEq for Signed<K, S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.attestation == other.attestation
+        self.payload == other.payload && self.attestation == other.attestation
     }
 }
 
-impl<S: Scheme, D: Digest> Eq for Notarize<S, D> {}
+impl<K: Kind<D>, S: Scheme, D: Digest> Eq for Signed<K, S, D> {}
 
-impl<S: Scheme, D: Digest> Hash for Notarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Hash for Signed<K, S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.proposal.hash(state);
+        self.payload.hash(state);
         self.attestation.hash(state);
     }
 }
 
-impl<S: Scheme, D: Digest> Write for Notarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Write for Signed<K, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.proposal.write(writer);
+        self.payload.write(writer);
         self.attestation.write(writer);
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for Notarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> EncodeSize for Signed<K, S, D> {
     fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.attestation.encode_size()
+        self.payload.encode_size() + self.attestation.encode_size()
     }
 }
 
-impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Read for Signed<K, S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let proposal = Proposal::read(reader)?;
+        let payload = K::Payload::read(reader)?;
         let attestation = Attestation::read(reader)?;
 
         Ok(Self {
-            proposal,
+            payload,
             attestation,
         })
     }
 }
 
-impl<S: Scheme, D: Digest> Attributable for Notarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Attributable for Signed<K, S, D> {
     fn signer(&self) -> Participant {
         self.attestation.signer
     }
 }
 
-impl<S: Scheme, D: Digest> Epochable for Notarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Epochable for Signed<K, S, D> {
     fn epoch(&self) -> Epoch {
-        self.proposal.epoch()
+        self.payload.epoch()
     }
 }
 
-impl<S: Scheme, D: Digest> Viewable for Notarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Viewable for Signed<K, S, D> {
     fn view(&self) -> View {
-        self.proposal.view()
+        self.payload.view()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Notarize<S, D>
+impl<K: Kind<D>, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Signed<K, S, D>
 where
+    K::Payload: for<'a> arbitrary::Arbitrary<'a>,
     S::Signature: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let proposal = Proposal::arbitrary(u)?;
+        let payload = K::Payload::arbitrary(u)?;
         let attestation = Attestation::arbitrary(u)?;
         Ok(Self {
-            proposal,
+            payload,
             attestation,
         })
     }
 }
+
+/// Validator vote that endorses a proposal for notarization.
+pub type Notarize<S, D> = Signed<kind::Notarize, S, D>;
+
+/// Validator vote for nullifying the current round, i.e. skip the current round.
+/// This is typically used when the leader is unresponsive or fails to propose a valid block.
+pub type Nullify<S, D> = Signed<kind::Nullify, S, D>;
+
+/// Validator vote to finalize a proposal.
+/// This happens after a proposal has been notarized, confirming it as the canonical block
+/// for this round.
+pub type Finalize<S, D> = Signed<kind::Finalize, S, D>;
 
 /// Batch-verifies certificates and returns a per-item result.
 ///
@@ -960,41 +1033,36 @@ where
     scheme.verify_certificates_bisect::<_, D, N3f1>(rng, certificates, strategy)
 }
 
-/// Aggregated notarization certificate recovered from notarize votes.
-/// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
-///
-/// Some signing schemes (like [`super::scheme::bls12381_threshold::vrf`]) embed an additional
-/// randomness seed in the certificate. For threshold signatures, the seed can be accessed
-/// via [`super::scheme::bls12381_threshold::vrf::Seedable::seed`].
+/// An aggregated certificate recovered from a quorum of votes over a [Kind]-specific payload.
 #[derive(Clone, Debug)]
-pub struct Notarization<S: Scheme, D: Digest> {
-    /// The proposal that has been notarized.
-    pub proposal: Proposal<D>,
-    /// The recovered certificate for the proposal.
+pub struct Certified<K: Kind<D>, S: Scheme, D: Digest> {
+    /// Payload covered by the certificate.
+    pub payload: K::Payload,
+    /// The recovered certificate for the payload.
     pub certificate: S::Certificate,
 }
 
-impl<S: Scheme, D: Digest> Notarization<S, D> {
-    /// Builds a notarization certificate from notarize votes for the same proposal.
-    pub fn from_notarizes<'a, I>(scheme: &S, notarizes: I, strategy: &impl Strategy) -> Option<Self>
+impl<K: Kind<D>, S: Scheme, D: Digest> Certified<K, S, D> {
+    /// Builds a certificate from votes over the same payload.
+    pub fn from_votes<'a, I>(scheme: &S, votes: I, strategy: &impl Strategy) -> Option<Self>
     where
-        I: IntoIterator<Item = &'a Notarize<S, D>>,
+        I: IntoIterator<Item = &'a Signed<K, S, D>>,
         I::IntoIter: Send,
     {
-        let mut iter = notarizes.into_iter().peekable();
-        let proposal = iter.peek()?.proposal.clone();
+        let mut iter = votes.into_iter().peekable();
+        let payload = iter.peek()?.payload.clone();
         let certificate =
-            scheme.assemble::<_, N3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
+            scheme.assemble::<_, N3f1>(iter.map(|v| v.attestation.clone()), strategy)?;
 
         Some(Self {
-            proposal,
+            payload,
             certificate,
         })
     }
 
-    /// Verifies the notarization certificate against the provided signing scheme.
+    /// Verifies the certificate against the provided signing scheme.
     ///
-    /// This ensures that the certificate is valid for the claimed proposal.
+    /// This ensures that the certificate is valid for the claimed payload.
     pub fn verify<R: CryptoRngCore>(
         &self,
         rng: &mut R,
@@ -1003,439 +1071,99 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     ) -> bool {
         scheme.verify_certificate::<_, D, N3f1>(
             rng,
-            Subject::Notarize {
-                proposal: &self.proposal,
-            },
+            K::subject(&self.payload),
             &self.certificate,
             strategy,
         )
     }
 
-    /// Returns the round associated with the notarized proposal.
-    pub const fn round(&self) -> Round {
-        self.proposal.round
+    /// Returns the round associated with the certified payload.
+    pub fn round(&self) -> Round {
+        Round::new(self.payload.epoch(), self.payload.view())
     }
 }
 
-impl<S: Scheme, D: Digest> PartialEq for Notarization<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> PartialEq for Certified<K, S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.certificate == other.certificate
+        self.payload == other.payload && self.certificate == other.certificate
     }
 }
 
-impl<S: Scheme, D: Digest> Eq for Notarization<S, D> {}
+impl<K: Kind<D>, S: Scheme, D: Digest> Eq for Certified<K, S, D> {}
 
-impl<S: Scheme, D: Digest> Hash for Notarization<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Hash for Certified<K, S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.proposal.hash(state);
+        self.payload.hash(state);
         self.certificate.hash(state);
     }
 }
 
-impl<S: Scheme, D: Digest> Write for Notarization<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Write for Certified<K, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.proposal.write(writer);
+        self.payload.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for Notarization<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> EncodeSize for Certified<K, S, D> {
     fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.certificate.encode_size()
+        self.payload.encode_size() + self.certificate.encode_size()
     }
 }
 
-impl<S: Scheme, D: Digest> Read for Notarization<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Read for Certified<K, S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let proposal = Proposal::read(reader)?;
+        let payload = K::Payload::read(reader)?;
         let certificate = S::Certificate::read_cfg(reader, cfg)?;
 
         Ok(Self {
-            proposal,
+            payload,
             certificate,
         })
     }
 }
 
-impl<S: Scheme, D: Digest> Epochable for Notarization<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Epochable for Certified<K, S, D> {
     fn epoch(&self) -> Epoch {
-        self.proposal.epoch()
+        self.payload.epoch()
     }
 }
 
-impl<S: Scheme, D: Digest> Viewable for Notarization<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Viewable for Certified<K, S, D> {
     fn view(&self) -> View {
-        self.proposal.view()
+        self.payload.view()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Notarization<S, D>
+impl<K: Kind<D>, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certified<K, S, D>
 where
+    K::Payload: for<'a> arbitrary::Arbitrary<'a>,
     S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let proposal = Proposal::arbitrary(u)?;
+        let payload = K::Payload::arbitrary(u)?;
         let certificate = S::Certificate::arbitrary(u)?;
         Ok(Self {
-            proposal,
+            payload,
             certificate,
         })
     }
 }
 
-/// Validator vote for nullifying the current round, i.e. skip the current round.
-/// This is typically used when the leader is unresponsive or fails to propose a valid block.
-#[derive(Clone, Debug)]
-pub struct Nullify<S: Scheme> {
-    /// The round to be nullified (skipped).
-    pub round: Round,
-    /// Scheme-specific attestation material.
-    pub attestation: Attestation<S>,
-}
-
-impl<S: Scheme> PartialEq for Nullify<S> {
-    fn eq(&self, other: &Self) -> bool {
-        self.round == other.round && self.attestation == other.attestation
-    }
-}
-
-impl<S: Scheme> Eq for Nullify<S> {}
-
-impl<S: Scheme> Hash for Nullify<S> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.round.hash(state);
-        self.attestation.hash(state);
-    }
-}
-
-impl<S: Scheme> Nullify<S> {
-    /// Signs a nullify vote for the given round.
-    pub fn sign<D: Digest>(scheme: &S, round: Round) -> Option<Self>
-    where
-        S: scheme::Scheme<D>,
-    {
-        let attestation = scheme.sign::<D>(Subject::Nullify { round })?;
-
-        Some(Self { round, attestation })
-    }
-
-    /// Verifies the nullify vote against the provided signing scheme.
-    ///
-    /// This ensures that the nullify signature is valid for the given round.
-    pub fn verify<R, D: Digest>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
-    where
-        R: CryptoRngCore,
-        S: scheme::Scheme<D>,
-    {
-        scheme.verify_attestation::<_, D>(
-            rng,
-            Subject::Nullify { round: self.round },
-            &self.attestation,
-            strategy,
-        )
-    }
-
-    /// Returns the round associated with this nullify vote.
-    pub const fn round(&self) -> Round {
-        self.round
-    }
-}
-
-impl<S: Scheme> Write for Nullify<S> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        self.attestation.write(writer);
-    }
-}
-
-impl<S: Scheme> EncodeSize for Nullify<S> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.attestation.encode_size()
-    }
-}
-
-impl<S: Scheme> Read for Nullify<S> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let attestation = Attestation::read(reader)?;
-
-        Ok(Self { round, attestation })
-    }
-}
-
-impl<S: Scheme> Attributable for Nullify<S> {
-    fn signer(&self) -> Participant {
-        self.attestation.signer
-    }
-}
-
-impl<S: Scheme> Epochable for Nullify<S> {
-    fn epoch(&self) -> Epoch {
-        self.round.epoch()
-    }
-}
-
-impl<S: Scheme> Viewable for Nullify<S> {
-    fn view(&self) -> View {
-        self.round.view()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<S: Scheme> arbitrary::Arbitrary<'_> for Nullify<S>
-where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let round = Round::arbitrary(u)?;
-        let attestation = Attestation::arbitrary(u)?;
-        Ok(Self { round, attestation })
-    }
-}
+/// Aggregated notarization certificate recovered from notarize votes.
+/// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
+///
+/// Some signing schemes (like [`super::scheme::bls12381_threshold::vrf`]) embed an additional
+/// randomness seed in the certificate. For threshold signatures, the seed can be accessed
+/// via [`super::scheme::bls12381_threshold::vrf::Seedable::seed`].
+pub type Notarization<S, D> = Certified<kind::Notarize, S, D>;
 
 /// Aggregated nullification certificate recovered from nullify votes.
 /// When a view is nullified, the consensus moves to the next view without finalizing a block.
-#[derive(Clone, Debug)]
-pub struct Nullification<S: Scheme> {
-    /// The round in which this nullification is made.
-    pub round: Round,
-    /// The recovered certificate for the nullification.
-    pub certificate: S::Certificate,
-}
-
-impl<S: Scheme> Nullification<S> {
-    /// Builds a nullification certificate from nullify votes from the same round.
-    pub fn from_nullifies<'a, I>(scheme: &S, nullifies: I, strategy: &impl Strategy) -> Option<Self>
-    where
-        I: IntoIterator<Item = &'a Nullify<S>>,
-        I::IntoIter: Send,
-    {
-        let mut iter = nullifies.into_iter().peekable();
-        let round = iter.peek()?.round;
-        let certificate =
-            scheme.assemble::<_, N3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
-
-        Some(Self { round, certificate })
-    }
-
-    /// Verifies the nullification certificate against the provided signing scheme.
-    ///
-    /// This ensures that the certificate is valid for the claimed round.
-    pub fn verify<R: CryptoRngCore, D: Digest>(
-        &self,
-        rng: &mut R,
-        scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
-        strategy: &impl Strategy,
-    ) -> bool {
-        scheme.verify_certificate::<_, D, N3f1>(
-            rng,
-            Subject::Nullify { round: self.round },
-            &self.certificate,
-            strategy,
-        )
-    }
-
-    /// Returns the round associated with this nullification.
-    pub const fn round(&self) -> Round {
-        self.round
-    }
-}
-
-impl<S: Scheme> PartialEq for Nullification<S> {
-    fn eq(&self, other: &Self) -> bool {
-        self.round == other.round && self.certificate == other.certificate
-    }
-}
-
-impl<S: Scheme> Eq for Nullification<S> {}
-
-impl<S: Scheme> Hash for Nullification<S> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.round.hash(state);
-        self.certificate.hash(state);
-    }
-}
-
-impl<S: Scheme> Write for Nullification<S> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        self.certificate.write(writer);
-    }
-}
-
-impl<S: Scheme> EncodeSize for Nullification<S> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.certificate.encode_size()
-    }
-}
-
-impl<S: Scheme> Read for Nullification<S> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, cfg)?;
-
-        Ok(Self { round, certificate })
-    }
-}
-
-impl<S: Scheme> Epochable for Nullification<S> {
-    fn epoch(&self) -> Epoch {
-        self.round.epoch()
-    }
-}
-
-impl<S: Scheme> Viewable for Nullification<S> {
-    fn view(&self) -> View {
-        self.round.view()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<S: Scheme> arbitrary::Arbitrary<'_> for Nullification<S>
-where
-    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let round = Round::arbitrary(u)?;
-        let certificate = S::Certificate::arbitrary(u)?;
-        Ok(Self { round, certificate })
-    }
-}
-
-/// Validator vote to finalize a proposal.
-/// This happens after a proposal has been notarized, confirming it as the canonical block
-/// for this round.
-#[derive(Clone, Debug)]
-pub struct Finalize<S: Scheme, D: Digest> {
-    /// Proposal being finalized.
-    pub proposal: Proposal<D>,
-    /// Scheme-specific attestation material.
-    pub attestation: Attestation<S>,
-}
-
-impl<S: Scheme, D: Digest> Finalize<S, D> {
-    /// Signs a finalize vote for the provided proposal.
-    pub fn sign(scheme: &S, proposal: Proposal<D>) -> Option<Self>
-    where
-        S: scheme::Scheme<D>,
-    {
-        let attestation = scheme.sign::<D>(Subject::Finalize {
-            proposal: &proposal,
-        })?;
-
-        Some(Self {
-            proposal,
-            attestation,
-        })
-    }
-
-    /// Verifies the finalize vote against the provided signing scheme.
-    ///
-    /// This ensures that the finalize signature is valid for the claimed proposal.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
-    where
-        R: CryptoRngCore,
-        S: scheme::Scheme<D>,
-    {
-        scheme.verify_attestation::<_, D>(
-            rng,
-            Subject::Finalize {
-                proposal: &self.proposal,
-            },
-            &self.attestation,
-            strategy,
-        )
-    }
-
-    /// Returns the round associated with this finalize vote.
-    pub const fn round(&self) -> Round {
-        self.proposal.round
-    }
-}
-
-impl<S: Scheme, D: Digest> PartialEq for Finalize<S, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.attestation == other.attestation
-    }
-}
-
-impl<S: Scheme, D: Digest> Eq for Finalize<S, D> {}
-
-impl<S: Scheme, D: Digest> Hash for Finalize<S, D> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.proposal.hash(state);
-        self.attestation.hash(state);
-    }
-}
-
-impl<S: Scheme, D: Digest> Write for Finalize<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.proposal.write(writer);
-        self.attestation.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Finalize<S, D> {
-    fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.attestation.encode_size()
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let proposal = Proposal::read(reader)?;
-        let attestation = Attestation::read(reader)?;
-
-        Ok(Self {
-            proposal,
-            attestation,
-        })
-    }
-}
-
-impl<S: Scheme, D: Digest> Attributable for Finalize<S, D> {
-    fn signer(&self) -> Participant {
-        self.attestation.signer
-    }
-}
-
-impl<S: Scheme, D: Digest> Epochable for Finalize<S, D> {
-    fn epoch(&self) -> Epoch {
-        self.proposal.epoch()
-    }
-}
-
-impl<S: Scheme, D: Digest> Viewable for Finalize<S, D> {
-    fn view(&self) -> View {
-        self.proposal.view()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Finalize<S, D>
-where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let proposal = Proposal::arbitrary(u)?;
-        let attestation = Attestation::arbitrary(u)?;
-        Ok(Self {
-            proposal,
-            attestation,
-        })
-    }
-}
+pub type Nullification<S, D> = Certified<kind::Nullify, S, D>;
 
 /// Aggregated finalization certificate recovered from finalize votes.
 /// When a proposal is finalized, it becomes the canonical block for its view.
@@ -1443,126 +1171,7 @@ where
 /// Some signing schemes (like [`super::scheme::bls12381_threshold::vrf`]) embed an additional
 /// randomness seed in the certificate. For threshold signatures, the seed can be accessed
 /// via [`super::scheme::bls12381_threshold::vrf::Seedable::seed`].
-#[derive(Clone, Debug)]
-pub struct Finalization<S: Scheme, D: Digest> {
-    /// The proposal that has been finalized.
-    pub proposal: Proposal<D>,
-    /// The recovered certificate for the proposal.
-    pub certificate: S::Certificate,
-}
-
-impl<S: Scheme, D: Digest> Finalization<S, D> {
-    /// Builds a finalization certificate from finalize votes for the same proposal.
-    pub fn from_finalizes<'a, I>(scheme: &S, finalizes: I, strategy: &impl Strategy) -> Option<Self>
-    where
-        I: IntoIterator<Item = &'a Finalize<S, D>>,
-        I::IntoIter: Send,
-    {
-        let mut iter = finalizes.into_iter().peekable();
-        let proposal = iter.peek()?.proposal.clone();
-        let certificate =
-            scheme.assemble::<_, N3f1>(iter.map(|f| f.attestation.clone()), strategy)?;
-
-        Some(Self {
-            proposal,
-            certificate,
-        })
-    }
-
-    /// Verifies the finalization certificate against the provided signing scheme.
-    ///
-    /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: CryptoRngCore>(
-        &self,
-        rng: &mut R,
-        scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
-        strategy: &impl Strategy,
-    ) -> bool {
-        scheme.verify_certificate::<_, D, N3f1>(
-            rng,
-            Subject::Finalize {
-                proposal: &self.proposal,
-            },
-            &self.certificate,
-            strategy,
-        )
-    }
-
-    /// Returns the round associated with the finalized proposal.
-    pub const fn round(&self) -> Round {
-        self.proposal.round
-    }
-}
-
-impl<S: Scheme, D: Digest> PartialEq for Finalization<S, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.certificate == other.certificate
-    }
-}
-
-impl<S: Scheme, D: Digest> Eq for Finalization<S, D> {}
-
-impl<S: Scheme, D: Digest> Hash for Finalization<S, D> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.proposal.hash(state);
-        self.certificate.hash(state);
-    }
-}
-
-impl<S: Scheme, D: Digest> Write for Finalization<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.proposal.write(writer);
-        self.certificate.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Finalization<S, D> {
-    fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.certificate.encode_size()
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for Finalization<S, D> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let proposal = Proposal::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, cfg)?;
-
-        Ok(Self {
-            proposal,
-            certificate,
-        })
-    }
-}
-
-impl<S: Scheme, D: Digest> Epochable for Finalization<S, D> {
-    fn epoch(&self) -> Epoch {
-        self.proposal.epoch()
-    }
-}
-
-impl<S: Scheme, D: Digest> Viewable for Finalization<S, D> {
-    fn view(&self) -> View {
-        self.proposal.view()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Finalization<S, D>
-where
-    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let proposal = Proposal::arbitrary(u)?;
-        let certificate = S::Certificate::arbitrary(u)?;
-        Ok(Self {
-            proposal,
-            certificate,
-        })
-    }
-}
+pub type Finalization<S, D> = Certified<kind::Finalize, S, D>;
 
 /// Backfiller is a message type for requesting and receiving missing consensus artifacts.
 /// This is used to synchronize validators that have fallen behind or just joined the network.
@@ -1726,7 +1335,7 @@ pub struct Response<S: Scheme, D: Digest> {
     /// Notarizations for the requested views
     pub notarizations: Vec<Notarization<S, D>>,
     /// Nullifications for the requested views
-    pub nullifications: Vec<Nullification<S>>,
+    pub nullifications: Vec<Nullification<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Response<S, D> {
@@ -1734,7 +1343,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     pub const fn new(
         id: u64,
         notarizations: Vec<Notarization<S, D>>,
-        nullifications: Vec<Nullification<S>>,
+        nullifications: Vec<Nullification<S, D>>,
     ) -> Self {
         Self {
             id,
@@ -1760,7 +1369,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
 
         let notarizations = self.notarizations.iter().map(|notarization| {
             let context = Subject::Notarize {
-                proposal: &notarization.proposal,
+                proposal: &notarization.payload,
             };
 
             (context, &notarization.certificate)
@@ -1768,7 +1377,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
 
         let nullifications = self.nullifications.iter().map(|nullification| {
             let context = Subject::Nullify {
-                round: nullification.round,
+                round: nullification.payload,
             };
 
             (context, &nullification.certificate)
@@ -1819,7 +1428,7 @@ impl<S: Scheme, D: Digest> Read for Response<S, D> {
         }
         let remaining = max_len - notarizations.len();
         views.clear();
-        let nullifications = Vec::<Nullification<S>>::read_cfg(
+        let nullifications = Vec::<Nullification<S, D>>::read_cfg(
             reader,
             &((..=remaining).into(), certificate_cfg.clone()),
         )?;
@@ -1883,9 +1492,9 @@ pub enum Activity<S: Scheme, D: Digest> {
     /// A notarization was locally certified.
     Certification(Notarization<S, D>),
     /// A validator's nullify vote used to skip the current view.
-    Nullify(Nullify<S>),
+    Nullify(Nullify<S, D>),
     /// A recovered certificate for a nullification (scheme-specific).
-    Nullification(Nullification<S>),
+    Nullification(Nullification<S, D>),
     /// A validator's finalize vote over a proposal.
     Finalize(Finalize<S, D>),
     /// A recovered certificate for a finalization (scheme-specific).
@@ -2094,11 +1703,11 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
                 Ok(Self::Certification(v))
             }
             3 => {
-                let v = Nullify::<S>::read(reader)?;
+                let v = Nullify::<S, D>::read(reader)?;
                 Ok(Self::Nullify(v))
             }
             4 => {
-                let v = Nullification::<S>::read_cfg(reader, cfg)?;
+                let v = Nullification::<S, D>::read_cfg(reader, cfg)?;
                 Ok(Self::Nullification(v))
             }
             5 => {
@@ -2186,11 +1795,11 @@ where
                 Ok(Self::Certification(v))
             }
             3 => {
-                let v = Nullify::<S>::arbitrary(u)?;
+                let v = Nullify::<S, D>::arbitrary(u)?;
                 Ok(Self::Nullify(v))
             }
             4 => {
-                let v = Nullification::<S>::arbitrary(u)?;
+                let v = Nullification::<S, D>::arbitrary(u)?;
                 Ok(Self::Nullification(v))
             }
             5 => {
@@ -2218,50 +1827,55 @@ where
     }
 }
 
-/// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
-/// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
+/// Evidence of a Byzantine validator voting for two conflicting payloads of the same [Kind]
+/// in the same round (equivocation).
 #[derive(Clone, Debug)]
-pub struct ConflictingNotarize<S: Scheme, D: Digest> {
-    /// The first conflicting notarize
-    notarize_1: Notarize<S, D>,
-    /// The second conflicting notarize
-    notarize_2: Notarize<S, D>,
+pub struct Conflicting<K: Kind<D>, S: Scheme, D: Digest> {
+    /// The first conflicting vote.
+    first: Signed<K, S, D>,
+    /// The second conflicting vote.
+    second: Signed<K, S, D>,
 }
 
-impl<S: Scheme, D: Digest> PartialEq for ConflictingNotarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> PartialEq for Conflicting<K, S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.notarize_1 == other.notarize_1 && self.notarize_2 == other.notarize_2
+        self.first == other.first && self.second == other.second
     }
 }
 
-impl<S: Scheme, D: Digest> Eq for ConflictingNotarize<S, D> {}
+impl<K: Kind<D>, S: Scheme, D: Digest> Eq for Conflicting<K, S, D> {}
 
-impl<S: Scheme, D: Digest> Hash for ConflictingNotarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Hash for Conflicting<K, S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.notarize_1.hash(state);
-        self.notarize_2.hash(state);
+        self.first.hash(state);
+        self.second.hash(state);
     }
 }
 
-impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
-    /// Creates a new conflicting notarize evidence from two conflicting notarizes.
+impl<K: Kind<D>, S: Scheme, D: Digest> Conflicting<K, S, D> {
+    /// Returns whether the two votes constitute conflicting evidence: same round and signer,
+    /// differing payloads.
+    fn conflicts(first: &Signed<K, S, D>, second: &Signed<K, S, D>) -> bool {
+        first.round() == second.round()
+            && first.signer() == second.signer()
+            && first.payload != second.payload
+    }
+
+    /// Creates new conflicting evidence from two conflicting votes.
     ///
     /// # Panics
     ///
-    /// Panics if the two notarizes do not have the same round and signer, or if they
-    /// have identical proposals (which would not constitute conflicting evidence).
-    pub fn new(notarize_1: Notarize<S, D>, notarize_2: Notarize<S, D>) -> Self {
-        assert_eq!(notarize_1.round(), notarize_2.round());
-        assert_eq!(notarize_1.signer(), notarize_2.signer());
+    /// Panics if the two votes do not have the same round and signer, or if they
+    /// have identical payloads (which would not constitute conflicting evidence).
+    pub fn new(first: Signed<K, S, D>, second: Signed<K, S, D>) -> Self {
+        assert_eq!(first.round(), second.round());
+        assert_eq!(first.signer(), second.signer());
         assert_ne!(
-            notarize_1.proposal, notarize_2.proposal,
-            "proposals must differ to constitute conflicting evidence"
+            first.payload, second.payload,
+            "payloads must differ to constitute conflicting evidence"
         );
 
-        Self {
-            notarize_1,
-            notarize_2,
-        }
+        Self { first, second }
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
@@ -2270,209 +1884,79 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.notarize_1.verify(rng, scheme, strategy)
-            && self.notarize_2.verify(rng, scheme, strategy)
+        self.first.verify(rng, scheme, strategy) && self.second.verify(rng, scheme, strategy)
     }
 }
 
-impl<S: Scheme, D: Digest> Attributable for ConflictingNotarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Attributable for Conflicting<K, S, D> {
     fn signer(&self) -> Participant {
-        self.notarize_1.signer()
+        self.first.signer()
     }
 }
 
-impl<S: Scheme, D: Digest> Epochable for ConflictingNotarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Epochable for Conflicting<K, S, D> {
     fn epoch(&self) -> Epoch {
-        self.notarize_1.epoch()
+        self.first.epoch()
     }
 }
 
-impl<S: Scheme, D: Digest> Viewable for ConflictingNotarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Viewable for Conflicting<K, S, D> {
     fn view(&self) -> View {
-        self.notarize_1.view()
+        self.first.view()
     }
 }
 
-impl<S: Scheme, D: Digest> Write for ConflictingNotarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Write for Conflicting<K, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.notarize_1.write(writer);
-        self.notarize_2.write(writer);
+        self.first.write(writer);
+        self.second.write(writer);
     }
 }
 
-impl<S: Scheme, D: Digest> Read for ConflictingNotarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> Read for Conflicting<K, S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let notarize_1 = Notarize::read(reader)?;
-        let notarize_2 = Notarize::read(reader)?;
+        let first = Signed::read(reader)?;
+        let second = Signed::read(reader)?;
 
-        if notarize_1.signer() != notarize_2.signer()
-            || notarize_1.round() != notarize_2.round()
-            || notarize_1.proposal == notarize_2.proposal
-        {
+        if !Self::conflicts(&first, &second) {
             return Err(Error::Invalid(
-                "consensus::simplex::ConflictingNotarize",
-                "invalid conflicting notarize",
+                "consensus::simplex::Conflicting",
+                "invalid conflicting evidence",
             ));
         }
 
-        Ok(Self {
-            notarize_1,
-            notarize_2,
-        })
+        Ok(Self { first, second })
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
+impl<K: Kind<D>, S: Scheme, D: Digest> EncodeSize for Conflicting<K, S, D> {
     fn encode_size(&self) -> usize {
-        self.notarize_1.encode_size() + self.notarize_2.encode_size()
+        self.first.encode_size() + self.second.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for ConflictingNotarize<S, D>
+impl<K: Kind<D>, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Conflicting<K, S, D>
 where
+    K::Payload: for<'a> arbitrary::Arbitrary<'a>,
     S::Signature: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let notarize_1 = Notarize::arbitrary(u)?;
-        let notarize_2 = Notarize::arbitrary(u)?;
-        Ok(Self {
-            notarize_1,
-            notarize_2,
-        })
+        let first = Signed::arbitrary(u)?;
+        let second = Signed::arbitrary(u)?;
+        Ok(Self { first, second })
     }
 }
+
+/// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
+/// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
+pub type ConflictingNotarize<S, D> = Conflicting<kind::Notarize, S, D>;
 
 /// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
 /// Similar to ConflictingNotarize, but for finalizes.
-#[derive(Clone, Debug)]
-pub struct ConflictingFinalize<S: Scheme, D: Digest> {
-    /// The second conflicting finalize
-    finalize_1: Finalize<S, D>,
-    /// The second conflicting finalize
-    finalize_2: Finalize<S, D>,
-}
-
-impl<S: Scheme, D: Digest> PartialEq for ConflictingFinalize<S, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.finalize_1 == other.finalize_1 && self.finalize_2 == other.finalize_2
-    }
-}
-
-impl<S: Scheme, D: Digest> Eq for ConflictingFinalize<S, D> {}
-
-impl<S: Scheme, D: Digest> Hash for ConflictingFinalize<S, D> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.finalize_1.hash(state);
-        self.finalize_2.hash(state);
-    }
-}
-
-impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
-    /// Creates a new conflicting finalize evidence from two conflicting finalizes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the two finalizes do not have the same round and signer, or if they
-    /// have identical proposals (which would not constitute conflicting evidence).
-    pub fn new(finalize_1: Finalize<S, D>, finalize_2: Finalize<S, D>) -> Self {
-        assert_eq!(finalize_1.round(), finalize_2.round());
-        assert_eq!(finalize_1.signer(), finalize_2.signer());
-        assert_ne!(
-            finalize_1.proposal, finalize_2.proposal,
-            "proposals must differ to constitute conflicting evidence"
-        );
-
-        Self {
-            finalize_1,
-            finalize_2,
-        }
-    }
-
-    /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
-    where
-        R: CryptoRngCore,
-        S: scheme::Scheme<D>,
-    {
-        self.finalize_1.verify(rng, scheme, strategy)
-            && self.finalize_2.verify(rng, scheme, strategy)
-    }
-}
-
-impl<S: Scheme, D: Digest> Attributable for ConflictingFinalize<S, D> {
-    fn signer(&self) -> Participant {
-        self.finalize_1.signer()
-    }
-}
-
-impl<S: Scheme, D: Digest> Epochable for ConflictingFinalize<S, D> {
-    fn epoch(&self) -> Epoch {
-        self.finalize_1.epoch()
-    }
-}
-
-impl<S: Scheme, D: Digest> Viewable for ConflictingFinalize<S, D> {
-    fn view(&self) -> View {
-        self.finalize_1.view()
-    }
-}
-
-impl<S: Scheme, D: Digest> Write for ConflictingFinalize<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.finalize_1.write(writer);
-        self.finalize_2.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for ConflictingFinalize<S, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let finalize_1 = Finalize::read(reader)?;
-        let finalize_2 = Finalize::read(reader)?;
-
-        if finalize_1.signer() != finalize_2.signer()
-            || finalize_1.round() != finalize_2.round()
-            || finalize_1.proposal == finalize_2.proposal
-        {
-            return Err(Error::Invalid(
-                "consensus::simplex::ConflictingFinalize",
-                "invalid conflicting finalize",
-            ));
-        }
-
-        Ok(Self {
-            finalize_1,
-            finalize_2,
-        })
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
-    fn encode_size(&self) -> usize {
-        self.finalize_1.encode_size() + self.finalize_2.encode_size()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for ConflictingFinalize<S, D>
-where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let finalize_1 = Finalize::arbitrary(u)?;
-        let finalize_2 = Finalize::arbitrary(u)?;
-        Ok(Self {
-            finalize_1,
-            finalize_2,
-        })
-    }
-}
+pub type ConflictingFinalize<S, D> = Conflicting<kind::Finalize, S, D>;
 
 /// NullifyFinalize represents evidence of a Byzantine validator sending both a nullify and finalize
 /// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
@@ -2480,7 +1964,7 @@ where
 #[derive(Clone, Debug)]
 pub struct NullifyFinalize<S: Scheme, D: Digest> {
     /// The conflicting nullify
-    nullify: Nullify<S>,
+    nullify: Nullify<S, D>,
     /// The conflicting finalize
     finalize: Finalize<S, D>,
 }
@@ -2502,8 +1986,8 @@ impl<S: Scheme, D: Digest> Hash for NullifyFinalize<S, D> {
 
 impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
     /// Creates a new nullify-finalize evidence from a nullify and a finalize.
-    pub fn new(nullify: Nullify<S>, finalize: Finalize<S, D>) -> Self {
-        assert_eq!(nullify.round, finalize.round());
+    pub fn new(nullify: Nullify<S, D>, finalize: Finalize<S, D>) -> Self {
+        assert_eq!(nullify.round(), finalize.round());
         assert_eq!(nullify.signer(), finalize.signer());
 
         Self { nullify, finalize }
@@ -2551,7 +2035,7 @@ impl<S: Scheme, D: Digest> Read for NullifyFinalize<S, D> {
         let nullify = Nullify::read(reader)?;
         let finalize = Finalize::read(reader)?;
 
-        if nullify.signer() != finalize.signer() || nullify.round != finalize.round() {
+        if nullify.signer() != finalize.signer() || nullify.round() != finalize.round() {
             return Err(Error::Invalid(
                 "consensus::simplex::NullifyFinalize",
                 "mismatched signatures",
@@ -2689,7 +2173,7 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
+            Notarization::from_votes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
         let encoded = notarization.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Notarization::decode_cfg(encoded, &cfg).unwrap();
@@ -2717,11 +2201,11 @@ mod tests {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
-        let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], round).unwrap();
+        let nullify = Nullify::<_, Sha256>::sign(&fixture.schemes[0], round).unwrap();
         let encoded = nullify.encode();
         let decoded = Nullify::decode(encoded).unwrap();
         assert_eq!(nullify, decoded);
-        assert!(decoded.verify::<_, Sha256>(&mut rng, &fixture.schemes[0], &Sequential));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2747,15 +2231,15 @@ mod tests {
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
+            .map(|scheme| Nullify::<_, Sha256>::sign(scheme, round).unwrap())
             .collect();
         let nullification =
-            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
+            Nullification::from_votes(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
         let encoded = nullification.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Nullification::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(nullification, decoded);
-        assert!(decoded.verify::<_, Sha256>(&mut rng, &fixture.schemes[0], &Sequential));
+        assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[test]
@@ -2813,7 +2297,7 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let finalization =
-            Finalization::from_finalizes(&fixture.schemes[0], &finalizes, &Sequential).unwrap();
+            Finalization::from_votes(&fixture.schemes[0], &finalizes, &Sequential).unwrap();
         let encoded = finalization.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Finalization::decode_cfg(encoded, &cfg).unwrap();
@@ -2860,15 +2344,15 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
+            Notarization::from_votes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
 
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
+            .map(|scheme| Nullify::<_, Sha256>::sign(scheme, round).unwrap())
             .collect();
         let nullification =
-            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
+            Nullification::from_votes(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
 
         let response = Response::<S, Sha256>::new(1, vec![notarization], vec![nullification]);
         let encoded_response = Backfiller::<S, Sha256>::Response(response.clone()).encode();
@@ -2917,15 +2401,15 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
+            Notarization::from_votes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
 
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
+            .map(|scheme| Nullify::<_, Sha256>::sign(scheme, round).unwrap())
             .collect();
         let nullification =
-            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
+            Nullification::from_votes(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
 
         let response = Response::<S, Sha256>::new(1, vec![notarization], vec![nullification]);
         let cfg = fixture.schemes[0].certificate_codec_config();
@@ -2937,9 +2421,9 @@ mod tests {
 
         assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
 
-        decoded.nullifications[0].round = Round::new(
-            decoded.nullifications[0].round.epoch(),
-            decoded.nullifications[0].round.view().next(),
+        decoded.nullifications[0].payload = Round::new(
+            decoded.nullifications[0].payload.epoch(),
+            decoded.nullifications[0].payload.view().next(),
         );
         assert!(!decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
@@ -3045,7 +2529,7 @@ mod tests {
         let fixture = fixture(&mut rng, NAMESPACE, 5);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(1));
-        let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], round).unwrap();
+        let nullify = Nullify::<_, Sha256>::sign(&fixture.schemes[0], round).unwrap();
         let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
 
@@ -3143,9 +2627,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
-                .expect("quorum notarization");
+        let notarization = Notarization::from_votes(&fixture.schemes[0], &notarizes, &Sequential)
+            .expect("quorum notarization");
         assert!(notarization.verify(&mut rng, &fixture.schemes[0], &Sequential));
         assert!(!notarization.verify(&mut rng, &wrong_fixture.verifier, &Sequential));
     }
@@ -3181,9 +2664,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
-                .expect("quorum notarization");
+        let notarization = Notarization::from_votes(&fixture.schemes[0], &notarizes, &Sequential)
+            .expect("quorum notarization");
         assert!(notarization.verify(&mut rng, &fixture.schemes[0], &Sequential));
 
         assert!(!notarization.verify(&mut rng, &wrong_fixture.schemes[0], &Sequential));
@@ -3220,7 +2702,7 @@ mod tests {
             .collect();
 
         assert!(
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).is_none(),
+            Notarization::from_votes(&fixture.schemes[0], &notarizes, &Sequential).is_none(),
             "insufficient votes should not form a notarization"
         );
     }
@@ -3285,7 +2767,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(8));
 
-        let nullify = Nullify::sign::<Sha256>(&fixture.schemes[0], round).unwrap();
+        let nullify = Nullify::<_, Sha256>::sign(&fixture.schemes[0], round).unwrap();
         let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
 
@@ -3324,9 +2806,8 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        let finalization =
-            Finalization::from_finalizes(&fixture.schemes[0], &finalizes, &Sequential)
-                .expect("quorum finalization");
+        let finalization = Finalization::from_votes(&fixture.schemes[0], &finalizes, &Sequential)
+            .expect("quorum finalization");
         assert!(finalization.verify(&mut rng, &fixture.schemes[0], &Sequential));
         assert!(!finalization.verify(&mut rng, &wrong_fixture.verifier, &Sequential));
     }
@@ -3426,7 +2907,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "proposals must differ")]
+    #[should_panic(expected = "payloads must differ")]
     fn issue_2944_regression_conflicting_notarize_new() {
         let mut rng = test_rng();
         let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
@@ -3461,7 +2942,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "proposals must differ")]
+    #[should_panic(expected = "payloads must differ")]
     fn issue_2944_regression_conflicting_finalize_new() {
         let mut rng = test_rng();
         let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
@@ -3511,8 +2992,8 @@ mod tests {
             CodecConformance<Proposal<Sha256Digest>>,
             CodecConformance<Notarize<Scheme, Sha256Digest>>,
             CodecConformance<Notarization<Scheme, Sha256Digest>>,
-            CodecConformance<Nullify<Scheme>>,
-            CodecConformance<Nullification<Scheme>>,
+            CodecConformance<Nullify<Scheme, Sha256Digest>>,
+            CodecConformance<Nullification<Scheme, Sha256Digest>>,
             CodecConformance<Finalize<Scheme, Sha256Digest>>,
             CodecConformance<Finalization<Scheme, Sha256Digest>>,
             CodecConformance<Backfiller<Scheme, Sha256Digest>>,
