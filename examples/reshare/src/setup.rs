@@ -15,7 +15,12 @@ use commonware_utils::{
     ordered::{Map, Set},
     Faults, N3f1, TryCollect, NZU32,
 };
-use rand::{rngs::StdRng, seq::IteratorRandom, SeedableRng};
+use rand::{
+    rand_core::UnwrapErr,
+    rngs::{StdRng, SysRng},
+    seq::IteratorRandom,
+    SeedableRng,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -178,7 +183,7 @@ fn generate_identities(
     Vec<(PrivateKey, Option<Share>)>,
 ) {
     // Generate p2p private keys
-    let mut rng = rand::make_rng::<StdRng>();
+    let mut rng = UnwrapErr(SysRng);
     let peer_signers = (0..num_peers)
         .map(|_| PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
@@ -223,7 +228,7 @@ fn generate_configs(
     output: Option<&Output<MinSig, PublicKey>>,
     identities: &[(PrivateKey, Option<Share>)],
 ) -> Vec<PathBuf> {
-    let mut rng = rand::make_rng::<StdRng>();
+    let mut rng = UnwrapErr(SysRng);
     let bootstrappers = identities
         .iter()
         .enumerate()

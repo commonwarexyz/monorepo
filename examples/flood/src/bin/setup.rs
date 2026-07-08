@@ -5,7 +5,7 @@ use commonware_deployer::aws;
 use commonware_flood::Config;
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
-use rand::{rngs::StdRng, seq::IteratorRandom};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, seq::IteratorRandom};
 use std::num::NonZeroUsize;
 use tracing::info;
 use uuid::Uuid;
@@ -122,7 +122,7 @@ fn main() {
         bootstrappers <= peers,
         "bootstrappers must be less than peers"
     );
-    let mut rng = rand::make_rng::<StdRng>();
+    let mut rng = UnwrapErr(SysRng);
     let peer_schemes = (0..peers)
         .map(|_| ed25519::PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
