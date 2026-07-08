@@ -2,6 +2,8 @@ use crate::{
     telemetry::metrics::{raw, Counter, Gauge, Register},
     Buf, Error, Handle, IoBufs, IoBufsMut,
 };
+#[commonware_macros::stability(BETA)]
+use crate::{BlobHeaderLayout, BlobInfo};
 use std::{
     ops::{Deref, RangeInclusive},
     sync::Arc,
@@ -90,17 +92,19 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         partition: &str,
         name: &[u8],
         versions: RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
-        let (inner, len, blob_version) =
-            self.inner.open_versioned(partition, name, versions).await?;
+        layout: BlobHeaderLayout,
+    ) -> Result<(Self::Blob, BlobInfo), Error> {
+        let (inner, info) = self
+            .inner
+            .open_versioned(partition, name, versions, layout)
+            .await?;
         Ok((
             Blob {
                 inner,
                 partition: partition.into(),
                 metrics: Arc::new(MetricsHandle::new(self.metrics.clone())),
             },
-            len,
-            blob_version,
+            info,
         ))
     }
 
@@ -278,7 +282,7 @@ mod tests {
 
         // Reopen with a disjoint version range
         let result = storage
-            .open_versioned("partition", b"test_blob", 7..=7)
+            .open_versioned("partition", b"test_blob", 7..=7, BlobHeaderLayout::V0)
             .await;
         assert!(matches!(result, Err(Error::BlobVersionMismatch { .. })));
         assert_eq!(
