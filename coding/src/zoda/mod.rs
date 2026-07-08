@@ -127,7 +127,6 @@ use commonware_math::{
 };
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{Builder as BmtBuilder, Error as BmtError, Proof};
-use rand::seq::SliceRandom as _;
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
@@ -345,7 +344,7 @@ fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
         .try_into()
         .expect("encoded_rows exceeds u32::MAX; data too large for ZODA");
     let mut out = (0..total).collect::<Vec<_>>();
-    out.shuffle(&mut transcript.noise(b"shuffle"));
+    transcript.shuffle(b"shuffle", &mut out);
     out
 }
 

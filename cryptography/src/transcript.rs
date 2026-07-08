@@ -8,8 +8,8 @@ use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
-use commonware_utils::{Array, Span};
-use core::{convert::Infallible, fmt::Display, ops::Deref};
+use commonware_utils::{Array, Span, NZU64};
+use core::{convert::Infallible, fmt::Display, num::NonZeroU64, ops::Deref};
 use rand_core::{CryptoRng, TryCryptoRng, TryRng};
 use zeroize::ZeroizeOnDrop;
 
@@ -244,6 +244,47 @@ impl Transcript {
         Rng::new(out.hasher.finalize_xof())
     }
 
+    /// Shuffle a slice deterministically, based on this transcript.
+    ///
+    /// The permutation will depend on all of the messages committed to the
+    /// transcript so far. This is a Fisher-Yates shuffle over [Transcript::noise].
+    ///
+    /// The label will also affect the permutation. Changing the label will
+    /// change the resulting order:
+    /// ```
+    /// # use commonware_cryptography::transcript::Transcript;
+    /// let t = Transcript::new(b"test");
+    /// let mut a = [0u32, 1, 2, 3, 4, 5, 6, 7];
+    /// let mut b = a;
+    /// t.shuffle(b"A", &mut a);
+    /// t.shuffle(b"B", &mut b);
+    /// assert_ne!(a, b);
+    /// ```
+    #[commonware_macros::stability(ALPHA)]
+    pub fn shuffle<T>(&self, label: &'static [u8], items: &mut [T]) {
+        let mut rng = self.noise(label);
+        for i in (1..items.len()).rev() {
+            let j = sample(&mut rng, NZU64!(i as u64 + 1));
+            items.swap(i, j as usize);
+        }
+    }
+
+    /// Sample a uniform value in `0..bound`, based on this transcript.
+    ///
+    /// The value is unbiased, and will depend on all of the messages committed
+    /// to the transcript so far. The label will also affect the value:
+    /// ```
+    /// # use commonware_cryptography::transcript::Transcript;
+    /// # use commonware_utils::NZU64;
+    /// let t = Transcript::new(b"test");
+    /// assert_eq!(t.sample(b"A", NZU64!(100)), t.sample(b"A", NZU64!(100)));
+    /// assert!(t.sample(b"A", NZU64!(100)) < 100);
+    /// ```
+    #[commonware_macros::stability(ALPHA)]
+    pub fn sample(&self, label: &'static [u8], bound: NonZeroU64) -> u64 {
+        sample(self.noise(label), bound)
+    }
+
     /// Extract a compact summary from this transcript.
     ///
     /// This can be used to compare transcripts for equality:
@@ -262,6 +303,21 @@ impl Transcript {
             self.hasher.finalize()
         };
         Summary { hash }
+    }
+}
+
+/// Sample a uniform value in `0..bound` from an infallible RNG.
+fn sample(mut rng: impl CryptoRng, bound: NonZeroU64) -> u64 {
+    let bound = bound.get();
+
+    // Accept only draws below the largest multiple of `bound`, so that the
+    // modulo is unbiased. Fewer than two draws are needed on average.
+    let zone = bound * (u64::MAX / bound);
+    loop {
+        let v = rng.next_u64();
+        if v < zone {
+            return v % bound;
+        }
     }
 }
 
@@ -555,6 +611,56 @@ mod test {
     }
 
     #[test]
+    fn test_shuffle_is_permutation() {
+        let t = Transcript::new(b"test");
+        let mut items: Vec<u32> = (0..1000).collect();
+        t.shuffle(b"shuffle", &mut items);
+        assert_ne!(items, (0..1000).collect::<Vec<_>>());
+        items.sort_unstable();
+        assert_eq!(items, (0..1000).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_shuffle_is_deterministic() {
+        let mut t = Transcript::new(b"test");
+        t.commit(b"DATA".as_slice());
+        let mut s1: Vec<u32> = (0..100).collect();
+        let mut s2 = s1.clone();
+        t.shuffle(b"shuffle", &mut s1);
+        t.shuffle(b"shuffle", &mut s2);
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn test_shuffle_label_and_history_matter() {
+        let t1 = Transcript::new(b"test");
+        let mut t2 = Transcript::new(b"test");
+        t2.commit(b"DATA".as_slice());
+        let mut base: Vec<u32> = (0..100).collect();
+        let (mut a, mut b, mut c) = (base.clone(), base.clone(), base.clone());
+        t1.shuffle(b"A", &mut a);
+        t1.shuffle(b"B", &mut b);
+        t2.shuffle(b"A", &mut c);
+        base.clear();
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_sample_within_bound() {
+        let t = Transcript::new(b"test");
+        let mut rng = t.noise(b"sample");
+        for bound in [1, 2, 3, 7, 100, 1 << 40, u64::MAX] {
+            assert!(sample(&mut rng, NZU64!(bound)) < bound);
+        }
+        assert_eq!(t.sample(b"sample", NZU64!(1)), 0);
+        assert_eq!(
+            t.sample(b"one shot", NZU64!(1000)),
+            sample(t.noise(b"one shot"), NZU64!(1000))
+        );
+    }
+
+    #[test]
     fn test_missing_append() {
         let s1 = Transcript::new(b"foo").append(b"AB".as_slice()).summarize();
         let s2 = Transcript::new(b"foo")
@@ -612,6 +718,13 @@ mod test {
                 rng.fill_bytes(&mut noise[..31]);
                 rng.fill_bytes(&mut noise[31..]);
                 log.extend(noise);
+
+                let mut indices: Vec<u32> = (0..(seed % 100) as u32).collect();
+                transcript.shuffle(b"shuffle", &mut indices);
+                for index in &indices {
+                    log.extend(index.encode());
+                }
+                log.extend(transcript.sample(b"sample", NZU64!(seed | 1)).encode());
 
                 let private_key = ed25519::PrivateKey::from_seed(seed);
                 let public_key = private_key.public_key();

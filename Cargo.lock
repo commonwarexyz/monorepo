@@ -1233,7 +1233,6 @@ dependencies = [
  "num-rational",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
- "rand_core 0.10.1",
  "rayon",
  "thiserror 2.0.17",
 ]
