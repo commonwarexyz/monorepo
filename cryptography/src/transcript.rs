@@ -8,8 +8,12 @@ use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
-use commonware_utils::{Array, Span, NZU64};
-use core::{convert::Infallible, fmt::Display, num::NonZeroU64, ops::Deref};
+#[commonware_macros::stability(ALPHA)]
+use commonware_utils::NZU64;
+use commonware_utils::{Array, Span};
+#[commonware_macros::stability(ALPHA)]
+use core::num::NonZeroU64;
+use core::{convert::Infallible, fmt::Display, ops::Deref};
 use rand_core::{CryptoRng, TryCryptoRng, TryRng};
 use zeroize::ZeroizeOnDrop;
 
@@ -307,6 +311,7 @@ impl Transcript {
 }
 
 /// Sample a uniform value in `0..bound` from an infallible RNG.
+#[commonware_macros::stability(ALPHA)]
 fn sample(mut rng: impl CryptoRng, bound: NonZeroU64) -> u64 {
     let bound = bound.get();
 
