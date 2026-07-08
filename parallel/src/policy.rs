@@ -472,7 +472,14 @@ mod tests {
         entry.record(Execution::Serial, Duration::from_millis(5));
 
         assert_eq!(entry.serial_ns, Some(81_000_000));
-        assert_eq!(Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM), Execution::Parallel);
+        assert_eq!(
+            Entry::preferred(
+                entry.serial_ns.unwrap(),
+                entry.parallel_ns.unwrap(),
+                PARALLELISM
+            ),
+            Execution::Parallel
+        );
     }
 
     #[test]
@@ -564,12 +571,24 @@ mod tests {
         let mut entry = Entry::default();
         entry.record(Execution::Parallel, Duration::from_millis(2));
         entry.record(Execution::Serial, Duration::from_millis(1));
-        assert_eq!(Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM), Execution::Serial);
+        assert_eq!(
+            Entry::preferred(
+                entry.serial_ns.unwrap(),
+                entry.parallel_ns.unwrap(),
+                PARALLELISM
+            ),
+            Execution::Serial
+        );
 
         let mut probes = 0;
         let mut flipped_at = None;
         for i in 1..=1_000 {
-            if Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM) == Execution::Parallel {
+            if Entry::preferred(
+                entry.serial_ns.unwrap(),
+                entry.parallel_ns.unwrap(),
+                PARALLELISM,
+            ) == Execution::Parallel
+            {
                 flipped_at = Some(i - 1);
                 break;
             }
@@ -626,7 +645,14 @@ mod tests {
         let mut entry = Entry::default();
         entry.record(Execution::Parallel, Duration::from_micros(500));
         entry.record(Execution::Serial, Duration::from_millis(15));
-        assert_eq!(Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM), Execution::Parallel);
+        assert_eq!(
+            Entry::preferred(
+                entry.serial_ns.unwrap(),
+                entry.parallel_ns.unwrap(),
+                PARALLELISM
+            ),
+            Execution::Parallel
+        );
 
         // Slowdown 15ms / 500us = 30 caps the shift, so the probe fires at 100 << 5 calls.
         let interval = RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT;
@@ -649,12 +675,26 @@ mod tests {
         let mut entry = Entry::default();
         entry.record(Execution::Parallel, Duration::from_micros(800));
         entry.record(Execution::Serial, Duration::from_millis(3));
-        assert_eq!(Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM), Execution::Parallel);
+        assert_eq!(
+            Entry::preferred(
+                entry.serial_ns.unwrap(),
+                entry.parallel_ns.unwrap(),
+                PARALLELISM
+            ),
+            Execution::Parallel
+        );
 
         entry.record(Execution::Serial, Duration::from_micros(20));
 
         assert_eq!(entry.serial_ns, Some(2_404_000));
-        assert_eq!(Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM), Execution::Parallel);
+        assert_eq!(
+            Entry::preferred(
+                entry.serial_ns.unwrap(),
+                entry.parallel_ns.unwrap(),
+                PARALLELISM
+            ),
+            Execution::Parallel
+        );
     }
 
     #[test]
