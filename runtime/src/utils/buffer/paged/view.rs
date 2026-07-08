@@ -6,8 +6,9 @@
 //! to a blob read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in
 //! exactly one place.
 
-use super::CacheRef;
+use super::{cache::CachedDecode, CacheRef};
 use crate::{Blob, Error, IoBufMut, IoBufs};
+use commonware_codec::Read as CodecRead;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::num::NonZeroUsize;
 
@@ -191,37 +192,10 @@ impl<B: Blob> View<'_, B> {
         Ok(offsets.len() - blob_reads)
     }
 
-    /// Like [`Self::read_many_into`], but synchronous and cache-only.
-    ///
-    /// Items fully served from the in-memory tail and page cache are written to their slots in
-    /// `buf`. Returns the indices of items that require a blob read, which is every index when
-    /// the offsets extend past the blob. Those slots hold unspecified bytes.
-    pub fn try_read_many_sync_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Vec<usize> {
-        let ranges = || offsets.iter().map(|&o| (o, item_size.get()));
-        if super::validate_read_ranges(buf.len(), ranges(), self.size).is_err() {
-            return (0..offsets.len()).collect();
-        }
-        if offsets.is_empty() {
-            return Vec::new();
-        }
-
-        let mut cache_ranges = super::split_read_ranges(buf, ranges(), self.tail_offset, self.tail);
-        if cache_ranges.is_empty() {
-            return Vec::new();
-        }
-        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
-        map_misses(cache_ranges, |idx| (offsets[idx], item_size.get()))
-    }
-
-    /// Like [`Self::try_read_many_sync_into`], but for variable-length ranges: `buf` holds one
-    /// slot per `(offset, len)` range, back to back. Returns the indices of ranges that require
-    /// a blob read, which is every index when the ranges extend past the blob. Their slots hold
-    /// unspecified bytes.
+    /// Like [`Self::read_many_into`], but synchronous and cache-only, for variable-length
+    /// ranges: `buf` holds one slot per `(offset, len)` range, back to back. Returns the
+    /// indices of ranges that require a blob read, which is every index when the ranges extend
+    /// past the blob. Their slots hold unspecified bytes.
     pub fn try_read_ranges_sync_into(&self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
         if super::validate_read_ranges(buf.len(), ranges.iter().copied(), self.size).is_err() {
             return (0..ranges.len()).collect();
@@ -237,6 +211,175 @@ impl<B: Blob> View<'_, B> {
         }
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
         map_misses(cache_ranges, |idx| ranges[idx])
+    }
+
+    /// Decode a `T` from the bytes starting at `offset`, letting the decoder consume up to
+    /// `max_len` bytes, without performing I/O. Returns the decoded value and the number of bytes
+    /// consumed.
+    ///
+    /// Returns `None` when the required bytes are not synchronously available (page-cache
+    /// miss), and the caller must fall back to an async read. Returns `Some(Err(_))` only when
+    /// the bytes were fully available and are malformed.
+    ///
+    /// The decode runs under the page-cache read lock and must be parse-only: `T::read_cfg`
+    /// implementations used here must not block or perform expensive work such as decompression.
+    ///
+    /// `T`'s decoding must be driven solely by the bytes it consumes (fixed-size or
+    /// length-prefixed encodings). The decoder is handed the resident prefix of the requested
+    /// range, which may be shorter than `max_len` (it can stop at a page boundary, a
+    /// non-resident page, or an internal gathering cap), and a success over that prefix is
+    /// returned as authoritative. A decoder whose result depends on `remaining()` (one that
+    /// greedily consumes everything available, like `commonware_codec::types::Lazy`) would
+    /// observe an arbitrary residency-dependent window and silently diverge from the async
+    /// read. Use [Self::try_decode_sync] for such types instead, which only succeeds when the
+    /// decoder sees exactly `len` bytes.
+    #[inline]
+    pub fn try_decode_prefix_sync<T: CodecRead>(
+        &self,
+        offset: u64,
+        max_len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<(T, usize), commonware_codec::Error>> {
+        if max_len == 0 || offset >= self.size {
+            return None;
+        }
+        if offset >= self.tail_offset {
+            // The requested range starts in the in-memory tail, so the resident window is the
+            // tail clamped to the logical size.
+            let start = (offset - self.tail_offset) as usize;
+            let end = self.tail.len().min(start.saturating_add(max_len));
+            let total = end - start;
+            let mut buf = &self.tail[start..end];
+            return match T::read_cfg(&mut buf, cfg) {
+                Ok(value) => Some(Ok((value, total - buf.len()))),
+                // The decoder saw the whole requested window, so the failure is authoritative
+                // (mirroring the cache fast path).
+                Err(err) if total == max_len => Some(Err(err)),
+                // A window clamped by the logical size may have starved the decoder, so let
+                // the async path produce the authoritative result.
+                Err(_) => None,
+            };
+        }
+        // The range starts below the tail: its window is the cached bytes up to the tail
+        // boundary followed by the in-memory tail bytes, clamped to `max_len` and the logical
+        // size.
+        let window = ((self.size - offset).min(max_len as u64)) as usize;
+        let cached_len = ((self.tail_offset - offset).min(window as u64)) as usize;
+        let tail = &self.tail[..window - cached_len];
+        match self
+            .cache_ref
+            .decode_cached_prefix::<T>(self.id, offset, cached_len, tail, max_len, cfg)
+        {
+            CachedDecode::Decoded(value, consumed) => Some(Ok((value, consumed))),
+            CachedDecode::Invalid(err) => Some(Err(err)),
+            CachedDecode::Missing => None,
+        }
+    }
+
+    /// Like [Self::try_decode_prefix_sync] but requires the encoding to occupy exactly `len`
+    /// bytes. Under-consumption is reported as an error, matching the
+    /// `commonware_codec::Decode::decode_cfg` semantics.
+    #[inline]
+    pub fn try_decode_sync<T: CodecRead>(
+        &self,
+        offset: u64,
+        len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<T, commonware_codec::Error>> {
+        let end = offset.checked_add(len as u64)?;
+        if len == 0 || end > self.size {
+            // Zero-length and out-of-bounds requests are left for the async path to report.
+            return None;
+        }
+        if offset >= self.tail_offset {
+            return Self::decode_slice_exact(
+                &self.tail[(offset - self.tail_offset) as usize..],
+                len,
+                cfg,
+            );
+        }
+        // A range ending at or below the tail boundary is served purely from cached pages;
+        // one that crosses it also hands the decoder the overlapping tail bytes.
+        let cached_len = ((self.tail_offset - offset).min(len as u64)) as usize;
+        let tail = &self.tail[..len - cached_len];
+        match self
+            .cache_ref
+            .decode_cached_exact::<T>(self.id, offset, cached_len, tail, cfg)
+        {
+            CachedDecode::Decoded(value, _) => Some(Ok(value)),
+            CachedDecode::Invalid(err) => Some(Err(err)),
+            CachedDecode::Missing => None,
+        }
+    }
+
+    /// Decode multiple items of exactly `len` bytes each at sorted, non-overlapping offsets
+    /// without performing I/O. For each offset, pushes `Some(item)` on success or `None` when
+    /// the item's bytes are not synchronously available. Returns an error only when resident
+    /// bytes are malformed (corruption). In that case `out` may contain fewer than
+    /// `offsets.len()` new entries and must be discarded.
+    ///
+    /// Amortizes lock acquisition: the page-cache read lock is taken once per internal chunk of
+    /// offsets rather than once per item, and tail-resident items need no lock at all.
+    pub fn try_decode_sync_many<T: CodecRead>(
+        &self,
+        offsets: &[u64],
+        len: usize,
+        cfg: &T::Cfg,
+        out: &mut Vec<Option<T>>,
+    ) -> Result<(), commonware_codec::Error> {
+        assert!(
+            offsets
+                .windows(2)
+                .all(|w| w[0].checked_add(len as u64).is_some_and(|end| end <= w[1])),
+            "offsets must be sorted and non-overlapping"
+        );
+        if len == 0 {
+            out.resize_with(out.len() + offsets.len(), || None);
+            return Ok(());
+        }
+
+        // Offsets are sorted, so the items entirely below the tail form a prefix. Decode those
+        // from the page cache in one batched pass.
+        let cached = offsets.partition_point(|&offset| {
+            offset
+                .checked_add(len as u64)
+                .is_some_and(|end| end <= self.tail_offset)
+        });
+        self.cache_ref
+            .decode_cached_exact_many::<T>(self.id, &offsets[..cached], len, cfg, out)?;
+
+        // The remainder is tail-resident, boundary-straddling (at most one item), or out of
+        // bounds. The single-item path serves each case.
+        for &offset in &offsets[cached..] {
+            match self.try_decode_sync::<T>(offset, len, cfg) {
+                Some(Ok(value)) => out.push(Some(value)),
+                // The result is authoritative (all `len` bytes were resident), matching the
+                // single-item path.
+                Some(Err(err)) => return Err(err),
+                None => out.push(None),
+            }
+        }
+        Ok(())
+    }
+
+    /// Decode a `T` occupying exactly the first `len` bytes of `slice`.
+    ///
+    /// Both error outcomes are authoritative: all `len` bytes are resident committed bytes, so
+    /// the async path would decode the same bytes to the same result.
+    #[inline]
+    fn decode_slice_exact<T: CodecRead>(
+        slice: &[u8],
+        len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<T, commonware_codec::Error>> {
+        let mut buf = &slice[..len];
+        match T::read_cfg(&mut buf, cfg) {
+            // Under-consumption means the encoding does not occupy exactly `len` bytes.
+            // Report the same error as `Decode::decode_cfg`.
+            Ok(value) if buf.is_empty() => Some(Ok(value)),
+            Ok(_) => Some(Err(commonware_codec::Error::ExtraData(buf.len()))),
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 

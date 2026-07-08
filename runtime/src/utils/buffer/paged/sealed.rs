@@ -17,6 +17,7 @@
 
 use super::{read::PageReader, view::View, CacheRef, Replay, CHECKSUM_SIZE};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
+use commonware_codec::Read as CodecRead;
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -160,21 +161,51 @@ impl<B: Blob> Sealed<B> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
-    /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
-    /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
-    pub fn try_read_many_sync_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Vec<usize> {
-        self.view().try_read_many_sync_into(buf, offsets, item_size)
-    }
-
-    /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges:
-    /// `buf` holds one slot per range, back to back.
+    /// Like [`Self::read_many_into`], but synchronous and cache-only, for variable-length
+    /// `(offset, len)` ranges: `buf` holds one slot per range, back to back. Returns the
+    /// indices of ranges that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub fn try_read_ranges_sync_into(&self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
         self.view().try_read_ranges_sync_into(buf, ranges)
+    }
+
+    /// Decode a `T` from the bytes starting at `offset`, letting the decoder consume up to
+    /// `max_len` bytes, without performing I/O. Returns the decoded value and the number of
+    /// bytes consumed. See [`super::Writer::try_decode_prefix_sync`] for the full contract,
+    /// including the requirements on `T`'s decoder.
+    #[inline]
+    pub fn try_decode_prefix_sync<T: CodecRead>(
+        &self,
+        offset: u64,
+        max_len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<(T, usize), commonware_codec::Error>> {
+        self.view()
+            .try_decode_prefix_sync::<T>(offset, max_len, cfg)
+    }
+
+    /// Like [Self::try_decode_prefix_sync] but requires the encoding to occupy exactly `len`
+    /// bytes. See [`super::Writer::try_decode_sync`].
+    #[inline]
+    pub fn try_decode_sync<T: CodecRead>(
+        &self,
+        offset: u64,
+        len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<T, commonware_codec::Error>> {
+        self.view().try_decode_sync::<T>(offset, len, cfg)
+    }
+
+    /// Decode multiple items of exactly `len` bytes each at sorted, non-overlapping offsets
+    /// without performing I/O. See [`super::Writer::try_decode_sync_many`].
+    pub fn try_decode_sync_many<T: CodecRead>(
+        &self,
+        offsets: &[u64],
+        len: usize,
+        cfg: &T::Cfg,
+        out: &mut Vec<Option<T>>,
+    ) -> Result<(), commonware_codec::Error> {
+        self.view()
+            .try_decode_sync_many::<T>(offsets, len, cfg, out)
     }
 
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
@@ -566,62 +597,6 @@ mod tests {
                     &data[off as usize..off as usize + item_size],
                 );
             }
-        });
-    }
-
-    /// `Sealed::try_read_many_sync_into` serves cached pages and the in-memory tail, and maps
-    /// missed ranges (including straddling prefixes) back to item indices.
-    #[test_traced("DEBUG")]
-    fn test_sealed_try_read_many_sync_into() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
-            let (blob, blob_size) = context.open("test_partition", b"rmany_sync").await.unwrap();
-            // Capacity of one page makes hit/miss behavior deterministic: the cache holds
-            // exactly the last page touched.
-            let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
-            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
-                .await
-                .unwrap();
-
-            // Two full pages plus a partial tail page held in memory by the sealed view.
-            let page_size = PAGE_SIZE.get() as usize;
-            let total = page_size * 2 + 50;
-            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
-            append.append(&data).await.unwrap();
-            let sealed = append.seal().await.unwrap();
-
-            // Items: page 0, page 1, straddling page 1 and the tail, pure tail.
-            let offsets = [
-                0u64,
-                page_size as u64,
-                (page_size * 2 - 2) as u64,
-                (page_size * 2 + 10) as u64,
-            ];
-            let item_size = 4usize;
-            let check = |out: &[u8], indices: &[usize]| {
-                for &i in indices {
-                    let off = offsets[i] as usize;
-                    assert_eq!(
-                        &out[i * item_size..(i + 1) * item_size],
-                        &data[off..off + item_size],
-                    );
-                }
-            };
-
-            // With only page 0 cached, items touching page 1 are misses. The tail item is
-            // served from the sealed view's in-memory bytes.
-            sealed.read_at(0, page_size).await.unwrap();
-            let mut out = vec![0u8; offsets.len() * item_size];
-            let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
-            assert_eq!(misses, vec![1, 2]);
-            check(&out, &[0, 3]);
-
-            // With only page 1 cached, item 0 becomes the miss and the straddler is served.
-            sealed.read_at(page_size as u64, page_size).await.unwrap();
-            let mut out = vec![0u8; offsets.len() * item_size];
-            let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
-            assert_eq!(misses, vec![0]);
-            check(&out, &[1, 2, 3]);
         });
     }
 

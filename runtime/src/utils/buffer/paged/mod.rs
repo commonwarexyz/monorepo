@@ -22,11 +22,26 @@
 //! A _full_ page is one whose crc stores a len equal to the logical page size. Otherwise the page
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
 //! full or partial. A partial page's committed prefix remains recoverable while it is rewritten.
+//!
+//! # Typed Synchronous Decoding
+//!
+//! The `try_decode_*` methods on [Writer] and [Sealed] decode codec types directly from cached
+//! page bytes (or the in-memory tail) without performing I/O and without copying bytes into an
+//! intermediate buffer: the decoder reads borrowed page slots in place, so only the decoded
+//! value itself is materialized. The decode runs under the page-cache read lock, so the
+//! `commonware_codec::Read` implementations used with these methods must be cheap and
+//! parse-only: no blocking and no expensive work such as decompression. A `None` result always
+//! means "retry via an async read". A `Some(Err(_))` result means the bytes were fully
+//! available and are malformed.
+//!
+//! Decoders used with the prefix variant must additionally be driven solely by the bytes they
+//! consume (fixed-size or length-prefixed encodings). See [Writer::try_decode_prefix_sync].
 
 use crate::{Blob, Buf, BufMut, Error, IoBuf};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{crc32, Crc32};
 
+mod buf;
 mod cache;
 mod read;
 mod sealed;

@@ -48,6 +48,7 @@ use crate::{
     Blob, Error, Handle, IoBuf, IoBufMut, IoBufs,
 };
 use bytes::BufMut;
+use commonware_codec::Read as CodecRead;
 use commonware_cryptography::Crc32;
 use std::num::{NonZeroU16, NonZeroUsize};
 use tracing::warn;
@@ -625,21 +626,72 @@ impl<B: Blob> Writer<B> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
-    /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
-    /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
-    pub fn try_read_many_sync_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Vec<usize> {
-        self.view().try_read_many_sync_into(buf, offsets, item_size)
-    }
-
-    /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges:
-    /// `buf` holds one slot per range, back to back.
+    /// Like [`Self::read_many_into`], but synchronous and cache-only, for variable-length
+    /// `(offset, len)` ranges: `buf` holds one slot per range, back to back. Returns the
+    /// indices of ranges that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub fn try_read_ranges_sync_into(&self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
         self.view().try_read_ranges_sync_into(buf, ranges)
+    }
+
+    /// Decode a `T` from the bytes starting at `offset`, letting the decoder consume up to
+    /// `max_len` bytes, without performing I/O. Returns the decoded value and the number of
+    /// bytes consumed.
+    ///
+    /// Returns `None` when the required bytes are not synchronously available (page-cache
+    /// miss), and the caller must fall back to an async read. Returns `Some(Err(_))` only when
+    /// the bytes were fully available and are malformed.
+    ///
+    /// The decode runs under the page-cache read lock and must be parse-only: `T::read_cfg`
+    /// implementations used here must not block or perform expensive work such as
+    /// decompression.
+    ///
+    /// `T`'s decoding must be driven solely by the bytes it consumes (fixed-size or
+    /// length-prefixed encodings). The decoder is handed the resident prefix of the requested
+    /// range, which may be shorter than `max_len` (it can stop at a page boundary, a
+    /// non-resident page, or an internal gathering cap), and a success over that prefix is
+    /// returned as authoritative. A decoder whose result depends on `remaining()` (one that
+    /// greedily consumes everything available, like `commonware_codec::types::Lazy`) would
+    /// observe an arbitrary residency-dependent window and silently diverge from the async
+    /// read. Use [Self::try_decode_sync] for such types instead, which only succeeds when the
+    /// decoder sees exactly `len` bytes.
+    #[inline]
+    pub fn try_decode_prefix_sync<T: CodecRead>(
+        &self,
+        offset: u64,
+        max_len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<(T, usize), commonware_codec::Error>> {
+        self.view()
+            .try_decode_prefix_sync::<T>(offset, max_len, cfg)
+    }
+
+    /// Like [Self::try_decode_prefix_sync] but requires the encoding to occupy exactly `len`
+    /// bytes. Under-consumption is reported as an error, matching the
+    /// `commonware_codec::Decode::decode_cfg` semantics.
+    #[inline]
+    pub fn try_decode_sync<T: CodecRead>(
+        &self,
+        offset: u64,
+        len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<T, commonware_codec::Error>> {
+        self.view().try_decode_sync::<T>(offset, len, cfg)
+    }
+
+    /// Decode multiple items of exactly `len` bytes each at sorted, non-overlapping offsets
+    /// without performing I/O. For each offset, pushes `Some(item)` on success or `None` when
+    /// the item's bytes are not synchronously available. Returns an error only when resident
+    /// bytes are malformed (corruption). In that case `out` may contain fewer than
+    /// `offsets.len()` new entries and must be discarded.
+    pub fn try_decode_sync_many<T: CodecRead>(
+        &self,
+        offsets: &[u64],
+        len: usize,
+        cfg: &T::Cfg,
+        out: &mut Vec<Option<T>>,
+    ) -> Result<(), commonware_codec::Error> {
+        self.view()
+            .try_decode_sync_many::<T>(offsets, len, cfg, out)
     }
 
     /// Reads bytes starting at `offset` into `buf`.
@@ -1170,6 +1222,308 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    /// The blob type produced by the deterministic runtime's storage.
+    type TestBlob = <deterministic::Context as crate::Storage>::Blob;
+
+    /// Open a [Writer] over a fresh blob and fill it with `len` patterned bytes
+    /// (byte `i` is `i as u8`), without syncing.
+    async fn patterned_writer(
+        context: &deterministic::Context,
+        name: &[u8],
+        len: usize,
+    ) -> Writer<TestBlob> {
+        let (blob, blob_size) = context.open("test_partition", name).await.unwrap();
+        let cache_ref = CacheRef::from_pooler(context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+        let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            .await
+            .unwrap();
+        let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
+        writer.append(&data).await.unwrap();
+        writer
+    }
+
+    /// The `u64` stored at `offset` in the patterned byte stream.
+    fn patterned_u64(offset: usize) -> u64 {
+        let bytes: Vec<u8> = (offset..offset + 8).map(|i| i as u8).collect();
+        u64::from_be_bytes(bytes.try_into().unwrap())
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_tip_only() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            // No sync: all bytes live in the tip buffer.
+            let writer = patterned_writer(&context, b"decode_tip", 20).await;
+
+            let offset = 4u64;
+            let decoded: u64 = writer
+                .try_decode_sync(offset, 8, &())
+                .expect("tip bytes should be available")
+                .unwrap();
+            assert_eq!(decoded, patterned_u64(offset as usize));
+
+            // A decode extending past the logical size must defer to the async path.
+            assert!(writer.try_decode_sync::<u64>(16, 8, &()).is_none());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_from_cache() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            // Sync flushes three full pages (which are cached) and leaves a partial tip.
+            let len = 3 * PAGE_SIZE.get() as usize + 10;
+            let mut writer = patterned_writer(&context, b"decode_cache", len).await;
+            writer.sync().await.unwrap();
+
+            // Fully inside a flushed page.
+            let offset = 16u64;
+            let decoded: u64 = writer.try_decode_sync(offset, 8, &()).unwrap().unwrap();
+            assert_eq!(decoded, patterned_u64(offset as usize));
+
+            // Spanning a page boundary in cache.
+            let offset = PAGE_SIZE.get() as u64 - 4;
+            let decoded: u64 = writer.try_decode_sync(offset, 8, &()).unwrap().unwrap();
+            assert_eq!(decoded, patterned_u64(offset as usize));
+
+            // A sealed handle over the same blob serves the same decodes.
+            let sealed = writer.seal().await.unwrap();
+            let decoded: u64 = sealed.try_decode_sync(offset, 8, &()).unwrap().unwrap();
+            assert_eq!(decoded, patterned_u64(offset as usize));
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_straddles_flushed_tip_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let len = 3 * page_size + 10;
+            let mut writer = patterned_writer(&context, b"decode_straddle", len).await;
+            writer.sync().await.unwrap();
+
+            // The item starts in the last flushed page and ends in the tip. The cached prefix
+            // and the tip bytes are assembled into one view, so the decode is served
+            // synchronously as long as the flushed page is resident.
+            let offset = 3 * page_size as u64 - 4;
+            let decoded: u64 = writer.try_decode_sync(offset, 8, &()).unwrap().unwrap();
+            assert_eq!(decoded, patterned_u64(offset as usize));
+
+            // With the flushed page evicted, the sync attempt must fall back.
+            writer.cache_ref.invalidate_from(writer.id, 0);
+            assert!(writer.try_decode_sync::<u64>(offset, 8, &()).is_none());
+
+            // The async fallback returns the correct value.
+            let mut buf = [0u8; 8];
+            writer.read_into(&mut buf, offset).await.unwrap();
+            let decoded = <u64 as ReadExt>::read(&mut &buf[..]).unwrap();
+            assert_eq!(decoded, patterned_u64(offset as usize));
+        });
+    }
+
+    /// A varint length prefix followed by exactly that many payload bytes, rehearsing the
+    /// variable journal's fused header-plus-item decode.
+    struct VarPrefixed(Vec<u8>);
+
+    impl commonware_codec::Read for VarPrefixed {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            let len = commonware_codec::varint::UInt::<u32>::read(buf)?.0 as usize;
+            commonware_codec::util::at_least(buf, len)?;
+            let mut data = vec![0u8; len];
+            buf.copy_to_slice(&mut data);
+            Ok(Self(data))
+        }
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_prefix_sync_varint() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let (blob, blob_size) = context.open("test_partition", b"decode_var").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Item A sits inside page 0. Item B's header lands in page 0 and its payload
+            // extends across the page 0/1 boundary.
+            let payload_a = vec![0xAB; 20];
+            let payload_b = vec![0xCD; page_size];
+            let header_a = commonware_codec::Encode::encode(&commonware_codec::varint::UInt(
+                payload_a.len() as u32,
+            ));
+            let header_b = commonware_codec::Encode::encode(&commonware_codec::varint::UInt(
+                payload_b.len() as u32,
+            ));
+            writer.append(&header_a).await.unwrap();
+            writer.append(&payload_a).await.unwrap();
+            let offset_b = writer.size();
+            assert!(offset_b < page_size as u64);
+            writer.append(&header_b).await.unwrap();
+            writer.append(&payload_b).await.unwrap();
+            // Pad so every touched page is full (and therefore cached) after sync.
+            let size = writer.size();
+            let pad = page_size as u64 - (size % page_size as u64);
+            writer.append(&vec![0u8; pad as usize]).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Item fully within one page.
+            let (item, consumed) = writer
+                .try_decode_prefix_sync::<VarPrefixed>(0, page_size, &())
+                .expect("item A should be resident")
+                .unwrap();
+            assert_eq!(item.0, payload_a);
+            assert_eq!(consumed, header_a.len() + payload_a.len());
+
+            // Item crossing a page boundary.
+            let (item, consumed) = writer
+                .try_decode_prefix_sync::<VarPrefixed>(offset_b, 2 * page_size, &())
+                .expect("item B should be resident")
+                .unwrap();
+            assert_eq!(item.0, payload_b);
+            assert_eq!(consumed, header_b.len() + payload_b.len());
+
+            // Header resident but a payload page absent: evict page 1 onward and verify
+            // the decode defers to the async path.
+            writer.cache_ref.invalidate_from(writer.id, 1);
+            assert!(writer
+                .try_decode_prefix_sync::<VarPrefixed>(offset_b, 2 * page_size, &())
+                .is_none());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_many_mixed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let len = 3 * page_size + 16;
+            let mut writer = patterned_writer(&context, b"decode_many", len).await;
+            writer.sync().await.unwrap();
+
+            // Evict page 1 (and nothing else) by invalidating from page 1 and re-reading
+            // page 2 to repopulate it.
+            writer.cache_ref.invalidate_from(writer.id, 1);
+            let mut buf = [0u8; 8];
+            writer
+                .read_into(&mut buf, 2 * page_size as u64)
+                .await
+                .unwrap();
+
+            // Hits in page 0, page 2, and the tip, and a miss in evicted page 1.
+            let offsets = [
+                8u64,
+                page_size as u64 + 8,
+                2 * page_size as u64 + 8,
+                3 * page_size as u64 + 4,
+            ];
+            let mut out = Vec::with_capacity(offsets.len());
+            writer
+                .try_decode_sync_many::<u64>(&offsets, 8, &(), &mut out)
+                .unwrap();
+
+            assert_eq!(out.len(), offsets.len());
+            assert_eq!(out[0], Some(patterned_u64(offsets[0] as usize)));
+            assert_eq!(out[1], None, "evicted page should miss");
+            assert_eq!(out[2], Some(patterned_u64(offsets[2] as usize)));
+            assert_eq!(out[3], Some(patterned_u64(offsets[3] as usize)));
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_under_consumption_in_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            // All bytes live in the tip buffer. A u32 consumes only 4 of the 8 bytes the
+            // caller claims the encoding occupies, which must be authoritative ExtraData
+            // corruption rather than a miss.
+            let writer = patterned_writer(&context, b"decode_extra", 16).await;
+            assert!(matches!(
+                writer.try_decode_sync::<u32>(0, 8, &()),
+                Some(Err(commonware_codec::Error::ExtraData(4)))
+            ));
+
+            // Zero-length and out-of-bounds decodes defer to the async path.
+            assert!(writer.try_decode_sync::<u32>(0, 0, &()).is_none());
+            assert!(writer.try_decode_sync::<u32>(12, 8, &()).is_none());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_edge_windows() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let writer = patterned_writer(&context, b"decode_edges", 20).await;
+
+            // Prefix decodes past the logical size defer to the async path.
+            assert!(writer.try_decode_prefix_sync::<u64>(20, 8, &()).is_none());
+            assert!(writer.try_decode_prefix_sync::<u64>(0, 0, &()).is_none());
+
+            // A prefix window clamped by the logical size that starves the decoder is a
+            // miss, not corruption: only 4 of the requested 8 bytes exist.
+            assert!(writer.try_decode_prefix_sync::<u64>(16, 8, &()).is_none());
+
+            // Zero-length batched decodes mark every offset as a miss.
+            let mut out: Vec<Option<u64>> = Vec::new();
+            writer
+                .try_decode_sync_many::<u64>(&[0, 8], 0, &(), &mut out)
+                .unwrap();
+            assert_eq!(out, vec![None, None]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_many_corruption_in_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"decode_corrupt_tail")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Both items live in the unflushed tip: the valid bool decodes and the corrupt
+            // one surfaces as an authoritative batch error.
+            writer.append(&[0x01, 0xFF]).await.unwrap();
+            let mut out: Vec<Option<bool>> = Vec::new();
+            assert!(writer
+                .try_decode_sync_many::<bool>(&[0, 1], 1, &(), &mut out)
+                .is_err());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_many_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let (blob, blob_size) = context
+                .open("test_partition", b"decode_corrupt")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // 0xFF is not a valid bool encoding. After sync, page 0 is resident, so the
+            // batch decode must surface corruption as an error.
+            writer.append(&vec![0xFF; page_size]).await.unwrap();
+            writer.sync().await.unwrap();
+
+            let mut out: Vec<Option<bool>> = Vec::new();
+            assert!(writer
+                .try_decode_sync_many::<bool>(&[0, 1, 2], 1, &(), &mut out)
+                .is_err());
+        });
+    }
 
     #[test_traced("DEBUG")]
     fn test_read_many_into_empty() {
