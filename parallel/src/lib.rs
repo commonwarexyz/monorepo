@@ -141,9 +141,6 @@ commonware_macros::stability_scope!(BETA {
             T: Send + 'static;
 
         /// Runs either a serial or parallel body.
-        ///
-        /// Both bodies must produce the same result; the strategy picks whichever it
-        /// expects to complete faster for `len` work items.
         #[track_caller]
         fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
         where
