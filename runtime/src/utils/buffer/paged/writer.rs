@@ -483,14 +483,18 @@ impl<B: Blob> Writer<B> {
     ///
     /// Such an append leaves bytes the writer never published: bulk pages past the claimed
     /// physical end, and possibly a full-page record staged in the tip page's free CRC
-    /// slot. Recovery would prefer both over the claim. Zeroing the staged slot's length
-    /// bytes retires it (length 0 is never authoritative; the committed slot is untouched),
-    /// and truncating back to the claimed physical end removes the bulk pages.
+    /// slot. Recovery would prefer both over the claim. Truncating back to the claimed
+    /// physical end removes the bulk pages, and zeroing the staged slot's length bytes
+    /// retires it (length 0 is never authoritative; the committed slot is untouched).
+    ///
+    /// The truncate must land first: recovery accepts a partial page only in the last
+    /// position, so the orphan pages must already be gone when retiring the slot demotes
+    /// the staged page back to partial.
     ///
     /// Both steps are idempotent and the record is cleared only after they complete, so a
     /// dropped reconciliation re-runs on the next operation. Ordering against the orphan's
     /// own writes comes from the [Blob] contract: mutations execute in submission order, so
-    /// these writes land after the orphan's.
+    /// these mutations land after the orphan's.
     async fn reconcile_publication(&mut self) -> Result<(), Error> {
         let Some(PendingPublication {
             physical_end,
@@ -499,6 +503,8 @@ impl<B: Blob> Writer<B> {
         else {
             return Ok(());
         };
+
+        self.sync_state.resize(&self.blob, physical_end).await?;
 
         if let Some((page, slot)) = staged_slot {
             let physical_page_size = self.cache_ref.page_size() + CHECKSUM_SIZE;
@@ -511,7 +517,6 @@ impl<B: Blob> Writer<B> {
                 .await?;
         }
 
-        self.sync_state.resize(&self.blob, physical_end).await?;
         self.pending_publication = None;
         Ok(())
     }
@@ -2441,6 +2446,164 @@ mod tests {
                 pre.len() as u64,
                 "orphan bytes must not be recovered"
             );
+        });
+    }
+
+    // A repairing sync dropped at its staged-slot retire write must not demote the staged
+    // page while orphan pages remain after it: recovery trusts the last valid page it
+    // finds. Reopening must recover exactly the claimed bytes.
+    #[test_traced("DEBUG")]
+    fn test_reconcile_cancel_at_slot_retire_reopen_recovers_claim() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"reconcile_cancel_retire")
+                .await
+                .unwrap();
+            let (blob, gate) = GatedWriteBlob::new(inner.clone(), GatePosition::After);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // Leave a committed partial page in the tip so the direct path completes it.
+            let pre: Vec<u8> = (0..50).map(|i| i as u8).collect();
+            writer.append(&pre).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Drop the append after both of its split writes landed.
+            gate.set_skip(1);
+            let data: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+            gate.cancel(writer.append_owned(IoBuf::from(data))).await;
+
+            // Drop the repairing sync after its staged-slot retire write landed.
+            gate.cancel(writer.sync()).await;
+            drop(writer);
+
+            // Model a crash that loses no applied writes: persist them all, then reopen.
+            inner.sync().await.unwrap();
+            let (blob, blob_size) = context
+                .open("test_partition", b"reconcile_cancel_retire")
+                .await
+                .unwrap();
+            let mut reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(
+                reopened.size(),
+                pre.len() as u64,
+                "orphan bytes must not be recovered"
+            );
+            let read = reopened.read_at(0, pre.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), pre.as_slice());
+            let mut replay = reopened.replay(NZUsize!(BUFFER_SIZE)).await.unwrap();
+            assert!(replay.ensure(pre.len()).await.unwrap());
+            assert_eq!(replay.copy_to_bytes(pre.len()).as_ref(), pre.as_slice());
+        });
+    }
+
+    // A repair dropped between its truncate and its staged-slot retire leaves the staged
+    // page as the last page, where either slot state is a valid tail. Reopening recovers
+    // the completed page.
+    #[test_traced("DEBUG")]
+    fn test_reconcile_cancel_after_truncate_reopen_is_consistent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"reconcile_cancel_truncate")
+                .await
+                .unwrap();
+            let (blob, write_gate) = GatedWriteBlob::new(inner.clone(), GatePosition::After);
+            let (blob, resize_gate) = GatedResizeBlob::new(blob, GatePosition::After);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let pre: Vec<u8> = (0..50).map(|i| i as u8).collect();
+            writer.append(&pre).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Drop the append after both of its split writes landed.
+            write_gate.set_skip(1);
+            let data: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+            write_gate
+                .cancel(writer.append_owned(IoBuf::from(data.clone())))
+                .await;
+
+            // Drop the repairing sync after its truncate removed the orphan pages.
+            resize_gate.cancel(writer.sync()).await;
+            drop(writer);
+
+            // Model a crash that loses no applied writes: persist them all, then reopen.
+            inner.sync().await.unwrap();
+            let page = PAGE_SIZE.get() as usize;
+            let (blob, blob_size) = context
+                .open("test_partition", b"reconcile_cancel_truncate")
+                .await
+                .unwrap();
+            let mut reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), page as u64);
+            let read = reopened.read_at(0, page).await.unwrap().coalesce();
+            assert_eq!(&read.as_ref()[..pre.len()], pre.as_slice());
+            assert_eq!(&read.as_ref()[pre.len()..], &data[..page - pre.len()]);
+            let mut replay = reopened.replay(NZUsize!(BUFFER_SIZE)).await.unwrap();
+            assert!(replay.ensure(page).await.unwrap());
+        });
+    }
+
+    // A repair dropped between its two steps re-runs on the next operation: the truncate
+    // repeats harmlessly and the staged slot is retired, restoring the claim.
+    #[test_traced("DEBUG")]
+    fn test_reconcile_cancel_after_truncate_retry_reconciles() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (inner, blob_size) = context
+                .open("test_partition", b"reconcile_cancel_retry")
+                .await
+                .unwrap();
+            let (blob, write_gate) = GatedWriteBlob::new(inner, GatePosition::After);
+            let (blob, resize_gate) = GatedResizeBlob::new(blob, GatePosition::After);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let pre: Vec<u8> = (0..50).map(|i| i as u8).collect();
+            writer.append(&pre).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Drop the append after both of its split writes landed.
+            write_gate.set_skip(1);
+            let data: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+            write_gate
+                .cancel(writer.append_owned(IoBuf::from(data)))
+                .await;
+
+            // Drop the repairing sync after its truncate removed the orphan pages.
+            resize_gate.cancel(writer.sync()).await;
+
+            // The claim is unchanged and a retried sync completes the repair.
+            assert_eq!(writer.size(), pre.len() as u64);
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"reconcile_cancel_retry")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(
+                reopened.size(),
+                pre.len() as u64,
+                "orphan bytes must not be recovered"
+            );
+            let read = reopened.read_at(0, pre.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), pre.as_slice());
         });
     }
 
