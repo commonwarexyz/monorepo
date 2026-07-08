@@ -988,6 +988,7 @@ pub(crate) mod harnesses {
             Self::Db::init(ctx, config).await.unwrap()
         }
 
+        #[boxed]
         async fn destroy(db: Self::Db) {
             db.destroy().await.unwrap();
         }
@@ -1195,7 +1196,7 @@ fn test_immutable_local_boundary_nodes_rejects_target_before_local_lower_bound()
         .unwrap()
         .is_some());
 
-        Box::pin(H::destroy(db)).await;
+        H::destroy(db).await;
     });
 }
 

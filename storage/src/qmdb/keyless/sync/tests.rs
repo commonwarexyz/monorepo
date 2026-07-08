@@ -21,6 +21,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{sha256, Sha256};
+use commonware_macros::boxed;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
 };
@@ -890,6 +891,7 @@ pub(crate) mod harnesses {
             VariableDb::<F>::init(ctx, config).await.unwrap()
         }
 
+        #[boxed]
         async fn destroy(db: Self::Db) {
             db.destroy().await.unwrap();
         }
@@ -1075,7 +1077,7 @@ fn test_keyless_local_boundary_nodes_rejects_target_before_local_lower_bound() {
         .unwrap()
         .is_some());
 
-        Box::pin(H::destroy(db)).await;
+        H::destroy(db).await;
     });
 }
 
