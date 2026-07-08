@@ -444,6 +444,7 @@ pub fn test(s: impl FnMut(&mut arbitrary::Unstructured<'_>) -> Result<(), arbitr
 #[cfg(test)]
 mod tests {
     use arbitrary::Unstructured;
+    use rstest::rstest;
 
     #[derive(Debug)]
     enum Plan {
@@ -476,7 +477,9 @@ mod tests {
         }
     }
 
-    fn search_haystack(depth: usize) {
+    #[rstest]
+    #[should_panic]
+    fn search_haystack(#[values(0, 1, 2, 4, 6, 8, 10)] depth: usize) {
         super::Builder::default()
             .with_search_limit(1_000_000)
             .with_seed(0)
@@ -488,48 +491,6 @@ mod tests {
                 }
                 Ok(())
             });
-    }
-
-    #[test]
-    #[should_panic]
-    fn search_haystack_depth_0() {
-        search_haystack(0);
-    }
-
-    #[test]
-    #[should_panic]
-    fn search_haystack_depth_1() {
-        search_haystack(1);
-    }
-
-    #[test]
-    #[should_panic]
-    fn search_haystack_depth_2() {
-        search_haystack(2);
-    }
-
-    #[test]
-    #[should_panic]
-    fn search_haystack_depth_4() {
-        search_haystack(4);
-    }
-
-    #[test]
-    #[should_panic]
-    fn search_haystack_depth_6() {
-        search_haystack(6);
-    }
-
-    #[test]
-    #[should_panic]
-    fn search_haystack_depth_8() {
-        search_haystack(8);
-    }
-
-    #[test]
-    #[should_panic]
-    fn search_haystack_depth_10() {
-        search_haystack(10);
     }
 
     #[test]

@@ -23,6 +23,7 @@ rand_core.workspace = true
 
 [dev-dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+rstest.workspace = true
 
 [lib]
 bench = false
