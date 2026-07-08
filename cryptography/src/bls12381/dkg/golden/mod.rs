@@ -1553,6 +1553,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::{N3f1, N5f1};
+    use rstest::rstest;
     use std::{sync::LazyLock, time::Duration};
 
     const TEST_NAMESPACE: &[u8] = b"test";
@@ -2205,6 +2206,12 @@ mod tests {
         assert!(signed.identify(&other_faults).is_none());
     }
 
+    #[rstest]
+    #[case()]
+    #[case()]
+    #[case()]
+    #[case()]
+    #[test_group("slow")]
     fn fuzz_plan() {
         minifuzz::Builder::default()
             .with_min_iterations(0)
@@ -2216,29 +2223,5 @@ mod tests {
                     .expect("plan should not panic");
                 Ok(())
             });
-    }
-
-    #[test_group("slow")]
-    #[test]
-    fn fuzz_plan_0() {
-        fuzz_plan();
-    }
-
-    #[test_group("slow")]
-    #[test]
-    fn fuzz_plan_1() {
-        fuzz_plan();
-    }
-
-    #[test_group("slow")]
-    #[test]
-    fn fuzz_plan_2() {
-        fuzz_plan();
-    }
-
-    #[test_group("slow")]
-    #[test]
-    fn fuzz_plan_3() {
-        fuzz_plan();
     }
 }
