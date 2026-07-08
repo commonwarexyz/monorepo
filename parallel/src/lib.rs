@@ -1180,6 +1180,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     }
 });
 
+#[cfg(any(feature = "std", test))]
+commonware_macros::stability_mod!(ALPHA, pub mod heartbeat);
+
 #[cfg(test)]
 mod test {
     use crate::{Rayon, Sequential, Strategy};
