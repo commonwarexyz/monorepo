@@ -186,6 +186,10 @@ hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 
+["commonware_cryptography::transcript::test::conformance::TranscriptOps"]
+n_cases = 4096
+hash = "e7d77c36167f3660015eee2c68d412443a0aa53cf3d8b94363f976519153d3e1"
+
 ["commonware_cryptography::zk::bulletproofs::ipa::conformance::CodecConformance<Claim<TestF,TestG>>"]
 n_cases = 65536
 hash = "e21188fc5031748fd25a5804f268ec5887612b7c78d5bc5fe97f0fb62be69f45"

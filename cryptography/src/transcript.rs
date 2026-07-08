@@ -568,8 +568,107 @@ mod test {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_conformance::Conformance;
+
+        struct TranscriptOps;
+
+        impl Conformance for TranscriptOps {
+            async fn commit(seed: u64) -> Vec<u8> {
+                let seed_bytes = seed.to_le_bytes();
+                let namespace = seed_bytes[..(seed as usize % seed_bytes.len()) + 1].to_vec();
+                let data: Vec<_> = (0..seed as usize % 256)
+                    .map(|i| (seed as u8).wrapping_add((3 * i) as u8))
+                    .collect();
+                let split = data.len() / 2;
+
+                let mut transcript = Transcript::new(&namespace);
+                transcript.append(&data[..split]);
+                transcript.commit(&data[split..]);
+
+                let mut log = transcript.summarize().encode().to_vec();
+                log.extend(
+                    Transcript::new(&namespace)
+                        .commit(&data[..split])
+                        .commit(&data[split..])
+                        .summarize()
+                        .encode(),
+                );
+                log.extend(
+                    Transcript::new(&namespace)
+                        .append(data.as_slice())
+                        .commit([].as_slice())
+                        .summarize()
+                        .encode(),
+                );
+                let resumed = Transcript::resume(transcript.summarize());
+                log.extend(resumed.summarize().encode());
+                log.extend(transcript.fork(b"left").summarize().encode());
+                log.extend(transcript.fork(b"right").summarize().encode());
+
+                let mut noise = [0u8; 80];
+                let mut rng = transcript.noise(b"noise");
+                log.extend(rng.next_u32().encode());
+                log.extend(rng.next_u64().encode());
+                rng.fill_bytes(&mut noise[..31]);
+                rng.fill_bytes(&mut noise[31..]);
+                log.extend(noise);
+
+                let private_key = ed25519::PrivateKey::from_seed(seed);
+                let public_key = private_key.public_key();
+                let summary = transcript.summarize();
+                let summary_sig = summary.sign(&private_key);
+                let transcript_sig = transcript.sign(&private_key);
+                log.extend(summary_sig.encode());
+                log.extend(transcript_sig.encode());
+                log.extend(summary.verify(&public_key, &summary_sig).encode());
+                log.extend(transcript.verify(&public_key, &transcript_sig).encode());
+
+                let mut summary_batch = ed25519::Batch::new(1);
+                log.extend(
+                    summary
+                        .add_to_batch(&mut summary_batch, &public_key, &summary_sig)
+                        .encode(),
+                );
+                log.extend(
+                    summary_batch
+                        .verify(&mut transcript.noise(b"summary batch"), &Sequential)
+                        .encode(),
+                );
+
+                let mut transcript_batch = ed25519::Batch::new(1);
+                log.extend(
+                    transcript
+                        .add_to_batch(&mut transcript_batch, &public_key, &transcript_sig)
+                        .encode(),
+                );
+                log.extend(
+                    transcript_batch
+                        .verify(&mut transcript.noise(b"transcript batch"), &Sequential)
+                        .encode(),
+                );
+
+                let mut pending = Transcript::new(&namespace);
+                pending.append(data.as_slice());
+                let pending_summary = pending.summarize();
+                log.extend(pending_summary.encode());
+                log.extend(pending.fork(b"pending fork").summarize().encode());
+
+                let mut pending_noise = [0u8; 37];
+                pending
+                    .noise(b"pending noise")
+                    .fill_bytes(&mut pending_noise);
+                log.extend(pending_noise);
+
+                let pending_sig = pending.sign(&private_key);
+                log.extend(pending_sig.encode());
+                log.extend(pending.verify(&public_key, &pending_sig).encode());
+
+                log
+            }
+        }
 
         commonware_conformance::conformance_tests! {
+            TranscriptOps => 4096,
             CodecConformance<Summary>,
         }
     }
