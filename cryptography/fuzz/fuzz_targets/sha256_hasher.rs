@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{Hasher, Sha256 as OurSha256, sha256::Digest};
+use commonware_cryptography::{Hasher, Sha256 as OurSha256, fuzz::Plan, sha256::Digest};
 use libfuzzer_sys::fuzz_target;
 use sha2::{Digest as RefSha2Digest, Sha256 as RefSha256};
 use zeroize::Zeroize;
@@ -11,6 +11,7 @@ use zeroize::Zeroize;
 pub struct FuzzInput {
     pub chunks: Vec<Vec<u8>>,
     pub data: Vec<u8>,
+    pub plan: Plan<OurSha256>,
     pub case_selector: u8,
 }
 
@@ -141,7 +142,7 @@ fn fuzz_zeroize() {
 }
 
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 8 {
+    match input.case_selector % 9 {
         0 => fuzz_basic_hashing(&input.chunks),
         1 => fuzz_reset_functionality(&input.chunks),
         2 => fuzz_chunked_vs_whole(&input.chunks),
@@ -150,6 +151,9 @@ fn fuzz(input: FuzzInput) {
         5 => fuzz_default_clone(),
         6 => fuzz_fill_and_format(input.data.first().copied().unwrap_or(0)),
         7 => fuzz_zeroize(),
+        // The specialized one-shot and pair (assembly) paths, which the
+        // cases above never reach.
+        8 => input.plan.run(),
         _ => unreachable!(),
     }
 }

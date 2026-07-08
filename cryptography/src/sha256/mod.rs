@@ -295,19 +295,15 @@ mod tests {
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
     );
 
+    /// Anchor the streaming and one-shot paths to a known SHA-256 digest,
+    /// which the differential fuzz tests (comparing paths against each
+    /// other) cannot do.
     #[test]
     fn test_sha256() {
         let msg = b"hello world";
 
-        // Generate initial hash
+        // Generate hash via streaming
         let mut hasher = Sha256::default();
-        hasher.update(msg);
-        let (hasher, digest) = hasher.finalize();
-        assert!(Digest::decode(digest.as_ref()).is_ok());
-        assert_eq!(digest.as_ref(), HELLO_DIGEST);
-
-        // Reuse the reset hasher
-        let mut hasher = hasher;
         hasher.update(msg);
         let (_, digest) = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
@@ -322,8 +318,10 @@ mod tests {
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
-    /// Exercise the fixed-size fast path and the streaming fallback across the
-    /// `MAX_FIXED` boundary, checking each against the streaming implementation.
+    /// Exhaustively sweep every total length across the block-padding and
+    /// `MAX_FIXED` boundaries, checking the one-shot path against the
+    /// streaming implementation. Fuzzing only hits specific off-by-one
+    /// lengths probabilistically; this guarantees them all.
     #[test]
     fn test_sha256_hash_parts_boundaries() {
         for total in 0..=300usize {
@@ -349,73 +347,19 @@ mod tests {
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
     }
 
+    /// Deterministically exercise the pair (assembly) kernel with the merkle
+    /// node shape (position || left || right) that motivates it, regardless
+    /// of what the fuzz generators happen to sample.
     #[test]
-    fn test_hash_pair_matches_scalar() {
-        let cases = [0usize, 1, 31, 32, 55, 56, 63, 64, 65, 72, 120, 256, 1024];
-        for len in cases {
-            let left = vec![0x11; len];
-            let right = vec![0x22; len];
-            let (left_digest, right_digest) =
-                Sha256::hash_pair(&[left.as_slice()], &[right.as_slice()]);
-            assert_eq!(left_digest, Sha256::hash(&[&left]), "left len={len}");
-            assert_eq!(right_digest, Sha256::hash(&[&right]), "right len={len}");
+    fn test_hash_pair_node_shape_matches_streaming() {
+        fn node(position: u64, fill: u8) -> Vec<Vec<u8>> {
+            vec![
+                position.to_be_bytes().to_vec(),
+                vec![fill; 32],
+                vec![fill + 1; 32],
+            ]
         }
-    }
-
-    #[test]
-    fn test_hash_pair_multi_part_matches_scalar() {
-        // The merkle node shape (position || left || right) that motivates the
-        // pair fast path.
-        let pos_a = 42u64.to_be_bytes();
-        let pos_b = 43u64.to_be_bytes();
-        let a1 = [0x11; 32];
-        let a2 = [0x22; 32];
-        let b1 = [0x33; 32];
-        let b2 = [0x44; 32];
-        let left: [&[u8]; 3] = [&pos_a, &a1, &a2];
-        let right: [&[u8]; 3] = [&pos_b, &b1, &b2];
-
-        let (left_digest, right_digest) = Sha256::hash_pair(&left, &right);
-        assert_eq!(left_digest, Sha256::hash(&left));
-        assert_eq!(right_digest, Sha256::hash(&right));
-    }
-
-    #[test]
-    fn test_hash_pair_unequal_lengths_matches_scalar() {
-        let left = vec![0x11; 32];
-        let right = vec![0x22; 33];
-        let (left_digest, right_digest) =
-            Sha256::hash_pair(&[left.as_slice()], &[right.as_slice()]);
-        assert_eq!(left_digest, Sha256::hash(&[&left]));
-        assert_eq!(right_digest, Sha256::hash(&[&right]));
-    }
-
-    #[test]
-    fn test_hash_pair_matches_scalar_minifuzz() {
-        commonware_invariants::minifuzz::Builder::default()
-            .with_seed(0)
-            .with_search_limit(512)
-            .test(|u| {
-                let len = match u.int_in_range(0..=4)? {
-                    0 => 64,
-                    1 => 72,
-                    2 => 128,
-                    3 => 1024,
-                    _ => u.int_in_range(0..=1024)?,
-                };
-                let left = u.bytes(len)?.to_vec();
-                let right = u.bytes(len)?.to_vec();
-
-                // Vary the part structure so the assembled fast path (72-byte
-                // messages) and the serial fallback are both exercised.
-                let split = u.int_in_range(0..=len)?;
-                let left_parts: [&[u8]; 2] = [&left[..split], &left[split..]];
-                let (left_digest, right_digest) =
-                    Sha256::hash_pair(&left_parts, &[right.as_slice()]);
-                assert_eq!(left_digest, Sha256::hash(&[&left]));
-                assert_eq!(right_digest, Sha256::hash(&[&right]));
-                Ok(())
-            });
+        crate::fuzz::Plan::<Sha256>::new(node(42, 0x11), node(43, 0x33)).run();
     }
 
     #[test]
