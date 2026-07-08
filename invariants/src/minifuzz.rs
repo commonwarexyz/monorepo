@@ -396,14 +396,29 @@ impl Builder {
             SearchBound::Limit(l) => l,
             SearchBound::Time(_) => u64::MAX,
         };
+        // A running case cannot be interrupted, so a deadline checked only
+        // after a case completes can overshoot the budget by the duration of
+        // one case. To keep the search time an approximate upper bound, stop
+        // before starting a case that is unlikely to finish in the remaining
+        // budget, using the longest case seen so far as the estimate. A case
+        // that sets a new record can still overshoot.
+        let mut longest_case = Duration::ZERO;
         'search: loop {
             while let Some(sample) = sampler.next() {
+                let past_min = tries >= self.min_iterations;
+                let past_limit =
+                    tries >= limit || deadline.is_some_and(|d| Instant::now() + longest_case >= d);
+                if past_min && past_limit {
+                    break 'search;
+                }
                 let sample_len = sample.len();
+                let started = Instant::now();
                 let result = try_catch(AssertUnwindSafe(|| {
                     let mut u = Unstructured::new(sample);
                     let res = s(&mut u);
                     (res, u.len())
                 }));
+                longest_case = longest_case.max(started.elapsed());
                 match result {
                     Err(e) => {
                         panic!("failure ({ENV_VAR} = {branch}):\n{e}")
@@ -420,12 +435,6 @@ impl Builder {
                     Ok((Ok(()), remaining)) => {
                         sampler.set_bytes_used(sample_len - remaining);
                         tries += 1;
-                        let past_min = tries >= self.min_iterations;
-                        let past_limit =
-                            tries >= limit || deadline.is_some_and(|d| Instant::now() >= d);
-                        if past_min && past_limit {
-                            break 'search;
-                        }
                     }
                 }
             }
