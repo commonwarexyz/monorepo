@@ -212,7 +212,7 @@ stability_scope!(BETA {
     }
 
     /// A parsed header prelude: either fully resolved, or awaiting the V1 extension (located at
-    /// [Header::SIZE], of size [Header::EXTENSION_SIZE]).
+    /// [Header::PRELUDE_SIZE], of size [Header::EXTENSION_SIZE]).
     #[derive(Clone, Copy, Debug)]
     pub(crate) enum ParsedHeader {
         V0 { blob_version: u16 },
@@ -221,10 +221,10 @@ stability_scope!(BETA {
 
     impl Header {
         /// Size of the header prelude in bytes.
-        pub(crate) const SIZE: usize = 8;
+        pub(crate) const PRELUDE_SIZE: usize = 8;
 
         /// Size of the header prelude as u64 for offset calculations.
-        pub(crate) const SIZE_U64: u64 = Self::SIZE as u64;
+        pub(crate) const PRELUDE_SIZE_U64: u64 = Self::PRELUDE_SIZE as u64;
 
         /// Size of the V1 header extension in bytes (data offset + CRC32).
         pub(crate) const EXTENSION_SIZE: usize = 8;
@@ -259,7 +259,7 @@ stability_scope!(BETA {
 
         /// Returns true if a blob is missing a valid header (new or corrupted).
         pub(crate) const fn missing(raw_len: u64) -> bool {
-            raw_len < Self::SIZE_U64
+            raw_len < Self::PRELUDE_SIZE_U64
         }
 
         /// Creates the header region for a new blob using the latest version from the range and
@@ -275,7 +275,7 @@ stability_scope!(BETA {
                 blob_version,
             };
             match layout {
-                BlobHeaderLayout::V0 => (header.encode().into(), blob_version, Self::SIZE_U64),
+                BlobHeaderLayout::V0 => (header.encode().into(), blob_version, Self::PRELUDE_SIZE_U64),
                 BlobHeaderLayout::V1 => {
                     let data_offset = Self::V1_DATA_OFFSET;
                     let mut region = Vec::with_capacity(data_offset as usize);
@@ -292,7 +292,7 @@ stability_scope!(BETA {
         /// Parses and validates a header prelude. Returns the blob version and whether the layout
         /// requires reading the extension to resolve the data offset.
         pub(crate) fn parse_prelude(
-            raw_bytes: [u8; Self::SIZE],
+            raw_bytes: [u8; Self::PRELUDE_SIZE],
             versions: &RangeInclusive<u16>,
         ) -> Result<ParsedHeader, HeaderError> {
             let header: Self = Self::decode(raw_bytes.as_slice())
@@ -315,13 +315,13 @@ stability_scope!(BETA {
         ///
         /// `raw_len` is the blob's raw on-disk length, which must cover the full header region.
         pub(crate) fn parse_extension(
-            prelude: [u8; Self::SIZE],
+            prelude: [u8; Self::PRELUDE_SIZE],
             extension: [u8; Self::EXTENSION_SIZE],
             raw_len: u64,
         ) -> Result<u64, HeaderError> {
-            let mut checked = [0u8; Self::SIZE + 4];
-            checked[..Self::SIZE].copy_from_slice(&prelude);
-            checked[Self::SIZE..].copy_from_slice(&extension[..4]);
+            let mut checked = [0u8; Self::PRELUDE_SIZE + 4];
+            checked[..Self::PRELUDE_SIZE].copy_from_slice(&prelude);
+            checked[Self::PRELUDE_SIZE..].copy_from_slice(&extension[..4]);
             let crc = u32::from_be_bytes(extension[4..].try_into().unwrap());
             if Crc32::checksum(&checked) != crc {
                 return Err(HeaderError::InvalidHeaderChecksum);
@@ -372,7 +372,7 @@ stability_scope!(BETA {
     }
 
     impl FixedSize for Header {
-        const SIZE: usize = Self::SIZE;
+        const SIZE: usize = Self::PRELUDE_SIZE;
     }
 
     impl CodecWrite for Header {
@@ -386,7 +386,7 @@ stability_scope!(BETA {
     impl CodecRead for Header {
         type Cfg = ();
         fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-            if buf.remaining() < Self::SIZE {
+            if buf.remaining() < Self::PRELUDE_SIZE {
                 return Err(commonware_codec::Error::EndOfBuffer);
             }
             let mut magic = [0u8; Self::MAGIC_LENGTH];
@@ -467,8 +467,8 @@ pub(crate) mod tests {
     fn test_header_create_v0() {
         let (region, blob_version, data_offset) = Header::create(&(42..=42), BlobHeaderLayout::V0);
         assert_eq!(blob_version, 42);
-        assert_eq!(data_offset, Header::SIZE_U64);
-        assert_eq!(region.len(), Header::SIZE);
+        assert_eq!(data_offset, Header::PRELUDE_SIZE_U64);
+        assert_eq!(region.len(), Header::PRELUDE_SIZE);
         let decoded: Header = Header::decode(region.as_slice()).unwrap();
         assert_eq!(decoded.magic, Header::MAGIC);
         assert_eq!(
@@ -486,19 +486,20 @@ pub(crate) mod tests {
         assert_eq!(region.len(), Header::V1_DATA_OFFSET as usize);
 
         // The padding past the extension is zero.
-        assert!(region[Header::SIZE + Header::EXTENSION_SIZE..]
+        assert!(region[Header::PRELUDE_SIZE + Header::EXTENSION_SIZE..]
             .iter()
             .all(|&b| b == 0));
 
         // The region round-trips through prelude + extension parsing.
-        let prelude: [u8; Header::SIZE] = region[..Header::SIZE].try_into().unwrap();
+        let prelude: [u8; Header::PRELUDE_SIZE] =
+            region[..Header::PRELUDE_SIZE].try_into().unwrap();
         let parsed = Header::parse_prelude(prelude, &(0..=7)).unwrap();
         assert!(matches!(
             parsed,
             super::ParsedHeader::NeedsExtension { blob_version: 7 }
         ));
         let extension: [u8; Header::EXTENSION_SIZE] = region
-            [Header::SIZE..Header::SIZE + Header::EXTENSION_SIZE]
+            [Header::PRELUDE_SIZE..Header::PRELUDE_SIZE + Header::EXTENSION_SIZE]
             .try_into()
             .unwrap();
         let resolved = Header::parse_extension(prelude, extension, Header::V1_DATA_OFFSET).unwrap();
@@ -534,9 +535,10 @@ pub(crate) mod tests {
             *Header::SUPPORTED_DATA_OFFSETS.end(),
         ] {
             let raw = v1_blob_bytes(offset, 0, b"");
-            let prelude: [u8; Header::SIZE] = raw[..Header::SIZE].try_into().unwrap();
+            let prelude: [u8; Header::PRELUDE_SIZE] =
+                raw[..Header::PRELUDE_SIZE].try_into().unwrap();
             let extension: [u8; Header::EXTENSION_SIZE] = raw
-                [Header::SIZE..Header::SIZE + Header::EXTENSION_SIZE]
+                [Header::PRELUDE_SIZE..Header::PRELUDE_SIZE + Header::EXTENSION_SIZE]
                 .try_into()
                 .unwrap();
             let resolved = Header::parse_extension(prelude, extension, raw.len() as u64).unwrap();
@@ -547,9 +549,10 @@ pub(crate) mod tests {
     #[test]
     fn test_header_extension_rejects_bad_crc() {
         let (region, _, _) = Header::create(&(0..=0), BlobHeaderLayout::V1);
-        let prelude: [u8; Header::SIZE] = region[..Header::SIZE].try_into().unwrap();
+        let prelude: [u8; Header::PRELUDE_SIZE] =
+            region[..Header::PRELUDE_SIZE].try_into().unwrap();
         let mut extension: [u8; Header::EXTENSION_SIZE] = region
-            [Header::SIZE..Header::SIZE + Header::EXTENSION_SIZE]
+            [Header::PRELUDE_SIZE..Header::PRELUDE_SIZE + Header::EXTENSION_SIZE]
             .try_into()
             .unwrap();
         extension[7] ^= 0x01;
@@ -562,14 +565,15 @@ pub(crate) mod tests {
         // A non-power-of-two (or out-of-bounds) data offset is rejected even with a valid CRC.
         for bad_offset in [0u32, 8, 2048, 4097, 1 << 21] {
             let (region, _, _) = Header::create(&(0..=0), BlobHeaderLayout::V1);
-            let mut checked = [0u8; Header::SIZE + 4];
-            checked[..Header::SIZE].copy_from_slice(&region[..Header::SIZE]);
-            checked[Header::SIZE..].copy_from_slice(&bad_offset.to_be_bytes());
+            let mut checked = [0u8; Header::PRELUDE_SIZE + 4];
+            checked[..Header::PRELUDE_SIZE].copy_from_slice(&region[..Header::PRELUDE_SIZE]);
+            checked[Header::PRELUDE_SIZE..].copy_from_slice(&bad_offset.to_be_bytes());
             let crc = commonware_cryptography::Crc32::checksum(&checked);
             let mut extension = [0u8; Header::EXTENSION_SIZE];
             extension[..4].copy_from_slice(&bad_offset.to_be_bytes());
             extension[4..].copy_from_slice(&crc.to_be_bytes());
-            let prelude: [u8; Header::SIZE] = region[..Header::SIZE].try_into().unwrap();
+            let prelude: [u8; Header::PRELUDE_SIZE] =
+                region[..Header::PRELUDE_SIZE].try_into().unwrap();
             let result = Header::parse_extension(prelude, extension, u64::MAX);
             assert!(
                 matches!(result, Err(HeaderError::InvalidDataOffset { found, .. }) if found == bad_offset as u64),
@@ -581,9 +585,10 @@ pub(crate) mod tests {
     #[test]
     fn test_header_extension_rejects_truncated_region() {
         let (region, _, _) = Header::create(&(0..=0), BlobHeaderLayout::V1);
-        let prelude: [u8; Header::SIZE] = region[..Header::SIZE].try_into().unwrap();
+        let prelude: [u8; Header::PRELUDE_SIZE] =
+            region[..Header::PRELUDE_SIZE].try_into().unwrap();
         let extension: [u8; Header::EXTENSION_SIZE] = region
-            [Header::SIZE..Header::SIZE + Header::EXTENSION_SIZE]
+            [Header::PRELUDE_SIZE..Header::PRELUDE_SIZE + Header::EXTENSION_SIZE]
             .try_into()
             .unwrap();
         let result = Header::parse_extension(prelude, extension, Header::V1_DATA_OFFSET - 1);

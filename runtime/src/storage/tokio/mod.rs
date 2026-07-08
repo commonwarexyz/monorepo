@@ -167,7 +167,7 @@ impl crate::Storage for Storage {
             (info, data_offset)
         } else {
             // Existing blob - read and validate the header, honoring the layout it records
-            let mut prelude = [0u8; Header::SIZE];
+            let mut prelude = [0u8; Header::PRELUDE_SIZE];
             file.read_exact(&mut prelude)
                 .await
                 .map_err(|_| Error::ReadFailed)?;
@@ -176,14 +176,14 @@ impl crate::Storage for Storage {
             match parsed {
                 ParsedHeader::V0 { blob_version } => {
                     let info = BlobInfo {
-                        size: len - Header::SIZE_U64,
+                        size: len - Header::PRELUDE_SIZE_U64,
                         blob_version,
                         layout: BlobHeaderLayout::V0,
                     };
-                    (info, Header::SIZE_U64)
+                    (info, Header::PRELUDE_SIZE_U64)
                 }
                 ParsedHeader::NeedsExtension { blob_version } => {
-                    let ext_end = Header::SIZE_U64 + Header::EXTENSION_SIZE as u64;
+                    let ext_end = Header::PRELUDE_SIZE_U64 + Header::EXTENSION_SIZE as u64;
                     if len < ext_end {
                         return Err(HeaderError::TruncatedHeader {
                             data_offset: ext_end,
@@ -525,7 +525,7 @@ mod tests {
         drop(blob);
         let path = storage_directory.join("partition").join(hex(b"truncated"));
         let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        file.set_len(Header::SIZE_U64 + 4).unwrap();
+        file.set_len(Header::PRELUDE_SIZE_U64 + 4).unwrap();
         drop(file);
 
         // Opening must report corruption, not a transient read failure.
@@ -600,7 +600,7 @@ mod tests {
         let partition_path = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_path).unwrap();
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
-        std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
+        std::fs::write(&bad_magic_path, vec![0u8; Header::PRELUDE_SIZE]).unwrap();
 
         // Opening should fail with corrupt error
         let result = storage.open("partition", b"bad_magic").await;
