@@ -155,6 +155,11 @@ impl<T: Attributable> AttributableMap<T> {
         self.data.get(<usize>::from(signer))?.as_ref()
     }
 
+    /// Returns `true` if an item from the given signer is present.
+    pub fn contains(&self, signer: Participant) -> bool {
+        self.get(signer).is_some()
+    }
+
     /// Returns an iterator over items in the map, ordered by signer index
     /// ([Attributable::signer()]).
     pub fn iter(&self) -> impl Iterator<Item = &T> {
@@ -169,14 +174,14 @@ impl<T: Attributable> AttributableMap<T> {
 /// allocations stable.
 pub struct VoteTracker<S: Scheme, D: Digest> {
     /// Per-signer notarize votes keyed by validator index.
-    notarizes: AttributableMap<Notarize<S, D>>,
+    pub notarizes: AttributableMap<Notarize<S, D>>,
     /// Per-signer nullify votes keyed by validator index.
-    nullifies: AttributableMap<Nullify<S, D>>,
+    pub nullifies: AttributableMap<Nullify<S, D>>,
     /// Per-signer finalize votes keyed by validator index.
     ///
     /// Finalize votes include the proposal digest so the entire certificate can be
     /// reconstructed once the quorum threshold is hit.
-    finalizes: AttributableMap<Finalize<S, D>>,
+    pub finalizes: AttributableMap<Finalize<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> VoteTracker<S, D> {
@@ -187,91 +192,6 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             nullifies: AttributableMap::new(participants),
             finalizes: AttributableMap::new(participants),
         }
-    }
-
-    /// Inserts a notarize vote if the signer has not already voted.
-    pub fn insert_notarize(&mut self, vote: Notarize<S, D>) -> bool {
-        self.notarizes.insert(vote)
-    }
-
-    /// Inserts a nullify vote if the signer has not already voted.
-    pub fn insert_nullify(&mut self, vote: Nullify<S, D>) -> bool {
-        self.nullifies.insert(vote)
-    }
-
-    /// Inserts a finalize vote if the signer has not already voted.
-    pub fn insert_finalize(&mut self, vote: Finalize<S, D>) -> bool {
-        self.finalizes.insert(vote)
-    }
-
-    /// Returns the notarize vote for `signer`, if present.
-    pub fn notarize(&self, signer: Participant) -> Option<&Notarize<S, D>> {
-        self.notarizes.get(signer)
-    }
-
-    /// Returns the nullify vote for `signer`, if present.
-    pub fn nullify(&self, signer: Participant) -> Option<&Nullify<S, D>> {
-        self.nullifies.get(signer)
-    }
-
-    /// Returns the finalize vote for `signer`, if present.
-    pub fn finalize(&self, signer: Participant) -> Option<&Finalize<S, D>> {
-        self.finalizes.get(signer)
-    }
-
-    /// Iterates over notarize votes in signer order.
-    pub fn iter_notarizes(&self) -> impl Iterator<Item = &Notarize<S, D>> {
-        self.notarizes.iter()
-    }
-
-    /// Iterates over nullify votes in signer order.
-    pub fn iter_nullifies(&self) -> impl Iterator<Item = &Nullify<S, D>> {
-        self.nullifies.iter()
-    }
-
-    /// Iterates over finalize votes in signer order.
-    pub fn iter_finalizes(&self) -> impl Iterator<Item = &Finalize<S, D>> {
-        self.finalizes.iter()
-    }
-
-    /// Returns how many notarize votes have been recorded.
-    pub fn len_notarizes(&self) -> u32 {
-        u32::try_from(self.notarizes.len()).expect("too many notarize votes")
-    }
-
-    /// Returns how many nullify votes have been recorded.
-    pub fn len_nullifies(&self) -> u32 {
-        u32::try_from(self.nullifies.len()).expect("too many nullify votes")
-    }
-
-    /// Returns how many finalize votes have been recorded.
-    pub fn len_finalizes(&self) -> u32 {
-        u32::try_from(self.finalizes.len()).expect("too many finalize votes")
-    }
-
-    /// Returns `true` if the given signer has a notarize vote recorded.
-    pub fn has_notarize(&self, signer: Participant) -> bool {
-        self.notarizes.get(signer).is_some()
-    }
-
-    /// Returns `true` if a nullify vote has been recorded for `signer`.
-    pub fn has_nullify(&self, signer: Participant) -> bool {
-        self.nullifies.get(signer).is_some()
-    }
-
-    /// Returns `true` if a finalize vote has been recorded for `signer`.
-    pub fn has_finalize(&self, signer: Participant) -> bool {
-        self.finalizes.get(signer).is_some()
-    }
-
-    /// Clears all notarize votes but keeps the allocations for reuse.
-    pub fn clear_notarizes(&mut self) {
-        self.notarizes.clear();
-    }
-
-    /// Clears all finalize votes but keeps the allocations for reuse.
-    pub fn clear_finalizes(&mut self) {
-        self.finalizes.clear();
     }
 }
 
@@ -913,12 +833,12 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Signed<K, S, D> {
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<_, D>(
-            rng,
-            K::subject(&self.payload),
-            &self.attestation,
-            strategy,
-        )
+        scheme.verify_attestation::<_, D>(rng, self.subject(), &self.attestation, strategy)
+    }
+
+    /// Returns the domain-separated subject covered by this vote.
+    pub fn subject(&self) -> Subject<'_, D> {
+        K::subject(&self.payload)
     }
 
     /// Returns the round associated with this vote.
@@ -1069,12 +989,12 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Certified<K, S, D> {
         scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
         strategy: &impl Strategy,
     ) -> bool {
-        scheme.verify_certificate::<_, D, N3f1>(
-            rng,
-            K::subject(&self.payload),
-            &self.certificate,
-            strategy,
-        )
+        scheme.verify_certificate::<_, D, N3f1>(rng, self.subject(), &self.certificate, strategy)
+    }
+
+    /// Returns the domain-separated subject covered by this certificate.
+    pub fn subject(&self) -> Subject<'_, D> {
+        K::subject(&self.payload)
     }
 
     /// Returns the round associated with the certified payload.
@@ -1367,21 +1287,15 @@ impl<S: Scheme, D: Digest> Response<S, D> {
             return true;
         }
 
-        let notarizations = self.notarizations.iter().map(|notarization| {
-            let context = Subject::Notarize {
-                proposal: &notarization.payload,
-            };
+        let notarizations = self
+            .notarizations
+            .iter()
+            .map(|notarization| (notarization.subject(), &notarization.certificate));
 
-            (context, &notarization.certificate)
-        });
-
-        let nullifications = self.nullifications.iter().map(|nullification| {
-            let context = Subject::Nullify {
-                round: nullification.payload,
-            };
-
-            (context, &nullification.certificate)
-        });
+        let nullifications = self
+            .nullifications
+            .iter()
+            .map(|nullification| (nullification.subject(), &nullification.certificate));
 
         scheme.verify_certificates::<_, D, _, N3f1>(
             rng,

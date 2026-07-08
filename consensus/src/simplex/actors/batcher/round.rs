@@ -4,8 +4,9 @@ use crate::{
         actors::span::ViewSpan,
         scheme::Scheme,
         types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
+            Activity, Attributable, AttributableMap, Certified, ConflictingFinalize,
+            ConflictingNotarize, Finalization, Kind, Notarization, Nullification, NullifyFinalize,
+            Proposal, Signed, Vote, VoteTracker,
         },
     },
     types::{Participant, Round as Rnd},
@@ -20,7 +21,7 @@ use commonware_utils::{
     N3f1,
 };
 use rand_core::CryptoRngCore;
-use tracing::{info_span, Span};
+use tracing::{info_span, span::EnteredSpan, Span};
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -163,7 +164,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.pending_votes.notarize(index) {
+                match self.pending_votes.notarizes.get(index) {
                     Some(previous) => {
                         if previous.payload != notarize.payload {
                             let activity = ConflictingNotarize::new(previous.clone(), notarize);
@@ -177,7 +178,7 @@ impl<
                     }
                     None => {
                         self.reporter.report(Activity::Notarize(notarize.clone()));
-                        self.pending_votes.insert_notarize(notarize.clone());
+                        self.pending_votes.notarizes.insert(notarize.clone());
                         self.verifier.add(Vote::Notarize(notarize), false);
                         true
                     }
@@ -191,7 +192,7 @@ impl<
                 }
 
                 // Check if finalized
-                if let Some(previous) = self.pending_votes.finalize(index) {
+                if let Some(previous) = self.pending_votes.finalizes.get(index) {
                     let activity = NullifyFinalize::new(nullify, previous.clone());
                     self.reporter.report(Activity::NullifyFinalize(activity));
                     commonware_p2p::block!(self.blocker, sender, "nullify after finalize");
@@ -199,7 +200,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.pending_votes.nullify(index) {
+                match self.pending_votes.nullifies.get(index) {
                     Some(previous) => {
                         if previous != &nullify {
                             commonware_p2p::block!(self.blocker, sender, "conflicting nullify");
@@ -208,7 +209,7 @@ impl<
                     }
                     None => {
                         self.reporter.report(Activity::Nullify(nullify.clone()));
-                        self.pending_votes.insert_nullify(nullify.clone());
+                        self.pending_votes.nullifies.insert(nullify.clone());
                         self.verifier.add(Vote::Nullify(nullify), false);
                         true
                     }
@@ -222,7 +223,7 @@ impl<
                 }
 
                 // Check if nullified
-                if let Some(previous) = self.pending_votes.nullify(index) {
+                if let Some(previous) = self.pending_votes.nullifies.get(index) {
                     let activity = NullifyFinalize::new(previous.clone(), finalize);
                     self.reporter.report(Activity::NullifyFinalize(activity));
                     commonware_p2p::block!(self.blocker, sender, "finalize after nullify");
@@ -230,7 +231,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.pending_votes.finalize(index) {
+                match self.pending_votes.finalizes.get(index) {
                     Some(previous) => {
                         if previous.payload != finalize.payload {
                             let activity = ConflictingFinalize::new(previous.clone(), finalize);
@@ -244,7 +245,7 @@ impl<
                     }
                     None => {
                         self.reporter.report(Activity::Finalize(finalize.clone()));
-                        self.pending_votes.insert_finalize(finalize.clone());
+                        self.pending_votes.finalizes.insert(finalize.clone());
                         self.verifier.add(Vote::Finalize(finalize), false);
                         true
                     }
@@ -262,7 +263,7 @@ impl<
 
                 // Our own votes are already verified
                 assert!(
-                    self.pending_votes.insert_notarize(notarize.clone()),
+                    self.pending_votes.notarizes.insert(notarize.clone()),
                     "duplicate notarize"
                 );
             }
@@ -272,7 +273,7 @@ impl<
 
                 // Our own votes are already verified
                 assert!(
-                    self.pending_votes.insert_nullify(nullify.clone()),
+                    self.pending_votes.nullifies.insert(nullify.clone()),
                     "duplicate nullify"
                 );
             }
@@ -282,7 +283,7 @@ impl<
 
                 // Our own votes are already verified
                 assert!(
-                    self.pending_votes.insert_finalize(finalize.clone()),
+                    self.pending_votes.finalizes.insert(finalize.clone()),
                     "duplicate finalize"
                 );
             }
@@ -371,7 +372,7 @@ impl<
 
     /// Returns true if `signer` has a nullify vote in this round.
     pub fn has_nullify(&self, signer: Participant) -> bool {
-        self.pending_votes.has_nullify(signer)
+        self.pending_votes.nullifies.contains(signer)
     }
 
     /// Returns participant indices whose matching vote for `proposal` was not
@@ -388,14 +389,16 @@ impl<
     pub fn is_missing_voter(&self, proposal: &Proposal<D>, participant: Participant) -> bool {
         if self
             .pending_votes
-            .notarize(participant)
+            .notarizes
+            .get(participant)
             .is_some_and(|vote| &vote.payload == proposal)
         {
             return false;
         }
 
         self.pending_votes
-            .finalize(participant)
+            .finalizes
+            .get(participant)
             .is_none_or(|vote| &vote.payload != proposal)
     }
 
@@ -421,15 +424,39 @@ impl<
     pub fn add_verified(&mut self, vote: Vote<S, D>) {
         match vote {
             Vote::Notarize(n) => {
-                self.verified_votes.insert_notarize(n);
+                self.verified_votes.notarizes.insert(n);
             }
             Vote::Nullify(n) => {
-                self.verified_votes.insert_nullify(n);
+                self.verified_votes.nullifies.insert(n);
             }
             Vote::Finalize(f) => {
-                self.verified_votes.insert_finalize(f);
+                self.verified_votes.finalizes.insert(f);
             }
         }
+    }
+
+    /// Attempts to construct a certificate of kind `K` from verified votes.
+    ///
+    /// Returns the certificate if we have quorum and haven't already constructed one.
+    /// `span` is entered only once construction is attempted.
+    fn try_construct<K: Kind<D>>(
+        slot: &mut Option<Certified<K, S, D>>,
+        votes: &AttributableMap<Signed<K, S, D>>,
+        quorum: u32,
+        scheme: &S,
+        strategy: &impl Strategy,
+        span: impl FnOnce() -> EnteredSpan,
+    ) -> Option<Certified<K, S, D>> {
+        if slot.is_some() {
+            return None;
+        }
+        if votes.len() < quorum as usize {
+            return None;
+        }
+        let _span = span();
+        let certificate = Certified::from_votes(scheme, votes.iter(), strategy)?;
+        *slot = Some(certificate.clone());
+        Some(certificate)
     }
 
     /// Attempts to construct a notarization certificate from verified votes.
@@ -440,22 +467,22 @@ impl<
         scheme: &S,
         strategy: &impl Strategy,
     ) -> Option<Notarization<S, D>> {
-        if self.has_notarization() {
-            return None;
-        }
-        if self.verified_votes.len_notarizes() < self.participants.quorum::<N3f1>() {
-            return None;
-        }
-        let _span = info_span!(
-            "simplex.batcher.try_construct_notarization",
-            epoch = self.round.epoch().traced(),
-            view = self.round.view().traced()
+        let (epoch, view) = (self.round.epoch().traced(), self.round.view().traced());
+        Self::try_construct(
+            &mut self.notarization,
+            &self.verified_votes.notarizes,
+            self.participants.quorum::<N3f1>(),
+            scheme,
+            strategy,
+            || {
+                info_span!(
+                    "simplex.batcher.try_construct_notarization",
+                    epoch = epoch,
+                    view = view
+                )
+                .entered()
+            },
         )
-        .entered();
-        let notarization =
-            Notarization::from_votes(scheme, self.verified_votes.iter_notarizes(), strategy)?;
-        self.set_notarization(notarization.clone());
-        Some(notarization)
     }
 
     /// Attempts to construct a nullification certificate from verified votes.
@@ -466,22 +493,22 @@ impl<
         scheme: &S,
         strategy: &impl Strategy,
     ) -> Option<Nullification<S, D>> {
-        if self.has_nullification() {
-            return None;
-        }
-        if self.verified_votes.len_nullifies() < self.participants.quorum::<N3f1>() {
-            return None;
-        }
-        let _span = info_span!(
-            "simplex.batcher.try_construct_nullification",
-            epoch = self.round.epoch().traced(),
-            view = self.round.view().traced()
+        let (epoch, view) = (self.round.epoch().traced(), self.round.view().traced());
+        Self::try_construct(
+            &mut self.nullification,
+            &self.verified_votes.nullifies,
+            self.participants.quorum::<N3f1>(),
+            scheme,
+            strategy,
+            || {
+                info_span!(
+                    "simplex.batcher.try_construct_nullification",
+                    epoch = epoch,
+                    view = view
+                )
+                .entered()
+            },
         )
-        .entered();
-        let nullification =
-            Nullification::from_votes(scheme, self.verified_votes.iter_nullifies(), strategy)?;
-        self.set_nullification(nullification.clone());
-        Some(nullification)
     }
 
     /// Attempts to construct a finalization certificate from verified votes.
@@ -492,21 +519,21 @@ impl<
         scheme: &S,
         strategy: &impl Strategy,
     ) -> Option<Finalization<S, D>> {
-        if self.has_finalization() {
-            return None;
-        }
-        if self.verified_votes.len_finalizes() < self.participants.quorum::<N3f1>() {
-            return None;
-        }
-        let _span = info_span!(
-            "simplex.batcher.try_construct_finalization",
-            epoch = self.round.epoch().traced(),
-            view = self.round.view().traced()
+        let (epoch, view) = (self.round.epoch().traced(), self.round.view().traced());
+        Self::try_construct(
+            &mut self.finalization,
+            &self.verified_votes.finalizes,
+            self.participants.quorum::<N3f1>(),
+            scheme,
+            strategy,
+            || {
+                info_span!(
+                    "simplex.batcher.try_construct_finalization",
+                    epoch = epoch,
+                    view = view
+                )
+                .entered()
+            },
         )
-        .entered();
-        let finalization =
-            Finalization::from_votes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
-        self.set_finalization(finalization.clone());
-        Some(finalization)
     }
 }

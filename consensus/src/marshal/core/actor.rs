@@ -18,7 +18,7 @@ use crate::{
     },
     simplex::{
         scheme::Scheme,
-        types::{verify_certificates, Finalization, Notarization, Subject},
+        types::{verify_certificates, Finalization, Notarization},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
     Block, Epochable, Heightable, Reporter,
@@ -1482,18 +1482,12 @@ where
         let certs: Vec<_> = delivers
             .iter()
             .map(|item| match item {
-                PendingVerification::Finalized { finalization, .. } => (
-                    Subject::Finalize {
-                        proposal: &finalization.payload,
-                    },
-                    &finalization.certificate,
-                ),
-                PendingVerification::Notarized { notarization, .. } => (
-                    Subject::Notarize {
-                        proposal: &notarization.payload,
-                    },
-                    &notarization.certificate,
-                ),
+                PendingVerification::Finalized { finalization, .. } => {
+                    (finalization.subject(), &finalization.certificate)
+                }
+                PendingVerification::Notarized { notarization, .. } => {
+                    (notarization.subject(), &notarization.certificate)
+                }
             })
             .collect();
 

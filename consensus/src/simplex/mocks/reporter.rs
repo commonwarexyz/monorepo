@@ -6,7 +6,7 @@ use crate::{
         scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
+            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize,
         },
     },
     types::{Round, View},
@@ -26,7 +26,6 @@ use commonware_utils::{
     },
     ordered::{Quorum, Set},
     sync::Mutex,
-    N3f1,
 };
 use rand_core::CryptoRngCore;
 use std::{
@@ -191,14 +190,7 @@ where
             Activity::Notarization(notarization) | Activity::Certification(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
-                if !self.scheme.verify_certificate::<_, D, N3f1>(
-                    &mut *self.context.lock(),
-                    Subject::Notarize {
-                        proposal: &notarization.payload,
-                    },
-                    &notarization.certificate,
-                    &Sequential,
-                ) {
+                if !notarization.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
                     *self.invalid_certificates.lock() += 1;
                     return Feedback::Ok;
                 }
@@ -225,14 +217,7 @@ where
             Activity::Nullification(nullification) => {
                 // Verify nullification
                 let view = nullification.view();
-                if !self.scheme.verify_certificate::<_, D, N3f1>(
-                    &mut *self.context.lock(),
-                    Subject::Nullify {
-                        round: nullification.payload,
-                    },
-                    &nullification.certificate,
-                    &Sequential,
-                ) {
+                if !nullification.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
                     *self.invalid_certificates.lock() += 1;
                     return Feedback::Ok;
                 }
@@ -263,14 +248,7 @@ where
             Activity::Finalization(finalization) => {
                 // Verify finalization
                 let view = finalization.view();
-                if !self.scheme.verify_certificate::<_, D, N3f1>(
-                    &mut *self.context.lock(),
-                    Subject::Finalize {
-                        proposal: &finalization.payload,
-                    },
-                    &finalization.certificate,
-                    &Sequential,
-                ) {
+                if !finalization.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
                     *self.invalid_certificates.lock() += 1;
                     return Feedback::Ok;
                 }

@@ -3,7 +3,10 @@ use crate::{
     simplex::{
         actors::span::ViewSpan,
         metrics::TimeoutReason,
-        types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
+        types::{
+            kind, Artifact, Attributable, Certified, Finalization, Kind, Notarization,
+            Nullification, Proposal,
+        },
     },
     types::{Participant, Round as Rnd},
 };
@@ -35,6 +38,56 @@ enum CertifyState {
     Aborted,
 }
 
+/// A certificate of one kind plus whether it has been broadcast.
+///
+/// A certificate is returned for broadcast at most once; replayed broadcasts are
+/// honored even when the certificate itself is not restored.
+struct CertSlot<K: Kind<D>, S: Scheme, D: Digest> {
+    /// The certificate, if we have received or constructed one.
+    certificate: Option<Certified<K, S, D>>,
+    /// Whether we have already broadcast the certificate.
+    broadcast: bool,
+}
+
+impl<K: Kind<D>, S: Scheme, D: Digest> CertSlot<K, S, D> {
+    const fn new() -> Self {
+        Self {
+            certificate: None,
+            broadcast: false,
+        }
+    }
+
+    /// Returns the stored certificate, if any.
+    const fn get(&self) -> Option<&Certified<K, S, D>> {
+        self.certificate.as_ref()
+    }
+
+    /// Returns whether a certificate is stored.
+    const fn is_set(&self) -> bool {
+        self.certificate.is_some()
+    }
+
+    /// Stores the certificate.
+    fn set(&mut self, certificate: Certified<K, S, D>) {
+        self.certificate = Some(certificate);
+    }
+
+    /// Returns the certificate for broadcast if present and not yet broadcast.
+    fn broadcast(&mut self) -> Option<Certified<K, S, D>> {
+        if self.broadcast {
+            return None;
+        }
+        let certificate = self.certificate.as_ref()?;
+        self.broadcast = true;
+        Some(certificate.clone())
+    }
+
+    /// Marks the certificate as already broadcast (used during replay).
+    const fn mark_broadcast(&mut self) {
+        self.broadcast = true;
+    }
+}
+
 /// Per-[Rnd] state machine.
 pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
@@ -55,15 +108,12 @@ pub struct Round<S: Scheme, D: Digest> {
     timeout_reason: Option<TimeoutReason>,
 
     // Certificates received from batcher (constructed or from network).
-    notarization: Option<Notarization<S, D>>,
+    notarization: CertSlot<kind::Notarize, S, D>,
     broadcast_notarize: bool,
-    broadcast_notarization: bool,
-    nullification: Option<Nullification<S, D>>,
+    nullification: CertSlot<kind::Nullify, S, D>,
     broadcast_nullify: bool,
-    broadcast_nullification: bool,
-    finalization: Option<Finalization<S, D>>,
+    finalization: CertSlot<kind::Finalize, S, D>,
     broadcast_finalize: bool,
-    broadcast_finalization: bool,
     certify: CertifyState,
 }
 
@@ -80,15 +130,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             certification_deadline: None,
             timeout_retry: None,
             timeout_reason: None,
-            notarization: None,
+            notarization: CertSlot::new(),
             broadcast_notarize: false,
-            broadcast_notarization: false,
-            nullification: None,
+            nullification: CertSlot::new(),
             broadcast_nullify: false,
-            broadcast_nullification: false,
-            finalization: None,
+            finalization: CertSlot::new(),
             broadcast_finalize: false,
-            broadcast_finalization: false,
             certify: CertifyState::Ready,
         }
     }
@@ -143,7 +190,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ///
     /// Returns the proposal once a notarization exists for it.
     pub fn try_certify(&mut self) -> Option<Proposal<D>> {
-        let notarization = self.notarization.as_ref()?;
+        let notarization = self.notarization.get()?;
         match self.certify {
             CertifyState::Ready => {}
             CertifyState::Outstanding(_) | CertifyState::Certified(_) | CertifyState::Aborted => {
@@ -237,17 +284,17 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Returns the notarization certificate if we already reconstructed one.
     pub const fn notarization(&self) -> Option<&Notarization<S, D>> {
-        self.notarization.as_ref()
+        self.notarization.get()
     }
 
     /// Returns the nullification certificate if we already reconstructed one.
     pub const fn nullification(&self) -> Option<&Nullification<S, D>> {
-        self.nullification.as_ref()
+        self.nullification.get()
     }
 
     /// Returns the finalization certificate if we already reconstructed one.
     pub const fn finalization(&self) -> Option<&Finalization<S, D>> {
-        self.finalization.as_ref()
+        self.finalization.get()
     }
 
     /// Returns true if we have explicitly certified the proposal.
@@ -425,7 +472,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ) -> (bool, Option<S::PublicKey>) {
         // Conflicting notarization certificates cannot exist unless safety already failed.
         // Once we've accepted one we simply ignore subsequent duplicates.
-        if self.notarization.is_some() {
+        if self.notarization.is_set() {
             return (false, None);
         }
 
@@ -433,7 +480,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // instead wait for certification to successfully complete).
 
         let equivocator = self.add_recovered_proposal(notarization.payload.clone());
-        self.notarization = Some(notarization);
+        self.notarization.set(notarization);
         (true, equivocator)
     }
 
@@ -442,11 +489,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns `true` if newly added, `false` if already existed.
     pub fn add_nullification(&mut self, nullification: Nullification<S, D>) -> bool {
         // A nullification certificate is unique per view unless safety already failed.
-        if self.nullification.is_some() {
+        if self.nullification.is_set() {
             return false;
         }
         self.clear_deadlines();
-        self.nullification = Some(nullification);
+        self.nullification.set(nullification);
         true
     }
 
@@ -460,50 +507,29 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ) -> (bool, Option<S::PublicKey>) {
         // Only one finalization certificate can exist unless safety already failed, so we ignore
         // later duplicates.
-        if self.finalization.is_some() {
+        if self.finalization.is_set() {
             return (false, None);
         }
         self.clear_deadlines();
 
         let equivocator = self.add_recovered_proposal(finalization.payload.clone());
-        self.finalization = Some(finalization);
+        self.finalization.set(finalization);
         (true, equivocator)
     }
 
     /// Returns a notarization certificate for broadcast if we have one and haven't broadcast it yet.
     pub fn broadcast_notarization(&mut self) -> Option<Notarization<S, D>> {
-        if self.broadcast_notarization {
-            return None;
-        }
-        if let Some(notarization) = &self.notarization {
-            self.broadcast_notarization = true;
-            return Some(notarization.clone());
-        }
-        None
+        self.notarization.broadcast()
     }
 
     /// Returns a nullification certificate for broadcast if we have one and haven't broadcast it yet.
     pub fn broadcast_nullification(&mut self) -> Option<Nullification<S, D>> {
-        if self.broadcast_nullification {
-            return None;
-        }
-        if let Some(nullification) = &self.nullification {
-            self.broadcast_nullification = true;
-            return Some(nullification.clone());
-        }
-        None
+        self.nullification.broadcast()
     }
 
     /// Returns a finalization certificate for broadcast if we have one and haven't broadcast it yet.
     pub fn broadcast_finalization(&mut self) -> Option<Finalization<S, D>> {
-        if self.broadcast_finalization {
-            return None;
-        }
-        if let Some(finalization) = &self.finalization {
-            self.broadcast_finalization = true;
-            return Some(finalization.clone());
-        }
-        None
+        self.finalization.broadcast()
     }
 
     /// Returns a proposal candidate for notarization if we're ready to vote.
@@ -548,7 +574,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
 
         // If there doesn't exist a notarization certificate, return None.
-        self.notarization.as_ref()?;
+        self.notarization.get()?;
 
         // If we haven't certified the proposal, return None.
         //
@@ -604,13 +630,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 self.broadcast_finalize = true;
             }
             Artifact::Notarization(_) => {
-                self.broadcast_notarization = true;
+                self.notarization.mark_broadcast();
             }
             Artifact::Nullification(_) => {
-                self.broadcast_nullification = true;
+                self.nullification.mark_broadcast();
             }
             Artifact::Finalization(_) => {
-                self.broadcast_finalization = true;
+                self.finalization.mark_broadcast();
             }
             Artifact::Certification(_, success) => {
                 self.certified(*success);
@@ -908,19 +934,19 @@ mod tests {
         round.replay(&Artifact::Finalize(finalize_local));
         assert!(round.broadcast_finalize);
         round.replay(&Artifact::Notarization(notarization.clone()));
-        assert!(round.broadcast_notarization);
+        assert!(round.notarization.broadcast);
         round.replay(&Artifact::Nullification(nullification.clone()));
-        assert!(round.broadcast_nullification);
+        assert!(round.nullification.broadcast);
         round.replay(&Artifact::Finalization(finalization.clone()));
-        assert!(round.broadcast_finalization);
+        assert!(round.finalization.broadcast);
 
         // Replaying the certificate again should keep the flags set.
         round.replay(&Artifact::Notarization(notarization));
-        assert!(round.broadcast_notarization);
+        assert!(round.notarization.broadcast);
         round.replay(&Artifact::Nullification(nullification));
-        assert!(round.broadcast_nullification);
+        assert!(round.nullification.broadcast);
         round.replay(&Artifact::Finalization(finalization));
-        assert!(round.broadcast_finalization);
+        assert!(round.finalization.broadcast);
     }
 
     /// Replaying a local notarize vote for a leader-owned proposal should
