@@ -136,7 +136,11 @@ impl crate::Storage for Storage {
                 // Sync the parent directory to ensure the directory entry is durable.
                 sync_dir(parent).await?;
 
-                // Sync storage directory if parent directory did not exist
+                // Sync storage directory if parent directory did not exist.
+                // `parent_existed` reflects the live filesystem, so a partition directory
+                // left by a failed prior attempt in this process skips this sync; that
+                // narrow window is accepted (process restarts are covered by the startup
+                // filesystem sync).
                 if !parent_existed {
                     sync_dir(&self.cfg.storage_directory).await?;
                 }
@@ -159,9 +163,24 @@ impl crate::Storage for Storage {
             // Existing blob - honor the header it records
             HeaderResolution::Valid { blob_version, size } => (blob_version, size),
             HeaderResolution::Recreate => {
-                // New, torn, or corrupted blob - truncate and write header with latest version
+                // Make the blob name durable BEFORE writing the header: a valid header on
+                // disk then implies its directory entries are durable, which is what lets
+                // the Valid arm skip directory syncs. A healed torn creation (len > 0) may
+                // be retrying an attempt that failed before its directory syncs, so its
+                // directory entries cannot be assumed durable even though they exist. (A
+                // brand-new file's entries were synced above; Windows lacks directory-entry
+                // syncing, see issue #2026.)
+                #[cfg(unix)]
+                if len > 0 {
+                    sync_dir(parent).await?;
+                    sync_dir(&self.cfg.storage_directory).await?;
+                }
+
+                // Truncate to zero before writing so a torn header write cannot splice old
+                // bytes into a fully valid header with a wrong version: every partial state
+                // stays shorter than the header and heals on the next open.
                 let (header, blob_version) = Header::new(&versions);
-                file.set_len(Header::SIZE_U64)
+                file.set_len(0)
                     .await
                     .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
                 file.rewind().await.map_err(|_| Error::WriteFailed)?;
@@ -171,16 +190,6 @@ impl crate::Storage for Storage {
                 file.sync_all()
                     .await
                     .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-                // A healed torn creation (len > 0) may be retrying an attempt that failed
-                // before its directory syncs, so its directory entries cannot be assumed
-                // durable even though they exist. (A brand-new file's entries were synced
-                // above; Windows lacks directory-entry syncing, see issue #2026.)
-                #[cfg(unix)]
-                if len > 0 {
-                    sync_dir(parent).await?;
-                    sync_dir(&self.cfg.storage_directory).await?;
-                }
 
                 (blob_version, 0)
             }
