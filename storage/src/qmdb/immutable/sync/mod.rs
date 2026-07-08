@@ -160,7 +160,7 @@ where
             .await?;
 
         sync::local_boundary_nodes::<F, _, H, S>(
-            context.child("recovery"),
+            context,
             config.merkle_config.clone(),
             target,
             inactivity_floor,
