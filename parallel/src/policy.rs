@@ -228,8 +228,12 @@ impl Entry {
     // Returns the path to run and whether the caller should time it and feed the elapsed duration
     // back to [`record`](Self::record).
     fn choose(&mut self, parallelism: usize) -> (Execution, bool) {
-        // Seed the parallel estimate with the first call.
+        // Seed the parallel estimate with the first call. Saturating the probe counter keeps
+        // the entry due for an immediate boundary, so the serial seed is offered as soon as
+        // the parallel estimate lands (when the projection allows) instead of waiting a full
+        // interval that a low-frequency callsite may never reach.
         let Some(parallel_ns) = self.parallel_ns else {
+            self.since_probe = u32::MAX;
             return (Execution::Parallel, true);
         };
 
@@ -334,19 +338,44 @@ mod tests {
     }
 
     #[test]
-    fn starts_parallel_then_seeds_serial_at_boundary() {
+    fn starts_parallel_then_seeds_serial_immediately() {
         let mut entry = Entry::default();
 
         assert_eq!(choose(&mut entry), (Execution::Parallel, true));
         entry.record(Execution::Parallel, Duration::from_micros(100));
 
+        // The projection fits the budget, so the serial seed is offered on the very next
+        // call rather than after a full interval.
+        assert_eq!(choose(&mut entry), (Execution::Serial, true));
+        entry.record(Execution::Serial, Duration::from_micros(95));
+
+        // With both estimates seeded, the boundary resumes its normal cadence.
+        for i in 1..RESAMPLE_INTERVAL {
+            assert_eq!(
+                choose(&mut entry),
+                (Execution::Serial, i % PREFERRED_SAMPLE_INTERVAL == 0)
+            );
+        }
+        assert_eq!(choose(&mut entry), (Execution::Parallel, true));
+    }
+
+    #[test]
+    fn defers_serial_seed_when_projection_exceeds_budget() {
+        let mut entry = Entry::default();
+
+        assert_eq!(choose(&mut entry), (Execution::Parallel, true));
+        entry.record(Execution::Parallel, Duration::from_millis(10));
+
+        // The projection (10ms x 4) is over budget, so the immediate boundary refreshes
+        // parallel instead of seeding serial and the cadence resets to a full interval.
+        assert_eq!(choose(&mut entry), (Execution::Parallel, true));
+        assert!(entry.serial_ns.is_none());
         for i in 1..RESAMPLE_INTERVAL {
             assert_eq!(
                 choose(&mut entry),
                 (Execution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
             );
         }
-        assert_eq!(choose(&mut entry), (Execution::Serial, true));
     }
 
     #[test]
