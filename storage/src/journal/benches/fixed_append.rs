@@ -1,4 +1,4 @@
-use crate::{append_fixed_random_data, get_fixed_journal};
+use crate::{append_fixed_random_data, get_fixed_journal, PAGE_CACHE_SIZE};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     Supervisor as _,
@@ -39,6 +39,7 @@ fn bench_fixed_append(c: &mut Criterion) {
                             ctx.child("storage"),
                             PARTITION,
                             ITEMS_PER_BLOB,
+                            PAGE_CACHE_SIZE,
                         )
                         .await;
 
