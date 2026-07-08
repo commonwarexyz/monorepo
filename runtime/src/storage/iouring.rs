@@ -178,7 +178,7 @@ impl crate::Storage for Storage {
             // Existing blob - read and validate the header, honoring the layout it records
             file.seek(SeekFrom::Start(0))
                 .map_err(|_| Error::ReadFailed)?;
-            let mut prelude = [0u8; Header::SIZE];
+            let mut prelude = [0u8; Header::PRELUDE_SIZE];
             file.read_exact(&mut prelude)
                 .map_err(|_| Error::ReadFailed)?;
             let parsed = Header::parse_prelude(prelude, &versions)
@@ -186,14 +186,14 @@ impl crate::Storage for Storage {
             match parsed {
                 ParsedHeader::V0 { blob_version } => {
                     let info = BlobInfo {
-                        size: raw_len - Header::SIZE_U64,
+                        size: raw_len - Header::PRELUDE_SIZE_U64,
                         blob_version,
                         layout: BlobHeaderLayout::V0,
                     };
-                    (info, Header::SIZE_U64)
+                    (info, Header::PRELUDE_SIZE_U64)
                 }
                 ParsedHeader::NeedsExtension { blob_version } => {
-                    let ext_end = Header::SIZE_U64 + Header::EXTENSION_SIZE as u64;
+                    let ext_end = Header::PRELUDE_SIZE_U64 + Header::EXTENSION_SIZE as u64;
                     if raw_len < ext_end {
                         return Err(HeaderError::TruncatedHeader {
                             data_offset: ext_end,
@@ -725,7 +725,7 @@ mod tests {
 
         // Manually create a file with invalid magic bytes
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
-        std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
+        std::fs::write(&bad_magic_path, vec![0u8; Header::PRELUDE_SIZE]).unwrap();
 
         // Opening should fail with corrupt error
         let err = storage
@@ -1050,7 +1050,7 @@ mod tests {
             file,
             submitter,
             pool,
-            Header::SIZE_U64,
+            Header::PRELUDE_SIZE_U64,
         );
 
         // Read and write should fail through their wrapper-specific error enums
@@ -1109,7 +1109,7 @@ mod tests {
             file,
             submitter,
             pool,
-            Header::SIZE_U64,
+            Header::PRELUDE_SIZE_U64,
         );
         // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
         let err = blob
@@ -1148,7 +1148,7 @@ mod tests {
             file,
             submitter,
             pool,
-            Header::SIZE_U64,
+            Header::PRELUDE_SIZE_U64,
         );
         let err = blob
             .start_sync()
@@ -1191,7 +1191,7 @@ mod tests {
             file,
             submitter,
             pool,
-            Header::SIZE_U64,
+            Header::PRELUDE_SIZE_U64,
         );
         let err = blob
             .resize(0)
@@ -1229,7 +1229,7 @@ mod tests {
             file,
             submitter.clone(),
             pool,
-            Header::SIZE_U64,
+            Header::PRELUDE_SIZE_U64,
         );
         // The request should reach the kernel and come back as a wrapped sync failure.
         let err = blob

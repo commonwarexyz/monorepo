@@ -71,21 +71,21 @@ impl crate::Storage for Storage {
             (info, data_offset)
         } else {
             // Existing blob - read and validate the header, honoring the layout it records
-            let mut prelude = [0u8; Header::SIZE];
-            prelude.copy_from_slice(&content[..Header::SIZE]);
+            let mut prelude = [0u8; Header::PRELUDE_SIZE];
+            prelude.copy_from_slice(&content[..Header::PRELUDE_SIZE]);
             let parsed = Header::parse_prelude(prelude, &versions)
                 .map_err(|e| e.into_error(partition, name))?;
             match parsed {
                 ParsedHeader::V0 { blob_version } => {
                     let info = BlobInfo {
-                        size: raw_len - Header::SIZE_U64,
+                        size: raw_len - Header::PRELUDE_SIZE_U64,
                         blob_version,
                         layout: BlobHeaderLayout::V0,
                     };
-                    (info, Header::SIZE_U64)
+                    (info, Header::PRELUDE_SIZE_U64)
                 }
                 ParsedHeader::NeedsExtension { blob_version } => {
-                    let ext_end = Header::SIZE + Header::EXTENSION_SIZE;
+                    let ext_end = Header::PRELUDE_SIZE + Header::EXTENSION_SIZE;
                     if content.len() < ext_end {
                         return Err(HeaderError::TruncatedHeader {
                             data_offset: ext_end as u64,
@@ -94,7 +94,7 @@ impl crate::Storage for Storage {
                         .into_error(partition, name));
                     }
                     let mut extension = [0u8; Header::EXTENSION_SIZE];
-                    extension.copy_from_slice(&content[Header::SIZE..ext_end]);
+                    extension.copy_from_slice(&content[Header::PRELUDE_SIZE..ext_end]);
                     let data_offset = Header::parse_extension(prelude, extension, raw_len)
                         .map_err(|e| e.into_error(partition, name))?;
                     let info = BlobInfo {
@@ -363,9 +363,9 @@ mod tests {
             let partitions = storage.partitions.lock();
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"v0".to_vec()).unwrap();
-            assert_eq!(raw_content.len(), Header::SIZE + data.len());
+            assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + data.len());
             assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Header::MAGIC);
-            assert_eq!(&raw_content[Header::SIZE..], data);
+            assert_eq!(&raw_content[Header::PRELUDE_SIZE..], data);
         }
 
         // Corrupted blob recovery (0 < raw_size < 8)
@@ -437,7 +437,7 @@ mod tests {
         {
             let mut partitions = storage.partitions.lock();
             let partition = partitions.entry("partition".into()).or_default();
-            partition.insert(b"bad_magic".to_vec(), vec![0u8; Header::SIZE]);
+            partition.insert(b"bad_magic".to_vec(), vec![0u8; Header::PRELUDE_SIZE]);
         }
 
         // Opening should fail with corrupt error
