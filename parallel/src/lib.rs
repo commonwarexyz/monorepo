@@ -72,6 +72,7 @@ commonware_macros::stability_scope!(BETA {
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
+            use core::convert::Infallible;
             use futures::{
                 channel::oneshot,
                 future::{self, Either},
@@ -942,18 +943,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             multiplier: usize,
             run: impl FnOnce(policy::Execution) -> R,
         ) -> R {
-            let threads = self.thread_pool.current_num_threads();
-            let Some(policy) = &self.policy else {
-                let execution = if threads <= 1 {
-                    policy::Execution::Serial
-                } else {
-                    policy::Execution::Parallel
-                };
-                return run(execution);
-            };
-
-            let work = len.saturating_mul(multiplier);
-            policy.run(Location::caller(), len, work, threads, run)
+            match self.try_execute(len, multiplier, |execution| {
+                Ok::<_, Infallible>(run(execution))
+            }) {
+                Ok(result) => result,
+                Err(e) => match e {},
+            }
         }
 
         #[track_caller]

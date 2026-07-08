@@ -28,7 +28,9 @@
 //!
 //! Timing is coarse by design: each measured call records one wall-clock sample. Queueing on a
 //! shared pool is included in a parallel sample's elapsed time, so contention pushes the
-//! parallel estimate up and steers concurrent callers back toward serial. Fallible operations
+//! parallel estimate up and steers concurrent callers back toward serial. On pools wide enough
+//! that the inflated projection exceeds the budget, the same pressure instead biases the entry
+//! to parallel until the contention subsides. Fallible operations
 //! only record samples on success: error paths often abort early, and recording their short
 //! wall time would let garbage inputs drag an estimate down and unlock a serial sample of
 //! genuine work. Both paths produce identical results, so a misjudged call only costs
@@ -80,30 +82,11 @@ pub(super) struct Policy {
 impl Policy {
     /// Runs `run` on the execution path preferred for this callsite and input size, occasionally
     /// timing the call so the decision tracks recent performance.
-    pub(super) fn run<R>(
-        &self,
-        caller: &'static Location<'static>,
-        len: usize,
-        work: usize,
-        parallelism: usize,
-        run: impl FnOnce(Execution) -> R,
-    ) -> R {
-        self.execute(
-            caller,
-            len,
-            work,
-            parallelism,
-            run,
-            |entry, execution, elapsed, _result| {
-                entry.record(execution, elapsed);
-            },
-        )
-    }
-
-    /// Like [`run`](Self::run), but only records the elapsed time when `run` returns `Ok`.
     ///
-    /// Error paths often abort early, so recording their short wall time would poison the
-    /// estimate used to choose between serial and parallel execution.
+    /// Only successful calls record their elapsed time. Error paths often abort early, so
+    /// recording their short wall time would poison the estimate used to choose between serial
+    /// and parallel execution. Infallible operations wrap their result in `Ok` to share this
+    /// path.
     pub(super) fn try_run<R, E>(
         &self,
         caller: &'static Location<'static>,
@@ -112,32 +95,6 @@ impl Policy {
         parallelism: usize,
         run: impl FnOnce(Execution) -> Result<R, E>,
     ) -> Result<R, E> {
-        self.execute(
-            caller,
-            len,
-            work,
-            parallelism,
-            run,
-            |entry, execution, elapsed, result| {
-                if result.is_ok() {
-                    entry.record(execution, elapsed);
-                }
-            },
-        )
-    }
-
-    fn execute<R, REC>(
-        &self,
-        caller: &'static Location<'static>,
-        len: usize,
-        work: usize,
-        parallelism: usize,
-        run: impl FnOnce(Execution) -> R,
-        record: REC,
-    ) -> R
-    where
-        REC: FnOnce(&mut Entry, Execution, Duration, &R),
-    {
         // A single-threaded pool cannot benefit from rayon scheduling, so always run serial and
         // never spend a measurement on it.
         if parallelism <= 1 {
@@ -148,9 +105,9 @@ impl Policy {
         let (execution, measure) = self.entries.entry(key).or_default().choose(parallelism);
         let start = measure.then(Instant::now);
         let result = run(execution);
-        if let Some(start) = start {
+        if let (Some(start), Ok(_)) = (start, &result) {
             let mut entry = self.entries.entry(key).or_default();
-            record(&mut entry, execution, start.elapsed(), &result);
+            entry.record(execution, start.elapsed());
         }
         result
     }
@@ -211,11 +168,17 @@ struct Entry {
 }
 
 impl Entry {
+    // A serial pass of work that parallel finishes in `parallel_ns` can take up to
+    // `parallel_ns * parallelism`.
+    fn projected_serial(parallel_ns: u64, parallelism: usize) -> u64 {
+        parallel_ns.saturating_mul(u64::try_from(parallelism).unwrap_or(u64::MAX))
+    }
+
     // Returns the path to prefer: the faster estimate, provided both the projected and
     // measured serial cost fit under the budget (the tuner only arbitrates small cases).
     // Ties go to serial (equal wall time for fewer busy workers).
-    const fn preferred(serial_ns: u64, parallel_ns: u64, projected_serial: u64) -> Execution {
-        if projected_serial >= SERIAL_SAMPLE_BUDGET_NS
+    fn preferred(serial_ns: u64, parallel_ns: u64, parallelism: usize) -> Execution {
+        if Self::projected_serial(parallel_ns, parallelism) >= SERIAL_SAMPLE_BUDGET_NS
             || serial_ns >= SERIAL_SAMPLE_BUDGET_NS
             || parallel_ns < serial_ns
         {
@@ -237,14 +200,11 @@ impl Entry {
             return (Execution::Parallel, true);
         };
 
-        // A serial pass of work that parallel finishes in `parallel_ns` can take up to
-        // `parallel_ns * parallelism`. The projection gates serial in both sampling and
-        // preference: a case whose projection exceeds the budget never runs serial. It is
-        // live: parallel keeps refreshing whenever it executes, so a case that shrinks into
-        // the budget unlocks on its own.
-        let projected_serial =
-            parallel_ns.saturating_mul(u64::try_from(parallelism).unwrap_or(u64::MAX));
-        let can_sample_serial = projected_serial < SERIAL_SAMPLE_BUDGET_NS;
+        // The projection gates serial in both sampling and preference: a case whose projection
+        // exceeds the budget never runs serial. It is live: parallel keeps refreshing whenever
+        // it executes, so a case that shrinks into the budget unlocks on its own.
+        let can_sample_serial =
+            Self::projected_serial(parallel_ns, parallelism) < SERIAL_SAMPLE_BUDGET_NS;
 
         // Until serial is sampled, parallel is preferred by default and the boundary doubles
         // as the seed slot. Once both estimates exist, the boundary probes the losing path on
@@ -253,7 +213,7 @@ impl Entry {
         let (preferred, interval) =
             self.serial_ns
                 .map_or((Execution::Parallel, RESAMPLE_INTERVAL), |serial_ns| {
-                    let preferred = Self::preferred(serial_ns, parallel_ns, projected_serial);
+                    let preferred = Self::preferred(serial_ns, parallel_ns, parallelism);
                     let (winner_ns, loser_ns) = match preferred {
                         Execution::Serial => (serial_ns, parallel_ns),
                         Execution::Parallel => (parallel_ns, serial_ns),
@@ -272,11 +232,12 @@ impl Entry {
         self.since_probe = self.since_probe.saturating_add(1);
         if self.since_probe >= interval {
             self.since_probe = 0;
-            match preferred {
-                Execution::Serial => return (Execution::Parallel, true),
-                Execution::Parallel if can_sample_serial => return (Execution::Serial, true),
-                Execution::Parallel => return (Execution::Parallel, true),
-            }
+            let probe = match preferred {
+                Execution::Serial => Execution::Parallel,
+                Execution::Parallel if can_sample_serial => Execution::Serial,
+                Execution::Parallel => Execution::Parallel,
+            };
+            return (probe, true);
         }
 
         (
@@ -327,14 +288,6 @@ mod tests {
 
     fn choose(entry: &mut Entry) -> (Execution, bool) {
         entry.choose(PARALLELISM)
-    }
-
-    fn preferred(entry: &Entry) -> Execution {
-        let serial_ns = entry.serial_ns.unwrap();
-        let parallel_ns = entry.parallel_ns.unwrap();
-        let projected_serial =
-            parallel_ns.saturating_mul(u64::try_from(PARALLELISM).unwrap_or(u64::MAX));
-        Entry::preferred(serial_ns, parallel_ns, projected_serial)
     }
 
     #[test]
@@ -519,7 +472,7 @@ mod tests {
         entry.record(Execution::Serial, Duration::from_millis(5));
 
         assert_eq!(entry.serial_ns, Some(81_000_000));
-        assert_eq!(preferred(&entry), Execution::Parallel);
+        assert_eq!(Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM), Execution::Parallel);
     }
 
     #[test]
@@ -611,12 +564,12 @@ mod tests {
         let mut entry = Entry::default();
         entry.record(Execution::Parallel, Duration::from_millis(2));
         entry.record(Execution::Serial, Duration::from_millis(1));
-        assert_eq!(preferred(&entry), Execution::Serial);
+        assert_eq!(Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM), Execution::Serial);
 
         let mut probes = 0;
         let mut flipped_at = None;
         for i in 1..=1_000 {
-            if preferred(&entry) == Execution::Parallel {
+            if Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM) == Execution::Parallel {
                 flipped_at = Some(i - 1);
                 break;
             }
@@ -673,7 +626,7 @@ mod tests {
         let mut entry = Entry::default();
         entry.record(Execution::Parallel, Duration::from_micros(500));
         entry.record(Execution::Serial, Duration::from_millis(15));
-        assert_eq!(preferred(&entry), Execution::Parallel);
+        assert_eq!(Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM), Execution::Parallel);
 
         // Slowdown 15ms / 500us = 30 caps the shift, so the probe fires at 100 << 5 calls.
         let interval = RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT;
@@ -696,12 +649,12 @@ mod tests {
         let mut entry = Entry::default();
         entry.record(Execution::Parallel, Duration::from_micros(800));
         entry.record(Execution::Serial, Duration::from_millis(3));
-        assert_eq!(preferred(&entry), Execution::Parallel);
+        assert_eq!(Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM), Execution::Parallel);
 
         entry.record(Execution::Serial, Duration::from_micros(20));
 
         assert_eq!(entry.serial_ns, Some(2_404_000));
-        assert_eq!(preferred(&entry), Execution::Parallel);
+        assert_eq!(Entry::preferred(entry.serial_ns.unwrap(), entry.parallel_ns.unwrap(), PARALLELISM), Execution::Parallel);
     }
 
     #[test]
@@ -735,8 +688,8 @@ mod tests {
         // A successful call records the parallel estimate.
         let result: Result<(), ()> = policy.try_run(location, len, work, PARALLELISM, |_| Ok(()));
         assert!(result.is_ok());
-        let (serial_ns, parallel_ns) = policy.get_entry(location, len, work, PARALLELISM).unwrap();
-        let parallel_estimate = parallel_ns;
+        let (serial_ns, parallel_estimate) =
+            policy.get_entry(location, len, work, PARALLELISM).unwrap();
         assert!(parallel_estimate.is_some());
         assert!(serial_ns.is_none());
 
