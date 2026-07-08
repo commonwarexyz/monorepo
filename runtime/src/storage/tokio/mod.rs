@@ -120,32 +120,6 @@ impl crate::Storage for Storage {
 
         // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
-        let newly_created = len == 0;
-
-        // Only sync if we created a new file
-        if newly_created {
-            // Sync the file to ensure it is durable
-            file.sync_all()
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
-            #[cfg(unix)]
-            {
-                // Sync the parent directory to ensure the directory entry is durable.
-                sync_dir(parent).await?;
-
-                // Sync storage directory if parent directory did not exist.
-                // `parent_existed` reflects the live filesystem, so a partition directory
-                // left by a failed prior attempt in this process skips this sync; that
-                // narrow window is accepted (process restarts are covered by the startup
-                // filesystem sync).
-                if !parent_existed {
-                    sync_dir(&self.cfg.storage_directory).await?;
-                }
-            }
-        }
 
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
@@ -167,13 +141,18 @@ impl crate::Storage for Storage {
                 // disk then implies its directory entries are durable, which is what lets
                 // the Valid arm skip directory syncs. A healed torn creation (len > 0) may
                 // be retrying an attempt that failed before its directory syncs, so its
-                // directory entries cannot be assumed durable even though they exist. (A
-                // brand-new file's entries were synced above; Windows lacks directory-entry
-                // syncing, see issue #2026.)
+                // directory entries cannot be assumed durable even though they exist.
+                // `parent_existed` reflects the live filesystem, so a partition directory
+                // left by a failed prior attempt in this process skips the storage-root
+                // sync; that narrow window is accepted (process restarts are covered by the
+                // startup filesystem sync). Windows lacks directory-entry syncing, see
+                // https://github.com/commonwarexyz/monorepo/issues/2026.
                 #[cfg(unix)]
-                if len > 0 {
+                {
                     sync_dir(parent).await?;
-                    sync_dir(&self.cfg.storage_directory).await?;
+                    if !parent_existed || len > 0 {
+                        sync_dir(&self.cfg.storage_directory).await?;
+                    }
                 }
 
                 // Truncate to zero before writing so a torn header write cannot splice old
