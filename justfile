@@ -69,7 +69,7 @@ test-benches crate test_flags='' lint_flags='':
 test *args='':
     cargo nextest run $@
 
-# Run loom tests, scoped to crates that declare a `loom` feature
+# Run loom tests
 test-loom *args='':
     #!/usr/bin/env bash
     set -euo pipefail
