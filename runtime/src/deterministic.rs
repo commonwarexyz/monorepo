@@ -101,7 +101,7 @@ use std::{
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::trace;
+use tracing::{instrument::WithSubscriber, trace};
 
 #[derive(Debug)]
 struct Metrics {
@@ -798,6 +798,12 @@ impl Tasks {
         label: Label,
         future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     ) {
+        // Attach the tracing subscriber current at spawn time and re-enter it on
+        // every poll (like tokio's spawn). A caller can set a per-node subscriber
+        // so all of a task's descendants are attributed to it, independent of
+        // span topology.
+        let future: Pin<Box<dyn Future<Output = ()> + Send + 'static>> =
+            Box::pin(future.with_current_subscriber());
         let id = arc_self.increment();
         let task = Arc::new(Task {
             id,
@@ -1999,6 +2005,93 @@ mod tests {
             }
             assert_eq!(results, vec![1, 2]);
         });
+    }
+
+    #[test]
+    fn poc_dispatch_propagation_attributes_by_node() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Per-node collecting layer: tags each event with the node it belongs to.
+        struct NodeCollector {
+            node: u32,
+            sink: Arc<Mutex<Vec<String>>>,
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for NodeCollector {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Msg(String);
+                impl tracing::field::Visit for Msg {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            use std::fmt::Write;
+                            let _ = write!(self.0, "{value:?}");
+                        }
+                    }
+                }
+                let mut m = Msg(String::new());
+                event.record(&mut m);
+                if !m.0.is_empty() {
+                    self.sink
+                        .lock()
+                        .unwrap()
+                        .push(format!("node={} {}", self.node, m.0));
+                }
+            }
+        }
+
+        let sink: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let executor = deterministic::Runner::default();
+        {
+            let sink = sink.clone();
+            executor.start(move |context| async move {
+                let mut handles = Vec::new();
+                for node in 0u32..2 {
+                    let subscriber =
+                        tracing_subscriber::registry().with(NodeCollector {
+                            node,
+                            sink: sink.clone(),
+                        });
+                    let dispatch = tracing::Dispatch::new(subscriber);
+                    let ctx = context.child("node");
+                    // Spawn each node's task tree under its own subscriber.
+                    let handle = tracing::dispatcher::with_default(&dispatch, || {
+                        ctx.spawn(move |context| async move {
+                            tracing::info!("parent event");
+                            // A CHILD task spawned from within this task must
+                            // inherit the same subscriber (recursive propagation).
+                            let child =
+                                context.child("child").spawn(|_| async move {
+                                    tracing::info!("child event");
+                                });
+                            child.await.unwrap();
+                        })
+                    });
+                    handles.push(handle);
+                }
+                for h in handles {
+                    h.await.unwrap();
+                }
+            });
+        }
+
+        let log = sink.lock().unwrap().clone();
+        for l in &log {
+            println!("{l}");
+        }
+        // Every event - including the CHILD task's, spawned deep in the tree -
+        // is attributed to the right node, with no span field anywhere.
+        assert!(log.iter().any(|l| l == "node=0 parent event"));
+        assert!(log.iter().any(|l| l == "node=0 child event"));
+        assert!(log.iter().any(|l| l == "node=1 parent event"));
+        assert!(log.iter().any(|l| l == "node=1 child event"));
     }
 
     #[cfg(not(feature = "external"))]
