@@ -900,6 +900,11 @@ where
                     break;
                 }
 
+                // The `sorted_contains` cursor relies on the candidate sequence ascending
+                // across the whole raise. `floor` is one past the last processed candidate.
+                assert!(candidates[0] >= floor);
+                assert!(candidates.is_sorted_by(|a, b| a < b));
+
                 // `read_candidates` omits locations already superseded by this diff. Keep
                 // `resolved` and `outcomes` in that filtered order, then walk `candidates`
                 // below so superseded locations still advance the floor in scan order.
@@ -1585,11 +1590,11 @@ where
     /// otherwise require) and accepts the floor-raise candidate source.
     ///
     /// The callback must yield candidates in ascending location order, both within one call
-    /// and across successive calls. It may skip locations only when it knows they are
-    /// inactive. The floor-raise loop revalidates each returned candidate against the batch
-    /// diff, ancestor diffs, and snapshot because the bitmap reflects committed state only --
-    /// uncommitted ancestor ops aren't tracked, and bits can be set for locations superseded
-    /// by an overlay in this chain.
+    /// and across successive calls (the floor raise asserts this). It may skip locations only
+    /// when it knows they are inactive. The floor-raise loop revalidates each returned
+    /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
+    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
+    /// be set for locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -1775,11 +1780,11 @@ where
     /// op generation directly) and accepts the floor-raise candidate source.
     ///
     /// The callback must yield candidates in ascending location order, both within one call
-    /// and across successive calls. It may skip locations only when it knows they are
-    /// inactive. The floor-raise loop revalidates each returned candidate against the batch
-    /// diff, ancestor diffs, and snapshot because the bitmap reflects committed state only --
-    /// uncommitted ancestor ops aren't tracked, and bits can be set for locations superseded
-    /// by an overlay in this chain.
+    /// and across successive calls (the floor raise asserts this). It may skip locations only
+    /// when it knows they are inactive. The floor-raise loop revalidates each returned
+    /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
+    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
+    /// be set for locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
