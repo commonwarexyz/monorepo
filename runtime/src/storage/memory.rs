@@ -1,4 +1,4 @@
-use super::{Header, HeaderError, ParsedHeader};
+use super::Header;
 #[commonware_macros::stability(BETA)]
 use crate::{BlobHeaderLayout, BlobInfo};
 use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut};
@@ -6,11 +6,10 @@ use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
-use tracing::warn;
 
-/// Parses an existing blob's header, returning `None` if the contents are those of a creation
-/// that was interrupted before its header became durable (the caller recreates the blob), and
-/// an error if the header is corrupt or unacceptable.
+/// Parses an existing blob's header, returning `None` if the blob is new or its contents are
+/// those of a creation that was interrupted before its header became durable (the caller
+/// recreates the blob), and an error if the header is corrupt or unacceptable.
 fn resolve_header(
     content: &[u8],
     versions: &RangeInclusive<u16>,
@@ -18,54 +17,13 @@ fn resolve_header(
     name: &[u8],
 ) -> Result<Option<(BlobInfo, u64)>, crate::Error> {
     let raw_len = content.len() as u64;
-    let mut prelude = [0u8; Header::PRELUDE_SIZE];
-    prelude.copy_from_slice(&content[..Header::PRELUDE_SIZE]);
-    let header_err = match Header::parse_prelude(prelude, versions) {
-        Ok(ParsedHeader::V0 { blob_version }) => {
-            let info = BlobInfo {
-                size: raw_len - Header::PRELUDE_SIZE_U64,
-                blob_version,
-                layout: BlobHeaderLayout::V0,
-            };
-            return Ok(Some((info, Header::PRELUDE_SIZE_U64)));
-        }
-        Ok(ParsedHeader::NeedsExtension { blob_version }) => {
-            let ext_end = Header::PRELUDE_SIZE + Header::EXTENSION_SIZE;
-            if content.len() < ext_end {
-                HeaderError::TruncatedHeader {
-                    data_offset: ext_end as u64,
-                    raw_len,
-                }
-            } else {
-                let mut extension = [0u8; Header::EXTENSION_SIZE];
-                extension.copy_from_slice(&content[Header::PRELUDE_SIZE..ext_end]);
-                match Header::parse_extension(prelude, extension, raw_len, versions) {
-                    Ok(data_offset) => {
-                        let info = BlobInfo {
-                            size: raw_len - data_offset,
-                            blob_version,
-                            layout: BlobHeaderLayout::V1,
-                        };
-                        return Ok(Some((info, data_offset)));
-                    }
-                    Err(e) => e,
-                }
-            }
-        }
-        Err(e) => e,
-    };
-
-    // The header failed to parse: distinguish a creation interrupted before its header became
-    // durable (recreate) from corruption of a blob that may hold synced data (fail loud).
-    if header_err.may_be_torn_creation() && Header::interrupted_creation(content) {
-        warn!(
-            partition,
-            name = %hex(name),
-            "recreating blob left torn by an interrupted creation"
-        );
-        Ok(None)
-    } else {
-        Err(header_err.into_error(partition, name))
+    if Header::missing(raw_len) {
+        return Ok(None);
+    }
+    let head = &content[..content.len().min(Header::PARSE_LEN)];
+    match Header::parse(head, raw_len, versions) {
+        Ok(resolved) => Ok(Some(resolved)),
+        Err(err) => super::resolve_unparseable(err, content, partition, name),
     }
 }
 
@@ -121,22 +79,12 @@ impl crate::Storage for Storage {
 
         // Handle header: existing blobs have their header read; new blobs and blobs left torn
         // by an interrupted creation get a fresh header written.
-        let raw_len = content.len() as u64;
-        let existing = if Header::missing(raw_len) {
-            None
-        } else {
-            resolve_header(content, &versions, partition, name)?
-        };
+        let existing = resolve_header(content, &versions, partition, name)?;
         let (info, data_offset) = existing.unwrap_or_else(|| {
-            let (region, blob_version, data_offset) = Header::create(&versions, layout);
+            let (region, info) = Header::create(&versions, layout);
             content.clear();
             content.extend_from_slice(&region);
-            let info = BlobInfo {
-                size: 0,
-                blob_version,
-                layout,
-            };
-            (info, data_offset)
+            (info, region.len() as u64)
         });
 
         Ok((
@@ -490,12 +438,13 @@ mod tests {
     async fn test_blob_torn_creation_recovers() {
         let storage = Storage::new(test_pool());
 
-        // Manually insert torn-creation leftovers: writeback-subsets of a canonical V1 header
-        // region (only the size flushed; a bare prefix; a lost runtime version byte)
-        let (region, _, _) = Header::create(&(0..=0), BlobHeaderLayout::V1);
-        let mut torn_version = region.clone();
+        // Manually insert a torn-creation leftover: a writeback-subset of a canonical V1
+        // header region (the full state enumeration lives in the Header::interrupted_creation
+        // unit tables)
+        let (region, _) = Header::create(&(0..=0), BlobHeaderLayout::V1);
+        let mut torn_version = region;
         torn_version[5] = 0;
-        let states = [vec![0u8; region.len()], region[..12].to_vec(), torn_version];
+        let states = [torn_version];
         for (i, state) in states.into_iter().enumerate() {
             let name = format!("torn_{i}").into_bytes();
             {
