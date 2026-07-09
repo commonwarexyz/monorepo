@@ -13,7 +13,7 @@ mod unordered;
 pub use unordered::Update as Unordered;
 
 /// An operation that updates a key-value pair.
-pub trait Update: sealed::Sealed + Clone + Send + Sync {
+pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// The key type.
     type Key: Key;
 

@@ -80,7 +80,7 @@ commonware_macros::stability_scope!(BETA {
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
                 slice::ParallelSliceMut,
-                ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
+                ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
             };
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
@@ -134,6 +134,9 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// The returned future resolves when the submitted job completes, but blocking on external
         /// synchronization or I/O inside the job can occupy execution capacity until it returns.
+        /// When the polling thread itself belongs to the strategy's execution resources (e.g. a
+        /// runtime whose executor thread is registered as a pool worker), the job (and other
+        /// pending work) may be executed inline on that thread rather than waited on.
         ///
         /// If the job panics, the panic is propagated to the caller; it never aborts the process.
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
@@ -995,8 +998,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 return Either::Left(future::ready(f(self.clone())));
             }
 
-            let (tx, rx) = oneshot::channel();
+            let (tx, mut rx) = oneshot::channel();
             let s = self.clone();
+            let pool = self.thread_pool.clone();
             self.thread_pool.spawn(move || {
                 // Catch the panic so a panicking job propagates to the awaiting task rather than
                 // aborting the process (rayon aborts on an uncaught panic in a spawned job).
@@ -1004,6 +1008,23 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 let _ = tx.send(result);
             });
             Either::Right(async move {
+                // When the polling thread is itself a member of the pool (e.g. a single-threaded
+                // runtime that registers its executor thread as a worker), waiting on the channel
+                // could park the only thread able to run the job. Execute pending pool work
+                // inline until the job completes or another worker takes over. `yield_now`
+                // returns `None` when this thread is not a pool member, so other runtimes fall
+                // through to the channel immediately.
+                loop {
+                    if let Ok(Some(result)) = rx.try_recv() {
+                        return match result {
+                            Ok(value) => value,
+                            Err(payload) => panic::resume_unwind(payload),
+                        };
+                    }
+                    if !matches!(pool.yield_now(), Some(Yield::Executed)) {
+                        break;
+                    }
+                }
                 match rx.await {
                     Ok(Ok(value)) => value,
                     Ok(Err(payload)) => panic::resume_unwind(payload),

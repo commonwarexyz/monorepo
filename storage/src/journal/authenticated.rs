@@ -300,9 +300,38 @@ where
         }
     }
 
-    /// Borrow the committed Mem through the read lock.
+    /// Borrow the committed Mem for the duration of the closure.
     pub(crate) fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, H::Digest>) -> R) -> R {
         self.merkle.with_mem(f)
+    }
+
+    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound
+    /// job submitted through [`Strategy::spawn`].
+    ///
+    /// The job hashes against an immutable snapshot of the committed Merkle state, so a
+    /// parallel strategy hosts the batch's dominant CPU phase on its own pool instead of
+    /// occupying the calling task. If the caller is cancelled mid-job, the job still runs to
+    /// completion against its snapshot and the result is discarded (a panic inside the job is
+    /// caught by [`Strategy::spawn`] and only propagates to a caller that awaits it).
+    pub(crate) async fn merkleize_batch(
+        &self,
+        batch: UnmerkleizedBatch<F, H, C::Item, S>,
+        items: Vec<C::Item>,
+        inactive_peaks: usize,
+    ) -> Result<(MerkleizedBatchArc<F, H, C::Item, S>, H::Digest), merkle::Error<F>>
+    where
+        C::Item: 'static,
+    {
+        let mem = self.merkle.snapshot();
+        let hasher = self.hasher.clone();
+        let strategy = self.strategy().clone();
+        strategy
+            .spawn(move |_| {
+                let merkleized = batch.add_many(items).merkleize(&mem);
+                let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
+                Ok((merkleized, root))
+            })
+            .await
     }
 
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.

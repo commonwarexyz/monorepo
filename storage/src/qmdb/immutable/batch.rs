@@ -260,8 +260,6 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = base + ops.len() as u64;
-
-        // Hash before `with_mem` borrows committed Merkle state under its read lock.
         let journal_batch = self.journal_batch.add_many(ops);
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 

@@ -1057,12 +1057,12 @@ where
         let leaves = Location::new(self.base_size + ops.len() as u64);
         let inactive_peaks = db.inactive_peaks(leaves, floor);
 
-        // Hash before `with_mem` borrows committed Merkle state under its read lock.
-        let journal_batch = self.journal_batch.add_many(ops);
-        let journal = db.log.with_mem(|base| journal_batch.merkleize(base));
-        let root = db
+        // Leaf and node hashing dominate merkleization, so run them as one job on the
+        // strategy instead of occupying the calling task (see `Journal::merkleize_batch`).
+        let (journal, root) = db
             .log
-            .with_mem(|base| journal.root(base, &db.log.hasher, inactive_peaks))?;
+            .merkleize_batch(self.journal_batch, ops, inactive_peaks)
+            .await?;
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
         let ancestors: Vec<_> = self

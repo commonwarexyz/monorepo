@@ -3949,6 +3949,28 @@ mod tests {
         });
     }
 
+    /// An awaited `Strategy::spawn` on a multi-thread pool must complete under the
+    /// deterministic runtime: pool workers never run there (they are registered as
+    /// cooperative tasks that block if polled), so the spawn future drives pending pool
+    /// work inline on the executor thread (registered as a pool worker at creation).
+    #[test]
+    fn test_deterministic_multithread_strategy_spawn_completes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context
+                .child("pool")
+                .create_strategy(NZUsize!(2))
+                .unwrap()
+                .manual();
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
+        });
+    }
+
     #[test]
     fn test_tokio_nested_parallel_strategy_uses_spawn_worker() {
         let executor = tokio::Runner::default();
