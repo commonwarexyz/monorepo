@@ -1000,12 +1000,12 @@ async fn wait_for_reached_progress<F: merkle::Family>(
     context: deterministic::Context,
     target: &Target<F, Digest>,
 ) {
-    let target_end = *target.range.end();
-    let journal_size = format!("client_sync_journal_size {target_end}");
-    let target_end = format!("client_sync_target_end {target_end}");
+    let target_leaves = *target.range.end();
+    let leaf_count = format!("client_leaf_count {target_leaves}");
+    let target_leaf_count = format!("client_target_leaf_count {target_leaves}");
     loop {
         let metrics = context.encode();
-        if metrics.contains(&journal_size) && metrics.contains(&target_end) {
+        if metrics.contains(&leaf_count) && metrics.contains(&target_leaf_count) {
             return;
         }
         context.sleep(Duration::from_millis(1)).await;

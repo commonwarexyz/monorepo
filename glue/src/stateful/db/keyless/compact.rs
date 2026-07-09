@@ -6,13 +6,12 @@
 
 use crate::stateful::db::{
     ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, MAX_CHANNEL_DRAIN_PER_TICK,
+    Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
-use commonware_macros::select;
 use commonware_parallel::Strategy;
-use commonware_runtime::{reschedule, Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
@@ -25,30 +24,10 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock};
-use futures::future::{pending, Either};
 use std::{ops::Deref, sync::Arc};
 
 type KeylessUnjournaledDbHandle<F, E, V, H, C, S> =
     Arc<TracedAsyncRwLock<CompactDb<F, E, V, H, C, S>>>;
-
-async fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T> {
-    let mut latest = None;
-    let mut drained = 0usize;
-    loop {
-        match tip_updates.try_recv() {
-            Ok(update) => {
-                latest = Some(update);
-                drained += 1;
-                if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
-                    reschedule().await;
-                }
-            }
-            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
-                return latest;
-            }
-        }
-    }
-}
 
 /// Wraps an unjournaled keyless batch before merkleization.
 pub struct KeylessUnjournaledUnmerkleized<F, E, V, H, S, C = ()>
@@ -339,73 +318,22 @@ where
         context: E,
         config: Self::Config,
         resolver: R,
-        mut target: Self::SyncTarget,
+        target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        mut finish: Option<mpsc::Receiver<()>>,
+        finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         _sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        let mut attempt = 0u64;
-        let mut tip_updates = Some(tip_updates);
-        loop {
-            if let Some(tip_updates) = tip_updates.as_mut() {
-                if let Some(update) = drain_latest_target(tip_updates).await {
-                    target = update;
-                }
-            }
-
-            let context = context.child("sync").with_attribute("attempt", attempt);
-            attempt += 1;
-            let update_future = tip_updates.as_mut().map_or_else(
-                || Either::Right(pending()),
-                |updates| Either::Left(updates.recv()),
-            );
-            let db = select! {
-                update = update_future => {
-                    let Some(update) = update else {
-                        tip_updates = None;
-                        continue;
-                    };
-                    target = update;
-                    continue;
-                },
-                db = sync::compact::sync(sync::compact::Config::<Self, R> {
-                    context,
-                    resolver: resolver.clone(),
-                    target: target.clone(),
-                    db_config: config.clone(),
-                }) => db?,
-            };
-
-            if let Some(tip_updates) = tip_updates.as_mut() {
-                if let Some(update) = drain_latest_target(tip_updates).await {
-                    target = update;
-                    continue;
-                }
-            }
-
-            if let Some(reached_target) = reached_target.as_ref() {
-                if reached_target.send(target.clone()).await.is_err() {
-                    return Ok(db);
-                }
-            }
-
-            let Some(finish) = finish.as_mut() else {
-                return Ok(db);
-            };
-            let Some(tip_updates) = tip_updates.as_mut() else {
-                return Ok(db);
-            };
-            select! {
-                _ = finish.recv() => return Ok(db),
-                update = tip_updates.recv() => {
-                    let Some(update) = update else {
-                        return Ok(db);
-                    };
-                    target = update;
-                },
-            }
-        }
+        sync::compact::sync(sync::compact::Config {
+            context,
+            resolver,
+            target,
+            db_config: config,
+            update_rx: Some(tip_updates),
+            finish_rx: finish,
+            reached_target_tx: reached_target,
+        })
+        .await
     }
 }
 
@@ -430,73 +358,22 @@ where
         context: E,
         config: Self::Config,
         resolver: R,
-        mut target: Self::SyncTarget,
+        target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        mut finish: Option<mpsc::Receiver<()>>,
+        finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         _sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        let mut attempt = 0u64;
-        let mut tip_updates = Some(tip_updates);
-        loop {
-            if let Some(tip_updates) = tip_updates.as_mut() {
-                if let Some(update) = drain_latest_target(tip_updates).await {
-                    target = update;
-                }
-            }
-
-            let context = context.child("sync").with_attribute("attempt", attempt);
-            attempt += 1;
-            let update_future = tip_updates.as_mut().map_or_else(
-                || Either::Right(pending()),
-                |updates| Either::Left(updates.recv()),
-            );
-            let db = select! {
-                update = update_future => {
-                    let Some(update) = update else {
-                        tip_updates = None;
-                        continue;
-                    };
-                    target = update;
-                    continue;
-                },
-                db = sync::compact::sync(sync::compact::Config::<Self, R> {
-                    context,
-                    resolver: resolver.clone(),
-                    target: target.clone(),
-                    db_config: config.clone(),
-                }) => db?,
-            };
-
-            if let Some(tip_updates) = tip_updates.as_mut() {
-                if let Some(update) = drain_latest_target(tip_updates).await {
-                    target = update;
-                    continue;
-                }
-            }
-
-            if let Some(reached_target) = reached_target.as_ref() {
-                if reached_target.send(target.clone()).await.is_err() {
-                    return Ok(db);
-                }
-            }
-
-            let Some(finish) = finish.as_mut() else {
-                return Ok(db);
-            };
-            let Some(tip_updates) = tip_updates.as_mut() else {
-                return Ok(db);
-            };
-            select! {
-                _ = finish.recv() => return Ok(db),
-                update = tip_updates.recv() => {
-                    let Some(update) = update else {
-                        return Ok(db);
-                    };
-                    target = update;
-                },
-            }
-        }
+        sync::compact::sync(sync::compact::Config {
+            context,
+            resolver,
+            target,
+            db_config: config,
+            update_rx: Some(tip_updates),
+            finish_rx: finish,
+            reached_target_tx: reached_target,
+        })
+        .await
     }
 }
 
@@ -504,6 +381,7 @@ where
 mod tests {
     use super::*;
     use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Spawner as _,
@@ -515,6 +393,7 @@ mod tests {
         qmdb::keyless as storage_keyless,
     };
     use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
+    use futures::pin_mut;
     use std::time::Duration;
 
     type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
@@ -556,7 +435,7 @@ mod tests {
         }
     }
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::CompactConfig<Sequential> {
+    fn fixed_config(context: &impl BufferPooler, suffix: &str) -> fixed::CompactConfig<Sequential> {
         fixed::CompactConfig {
             strategy: Sequential,
             witness: commonware_storage::journal::contiguous::variable::Config {
@@ -564,7 +443,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11)),
+                page_cache: CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11)),
                 write_buffer: NZUsize!(1024),
             },
             commit_codec_config: (),
@@ -572,10 +451,10 @@ mod tests {
     }
 
     fn full_fixed_config(
+        context: &impl BufferPooler,
         suffix: &str,
-        pooler: &impl BufferPooler,
     ) -> storage_keyless::fixed::Config<Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
+        let page_cache = CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11));
         storage_keyless::fixed::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("stateful-keyless-full-journal-{suffix}"),
@@ -623,7 +502,7 @@ mod tests {
     #[test]
     fn managed_db_finalize_commits_fixed_keyless_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("managed-db", &context);
+            let config = fixed_config(&context, "managed-db");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
@@ -657,7 +536,7 @@ mod tests {
     #[test]
     fn managed_db_matches_sync_target_rejects_wrong_leaf_count() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("matches-sync-target", &context);
+            let config = fixed_config(&context, "matches-sync-target");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
@@ -694,7 +573,7 @@ mod tests {
     fn state_sync_fetches_fixed_keyless_compact_state() {
         deterministic::Runner::default().start(|context| async move {
             let mut source =
-                FixedDb::init(context.child("source"), fixed_config("source", &context))
+                FixedDb::init(context.child("source"), fixed_config(&context, "source"))
                     .await
                     .unwrap();
             let floor = source.inactivity_floor_loc();
@@ -710,7 +589,7 @@ mod tests {
             let (_update_tx, update_rx) = mpsc::channel(1);
             let synced = <FixedDb as StateSyncDb<_, Arc<FixedDb>>>::sync_db(
                 context.child("target"),
-                fixed_config("target", &context),
+                fixed_config(&context, "target"),
                 Arc::new(source),
                 target.clone(),
                 update_rx,
@@ -731,7 +610,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let mut source = FullFixedDb::init(
                 context.child("source"),
-                full_fixed_config("source", &context),
+                full_fixed_config(&context, "source"),
             )
             .await
             .unwrap();
@@ -767,7 +646,7 @@ mod tests {
             let (reached_tx, mut reached_rx) = mpsc::channel(1);
             let synced = <FixedDb as StateSyncDb<_, Arc<FullFixedDb>>>::sync_db(
                 context.child("target"),
-                fixed_config("target", &context),
+                fixed_config(&context, "target"),
                 Arc::new(source),
                 first_target,
                 update_rx,
@@ -785,11 +664,95 @@ mod tests {
     }
 
     #[test]
+    fn state_sync_reports_compact_progress() {
+        deterministic::Runner::default().start(|context| async move {
+            let source_context = context.child("source");
+            let source_config = fixed_config(&source_context, "source");
+            let mut source = FixedDb::init(source_context, source_config).await.unwrap();
+            let floor = source.inactivity_floor_loc();
+            let batch =
+                source
+                    .new_batch()
+                    .append(U64::new(7))
+                    .merkleize(&source, Some(U64::new(9)), floor);
+            source.apply_batch(batch).unwrap();
+            source.sync().await.unwrap();
+            let target = source.target();
+
+            // A larger target the resolver never serves. Its sync attempt
+            // hangs so the test can observe the gauges while they diverge.
+            let unservable_target = sync::compact::Target {
+                root: Sha256::hash(&[0xFF]),
+                leaf_count: Location::new(*target.leaf_count + 1),
+            };
+            let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
+            let resolver = SupersedingCompactResolver {
+                source: Arc::new(source),
+                stale_target: unservable_target.clone(),
+                stale_request_tx,
+            };
+
+            let (update_tx, update_rx) = mpsc::channel(1);
+            let (_finish_tx, finish_rx) = mpsc::channel(1);
+            let (reached_tx, mut reached_rx) = mpsc::channel(1);
+            let client_context = context.child("client");
+            let client_config = fixed_config(&client_context, "client");
+            let sync = <FixedDb as StateSyncDb<_, _>>::sync_db(
+                client_context,
+                client_config,
+                resolver,
+                target.clone(),
+                update_rx,
+                Some(finish_rx),
+                Some(reached_tx),
+                sync_config(),
+            );
+            pin_mut!(sync);
+
+            select! {
+                _ = sync.as_mut() => panic!("sync completed before explicit finish signal"),
+                reached = reached_rx.recv() => assert_eq!(reached, Some(target.clone())),
+            }
+
+            let synced_leaves = *target.leaf_count;
+            let encoded = context.encode();
+            assert!(
+                encoded.contains(&format!("\nclient_target_leaf_count {synced_leaves}")),
+                "missing compact sync target gauge: {encoded}"
+            );
+            assert!(
+                encoded.contains(&format!("\nclient_leaf_count {synced_leaves}")),
+                "missing compact sync progress gauge: {encoded}"
+            );
+
+            // Supersede with the unservable target and wait for its fetch to
+            // start. The target gauge advances while the synced gauge still
+            // reports the previously reached target.
+            update_tx.send(unservable_target.clone()).await.unwrap();
+            select! {
+                _ = sync.as_mut() => panic!("sync completed with an unservable target"),
+                request = stale_request_rx.recv() => assert_eq!(request, Some(())),
+            }
+
+            let target_leaves = *unservable_target.leaf_count;
+            let encoded = context.encode();
+            assert!(
+                encoded.contains(&format!("\nclient_target_leaf_count {target_leaves}")),
+                "target gauge should advance to the superseding target: {encoded}"
+            );
+            assert!(
+                encoded.contains(&format!("\nclient_leaf_count {synced_leaves}")),
+                "synced gauge should still report the reached target: {encoded}"
+            );
+        });
+    }
+
+    #[test]
     fn state_sync_supersedes_in_flight_stale_compact_target() {
         deterministic::Runner::default().start(|context| async move {
             let mut source = FixedDb::init(
                 context.child("source"),
-                fixed_config("supersede-source", &context),
+                fixed_config(&context, "supersede-source"),
             )
             .await
             .unwrap();
@@ -825,7 +788,7 @@ mod tests {
             let sync_handle = context.child("sync").spawn(move |context| async move {
                 <FixedDb as StateSyncDb<_, _>>::sync_db(
                     context.child("target"),
-                    fixed_config("supersede-target", &context),
+                    fixed_config(&context, "supersede-target"),
                     resolver,
                     stale_target,
                     update_rx,
@@ -859,7 +822,7 @@ mod tests {
     #[test]
     fn managed_db_rewinds_fixed_keyless_unjournaled_multiple_commit_ranges() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("rewind", &context);
+            let config = fixed_config(&context, "rewind");
             let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
 
             let floor = db.inactivity_floor_loc();
@@ -899,7 +862,7 @@ mod tests {
     fn managed_db_prune_bounds_fixed_keyless_unjournaled_rewind_history() {
         deterministic::Runner::default().start(|context| async move {
             // One witness entry per section so pruning takes effect at entry granularity.
-            let mut config = fixed_config("prune", &context);
+            let mut config = fixed_config(&context, "prune");
             config.witness.items_per_section = NZU64!(1);
             let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
 

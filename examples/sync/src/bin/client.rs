@@ -363,6 +363,9 @@ where
             resolver,
             target,
             db_config: make_db_config(&context),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
         };
         let database: DB = match compact::sync(sync_config).await {
             Ok(database) => database,
