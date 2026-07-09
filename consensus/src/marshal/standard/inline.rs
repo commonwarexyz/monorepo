@@ -442,6 +442,17 @@ where
         );
         runtime_context.spawn(move |runtime_context| {
             async move {
+                // Start the parent fetch immediately: its commitment and certified
+                // round are known from the consensus context, so it can proceed in
+                // parallel with broadcast delivery of the candidate block.
+                let (parent_view, parent_commitment) = context.parent;
+                let parent_request = marshal.subscribe_by_commitment(
+                    parent_commitment,
+                    CommitmentFallback::FetchByRound {
+                        round: Round::new(context.epoch(), parent_view),
+                    },
+                );
+
                 let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
                 let Some(block) =
                     await_block_subscription(&mut tx, block_request, &digest, "verification").await
@@ -490,20 +501,19 @@ where
                 // the fallback rides the verified write instead of re-persisting.
                 let store = marshal.verified(round, block.clone());
                 let verify_then_vote = async {
-                    // Non-reproposal path: fetch the expected parent and validate
-                    // ancestry.
-                    let parent = match fetch_and_validate_parent(
-                        &context, &block, &marshal, &mut tx,
-                    )
-                    .await
-                    {
-                        Some(ParentCheck::Valid(parent)) => parent,
-                        Some(ParentCheck::Invalid) => {
-                            tx.send_lossy(false);
-                            return Some(false);
-                        }
-                        None => return None,
-                    };
+                    // Non-reproposal path: validate the parent we already started
+                    // fetching.
+                    let parent =
+                        match fetch_and_validate_parent(&context, &block, parent_request, &mut tx)
+                            .await
+                        {
+                            Some(ParentCheck::Valid(parent)) => parent,
+                            Some(ParentCheck::Invalid) => {
+                                tx.send_lossy(false);
+                                return Some(false);
+                            }
+                            None => return None,
+                        };
                     let valid = run_app_verify(
                         runtime_context,
                         context,

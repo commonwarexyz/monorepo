@@ -343,6 +343,16 @@ where
                 let round = consensus_context.round;
                 let (parent_view, parent_commitment) = consensus_context.parent;
 
+                // Start the parent fetch immediately: its commitment and certified
+                // round are known from the consensus context, so it can proceed in
+                // parallel with candidate reconstruction.
+                let parent_request = marshal.subscribe_by_commitment(
+                    parent_commitment,
+                    core::CommitmentFallback::FetchByRound {
+                        round: Round::new(consensus_context.epoch(), parent_view),
+                    },
+                );
+
                 // Get the candidate block either from the caller or by waiting for
                 // local reconstruction. Candidate data remains local-only: a
                 // notarization is not sufficient reason to request it from peers.
@@ -377,13 +387,7 @@ where
                 // app verification succeeds and the store is durable.
                 let store = stage.store(&marshal, round, block.clone());
                 let verify = async {
-                    // The context supplies the certified parent round. Do not derive a
-                    // height from the unverified child block for this lookup.
-                    let fallback = core::CommitmentFallback::FetchByRound {
-                        round: Round::new(consensus_context.epoch(), parent_view),
-                    };
-                    let parent_request =
-                        marshal.subscribe_by_commitment(parent_commitment, fallback);
+                    // Await the parent fetch we started above.
                     let parent = select! {
                         _ = tx.closed() => {
                             debug!(

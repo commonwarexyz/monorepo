@@ -3,14 +3,14 @@ use crate::{
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
         },
-        core::{CommitmentFallback, Mailbox},
+        core::Mailbox,
         standard::Standard,
     },
     simplex::types::Context,
-    types::{Epocher, Round},
+    types::Epocher,
     Application, Block, Epochable,
 };
-use commonware_cryptography::certificate::Scheme;
+use commonware_cryptography::{certificate::Scheme, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{
     telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
@@ -120,28 +120,26 @@ pub(super) enum ParentCheck<B> {
     Invalid,
 }
 
-/// Fetches the expected parent and validates standard ancestry invariants (parent linkage
-/// and contiguous height).
+/// Validates the fetched parent against standard ancestry invariants (parent linkage and
+/// contiguous height).
+///
+/// The `parent_request` must have been started by the caller so the parent fetch can overlap
+/// earlier work (e.g., waiting for the candidate block to become available).
 ///
 /// Returns `None` when work should stop early (receiver dropped or parent unavailable).
 #[inline]
-pub(super) async fn fetch_and_validate_parent<S, B>(
-    context: &Context<B::Digest, S::PublicKey>,
+pub(super) async fn fetch_and_validate_parent<B, P>(
+    context: &Context<B::Digest, P>,
     block: &B,
-    marshal: &Mailbox<S, Standard<B>>,
+    parent_request: oneshot::Receiver<B>,
     tx: &mut oneshot::Sender<bool>,
 ) -> Option<ParentCheck<B>>
 where
-    S: Scheme,
     B: Block + Clone,
+    P: PublicKey,
 {
-    let (parent_view, parent_commitment) = context.parent;
-    let parent_request = marshal.subscribe_by_commitment(
-        parent_commitment,
-        CommitmentFallback::FetchByRound {
-            round: Round::new(context.epoch(), parent_view),
-        },
-    );
+    let (_parent_view, parent_commitment) = context.parent;
+
     // If consensus drops the receiver, we can stop work early.
     let parent = select! {
         _ = tx.closed() => {
