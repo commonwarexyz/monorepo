@@ -126,9 +126,6 @@ mod test {
     }
 
     async fn open_rayon_db<F: Family>(context: deterministic::Context) -> TestRayonDb<F> {
-        // Use the runtime's thread pool (executor thread registered as a worker) rather than
-        // a standalone `Rayon::new` pool: merkleize awaits a `Strategy::spawn` job, and the
-        // deterministic runtime cannot observe completions signaled from external threads.
         let strategy = context.create_strategy(NZUsize!(2)).unwrap();
         let cfg = db_config("rayon", &context, strategy);
         TestRayonDb::init(context, cfg).await.unwrap()
