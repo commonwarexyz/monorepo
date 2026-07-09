@@ -253,10 +253,11 @@ impl<
 
     /// Syncs all journal sections with pending appends.
     ///
-    /// Invoked before any broadcast so everything we tell the network is
-    /// recoverable after a restart. Deferring syncs to this point (rather than
-    /// syncing after each append) coalesces back-to-back appends in the same
-    /// loop iteration into a single sync.
+    /// Invoked after each construction phase and before the corresponding
+    /// broadcast phase (regardless of whether anything will be broadcast) so
+    /// everything we tell the network is recoverable after a restart. Deferring
+    /// syncs to this boundary (rather than syncing after each append) coalesces
+    /// all appends in the same loop iteration into a single sync.
     async fn sync_journal(&mut self) {
         if self.dirty.is_empty() {
             return;
@@ -265,7 +266,7 @@ impl<
             .journal
             .as_mut()
             .expect("pending journal sections without a journal");
-        let sections: Vec<u64> = mem::take(&mut self.dirty).into_iter().collect();
+        let sections = mem::take(&mut self.dirty);
         let span = info_span!(
             "simplex.voter.journal.sync",
             epoch = self.state.epoch().traced(),
@@ -280,16 +281,14 @@ impl<
 
     /// Send a vote to every peer.
     ///
-    /// Syncs pending journal appends first. A vote must be durable before it
-    /// reaches the network so a restart cannot cause us to equivocate.
-    async fn broadcast_vote<T: Sender>(
+    /// Callers must sync pending journal appends first (via [Self::sync_journal]).
+    /// A vote must be durable before it reaches the network so a restart cannot
+    /// cause us to equivocate.
+    fn broadcast_vote<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Vote<S, D>>,
         vote: Vote<S, D>,
     ) {
-        // Persist anything we've journaled before the vote reaches the network
-        self.sync_journal().await;
-
         // Update outbound metrics
         let metric = match &vote {
             Vote::Notarize(_) => metrics::Outbound::notarize(),
@@ -304,16 +303,13 @@ impl<
 
     /// Send a certificate to every peer.
     ///
-    /// Syncs pending journal appends first so any state we advertise to the
-    /// network survives a restart.
-    async fn broadcast_certificate<T: Sender>(
+    /// Callers must sync pending journal appends first (via [Self::sync_journal])
+    /// so any state we advertise to the network survives a restart.
+    fn broadcast_certificate<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Certificate<S, D>>,
         certificate: Certificate<S, D>,
     ) {
-        // Persist anything we've journaled before the certificate reaches the network
-        self.sync_journal().await;
-
         // Update outbound metrics
         let metric = match &certificate {
             Certificate::Notarization(_) => metrics::Outbound::notarization(),
@@ -400,10 +396,12 @@ impl<
             self.handle_nullify(nullify.clone()).await;
         }
 
+        // Make the vote durable before it reaches the network
+        self.sync_journal().await;
+
         // Broadcast nullify vote (regardless)
         debug!(round=?nullify.round(), "broadcasting nullify");
-        self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
-            .await;
+        self.broadcast_vote(vote_sender, Vote::Nullify(nullify));
     }
 
     /// Handle a timeout.
@@ -431,8 +429,7 @@ impl<
             .previous()
             .expect("we should never be in the genesis view");
         if let Some(certificate) = self.state.get_best_certificate(past_view) {
-            self.broadcast_certificate(certificate_sender, certificate)
-                .await;
+            self.broadcast_certificate(certificate_sender, certificate);
         }
     }
 
@@ -490,9 +487,9 @@ impl<
         // Get the notarization before advancing state
         let notarization = self.state.certified(view, success)?;
 
-        // Record the certification result for recovery. It is synced with the
-        // next broadcast. If lost to a crash before then, certification is
-        // re-requested on restart.
+        // Record the certification result for recovery. It is synced before this
+        // iteration's broadcast phase. If lost to a crash before then, certification
+        // is re-requested on restart.
         let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
         self.append_journal(view, artifact).await;
 
@@ -796,8 +793,10 @@ impl<
                     Certificate::Nullification(nullification) => {
                         trace!(%view, from_resolver, "received nullification");
                         if let Some(floor) = self.handle_nullification(nullification).await {
+                            // Make the nullification durable before advertising the floor
+                            self.sync_journal().await;
                             warn!(?floor, "broadcasting nullification floor");
-                            self.broadcast_certificate(certificate_sender, floor).await;
+                            self.broadcast_certificate(certificate_sender, floor);
                         }
                         if from_resolver {
                             resolved = Resolved::Nullification;
@@ -836,8 +835,7 @@ impl<
         resolved: Resolved,
     ) {
         // Build and record everything that became available before broadcasting
-        // anything. The first broadcast syncs the journal, so all appends made
-        // here (and earlier in the loop iteration) share a single sync.
+        // anything below.
         let notarize = self.prepare_notarize(batcher, view).await;
         let notarization = self.prepare_notarization(resolver, view, resolved).await;
         // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
@@ -845,46 +843,47 @@ impl<
         let finalize = self.prepare_finalize(batcher, view).await;
         let finalization = self.prepare_finalization(resolver, view, resolved).await;
 
+        // Sync everything appended this iteration (during message processing and
+        // the construction phase above) in a single coalesced sync. This runs even
+        // if there is nothing to broadcast below so every artifact is durable by
+        // the end of the iteration that appended it.
+        self.sync_journal().await;
+
         // Broadcast everything we built (and report it to the application).
         if let Some(notarize) = notarize {
             debug!(proposal=?notarize.proposal, "broadcasting notarize");
-            self.broadcast_vote(vote_sender, Vote::Notarize(notarize))
-                .await;
+            self.broadcast_vote(vote_sender, Vote::Notarize(notarize));
         }
         if let Some(notarization) = notarization {
             debug!(proposal=?notarization.proposal, "broadcasting notarization");
             self.broadcast_certificate(
                 certificate_sender,
                 Certificate::Notarization(notarization.clone()),
-            )
-            .await;
+            );
             self.reporter.report(Activity::Notarization(notarization));
         }
         if let Some((nullification, floor)) = nullification {
             if let Some(floor) = floor {
                 warn!(?floor, "broadcasting nullification floor");
-                self.broadcast_certificate(certificate_sender, floor).await;
+                self.broadcast_certificate(certificate_sender, floor);
             }
             debug!(round=?nullification.round(), "broadcasting nullification");
             self.broadcast_certificate(
                 certificate_sender,
                 Certificate::Nullification(nullification.clone()),
-            )
-            .await;
+            );
             self.reporter.report(Activity::Nullification(nullification));
         }
         if let Some(finalize) = finalize {
             debug!(proposal=?finalize.proposal, "broadcasting finalize");
-            self.broadcast_vote(vote_sender, Vote::Finalize(finalize))
-                .await;
+            self.broadcast_vote(vote_sender, Vote::Finalize(finalize));
         }
         if let Some(finalization) = finalization {
             debug!(proposal=?finalization.proposal, "broadcasting finalization");
             self.broadcast_certificate(
                 certificate_sender,
                 Certificate::Finalization(finalization.clone()),
-            )
-            .await;
+            );
             self.reporter.report(Activity::Finalization(finalization));
         }
     }

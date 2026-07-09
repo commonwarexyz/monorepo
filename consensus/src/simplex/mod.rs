@@ -312,8 +312,9 @@
 //! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
 //! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
 //! Before sending a message, any pending `Journal` appends are synced to prevent inadvertent Byzantine
-//! behavior on restart (especially in the case of unclean shutdown). Appends made in the same event
-//! loop iteration are coalesced into a single sync.
+//! behavior on restart (especially in the case of unclean shutdown). All appends made in the same event
+//! loop iteration are coalesced into a single sync that runs after messages are constructed and before
+//! any are broadcast (even if there is nothing to broadcast).
 //!
 //! ## Automaton Failure Semantics
 //!
