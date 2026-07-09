@@ -522,7 +522,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             cfg.write_buffer,
         );
         let tail_blob = super::position_to_blob(clear_target, cfg.items_per_blob.get());
-        let blobs = Writable::recover(partition, BTreeMap::new(), tail_blob).await?;
+        let mut blobs = Writable::recover(partition, BTreeMap::new(), tail_blob).await?;
+        // Make the fresh tail durable (creation defers that to the first sync, including its
+        // directory entries) before the checkpoint durably records the clear against it.
+        blobs.sync_from(tail_blob).await?;
         checkpoint
             .finish_clear(cfg.items_per_blob.get(), clear_target)
             .await?;

@@ -375,6 +375,10 @@ impl<E: Context> Writable<E> {
         }
         let _ = self.metrics.tracked.try_set(0);
         self.tail = self.partition.open(tail_blob).await?;
+        // Make the fresh tail durable (creation defers that to the first sync, including its
+        // directory entries) before callers durably record state that references it.
+        self.tail.sync().await.map_err(Error::Runtime)?;
+        self.metrics.synced.inc();
         self.metrics.tracked.inc();
         self.oldest_blob_index = tail_blob;
         self.sealed.clear();

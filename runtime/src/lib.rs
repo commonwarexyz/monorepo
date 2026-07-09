@@ -674,6 +674,11 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
+    /// A blob whose creation was never followed by a durability request is the
+    /// exception: it may vanish entirely across a crash (see
+    /// [`Storage::open_versioned`]), so recovery must not depend on the
+    /// existence of a blob it never synced.
+    ///
     /// # Partition Names
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
@@ -824,7 +829,8 @@ stability_scope!(BETA {
         /// This is not a durability barrier for previous operations. When it completes,
         /// only the bytes submitted to this call are guaranteed durable. Earlier unsynced
         /// [`Blob::write_at`] or [`Blob::resize`] calls require [`Blob::sync`] to become
-        /// durable.
+        /// durable. A handle's first durability request additionally covers the blob's
+        /// directory entries, exactly as [`Blob::sync`] does.
         fn write_at_sync(
             &self,
             offset: u64,

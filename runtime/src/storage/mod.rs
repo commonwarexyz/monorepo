@@ -770,6 +770,30 @@ pub(crate) mod tests {
         ));
     }
 
+    /// A failed directory fsync leaves the once-flag unset, so a retry covers the
+    /// entries; success sets it and later calls are no-ops.
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_sync_failure_retries() {
+        let root = std::env::temp_dir().join(format!("test_dir_sync_retry_{}", std::process::id()));
+        let missing = root.join("missing");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // The parent does not exist: sync fails and the flag stays unset.
+        let dirs = super::DirSync::new(missing.clone(), root.clone());
+        assert!(dirs.sync().is_err());
+        assert!(!dirs.synced());
+
+        // Once the parent exists, a retry succeeds and later calls are no-ops.
+        std::fs::create_dir_all(&missing).unwrap();
+        dirs.sync().unwrap();
+        assert!(dirs.synced());
+        dirs.sync().unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Every parse failure converts to a contextual error naming its cause.
     #[test]
     fn test_header_error_messages() {

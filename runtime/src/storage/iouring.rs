@@ -174,7 +174,6 @@ impl crate::Storage for Storage {
             .open(&path)
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
 
-        // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
         // Handle header: existing blobs have their header read; new blobs and blobs left torn
