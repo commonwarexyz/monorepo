@@ -1180,9 +1180,7 @@ commonware_utils::thread_local_cache!(static THREAD_POOL: ThreadPool);
 ///
 /// Rayon's current-thread registration is permanent and per-OS-thread, so every call after
 /// the first on a thread (including calls from a later runner on the same thread) returns
-/// the pool the thread registered with, sized by the first request. Pools built outside
-/// [`crate::ThreadPooler`] have external threads whose completions this runtime cannot
-/// observe; do not await `Strategy::spawn` jobs on them.
+/// the pool the thread registered with, sized by the first request.
 impl crate::ThreadPooler for Context {
     fn create_thread_pool(
         &self,
