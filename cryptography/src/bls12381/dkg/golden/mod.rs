@@ -1042,8 +1042,7 @@ mod test_plan {
     use super::*;
     use commonware_math::{algebra::Random, poly::Poly};
     use commonware_parallel::Sequential;
-    use commonware_utils::N3f1;
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{N3f1, TestRng};
     use std::collections::{BTreeMap, BTreeSet};
 
     /// The largest dealer or player count the `Arbitrary` implementation for
@@ -1272,7 +1271,7 @@ mod test_plan {
             self.validate()?;
             let expect_failure = self.expect_failure();
 
-            let mut rng = StdRng::seed_from_u64(seed);
+            let mut rng = TestRng::new(seed);
 
             let dealer_keys: Vec<PrivateKey> = (0..self.num_dealers)
                 .map(|_| PrivateKey::random(&mut rng))

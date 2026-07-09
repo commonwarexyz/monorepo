@@ -526,10 +526,10 @@ pub mod tests {
         deterministic::{self, Context},
         BufferPooler, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{bitmap::Readable, NZUsize, NZU16, NZU64};
+    use commonware_utils::{bitmap::Readable, NZUsize, TestRng, NZU16, NZU64};
     use core::future::Future;
     use ordered::tests::test_build_small_close_reopen as test_ordered_build_small_close_reopen;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::Rng;
     use std::{
         num::{NonZeroU16, NonZeroUsize},
         sync::Arc,
@@ -839,7 +839,7 @@ pub mod tests {
     {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
-        let mut rng = StdRng::seed_from_u64(rng_seed);
+        let mut rng = TestRng::new(rng_seed);
 
         // First loop: all initial writes in one batch.
         let writes: Vec<_> = (0u64..num_elements)
@@ -858,13 +858,13 @@ pub mod tests {
         let mut pending: WriteVec<F, C> = Vec::new();
         for _ in 0u64..num_elements * 10 {
             let rand_key = TestKey::from_seed(rng.next_u64() % num_elements);
-            if rng.next_u32() % 7 == 0 {
+            if rng.next_u32().is_multiple_of(7) {
                 pending.push((rand_key, None));
                 continue;
             }
             let v = TestValue::from_seed(rng.next_u64());
             pending.push((rand_key, Some(v)));
-            if commit_changes && rng.next_u32() % 20 == 0 {
+            if commit_changes && rng.next_u32().is_multiple_of(20) {
                 commit_writes(&mut db, pending.drain(..)).await?;
             }
         }

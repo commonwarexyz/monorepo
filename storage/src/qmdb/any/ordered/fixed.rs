@@ -156,7 +156,7 @@ pub(crate) mod test {
     };
     use commonware_utils::{sequence::FixedBytes, TestRng, NZU64};
     use futures::StreamExt as _;
-    use rand::{rngs::StdRng, seq::IteratorRandom, Rng, SeedableRng};
+    use rand::{seq::IteratorRandom, Rng};
     use std::collections::{BTreeMap, HashMap};
 
     /// A generic type alias for an Any database parameterized by merkle family.
@@ -967,7 +967,7 @@ pub(crate) mod test {
         executor.start(|mut context| async move {
             async fn insert_random<T: Translator>(
                 mut db: Db<mmr::Family, Context, Digest, i32, Sha256, T, Sequential>,
-                rng: &mut StdRng,
+                rng: &mut TestRng,
             ) -> Db<mmr::Family, Context, Digest, i32, Sha256, T, Sequential> {
                 let mut keys = BTreeMap::new();
 
@@ -1035,7 +1035,7 @@ pub(crate) mod test {
                 db
             }
 
-            let mut rng = StdRng::seed_from_u64(context.next_u64());
+            let mut rng = TestRng::new(context.next_u64());
             let seed = context.next_u64();
 
             // Use a OneCap to ensure many collisions.

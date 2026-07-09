@@ -1963,9 +1963,8 @@ mod test_plan {
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
-    use commonware_utils::{Faults, N3f1, TryCollect};
+    use commonware_utils::{Faults, N3f1, TestRng, TryCollect};
     use core::num::NonZeroI32;
-    use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
 
     /// Apply a mask to some bytes, returning whether or not a modification happened
@@ -2310,7 +2309,7 @@ mod test_plan {
         pub fn run<V: Variant>(self, seed: u64) -> anyhow::Result<()> {
             self.validate()?;
 
-            let mut rng = StdRng::seed_from_u64(seed);
+            let mut rng = TestRng::new(seed);
 
             // Generate keys for all participants (1-indexed to num_participants)
             let keys = (0..self.num_participants.get())

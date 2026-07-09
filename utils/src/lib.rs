@@ -336,9 +336,10 @@ macro_rules! NZDuration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TestRng;
     use commonware_formatting::hex;
     use num_bigint::BigUint;
-    use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+    use rand::RngExt as _;
 
     #[test]
     fn test_union() {
@@ -416,7 +417,7 @@ mod tests {
 
         // Test case 3: check equivalence with BigUint
         for i in 0..100 {
-            let mut rng = StdRng::seed_from_u64(i);
+            let mut rng = TestRng::new(i);
             let bytes: [u8; 32] = rng.random();
 
             // 1-byte modulus

@@ -441,8 +441,7 @@ impl<V: Variant> Read for Sharing<V> {
 mod tests {
     use super::*;
     use commonware_invariants::minifuzz;
-    use commonware_utils::ordered::Map;
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{ordered::Map, TestRng};
 
     #[test]
     fn test_roots_of_unity_interpolator_large_total_returns_none() {
@@ -509,7 +508,7 @@ mod tests {
             let max_degree = u32::try_from(subset.len() - 1).expect("subset len fits in u32");
             let degree = u.int_in_range(0u32..=max_degree)?;
             let seed: u64 = u.arbitrary()?;
-            let poly: Poly<Scalar> = Poly::new(StdRng::seed_from_u64(seed), degree);
+            let poly: Poly<Scalar> = Poly::new(TestRng::new(seed), degree);
 
             let all_shares = Map::from_iter_dedup((0..total.get()).map(|i| {
                 let participant = Participant::new(i);
@@ -545,8 +544,7 @@ mod tests {
 mod fuzz {
     use super::*;
     use arbitrary::Arbitrary;
-    use commonware_utils::{N3f1, NZU32};
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{N3f1, TestRng, NZU32};
 
     impl<'a> Arbitrary<'a> for Mode {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
@@ -563,7 +561,7 @@ mod fuzz {
             let total: u32 = u.int_in_range(1..=100)?;
             let mode: Mode = u.arbitrary()?;
             let seed: u64 = u.arbitrary()?;
-            let poly = Poly::new(StdRng::seed_from_u64(seed), N3f1::quorum(total) - 1);
+            let poly = Poly::new(TestRng::new(seed), N3f1::quorum(total) - 1);
             Ok(Self::new(
                 mode,
                 NZU32!(total),
