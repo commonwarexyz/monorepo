@@ -50,6 +50,7 @@ commonware-consensus = { path = ".", features = ["mocks"] }
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 paste.workspace = true
+rand = { workspace = true, features = ["alloc"] }
 rand_chacha.workspace = true
 rstest.workspace = true
 tracing-subscriber.workspace = true

@@ -175,7 +175,6 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_utils::{test_rng, TestRng};
     use helpers::Sha256Digest;
-    use rand::{rngs::StdRng, SeedableRng as _};
 
     const NAMESPACE: &[u8] = b"1234";
 
