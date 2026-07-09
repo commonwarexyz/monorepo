@@ -1,11 +1,12 @@
 use commonware_cryptography::{bls12381, Signer as _};
 use commonware_math::algebra::Random;
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::hint::black_box;
 
 fn bench_signature_generation(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
     rng.fill(&mut msg);

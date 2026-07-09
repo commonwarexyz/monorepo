@@ -50,7 +50,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{test_rng, vec::NonEmptyVec, NZUsize, TestRng, NZU16, NZU64};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
@@ -1507,7 +1507,7 @@ where
         participants,
         schemes,
         ..
-    } = bls12381_threshold_vrf::fixture::<V, _>(&mut TestRng::new(0), NAMESPACE, NUM_VALIDATORS);
+    } = bls12381_threshold_vrf::fixture::<V, _>(&mut test_rng(), NAMESPACE, NUM_VALIDATORS);
 
     let me = participants[0].clone();
     let provider = ConstantProvider::new(schemes[0].clone());

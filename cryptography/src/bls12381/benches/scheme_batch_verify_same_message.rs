@@ -1,14 +1,14 @@
 use commonware_cryptography::{bls12381, BatchVerifier, Signer as _};
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::NZUsize;
+use commonware_utils::{test_rng, NZUsize, TestRng};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::hint::black_box;
 
 fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
-    let mut verify_rng = StdRng::seed_from_u64(1);
+    let mut rng = test_rng();
+    let mut verify_rng = TestRng::new(1);
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
     rng.fill(&mut msg);

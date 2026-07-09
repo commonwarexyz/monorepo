@@ -9,9 +9,8 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig, PartialSignature},
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{N3f1, Participant};
+use commonware_utils::{test_rng, N3f1, Participant};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 use std::num::NonZeroUsize;
 
 mod common;
@@ -229,7 +228,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 }
 
 fn fuzz(op: FuzzOperation) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     match op {
         FuzzOperation::SignProofOfPossessionMinPk {
             public,

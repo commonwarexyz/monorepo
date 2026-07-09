@@ -1,9 +1,10 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 
 fn bench_aggregate_verify_same_message(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
     rng.fill(&mut msg);

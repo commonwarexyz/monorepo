@@ -19,9 +19,12 @@ use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients
 use commonware_runtime::{
     deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _,
 };
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    TestRng,
+};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
@@ -130,7 +133,7 @@ struct FuzzHandler {
 }
 
 impl FuzzHandler {
-    fn new(respond: bool, mut rng: StdRng) -> Self {
+    fn new(respond: bool, mut rng: TestRng) -> Self {
         let mut response_map = HashMap::new();
         for _ in 0..rng.random_range(0..10) {
             let id = rng.random();
@@ -304,7 +307,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    let mut rng = StdRng::seed_from_u64(input.seed);
+    let mut rng = TestRng::new(input.seed);
 
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
@@ -317,10 +320,7 @@ fn fuzz(input: FuzzInput) {
         for i in 2..5 {
             let seed = rng.random();
             peers.push(PrivateKey::from_seed(seed));
-            handlers.insert(
-                i,
-                FuzzHandler::new(rng.random(), StdRng::seed_from_u64(seed)),
-            );
+            handlers.insert(i, FuzzHandler::new(rng.random(), TestRng::new(seed)));
             monitors.insert(i, FuzzMonitor::new());
         }
         assert!(!peers.is_empty(), "no peers");
@@ -409,9 +409,10 @@ fn fuzz(input: FuzzInput) {
                     let idx = (peer_idx as usize) % peers.len();
                     let mailbox_size = usize::from(mailbox_size.max(MIN_BUFFER_SIZE));
                     let mailbox_size = NonZeroUsize::new(mailbox_size).unwrap();
-                    let handler = handlers.get(&idx).cloned().unwrap_or_else(|| {
-                        FuzzHandler::new(true, StdRng::seed_from_u64(rng.random()))
-                    });
+                    let handler = handlers
+                        .get(&idx)
+                        .cloned()
+                        .unwrap_or_else(|| FuzzHandler::new(true, TestRng::new(rng.random())));
                     let monitor = monitors.get(&idx).cloned().unwrap_or_else(FuzzMonitor::new);
                     let config = Config {
                         blocker: FuzzBlocker,

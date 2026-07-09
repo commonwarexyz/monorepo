@@ -6,9 +6,9 @@ use commonware_runtime::{
     ThreadPooler,
 };
 use commonware_storage::merkle::{self, mem::Mem, Bagging::ForwardFold, Family, Location};
-use commonware_utils::NZUsize;
+use commonware_utils::{test_rng, NZUsize};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::{collections::HashMap, num::NonZeroUsize, time::Instant};
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
@@ -48,7 +48,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                 Mode::BatchedSerial => None,
                             };
                             let mut elements = Vec::with_capacity(leaves);
-                            let mut sampler = StdRng::seed_from_u64(0);
+                            let mut sampler = test_rng();
                             let mut leaf_locations = Vec::with_capacity(leaves);
                             let h = StandardHasher::<Sha256>::new(ForwardFold);
 

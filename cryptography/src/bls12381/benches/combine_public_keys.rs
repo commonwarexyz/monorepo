@@ -1,10 +1,10 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;
 
 fn bench_combine_public_keys(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     for n in [10, 100, 1000, 10000].into_iter() {
         c.bench_function(&format!("{}/pks={}", module_path!(), n), |b| {
             b.iter_batched(

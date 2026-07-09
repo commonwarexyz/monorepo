@@ -1,14 +1,14 @@
 use commonware_cryptography::{ed25519, BatchVerifier, Signer as _};
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::NZUsize;
+use commonware_utils::{test_rng, NZUsize, TestRng};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::hint::black_box;
 
 fn bench_batch_verify_same_signer(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
-    let mut verify_rng = StdRng::seed_from_u64(1);
+    let mut rng = test_rng();
+    let mut verify_rng = TestRng::new(1);
     let namespace = b"namespace";
     for n_messages in [1, 10, 100, 1000, 10000].into_iter() {
         for concurrency in [1, 8] {

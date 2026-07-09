@@ -1,7 +1,7 @@
 use commonware_runtime::tokio::Context;
 use commonware_storage::ordinal;
-use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, test_rng, NZUsize, NZU64};
+use rand::Rng;
 use std::collections::BTreeMap;
 
 /// Number of bytes that can be buffered before being written to disk.
@@ -32,7 +32,7 @@ pub async fn init(ctx: Context, bits: Option<BTreeMap<u64, &Option<BitMap>>>) ->
 
 /// Append `count` sequential entries with random values to ordinal store and sync once.
 pub async fn append_random(store: &mut Ordinal, count: u64) -> Vec<u64> {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let mut val_buf = [0u8; 128];
 
     let mut indices = Vec::with_capacity(count as usize);

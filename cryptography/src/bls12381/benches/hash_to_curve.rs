@@ -3,13 +3,13 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinSig, Variant},
 };
 use commonware_parallel::{Rayon, Sequential, Strategy};
-use commonware_utils::NZUsize;
+use commonware_utils::{test_rng, NZUsize};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::hint::black_box;
 
 fn bench_hash_to_curve(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let namespace = b"namespace";
     for n in [10, 50, 100, 200] {
         // Generate random messages

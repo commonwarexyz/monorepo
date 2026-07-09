@@ -1,9 +1,10 @@
 use commonware_cryptography::{blake3::Blake3, Hasher};
+use commonware_utils::test_rng;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::Rng;
 
 fn bench_hash_message(c: &mut Criterion) {
-    let mut sampler = StdRng::seed_from_u64(0);
+    let mut sampler = test_rng();
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
     for message_length in cases.into_iter() {
         let mut msg = vec![0u8; message_length];

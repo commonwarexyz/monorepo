@@ -1,8 +1,8 @@
 use commonware_cryptography::{blake3::Blake3, sha256::Sha256, BloomFilter, Hasher};
-use commonware_utils::rational::BigRationalExt;
+use commonware_utils::{rational::BigRationalExt, TestRng};
 use criterion::{criterion_group, Criterion};
 use num_rational::BigRational;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::Rng;
 use std::{collections::HashSet, hint::black_box, num::NonZeroUsize};
 
 const ITEM_SIZES: [usize; 3] = [32, 2048, 4096];
@@ -24,7 +24,7 @@ fn run_contains_bench<H: Hasher>(c: &mut Criterion, hasher: &str, query_inserted
     for item_size in ITEM_SIZES {
         for (fp_rate, fp_label) in fp_rates() {
             // Create and populate the bloom filter
-            let mut rng = StdRng::seed_from_u64(42);
+            let mut rng = TestRng::new(42);
             let mut bf =
                 BloomFilter::<H>::with_rate(NonZeroUsize::new(NUM_ITEMS).unwrap(), fp_rate);
             let mut inserted_set = HashSet::new();

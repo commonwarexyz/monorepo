@@ -1,10 +1,11 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::hint::black_box;
 
 fn bench_combine_signatures(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let namespace = b"namespace";
     for n in [10, 100, 1000, 10000].into_iter() {
         let mut msgs = Vec::with_capacity(n);

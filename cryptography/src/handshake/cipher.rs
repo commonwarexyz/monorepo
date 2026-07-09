@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_recv_wrong_key_fails() {
-        let mut send = SendCipher::new(TestRng::new(0));
+        let mut send = SendCipher::new(test_rng());
         let mut recv = RecvCipher::new(TestRng::new(1));
 
         let ciphertext = send.send(b"hello").unwrap();

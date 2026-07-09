@@ -13,7 +13,7 @@ use commonware_runtime::{
     Runner as _, Supervisor as _,
 };
 use commonware_storage::{merkle::Family, qmdb::any::traits::DbAny};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, TestRng};
 use core::num::NonZeroUsize;
 use criterion::{criterion_group, Criterion};
 
@@ -41,7 +41,7 @@ async fn populate_and_sync<F: Family, C: DbAny<F, Key = Digest>>(
     db: &mut C,
     elements: u64,
     operations: u64,
-    make_value: impl Fn(&mut rand::rngs::StdRng) -> C::Value,
+    make_value: impl Fn(&mut TestRng) -> C::Value,
 ) {
     gen_random_kv::<F, _>(
         db,

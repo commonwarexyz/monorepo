@@ -1,12 +1,12 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::NZUsize;
+use commonware_utils::{test_rng, NZUsize, TestRng};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 
 fn bench_batch_verify_same_signer(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
-    let mut verify_rng = StdRng::seed_from_u64(1);
+    let mut rng = test_rng();
+    let mut verify_rng = TestRng::new(1);
     let namespace = b"namespace";
     for n in [2, 10, 100, 1000, 10000].into_iter() {
         let mut msgs: Vec<[u8; 32]> = Vec::with_capacity(n);
