@@ -5,9 +5,11 @@ use crate::journal::{
     segmented::{fixed as segmented_fixed, glob, oversized, variable as segmented_variable},
 };
 use commonware_codec::{FixedSize, RangeCfg, Read, ReadExt, Write};
-use commonware_conformance::{conformance_tests, Conformance};
+use commonware_conformance::conformance_tests;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Buf, BufMut, Runner, Supervisor as _,
+    buffer::paged::CacheRef,
+    conformance::{StorageConformance, StorageWorkload},
+    Buf, BufMut, Supervisor as _,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
@@ -19,190 +21,172 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(4096);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-struct ContiguousFixed;
+struct ContiguousFixedWorkload;
+type ContiguousFixed = StorageConformance<ContiguousFixedWorkload>;
 
-impl Conformance for ContiguousFixed {
-    async fn commit(seed: u64) -> Vec<u8> {
-        let runner = deterministic::Runner::seeded(seed);
-        runner.start(|mut context| async move {
-            let config = fixed::Config {
-                partition: format!("contiguous-fixed-conformance-{seed}"),
-                items_per_blob: ITEMS_PER_BLOB,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: WRITE_BUFFER,
-            };
-            let mut journal = fixed::Journal::<_, u64>::init(context.child("journal"), config)
-                .await
-                .unwrap();
+impl StorageWorkload for ContiguousFixedWorkload {
+    type Error = crate::journal::Error;
 
-            let mut data_to_write =
-                vec![0u64; context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
-            context.fill(&mut data_to_write[..]);
+    async fn run(
+        mut context: commonware_runtime::deterministic::Context,
+        seed: u64,
+    ) -> Result<(), Self::Error> {
+        let config = fixed::Config {
+            partition: format!("contiguous-fixed-conformance-{seed}"),
+            items_per_blob: ITEMS_PER_BLOB,
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: WRITE_BUFFER,
+        };
+        let mut journal = fixed::Journal::<_, u64>::init(context.child("journal"), config).await?;
 
-            for item in data_to_write.iter() {
-                journal.append(item).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
+        let mut data_to_write =
+            vec![0u64; context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
+        context.fill(&mut data_to_write[..]);
 
-            context.storage_audit().to_vec()
-        })
+        for item in data_to_write.iter() {
+            journal.append(item).await?;
+        }
+        journal.sync().await
     }
 }
 
-struct ContiguousVariable;
+struct ContiguousVariableWorkload;
+type ContiguousVariable = StorageConformance<ContiguousVariableWorkload>;
 
-impl Conformance for ContiguousVariable {
-    async fn commit(seed: u64) -> Vec<u8> {
-        let runner = deterministic::Runner::seeded(seed);
-        runner.start(|mut context| async move {
-            let config = variable::Config {
-                partition: format!("contiguous-variable-conformance-{seed}"),
-                items_per_section: ITEMS_PER_BLOB,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: WRITE_BUFFER,
-                compression: None,
-                codec_config: (RangeCfg::new(0..256), ()),
-            };
-            let mut journal =
-                variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
-                    .await
-                    .unwrap();
+impl StorageWorkload for ContiguousVariableWorkload {
+    type Error = crate::journal::Error;
 
-            let mut data_to_write =
-                vec![Vec::new(); context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
-            for item in data_to_write.iter_mut() {
-                let size = context.random_range(0..256);
-                item.resize(size, 0);
-                context.fill(item.as_mut_slice());
-            }
+    async fn run(
+        mut context: commonware_runtime::deterministic::Context,
+        seed: u64,
+    ) -> Result<(), Self::Error> {
+        let config = variable::Config {
+            partition: format!("contiguous-variable-conformance-{seed}"),
+            items_per_section: ITEMS_PER_BLOB,
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: WRITE_BUFFER,
+            compression: None,
+            codec_config: (RangeCfg::new(0..256), ()),
+        };
+        let mut journal =
+            variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config).await?;
 
-            for item in data_to_write {
-                journal.append(&item).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
+        let mut data_to_write =
+            vec![Vec::new(); context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
+        for item in data_to_write.iter_mut() {
+            let size = context.random_range(0..256);
+            item.resize(size, 0);
+            context.fill(item.as_mut_slice());
+        }
 
-            context.storage_audit().to_vec()
-        })
+        for item in data_to_write {
+            journal.append(&item).await?;
+        }
+        journal.sync().await
     }
 }
 
-struct SegmentedFixed;
+struct SegmentedFixedWorkload;
+type SegmentedFixed = StorageConformance<SegmentedFixedWorkload>;
 
-impl Conformance for SegmentedFixed {
-    async fn commit(seed: u64) -> Vec<u8> {
-        let runner = deterministic::Runner::seeded(seed);
-        runner.start(|mut context| async move {
-            let config = segmented_fixed::Config {
-                partition: format!("segmented-fixed-conformance-{seed}"),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: WRITE_BUFFER,
-            };
-            let mut journal =
-                segmented_fixed::Journal::<_, u64>::init(context.child("journal"), config)
-                    .await
-                    .unwrap();
+impl StorageWorkload for SegmentedFixedWorkload {
+    type Error = crate::journal::Error;
 
-            // Write items across multiple sections
-            let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
-            let mut data_to_write = vec![0u64; items_count];
-            context.fill(&mut data_to_write[..]);
+    async fn run(
+        mut context: commonware_runtime::deterministic::Context,
+        seed: u64,
+    ) -> Result<(), Self::Error> {
+        let config = segmented_fixed::Config {
+            partition: format!("segmented-fixed-conformance-{seed}"),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: WRITE_BUFFER,
+        };
+        let mut journal =
+            segmented_fixed::Journal::<_, u64>::init(context.child("journal"), config).await?;
 
-            // Distribute items across sections 0, 1, 2
-            for (i, item) in data_to_write.iter().enumerate() {
-                let section = (i % 3) as u64;
-                journal.append(section, item).await.unwrap();
-            }
+        let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
+        let mut data_to_write = vec![0u64; items_count];
+        context.fill(&mut data_to_write[..]);
 
-            // Sync all sections
-            journal.sync([0, 1, 2]).await.unwrap();
-            drop(journal);
+        for (i, item) in data_to_write.iter().enumerate() {
+            let section = (i % 3) as u64;
+            journal.append(section, item).await?;
+        }
 
-            context.storage_audit().to_vec()
-        })
+        journal.sync([0, 1, 2]).await
     }
 }
 
-struct SegmentedGlob;
+struct SegmentedGlobWorkload;
+type SegmentedGlob = StorageConformance<SegmentedGlobWorkload>;
 
-impl Conformance for SegmentedGlob {
-    async fn commit(seed: u64) -> Vec<u8> {
-        let runner = deterministic::Runner::seeded(seed);
-        runner.start(|mut context| async move {
-            let config = glob::Config {
-                partition: format!("segmented-glob-conformance-{seed}"),
-                compression: None,
-                codec_config: (RangeCfg::new(0..256), ()),
-                write_buffer: WRITE_BUFFER,
-            };
-            let mut journal = glob::Glob::<_, Vec<u8>>::init(context.child("journal"), config)
-                .await
-                .unwrap();
+impl StorageWorkload for SegmentedGlobWorkload {
+    type Error = crate::journal::Error;
 
-            // Write variable-size items across multiple sections
-            let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
-            let mut data_to_write = vec![Vec::new(); items_count];
-            for item in data_to_write.iter_mut() {
-                let size = context.random_range(0..256);
-                item.resize(size, 0);
-                context.fill(item.as_mut_slice());
-            }
+    async fn run(
+        mut context: commonware_runtime::deterministic::Context,
+        seed: u64,
+    ) -> Result<(), Self::Error> {
+        let config = glob::Config {
+            partition: format!("segmented-glob-conformance-{seed}"),
+            compression: None,
+            codec_config: (RangeCfg::new(0..256), ()),
+            write_buffer: WRITE_BUFFER,
+        };
+        let mut journal = glob::Glob::<_, Vec<u8>>::init(context.child("journal"), config).await?;
 
-            // Distribute items across sections 0, 1, 2
-            for (i, item) in data_to_write.iter().enumerate() {
-                let section = (i % 3) as u64;
-                journal.append(section, item).await.unwrap();
-            }
+        let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
+        let mut data_to_write = vec![Vec::new(); items_count];
+        for item in data_to_write.iter_mut() {
+            let size = context.random_range(0..256);
+            item.resize(size, 0);
+            context.fill(item.as_mut_slice());
+        }
 
-            // Sync all sections
-            journal.sync([0, 1, 2]).await.unwrap();
-            drop(journal);
+        for (i, item) in data_to_write.iter().enumerate() {
+            let section = (i % 3) as u64;
+            journal.append(section, item).await?;
+        }
 
-            context.storage_audit().to_vec()
-        })
+        journal.sync([0, 1, 2]).await
     }
 }
 
-struct SegmentedVariable;
+struct SegmentedVariableWorkload;
+type SegmentedVariable = StorageConformance<SegmentedVariableWorkload>;
 
-impl Conformance for SegmentedVariable {
-    async fn commit(seed: u64) -> Vec<u8> {
-        let runner = deterministic::Runner::seeded(seed);
-        runner.start(|mut context| async move {
-            let config = segmented_variable::Config {
-                partition: format!("segmented-variable-conformance-{seed}"),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: WRITE_BUFFER,
-                compression: None,
-                codec_config: (RangeCfg::new(0..256), ()),
-            };
-            let mut journal =
-                segmented_variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
-                    .await
-                    .unwrap();
+impl StorageWorkload for SegmentedVariableWorkload {
+    type Error = crate::journal::Error;
 
-            // Write variable-size items across multiple sections
-            let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
-            let mut data_to_write = vec![Vec::new(); items_count];
-            for item in data_to_write.iter_mut() {
-                let size = context.random_range(0..256);
-                item.resize(size, 0);
-                context.fill(item.as_mut_slice());
-            }
+    async fn run(
+        mut context: commonware_runtime::deterministic::Context,
+        seed: u64,
+    ) -> Result<(), Self::Error> {
+        let config = segmented_variable::Config {
+            partition: format!("segmented-variable-conformance-{seed}"),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: WRITE_BUFFER,
+            compression: None,
+            codec_config: (RangeCfg::new(0..256), ()),
+        };
+        let mut journal =
+            segmented_variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
+                .await?;
 
-            // Distribute items across sections 0, 1, 2
-            for (i, item) in data_to_write.iter().enumerate() {
-                let section = (i % 3) as u64;
-                journal.append(section, item).await.unwrap();
-            }
+        let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
+        let mut data_to_write = vec![Vec::new(); items_count];
+        for item in data_to_write.iter_mut() {
+            let size = context.random_range(0..256);
+            item.resize(size, 0);
+            context.fill(item.as_mut_slice());
+        }
 
-            // Sync all sections
-            journal.sync([0, 1, 2]).await.unwrap();
-            drop(journal);
+        for (i, item) in data_to_write.iter().enumerate() {
+            let section = (i % 3) as u64;
+            journal.append(section, item).await?;
+        }
 
-            context.storage_audit().to_vec()
-        })
+        journal.sync([0, 1, 2]).await
     }
 }
 
@@ -253,54 +237,48 @@ impl Record for TestEntry {
     }
 }
 
-struct SegmentedOversized;
+struct SegmentedOversizedWorkload;
+type SegmentedOversized = StorageConformance<SegmentedOversizedWorkload>;
 
-impl Conformance for SegmentedOversized {
-    async fn commit(seed: u64) -> Vec<u8> {
-        let runner = deterministic::Runner::seeded(seed);
-        runner.start(|mut context| async move {
-            let config = oversized::Config {
-                index_partition: format!("segmented-oversized-index-conformance-{seed}"),
-                value_partition: format!("segmented-oversized-value-conformance-{seed}"),
-                index_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                index_write_buffer: WRITE_BUFFER,
-                value_write_buffer: WRITE_BUFFER,
-                compression: None,
-                codec_config: (RangeCfg::new(0..256), ()),
+impl StorageWorkload for SegmentedOversizedWorkload {
+    type Error = crate::journal::Error;
+
+    async fn run(
+        mut context: commonware_runtime::deterministic::Context,
+        seed: u64,
+    ) -> Result<(), Self::Error> {
+        let config = oversized::Config {
+            index_partition: format!("segmented-oversized-index-conformance-{seed}"),
+            value_partition: format!("segmented-oversized-value-conformance-{seed}"),
+            index_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            index_write_buffer: WRITE_BUFFER,
+            value_write_buffer: WRITE_BUFFER,
+            compression: None,
+            codec_config: (RangeCfg::new(0..256), ()),
+        };
+        let mut journal =
+            oversized::Oversized::<_, TestEntry, Vec<u8>>::init(context.child("journal"), config)
+                .await?;
+
+        let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
+        let mut data_to_write = vec![Vec::new(); items_count];
+        for item in data_to_write.iter_mut() {
+            let size = context.random_range(0..256);
+            item.resize(size, 0);
+            context.fill(item.as_mut_slice());
+        }
+
+        for (i, item) in data_to_write.iter().enumerate() {
+            let section = (i % 3) as u64;
+            let entry = TestEntry {
+                id: i as u64,
+                value_offset: 0,
+                value_size: 0,
             };
-            let mut journal = oversized::Oversized::<_, TestEntry, Vec<u8>>::init(
-                context.child("journal"),
-                config,
-            )
-            .await
-            .unwrap();
+            journal.append(section, entry, item).await?;
+        }
 
-            // Write variable-size items across multiple sections
-            let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
-            let mut data_to_write = vec![Vec::new(); items_count];
-            for item in data_to_write.iter_mut() {
-                let size = context.random_range(0..256);
-                item.resize(size, 0);
-                context.fill(item.as_mut_slice());
-            }
-
-            // Distribute items across sections 0, 1, 2
-            for (i, item) in data_to_write.iter().enumerate() {
-                let section = (i % 3) as u64;
-                let entry = TestEntry {
-                    id: i as u64,
-                    value_offset: 0,
-                    value_size: 0,
-                };
-                journal.append(section, entry, item).await.unwrap();
-            }
-
-            // Sync all sections
-            journal.sync([0, 1, 2]).await.unwrap();
-            drop(journal);
-
-            context.storage_audit().to_vec()
-        })
+        journal.sync([0, 1, 2]).await
     }
 }
 
