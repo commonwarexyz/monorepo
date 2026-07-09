@@ -265,7 +265,7 @@ mod test {
                         ));
                 }
                 let new_commit_loc = Location::new(*db.last_commit_loc() + 1 + 3);
-                db.apply_batch(batch.merkleize(&db, None, new_commit_loc))
+                db.apply_batch(batch.merkleize(&db, None, new_commit_loc).await)
                     .await
                     .unwrap();
             }
@@ -351,12 +351,14 @@ mod test {
             .new_batch()
             .append(v1.clone())
             .append(v2.clone())
-            .merkleize(&db, Some(metadata.clone()), floor);
-        let compact_batch = compact.new_batch().append(v1).append(v2).merkleize(
-            &compact,
-            Some(metadata.clone()),
-            floor,
-        );
+            .merkleize(&db, Some(metadata.clone()), floor)
+            .await;
+        let compact_batch = compact
+            .new_batch()
+            .append(v1)
+            .append(v2)
+            .merkleize(&compact, Some(metadata.clone()), floor)
+            .await;
 
         assert_eq!(retained.root(), compact_batch.root());
 

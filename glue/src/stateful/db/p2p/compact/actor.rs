@@ -452,11 +452,12 @@ mod tests {
         compact::FetchResult<mmr::Family, TestOp, sha256::Digest>,
     ) {
         let mut db = init_db(context).await;
-        db.apply_batch(db.new_batch().append(U64::new(7)).merkleize(
-            &db,
-            None,
-            db.inactivity_floor_loc(),
-        ))
+        db.apply_batch(
+            db.new_batch()
+                .append(U64::new(7))
+                .merkleize(&db, None, db.inactivity_floor_loc())
+                .await,
+        )
         .unwrap();
         db.sync().await.unwrap();
 

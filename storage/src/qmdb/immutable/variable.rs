@@ -350,13 +350,14 @@ mod tests {
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
-            .merkleize(&db, Some(metadata), floor);
-        let compact_batch =
-            compact
-                .new_batch()
-                .set(k1, v1)
-                .set(k2, v2)
-                .merkleize(&compact, Some(metadata), floor);
+            .merkleize(&db, Some(metadata), floor)
+            .await;
+        let compact_batch = compact
+            .new_batch()
+            .set(k1, v1)
+            .set(k2, v2)
+            .merkleize(&compact, Some(metadata), floor)
+            .await;
 
         assert_eq!(retained.root(), compact_batch.root());
 

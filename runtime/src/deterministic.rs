@@ -1164,6 +1164,16 @@ impl crate::Spawner for Context {
     }
 }
 
+/// Pool workers run as cooperative tasks that never actually execute rayon's worker loop.
+/// Parallel work is executed by the calling thread instead: the executor thread registers
+/// itself as a pool worker at creation, so `install` runs work inline and awaited
+/// `Strategy::spawn` jobs are driven by the spawn future's yield loop.
+///
+/// Because rayon's current-thread registration is permanent, only the FIRST pool created on
+/// the executor thread can register it. Awaited `Strategy::spawn` jobs on any later pool
+/// (or on a pool built outside [`crate::ThreadPooler`], whose external threads this runtime
+/// cannot observe) never complete. Deterministic tests should create at most one pool per
+/// runtime.
 impl crate::ThreadPooler for Context {
     fn create_thread_pool(
         &self,

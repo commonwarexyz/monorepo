@@ -166,11 +166,14 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(
-            &*db,
-            self.metadata,
-            self.inactivity_floor.unwrap_or_default(),
-        );
+        let merkleized = self
+            .batch
+            .merkleize(
+                &*db,
+                self.metadata,
+                self.inactivity_floor.unwrap_or_default(),
+            )
+            .await;
         Ok(KeylessUnjournaledMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -698,11 +701,11 @@ mod tests {
                     .await
                     .unwrap();
             let floor = source.inactivity_floor_loc();
-            let batch =
-                source
-                    .new_batch()
-                    .append(U64::new(7))
-                    .merkleize(&source, Some(U64::new(9)), floor);
+            let batch = source
+                .new_batch()
+                .append(U64::new(7))
+                .merkleize(&source, Some(U64::new(9)), floor)
+                .await;
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
 
@@ -737,11 +740,11 @@ mod tests {
             .unwrap();
 
             let floor = source.inactivity_floor_loc();
-            let batch =
-                source
-                    .new_batch()
-                    .append(U64::new(7))
-                    .merkleize(&source, Some(U64::new(9)), floor);
+            let batch = source
+                .new_batch()
+                .append(U64::new(7))
+                .merkleize(&source, Some(U64::new(9)), floor)
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.sync().await.unwrap();
             let first_target = sync::compact::Target {
@@ -750,11 +753,11 @@ mod tests {
             };
 
             let floor = source.inactivity_floor_loc();
-            let batch = source.new_batch().append(U64::new(8)).merkleize(
-                &source,
-                Some(U64::new(10)),
-                floor,
-            );
+            let batch = source
+                .new_batch()
+                .append(U64::new(8))
+                .merkleize(&source, Some(U64::new(10)), floor)
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.sync().await.unwrap();
             let second_target = sync::compact::Target {
@@ -795,21 +798,21 @@ mod tests {
             .unwrap();
 
             let floor = source.inactivity_floor_loc();
-            let batch =
-                source
-                    .new_batch()
-                    .append(U64::new(7))
-                    .merkleize(&source, Some(U64::new(9)), floor);
+            let batch = source
+                .new_batch()
+                .append(U64::new(7))
+                .merkleize(&source, Some(U64::new(9)), floor)
+                .await;
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
             let stale_target = source.target();
 
             let floor = source.inactivity_floor_loc();
-            let batch = source.new_batch().append(U64::new(8)).merkleize(
-                &source,
-                Some(U64::new(10)),
-                floor,
-            );
+            let batch = source
+                .new_batch()
+                .append(U64::new(8))
+                .merkleize(&source, Some(U64::new(10)), floor)
+                .await;
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
             let latest_target = source.target();
@@ -863,10 +866,11 @@ mod tests {
             let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
 
             let floor = db.inactivity_floor_loc();
-            let batch =
-                db.new_batch()
-                    .append(U64::new(1))
-                    .merkleize(&db, Some(U64::new(11)), floor);
+            let batch = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
             db.apply_batch(batch).unwrap();
             db.sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
@@ -874,11 +878,11 @@ mod tests {
             // Commit two more ranges so the rewind below spans multiple commits.
             for i in [2u64, 3] {
                 let floor = db.inactivity_floor_loc();
-                let batch = db.new_batch().append(U64::new(i)).merkleize(
-                    &db,
-                    Some(U64::new(i * 11)),
-                    floor,
-                );
+                let batch = db
+                    .new_batch()
+                    .append(U64::new(i))
+                    .merkleize(&db, Some(U64::new(i * 11)), floor)
+                    .await;
                 db.apply_batch(batch).unwrap();
                 db.sync().await.unwrap();
             }
@@ -907,11 +911,11 @@ mod tests {
             let mut targets = Vec::new();
             for i in [1u64, 2, 3] {
                 let floor = db.inactivity_floor_loc();
-                let batch = db.new_batch().append(U64::new(i)).merkleize(
-                    &db,
-                    Some(U64::new(i * 11)),
-                    floor,
-                );
+                let batch = db
+                    .new_batch()
+                    .append(U64::new(i))
+                    .merkleize(&db, Some(U64::new(i * 11)), floor)
+                    .await;
                 db.apply_batch(batch).unwrap();
                 db.sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));

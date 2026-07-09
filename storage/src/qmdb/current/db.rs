@@ -135,7 +135,12 @@ pub struct Db<
     ///
     /// Internal nodes are hashed using their position in the ops tree rather than their
     /// grafted position.
-    pub(super) grafted_tree: Mem<F, H::Digest>,
+    ///
+    /// Held in an [`Arc`] so merkleize can hand a zero-copy, immutable snapshot to the
+    /// grafted-layer hashing job running off the calling task. Mutations go through
+    /// [`Arc::make_mut`]: they are in-place while no snapshot is alive and copy-on-write
+    /// otherwise, so a snapshot never observes later mutations.
+    pub(super) grafted_tree: Arc<Mem<F, H::Digest>>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
@@ -483,7 +488,7 @@ where
             retained.push(digest);
         }
 
-        self.grafted_tree = Mem::from_pruned_with_retained(prune_pos, pinned, retained);
+        self.grafted_tree = Arc::new(Mem::from_pruned_with_retained(prune_pos, pinned, retained));
         Ok(())
     }
 
@@ -639,7 +644,7 @@ where
         )
         .await?;
 
-        self.grafted_tree = grafted_tree;
+        self.grafted_tree = Arc::new(grafted_tree);
         self.root = root;
         self.update_metrics();
 
@@ -799,7 +804,7 @@ where
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
-        self.grafted_tree.apply_batch(&batch.grafted)?;
+        Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
         self.update_metrics();
         Ok(range)
@@ -1007,11 +1012,36 @@ pub(super) async fn compute_grafted_root<
     Ok(hasher.root(leaves, inactive_peaks, peaks.iter())?)
 }
 
-/// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
+/// Resolve each bitmap chunk's covering ops-tree node, returning
+/// `(chunk_idx, chunk_ops_digest, chunk)` triples ready for
+/// [`grafting::graft_chunk_digests`].
 ///
 /// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
-/// [`merkle::Graftable::subtree_root_position`]. The grafted leaf digest is `hash(chunk ||
+/// [`merkle::Graftable::subtree_root_position`].
+pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
+    ops_tree: &impl MerkleStorage<F, Digest = D>,
+    chunks: impl IntoIterator<Item = (usize, [u8; N])>,
+) -> Result<Vec<(usize, D, [u8; N])>, Error<F>> {
+    let grafting_height = grafting::height::<N>();
+
+    // Each graftable chunk has a single h=G ancestor at the deterministic
+    // `subtree_root_position(chunk_idx << G, G)`. Look it up directly.
+    try_join_all(chunks.into_iter().map(|(chunk_idx, chunk)| async move {
+        let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
+        let pos = F::subtree_root_position(leaf_start, grafting_height);
+        let chunk_ops_digest = ops_tree
+            .get_node(pos)
+            .await?
+            .ok_or(merkle::Error::<F>::MissingGraftedLeaf(pos))?;
+        Ok::<_, Error<F>>((chunk_idx, chunk_ops_digest, chunk))
+    }))
+    .await
+}
+
+/// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
+///
+/// See [`read_graft_inputs`] for the chunk requirements. The grafted leaf digest is `hash(chunk ||
 /// ops_h_G_node)`; for all-zero chunks the grafted leaf equals the ops digest directly (zero-chunk
 /// identity).
 ///
@@ -1026,21 +1056,7 @@ pub(super) async fn compute_grafted_leaves<
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     strategy: &S,
 ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
-    let grafting_height = grafting::height::<N>();
-
-    // Each graftable chunk has a single h=G ancestor at the deterministic
-    // `subtree_root_position(chunk_idx << G, G)`. Look it up directly.
-    let inputs = try_join_all(chunks.into_iter().map(|(chunk_idx, chunk)| async move {
-        let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
-        let pos = F::subtree_root_position(leaf_start, grafting_height);
-        let chunk_ops_digest = ops_tree
-            .get_node(pos)
-            .await?
-            .ok_or(merkle::Error::<F>::MissingGraftedLeaf(pos))?;
-        Ok::<_, Error<F>>((chunk_idx, chunk_ops_digest, chunk))
-    }))
-    .await?;
-
+    let inputs = read_graft_inputs::<F, _, N>(ops_tree, chunks).await?;
     Ok(grafting::graft_chunk_digests::<H, _, N>(strategy, inputs))
 }
 

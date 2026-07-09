@@ -249,7 +249,7 @@ where
     /// be at most this batch's own commit location (`total_size - 1`). A floor past the commit
     /// would let a later `prune(floor)` remove the last readable commit.
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
-    pub fn merkleize<E, C>(
+    pub async fn merkleize<E, C>(
         self,
         db: &Keyless<F, E, V, C, H, S>,
         metadata: Option<V::Value>,
@@ -267,17 +267,17 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = self.base_size + ops.len() as u64;
-        let journal_batch = self.journal_batch.add_many(ops);
-        let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
-
-        // Compute the root.
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let root = db
+
+        // Leaf and node hashing dominate merkleization, so run them as one job on the
+        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        let (journal, root) = db
             .journal
-            .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
+            .merkleize(self.journal_batch, ops, inactive_peaks)
+            .await
             .expect("inactive_peaks computed from batch size");
 
         // Compute the batch chain bounds.

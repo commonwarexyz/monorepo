@@ -479,7 +479,7 @@ where
     let metrics = Metrics::new(context);
     let db = db::Db {
         any,
-        grafted_tree,
+        grafted_tree: Arc::new(grafted_tree),
         metadata,
         strategy,
         root,

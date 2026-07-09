@@ -149,7 +149,11 @@ mod tests {
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
             let floor = db.inactivity_floor_loc();
-            let batch = db.new_batch().set(key, value).merkleize(&db, None, floor);
+            let batch = db
+                .new_batch()
+                .set(key, value)
+                .merkleize(&db, None, floor)
+                .await;
             db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
@@ -402,13 +406,14 @@ mod tests {
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
-            .merkleize(&db, Some(metadata), floor);
-        let compact_batch =
-            compact
-                .new_batch()
-                .set(k1, v1)
-                .set(k2, v2)
-                .merkleize(&compact, Some(metadata), floor);
+            .merkleize(&db, Some(metadata), floor)
+            .await;
+        let compact_batch = compact
+            .new_batch()
+            .set(k1, v1)
+            .set(k2, v2)
+            .merkleize(&compact, Some(metadata), floor)
+            .await;
 
         assert_eq!(retained.root(), compact_batch.root());
 

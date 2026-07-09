@@ -300,11 +300,6 @@ where
         }
     }
 
-    /// Borrow the committed Mem for the duration of the closure.
-    pub(crate) fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, H::Digest>) -> R) -> R {
-        self.merkle.with_mem(f)
-    }
-
     /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound
     /// job submitted through [`Strategy::spawn`].
     ///
@@ -313,7 +308,7 @@ where
     /// occupying the calling task. If the caller is cancelled mid-job, the job still runs to
     /// completion against its snapshot and the result is discarded (a panic inside the job is
     /// caught by [`Strategy::spawn`] and only propagates to a caller that awaits it).
-    pub(crate) async fn merkleize_batch(
+    pub(crate) async fn merkleize(
         &self,
         batch: UnmerkleizedBatch<F, H, C::Item, S>,
         items: Vec<C::Item>,

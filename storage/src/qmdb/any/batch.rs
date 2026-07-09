@@ -1058,10 +1058,10 @@ where
         let inactive_peaks = db.inactive_peaks(leaves, floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job on the
-        // strategy instead of occupying the calling task (see `Journal::merkleize_batch`).
+        // strategy instead of occupying the calling task (see `Journal::merkleize`).
         let (journal, root) = db
             .log
-            .merkleize_batch(self.journal_batch, ops, inactive_peaks)
+            .merkleize(self.journal_batch, ops, inactive_peaks)
             .await?;
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
