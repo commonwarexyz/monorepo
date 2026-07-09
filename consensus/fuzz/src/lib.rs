@@ -216,7 +216,6 @@ async fn setup_network<P: simplex::Simplex>(
     let Fixture {
         participants,
         schemes,
-        verifier: _,
         ..
     } = P::fixture(context, NAMESPACE, input.configuration.n);
     let (network, mut oracle) = Network::new_with_peers(

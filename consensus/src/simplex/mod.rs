@@ -989,7 +989,7 @@ mod tests {
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             for finalizer in finalizers.iter() {
                                 if nullifies.contains(finalizer) {
                                     panic!("should not nullify and finalize at same view");
@@ -1688,7 +1688,7 @@ mod tests {
 
                 // Store all finalizer handles
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < required_containers {
@@ -1715,7 +1715,7 @@ mod tests {
                         // Check reporters for faults activity
                         let supervised = supervised.lock();
                         for reporters in supervised.iter() {
-                            for (_, reporter) in reporters.iter() {
+                            for reporter in reporters.values() {
                                 reporter.assert_no_faults();
                             }
                         }
@@ -2140,7 +2140,7 @@ mod tests {
                 {
                     let notarizes = reporter.notarizes.lock();
                     for (view, payloads) in notarizes.iter() {
-                        for (_, participants) in payloads.iter() {
+                        for participants in payloads.values() {
                             if participants.contains(offline) {
                                 panic!("view: {view}");
                             }
@@ -2158,7 +2158,7 @@ mod tests {
                 {
                     let finalizes = reporter.finalizes.lock();
                     for (view, payloads) in finalizes.iter() {
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             if finalizers.contains(offline) {
                                 panic!("view: {view}");
                             }
@@ -3094,7 +3094,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
+                    for faults in faulter.values() {
                         for fault in faults.iter() {
                             match fault {
                                 Activity::ConflictingNotarize(_) => {
@@ -4284,7 +4284,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
+                    for faults in faulter.values() {
                         for fault in faults.iter() {
                             match fault {
                                 Activity::NullifyFinalize(_) => {
@@ -4909,7 +4909,7 @@ mod tests {
 
                 // Check finalizes
                 let finalizes = reporter.finalizes.lock();
-                for (_, payloads) in finalizes.iter() {
+                for payloads in finalizes.values() {
                     let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
                     // For attributable schemes, we should see peer activities
@@ -5555,7 +5555,7 @@ mod tests {
 
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5577,7 +5577,7 @@ mod tests {
 
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5645,7 +5645,7 @@ mod tests {
 
                 // Wait for all engines to hit required containers
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5659,7 +5659,7 @@ mod tests {
 
             // Check reporters for correct activity
             let latest_complete = target.saturating_sub(activity_timeout);
-            for (_, reporter) in reporters.iter() {
+            for reporter in reporters.values() {
                 // Ensure no faults
                 reporter.assert_no_faults();
 
@@ -5719,7 +5719,7 @@ mod tests {
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             for finalizer in finalizers.iter() {
                                 if nullifies.contains(finalizer) {
                                     panic!("should not nullify and finalize at same view");
@@ -6210,7 +6210,7 @@ mod tests {
                 // Ensure faults are attributable to twins.
                 for reporter in reporters.iter().skip(honest_start) {
                     let faults = reporter.faults.lock();
-                    for (faulter, _) in faults.iter() {
+                    for faulter in faults.keys() {
                         assert!(
                             twin_identities.contains(faulter),
                             "fault from non-twin participant"
