@@ -23,7 +23,9 @@ use commonware_conformance::{conformance_tests, Conformance};
 use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+    buffer::paged::CacheRef,
+    conformance::{StorageConformance, StorageWorkload},
+    deterministic, BufferPooler, Runner as _, Supervisor as _,
 };
 use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
 use std::num::{NonZeroU16, NonZeroUsize};
@@ -646,6 +648,47 @@ macro_rules! immutable_compact_conformance {
     };
 }
 
+macro_rules! storage_audit_conformance {
+    ($name:ident, $family:ty, $db:ty, $cfg_fn:expr, |$d:ident, $s:ident| $body:expr) => {
+        struct $name;
+
+        impl StorageWorkload for $name {
+            type Error = crate::qmdb::Error<$family>;
+
+            async fn run(context: Ctx, $s: u64) -> Result<(), Self::Error> {
+                let suffix = format!("{}-{}", stringify!($name), $s);
+                let mut $d = <$db>::init(context.child("db"), ($cfg_fn)(&suffix, &context)).await?;
+                let _root = $body;
+                $d.sync().await
+            }
+        }
+    };
+}
+
+macro_rules! keyed_storage_audit {
+    ($name:ident, $family:ty, $db:ty, $cfg_fn:expr) => {
+        storage_audit_conformance!($name, $family, $db, $cfg_fn, |db, seed| {
+            keyed_root(&mut db, seed).await
+        });
+    };
+}
+
+macro_rules! immutable_storage_audit {
+    ($name:ident, $family:ty, $db:ty, $cfg_fn:expr) => {
+        storage_audit_conformance!($name, $family, $db, $cfg_fn, |db, seed| {
+            immutable_root!(db, seed)
+        });
+    };
+}
+
+macro_rules! immutable_compact_storage_audit {
+    ($name:ident, $family:ty, $db:ty, $cfg_fn:expr) => {
+        storage_audit_conformance!($name, $family, $db, $cfg_fn, |db, seed| {
+            immutable_root_compact!(db, seed)
+        });
+    };
+}
+
 keyed_conformance!(
     AnyMmrUnorderedFixedConf,
     AnyMmrUnorderedFixed,
@@ -811,6 +854,211 @@ db_conformance!(
     |db, seed| { keyless_root_compact!(db, seed, |x| x.to_be_bytes().to_vec()) }
 );
 
+keyed_storage_audit!(
+    AnyMmrUnorderedFixedStorage,
+    mmr::Family,
+    AnyMmrUnorderedFixed,
+    any_fixed_config
+);
+keyed_storage_audit!(
+    AnyMmrUnorderedVariableStorage,
+    mmr::Family,
+    AnyMmrUnorderedVariable,
+    any_variable_config
+);
+keyed_storage_audit!(
+    AnyMmrOrderedFixedStorage,
+    mmr::Family,
+    AnyMmrOrderedFixed,
+    any_fixed_config
+);
+keyed_storage_audit!(
+    AnyMmrOrderedVariableStorage,
+    mmr::Family,
+    AnyMmrOrderedVariable,
+    any_variable_config
+);
+keyed_storage_audit!(
+    AnyMmbUnorderedFixedStorage,
+    mmb::Family,
+    AnyMmbUnorderedFixed,
+    any_fixed_config
+);
+keyed_storage_audit!(
+    AnyMmbUnorderedVariableStorage,
+    mmb::Family,
+    AnyMmbUnorderedVariable,
+    any_variable_config
+);
+keyed_storage_audit!(
+    AnyMmbOrderedFixedStorage,
+    mmb::Family,
+    AnyMmbOrderedFixed,
+    any_fixed_config
+);
+keyed_storage_audit!(
+    AnyMmbOrderedVariableStorage,
+    mmb::Family,
+    AnyMmbOrderedVariable,
+    any_variable_config
+);
+keyed_storage_audit!(
+    CurrentMmrUnorderedFixedStorage,
+    mmr::Family,
+    CurrentMmrUnorderedFixed,
+    current_fixed_config
+);
+keyed_storage_audit!(
+    CurrentMmrUnorderedVariableStorage,
+    mmr::Family,
+    CurrentMmrUnorderedVariable,
+    current_variable_config
+);
+keyed_storage_audit!(
+    CurrentMmrOrderedFixedStorage,
+    mmr::Family,
+    CurrentMmrOrderedFixed,
+    current_fixed_config
+);
+keyed_storage_audit!(
+    CurrentMmrOrderedVariableStorage,
+    mmr::Family,
+    CurrentMmrOrderedVariable,
+    current_variable_config
+);
+keyed_storage_audit!(
+    CurrentMmbUnorderedFixedStorage,
+    mmb::Family,
+    CurrentMmbUnorderedFixed,
+    current_fixed_config
+);
+keyed_storage_audit!(
+    CurrentMmbUnorderedVariableStorage,
+    mmb::Family,
+    CurrentMmbUnorderedVariable,
+    current_variable_config
+);
+keyed_storage_audit!(
+    CurrentMmbOrderedFixedStorage,
+    mmb::Family,
+    CurrentMmbOrderedFixed,
+    current_fixed_config
+);
+keyed_storage_audit!(
+    CurrentMmbOrderedVariableStorage,
+    mmb::Family,
+    CurrentMmbOrderedVariable,
+    current_variable_config
+);
+
+immutable_storage_audit!(
+    ImmutableMmrFixedStorage,
+    mmr::Family,
+    ImmutableMmrFixed,
+    immutable_fixed_config
+);
+immutable_storage_audit!(
+    ImmutableMmbFixedStorage,
+    mmb::Family,
+    ImmutableMmbFixed,
+    immutable_fixed_config
+);
+immutable_storage_audit!(
+    ImmutableMmrVariableStorage,
+    mmr::Family,
+    ImmutableMmrVariable,
+    immutable_variable_config
+);
+immutable_storage_audit!(
+    ImmutableMmbVariableStorage,
+    mmb::Family,
+    ImmutableMmbVariable,
+    immutable_variable_config
+);
+
+storage_audit_conformance!(
+    KeylessMmrFixedStorage,
+    mmr::Family,
+    KeylessMmrFixed,
+    keyless_fixed_config,
+    |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
+);
+storage_audit_conformance!(
+    KeylessMmbFixedStorage,
+    mmb::Family,
+    KeylessMmbFixed,
+    keyless_fixed_config,
+    |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
+);
+storage_audit_conformance!(
+    KeylessMmrVariableStorage,
+    mmr::Family,
+    KeylessMmrVariable,
+    keyless_variable_config,
+    |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
+);
+storage_audit_conformance!(
+    KeylessMmbVariableStorage,
+    mmb::Family,
+    KeylessMmbVariable,
+    keyless_variable_config,
+    |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
+);
+
+immutable_compact_storage_audit!(
+    ImmutableMmrCompactFixedStorage,
+    mmr::Family,
+    ImmutableMmrCompactFixed,
+    immutable_fixed_compact_config
+);
+immutable_compact_storage_audit!(
+    ImmutableMmbCompactFixedStorage,
+    mmb::Family,
+    ImmutableMmbCompactFixed,
+    immutable_fixed_compact_config
+);
+immutable_compact_storage_audit!(
+    ImmutableMmrCompactVariableStorage,
+    mmr::Family,
+    ImmutableMmrCompactVariable,
+    immutable_variable_compact_config
+);
+immutable_compact_storage_audit!(
+    ImmutableMmbCompactVariableStorage,
+    mmb::Family,
+    ImmutableMmbCompactVariable,
+    immutable_variable_compact_config
+);
+
+storage_audit_conformance!(
+    KeylessMmrCompactFixedStorage,
+    mmr::Family,
+    KeylessMmrCompactFixed,
+    keyless_fixed_compact_config,
+    |db, seed| { keyless_root_compact!(db, seed, |x| U64::new(x)) }
+);
+storage_audit_conformance!(
+    KeylessMmbCompactFixedStorage,
+    mmb::Family,
+    KeylessMmbCompactFixed,
+    keyless_fixed_compact_config,
+    |db, seed| { keyless_root_compact!(db, seed, |x| U64::new(x)) }
+);
+storage_audit_conformance!(
+    KeylessMmrCompactVariableStorage,
+    mmr::Family,
+    KeylessMmrCompactVariable,
+    keyless_variable_compact_config,
+    |db, seed| { keyless_root_compact!(db, seed, |x| x.to_be_bytes().to_vec()) }
+);
+storage_audit_conformance!(
+    KeylessMmbCompactVariableStorage,
+    mmb::Family,
+    KeylessMmbCompactVariable,
+    keyless_variable_compact_config,
+    |db, seed| { keyless_root_compact!(db, seed, |x| x.to_be_bytes().to_vec()) }
+);
+
 conformance_tests! {
     AnyMmrUnorderedFixedConf => 200,
     AnyMmrUnorderedVariableConf => 200,
@@ -844,6 +1092,38 @@ conformance_tests! {
     KeylessMmbCompactFixedConf => 200,
     KeylessMmrCompactVariableConf => 200,
     KeylessMmbCompactVariableConf => 200,
+    StorageConformance<AnyMmrUnorderedFixedStorage> => 64,
+    StorageConformance<AnyMmrUnorderedVariableStorage> => 64,
+    StorageConformance<AnyMmrOrderedFixedStorage> => 64,
+    StorageConformance<AnyMmrOrderedVariableStorage> => 64,
+    StorageConformance<AnyMmbUnorderedFixedStorage> => 64,
+    StorageConformance<AnyMmbUnorderedVariableStorage> => 64,
+    StorageConformance<AnyMmbOrderedFixedStorage> => 64,
+    StorageConformance<AnyMmbOrderedVariableStorage> => 64,
+    StorageConformance<CurrentMmrUnorderedFixedStorage> => 64,
+    StorageConformance<CurrentMmrUnorderedVariableStorage> => 64,
+    StorageConformance<CurrentMmrOrderedFixedStorage> => 64,
+    StorageConformance<CurrentMmrOrderedVariableStorage> => 64,
+    StorageConformance<CurrentMmbUnorderedFixedStorage> => 64,
+    StorageConformance<CurrentMmbUnorderedVariableStorage> => 64,
+    StorageConformance<CurrentMmbOrderedFixedStorage> => 64,
+    StorageConformance<CurrentMmbOrderedVariableStorage> => 64,
+    StorageConformance<ImmutableMmrFixedStorage> => 64,
+    StorageConformance<ImmutableMmbFixedStorage> => 64,
+    StorageConformance<ImmutableMmrVariableStorage> => 64,
+    StorageConformance<ImmutableMmbVariableStorage> => 64,
+    StorageConformance<KeylessMmrFixedStorage> => 64,
+    StorageConformance<KeylessMmbFixedStorage> => 64,
+    StorageConformance<KeylessMmrVariableStorage> => 64,
+    StorageConformance<KeylessMmbVariableStorage> => 64,
+    StorageConformance<ImmutableMmrCompactFixedStorage> => 64,
+    StorageConformance<ImmutableMmbCompactFixedStorage> => 64,
+    StorageConformance<ImmutableMmrCompactVariableStorage> => 64,
+    StorageConformance<ImmutableMmbCompactVariableStorage> => 64,
+    StorageConformance<KeylessMmrCompactFixedStorage> => 64,
+    StorageConformance<KeylessMmbCompactFixedStorage> => 64,
+    StorageConformance<KeylessMmrCompactVariableStorage> => 64,
+    StorageConformance<KeylessMmbCompactVariableStorage> => 64,
 }
 
 // Order-independence tests (run via `just test`, unlike the conformance tests above)
