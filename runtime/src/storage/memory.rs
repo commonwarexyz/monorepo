@@ -27,17 +27,25 @@ impl Storage {
     pub fn audit(&self) -> [u8; 32] {
         let partitions = self.partitions.lock();
         let mut hasher = Sha256::new();
+        hasher.update(b"commonware-runtime-storage-audit-v1");
 
         for (partition_name, blobs) in partitions.iter() {
             for (blob_name, content) in blobs.iter() {
-                hasher.update(partition_name.as_bytes());
-                hasher.update(blob_name);
-                hasher.update(content);
+                update_audit_field(&mut hasher, b"partition", partition_name.as_bytes());
+                update_audit_field(&mut hasher, b"blob", blob_name);
+                update_audit_field(&mut hasher, b"content", content);
             }
         }
 
         hasher.finalize().into()
     }
+}
+
+fn update_audit_field(hasher: &mut Sha256, tag: &[u8], value: &[u8]) {
+    hasher.update((tag.len() as u64).to_be_bytes());
+    hasher.update(tag);
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
 }
 
 impl crate::Storage for Storage {
@@ -349,5 +357,20 @@ mod tests {
         assert!(
             matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_audit_separates_partition_and_blob_names() {
+        let storage_a = Storage::new(test_pool());
+        let (blob_a, _) = storage_a.open("a", b"bc").await.unwrap();
+        blob_a.write_at(0, b"d").await.unwrap();
+        blob_a.sync().await.unwrap();
+
+        let storage_b = Storage::new(test_pool());
+        let (blob_b, _) = storage_b.open("ab", b"c").await.unwrap();
+        blob_b.write_at(0, b"d").await.unwrap();
+        blob_b.sync().await.unwrap();
+
+        assert_ne!(storage_a.audit(), storage_b.audit());
     }
 }
