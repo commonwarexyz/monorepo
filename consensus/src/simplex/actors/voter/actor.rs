@@ -490,8 +490,9 @@ impl<
         // Get the notarization before advancing state
         let notarization = self.state.certified(view, success)?;
 
-        // Record the certification result for recovery. It is synced with our
-        // next broadcast (at the latest, the vote this result unlocks).
+        // Record the certification result for recovery. It is synced with the
+        // next broadcast. If lost to a crash before then, certification is
+        // re-requested on restart.
         let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
         self.append_journal(view, artifact).await;
 
@@ -515,44 +516,31 @@ impl<
         self.block_equivocator(equivocator);
     }
 
-    /// Build, persist, and broadcast a notarize vote when this view is ready.
-    async fn try_broadcast_notarize<Sp: Sender>(
+    /// Builds and records a notarize vote when this view is ready.
+    async fn prepare_notarize(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
-    ) {
+    ) -> Option<Notarize<S, D>> {
         // Construct a notarize vote
-        let Some(notarize) = self.state.construct_notarize(view) else {
-            return;
-        };
+        let notarize = self.state.construct_notarize(view)?;
 
         // Inform the batcher so it can aggregate our vote with others.
         batcher.constructed(Vote::Notarize(notarize.clone()));
         // Record the vote locally before sharing it.
         self.handle_notarize(notarize.clone()).await;
-
-        // Broadcast the notarize vote
-        debug!(
-            proposal=?notarize.proposal,
-            "broadcasting notarize"
-        );
-        self.broadcast_vote(vote_sender, Vote::Notarize(notarize))
-            .await;
+        Some(notarize)
     }
 
-    /// Share a notarization certificate once we can assemble it locally.
-    async fn try_broadcast_notarization<Sr: Sender>(
+    /// Builds and records a notarization certificate once we can assemble it locally.
+    async fn prepare_notarization(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
-    ) {
+    ) -> Option<Notarization<S, D>> {
         // Construct a notarization certificate
-        let Some(notarization) = self.state.broadcast_notarization(view) else {
-            return;
-        };
+        let notarization = self.state.broadcast_notarization(view)?;
 
         // Only the leader sees an unbiased latency sample, so record it now.
         if let Some(elapsed) = self.leader_elapsed(view) {
@@ -566,15 +554,7 @@ impl<
         }
         // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
-        // Broadcast the notarization certificate
-        debug!(proposal=?notarization.proposal, "broadcasting notarization");
-        self.broadcast_certificate(
-            certificate_sender,
-            Certificate::Notarization(notarization.clone()),
-        )
-        .await;
-        // Surface the event to the application for observability.
-        self.reporter.report(Activity::Notarization(notarization));
+        Some(notarization)
     }
 
     /// Broadcast a nullify vote for `view` if the state machine allows it.
@@ -590,18 +570,18 @@ impl<
         Some(was_retry)
     }
 
-    /// Broadcast a nullification certificate if the round provides a candidate.
-    async fn try_broadcast_nullification<Sr: Sender>(
+    /// Builds and records a nullification certificate if the round provides a candidate.
+    ///
+    /// Also returns the best notarization or finalization we know of (i.e. the "floor")
+    /// if we were the leader in the provided view.
+    async fn prepare_nullification(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
-    ) {
+    ) -> Option<(Nullification<S>, Option<Certificate<S, D>>)> {
         // Construct the nullification certificate.
-        let Some(nullification) = self.state.broadcast_nullification(view) else {
-            return;
-        };
+        let nullification = self.state.broadcast_nullification(view)?;
 
         // Notify resolver so dependent parents can progress.
         // Skip if the resolver just sent us this certificate (avoid boomerang).
@@ -609,59 +589,35 @@ impl<
             resolver.updated(Certificate::Nullification(nullification.clone()));
         }
         // Track the certificate locally to avoid rebuilding it.
-        if let Some(floor) = self.handle_nullification(nullification.clone()).await {
-            warn!(?floor, "broadcasting nullification floor");
-            self.broadcast_certificate(certificate_sender, floor).await;
-        }
-        // Broadcast the nullification certificate.
-        debug!(round=?nullification.round(), "broadcasting nullification");
-        self.broadcast_certificate(
-            certificate_sender,
-            Certificate::Nullification(nullification.clone()),
-        )
-        .await;
-        // Surface the event to the application for observability.
-        self.reporter.report(Activity::Nullification(nullification));
+        let floor = self.handle_nullification(nullification.clone()).await;
+        Some((nullification, floor))
     }
 
-    /// Broadcast a finalize vote if the round provides a candidate.
-    async fn try_broadcast_finalize<Sp: Sender>(
+    /// Builds and records a finalize vote if the round provides a candidate.
+    async fn prepare_finalize(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
-    ) {
+    ) -> Option<Finalize<S, D>> {
         // Construct the finalize vote.
-        let Some(finalize) = self.state.construct_finalize(view) else {
-            return;
-        };
+        let finalize = self.state.construct_finalize(view)?;
 
         // Provide the vote to the batcher pipeline.
         batcher.constructed(Vote::Finalize(finalize.clone()));
-        // Update the round before persisting.
+        // Record the vote locally before sharing it.
         self.handle_finalize(finalize.clone()).await;
-
-        // Broadcast the finalize vote.
-        debug!(
-            proposal=?finalize.proposal,
-            "broadcasting finalize"
-        );
-        self.broadcast_vote(vote_sender, Vote::Finalize(finalize))
-            .await;
+        Some(finalize)
     }
 
-    /// Share a finalization certificate and notify observers of the new height.
-    async fn try_broadcast_finalization<Sr: Sender>(
+    /// Builds and records a finalization certificate if the round provides a candidate.
+    async fn prepare_finalization(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
-    ) {
+    ) -> Option<Finalization<S, D>> {
         // Construct the finalization certificate.
-        let Some(finalization) = self.state.broadcast_finalization(view) else {
-            return;
-        };
+        let finalization = self.state.broadcast_finalization(view)?;
 
         // Only record latency if we are the current leader.
         if let Some(elapsed) = self.leader_elapsed(view) {
@@ -675,15 +631,7 @@ impl<
         }
         // Advance the consensus core with the finalization proof.
         self.handle_finalization(finalization.clone()).await;
-        // Broadcast the finalization certificate.
-        debug!(proposal=?finalization.proposal, "broadcasting finalization");
-        self.broadcast_certificate(
-            certificate_sender,
-            Certificate::Finalization(finalization.clone()),
-        )
-        .await;
-        // Surface the event to the application for observability.
-        self.reporter.report(Activity::Finalization(finalization));
+        Some(finalization)
     }
 
     /// Processes the automaton's response to a proposal request.
@@ -792,8 +740,9 @@ impl<
                 // and subsequent nullification), failing to certify can lead to a halt
                 // because we'll never exit the view without a notarization + certification.
                 //
-                // We do not assume failure here because certification results are persisted
-                // to the journal and will be recovered on restart.
+                // We do not assume failure here because we recover on restart: a synced
+                // certification result is replayed from the journal and a missing one
+                // causes certification to be re-requested.
                 debug!(?err, ?round, "failed to certify proposal");
             }
         };
@@ -886,17 +835,58 @@ impl<
         view: View,
         resolved: Resolved,
     ) {
-        self.try_broadcast_notarize(batcher, vote_sender, view)
-            .await;
-        self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
-            .await;
+        // Build and record everything that became available before broadcasting
+        // anything. The first broadcast syncs the journal, so all appends made
+        // here (and earlier in the loop iteration) share a single sync.
+        let notarize = self.prepare_notarize(batcher, view).await;
+        let notarization = self.prepare_notarization(resolver, view, resolved).await;
         // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
-        self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
+        let nullification = self.prepare_nullification(resolver, view, resolved).await;
+        let finalize = self.prepare_finalize(batcher, view).await;
+        let finalization = self.prepare_finalization(resolver, view, resolved).await;
+
+        // Broadcast everything we built (and report it to the application).
+        if let Some(notarize) = notarize {
+            debug!(proposal=?notarize.proposal, "broadcasting notarize");
+            self.broadcast_vote(vote_sender, Vote::Notarize(notarize))
+                .await;
+        }
+        if let Some(notarization) = notarization {
+            debug!(proposal=?notarization.proposal, "broadcasting notarization");
+            self.broadcast_certificate(
+                certificate_sender,
+                Certificate::Notarization(notarization.clone()),
+            )
             .await;
-        self.try_broadcast_finalize(batcher, vote_sender, view)
+            self.reporter.report(Activity::Notarization(notarization));
+        }
+        if let Some((nullification, floor)) = nullification {
+            if let Some(floor) = floor {
+                warn!(?floor, "broadcasting nullification floor");
+                self.broadcast_certificate(certificate_sender, floor).await;
+            }
+            debug!(round=?nullification.round(), "broadcasting nullification");
+            self.broadcast_certificate(
+                certificate_sender,
+                Certificate::Nullification(nullification.clone()),
+            )
             .await;
-        self.try_broadcast_finalization(resolver, certificate_sender, view, resolved)
+            self.reporter.report(Activity::Nullification(nullification));
+        }
+        if let Some(finalize) = finalize {
+            debug!(proposal=?finalize.proposal, "broadcasting finalize");
+            self.broadcast_vote(vote_sender, Vote::Finalize(finalize))
+                .await;
+        }
+        if let Some(finalization) = finalization {
+            debug!(proposal=?finalization.proposal, "broadcasting finalization");
+            self.broadcast_certificate(
+                certificate_sender,
+                Certificate::Finalization(finalization.clone()),
+            )
             .await;
+            self.reporter.report(Activity::Finalization(finalization));
+        }
     }
 
     /// Spawns the actor event loop with the provided channels.
