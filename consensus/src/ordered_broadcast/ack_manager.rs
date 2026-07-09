@@ -158,11 +158,9 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
 }
 
 #[cfg(test)]
-#[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
     use crate::ordered_broadcast::{
-        mocks,
         scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
         types::Chunk,
     };

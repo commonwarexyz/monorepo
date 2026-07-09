@@ -741,7 +741,10 @@ where
         // acquisition per blob a shard touches). The sortedness assert keeps contract
         // violations deterministic: past it, a non-increasing batch would only trip per-shard
         // validation when an inversion lands inside a single shard.
-        crate::journal::assert_positions_increasing(positions);
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
         let strategy = self.strategy();
         let journal = &self.journal;
         let mut items = strategy.run(

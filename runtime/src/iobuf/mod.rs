@@ -3909,7 +3909,7 @@ mod tests {
         let expected: &[u8] = b"xyz";
         assert!(PartialEq::<[u8]>::eq(&buf, expected));
         assert!(buf == b"xyz"[..]);
-        assert!(buf == [b'x', b'y', b'z']);
+        assert!(buf == *b"xyz");
         assert!(buf == b"xyz");
 
         // Conversions from common owned/shared containers preserve contents.

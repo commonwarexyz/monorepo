@@ -116,6 +116,35 @@ pub(crate) fn lookup_sorted<'a, K: Ord, V>(entries: &'a [(K, V)], key: &K) -> Op
         .map(|idx| &entries[idx].1)
 }
 
+/// Returns whether sorted, deduplicated `items` contains `target`, advancing `cursor` past
+/// entries below it. Successive calls must use non-decreasing `target`s.
+fn sorted_contains<T: Ord>(items: &[T], cursor: &mut usize, target: &T) -> bool {
+    while items.get(*cursor).is_some_and(|item| item < target) {
+        *cursor += 1;
+    }
+    items.get(*cursor) == Some(target)
+}
+
+/// Merge two key-sorted diffs with disjoint keys into one sorted diff.
+fn merge_sorted_diffs<K: Ord, F: Family, V>(
+    a: DiffVec<K, F, V>,
+    b: DiffVec<K, F, V>,
+) -> DiffVec<K, F, V> {
+    let mut merged = Vec::with_capacity(a.len() + b.len());
+    let mut a = a.into_iter().peekable();
+    let mut b = b.into_iter().peekable();
+    while let (Some(x), Some(y)) = (a.peek(), b.peek()) {
+        if x.0 < y.0 {
+            merged.push(a.next().expect("peeked"));
+        } else {
+            merged.push(b.next().expect("peeked"));
+        }
+    }
+    merged.extend(a);
+    merged.extend(b);
+    merged
+}
+
 /// Where this batch's inherited state comes from.
 enum Base<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>
 where
@@ -851,6 +880,15 @@ where
             strategy.sort_by(&mut superseded_locs, |a, b| a.cmp(b));
             superseded_locs.dedup();
 
+            // The raise appends at most `total_steps` moved ops plus the CommitFloor. Reserve
+            // once instead of growing mid-loop.
+            ops.reserve(total_steps as usize + 1);
+
+            // `fill_candidates` yields ascending locations, so superseded checks advance a
+            // monotonic cursor.
+            let mut superseded_cursor = 0;
+
+            // Scan active operations in `[floor, fixed_tip)` and move them to the tip.
             while moved < total_steps {
                 // Collect candidates, capped by the number of active ops still needed.
                 // `scan_from` tracks prefetch progress separately from `floor`, so
@@ -862,13 +900,20 @@ where
                     break;
                 }
 
+                // The `sorted_contains` cursor relies on the candidate sequence ascending
+                // across the whole raise. `floor` is one past the last processed candidate.
+                assert!(candidates[0] >= floor);
+                assert!(candidates.is_sorted_by(|a, b| a < b));
+
                 // `read_candidates` omits locations already superseded by this diff. Keep
                 // `resolved` and `outcomes` in that filtered order, then walk `candidates`
                 // below so superseded locations still advance the floor in scan order.
                 let read_candidates: Vec<_> = candidates
                     .iter()
                     .copied()
-                    .filter(|candidate| superseded_locs.binary_search(candidate).is_err())
+                    .filter(|candidate| {
+                        !sorted_contains(&superseded_locs, &mut superseded_cursor, candidate)
+                    })
                     .collect();
                 let (resolved, outcomes): (_, Vec<Vec<FloorOutcome<F>>>) =
                     if read_candidates.is_empty() {
@@ -940,16 +985,18 @@ where
                         (resolved, outcomes)
                     };
 
-                // Apply in candidate order, moving active ops to the tip.
+                // Apply in candidate order, moving active ops to the tip. `read_candidates`
+                // preserves candidate order, so a candidate that does not match the next
+                // pending read was superseded and only advances the floor.
                 let mut outcomes = outcomes.into_iter().flatten();
-                let mut reads = read_candidates.into_iter().zip(resolved);
+                let mut reads = resolved.into_iter();
+                let mut pending = read_candidates.iter().peekable();
                 for candidate in candidates {
                     floor = Location::new(*candidate + 1);
-                    if superseded_locs.binary_search(&candidate).is_ok() {
+                    if pending.next_if(|&&pending| pending == candidate).is_none() {
                         continue;
                     }
-                    let (read_candidate, op) = reads.next().expect("one read per candidate");
-                    assert_eq!(candidate, read_candidate);
+                    let op = reads.next().expect("one read per candidate");
                     let outcome = outcomes.next().expect("one outcome per read candidate");
                     match outcome {
                         FloorOutcome::Inactive => continue,
@@ -988,8 +1035,8 @@ where
                 // `floor_diff` only accumulates keys that were not already present in `diff`.
                 // A key can only be moved once during this floor raise because, after it is
                 // moved, its new location lies above `fixed_tip` and the scan never revisits it.
-                diff.extend(floor_diff);
-                strategy.sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
+                strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
+                diff = merge_sorted_diffs(diff, floor_diff);
                 assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
             }
         } else {
@@ -1542,10 +1589,12 @@ where
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would
     /// otherwise require) and accepts the floor-raise candidate source.
     ///
-    /// The callback may skip locations only when it knows they are inactive. The floor-raise
-    /// loop revalidates each returned candidate against the batch diff, ancestor diffs, and
-    /// snapshot because the bitmap reflects committed state only -- uncommitted ancestor ops
-    /// aren't tracked, and bits can be set for locations superseded by an overlay in this chain.
+    /// The callback must yield candidates in ascending location order, both within one call
+    /// and across successive calls (the floor raise asserts this). It may skip locations only
+    /// when it knows they are inactive. The floor-raise loop revalidates each returned
+    /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
+    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
+    /// be set for locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -1730,10 +1779,12 @@ where
     /// resolution would otherwise require: the caller's new value and the cached next key feed
     /// op generation directly) and accepts the floor-raise candidate source.
     ///
-    /// The callback may skip locations only when it knows they are inactive. The floor-raise
-    /// loop revalidates each returned candidate against the batch diff, ancestor diffs, and
-    /// snapshot because the bitmap reflects committed state only -- uncommitted ancestor ops
-    /// aren't tracked, and bits can be set for locations superseded by an overlay in this chain.
+    /// The callback must yield candidates in ascending location order, both within one call
+    /// and across successive calls (the floor raise asserts this). It may skip locations only
+    /// when it knows they are inactive. The floor-raise loop revalidates each returned
+    /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
+    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
+    /// be set for locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
@@ -2676,6 +2727,65 @@ mod tests {
         let mut cursors = DiffCursors::new([diff.as_slice()]);
         assert!(cursors.resolve(&5).is_some());
         cursors.resolve(&1);
+    }
+
+    /// `sorted_contains` matches `binary_search` for ascending queries over sorted, deduped
+    /// items.
+    #[test]
+    fn sorted_contains_matches_binary_search() {
+        let mut rng = test_rng();
+        for _ in 0..50 {
+            let mut items: Vec<u64> = (0..rng.random_range(0..40))
+                .map(|_| rng.random_range(0..100u64))
+                .collect();
+            items.sort_unstable();
+            items.dedup();
+
+            let mut queries: Vec<u64> = (0..rng.random_range(1..80))
+                .map(|_| rng.random_range(0..110u64))
+                .collect();
+            queries.sort_unstable();
+
+            let mut cursor = 0;
+            for q in queries {
+                assert_eq!(
+                    sorted_contains(&items, &mut cursor, &q),
+                    items.binary_search(&q).is_ok(),
+                    "query {q} diverged"
+                );
+            }
+        }
+    }
+
+    /// `merge_sorted_diffs` matches `extend` + `sort_by_key` for disjoint, sorted diffs.
+    #[test]
+    fn merge_sorted_diffs_matches_sort() {
+        let mut rng = test_rng();
+        for _ in 0..50 {
+            // Disjoint key sets: evens on one side, odds on the other.
+            let mut build = |offset: u64| -> DiffVec<u64, mmr::Family, u64> {
+                let mut keys: Vec<u64> = (0..rng.random_range(0..30))
+                    .map(|_| rng.random_range(0..50u64) * 2 + offset)
+                    .collect();
+                keys.sort_unstable();
+                keys.dedup();
+                keys.into_iter().map(|k| (k, active(k, k))).collect()
+            };
+            let a = build(0);
+            let b = build(1);
+
+            let mut reference = a.clone();
+            reference.extend(b.clone());
+            reference.sort_by_key(|x| x.0);
+
+            let merged = merge_sorted_diffs(a, b);
+            assert_eq!(merged.len(), reference.len());
+            for ((mk, me), (rk, re)) in merged.iter().zip(&reference) {
+                assert_eq!(mk, rk);
+                assert_eq!(me.loc(), re.loc());
+                assert_eq!(me.value(), re.value());
+            }
+        }
     }
 
     /// Single-step oracle for [`fill_candidates`]: return the next floor-raise candidate in

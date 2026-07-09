@@ -3,11 +3,11 @@ use crate::{
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
         },
-        core::{CommitmentFallback, Mailbox},
+        core::Mailbox,
         standard::Standard,
     },
     simplex::types::Context,
-    types::{Epocher, Round},
+    types::Epocher,
     Application, Block, Epochable,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -111,37 +111,34 @@ where
     Some(Decision::Continue(block))
 }
 
-/// Outcome of fetching the parent and validating structural ancestry invariants.
+/// Outcome of awaiting the parent and validating structural ancestry invariants.
 pub(super) enum ParentCheck<B> {
-    /// Structurally valid; carries the fetched parent for application verification.
+    /// Structurally valid. Carries the parent for application verification.
     Valid(B),
     /// Structurally invalid (bad parent linkage or non-contiguous height); the verdict is
     /// `false` and the block must not be stored.
     Invalid,
 }
 
-/// Fetches the expected parent and validates standard ancestry invariants (parent linkage
-/// and contiguous height).
+/// Awaits the parent subscription and validates standard ancestry invariants (parent linkage
+/// and contiguous height) against `parent_commitment`, the expected parent commitment from
+/// the context the block is verified under.
+///
+/// The `parent_request` must be a subscription to `parent_commitment` started by the caller,
+/// so the parent fetch can overlap earlier work (e.g., waiting for the candidate block to
+/// become available).
 ///
 /// Returns `None` when work should stop early (receiver dropped or parent unavailable).
 #[inline]
-pub(super) async fn fetch_and_validate_parent<S, B>(
-    context: &Context<B::Digest, S::PublicKey>,
+pub(super) async fn await_and_validate_parent<B>(
+    parent_commitment: B::Digest,
     block: &B,
-    marshal: &Mailbox<S, Standard<B>>,
+    parent_request: oneshot::Receiver<B>,
     tx: &mut oneshot::Sender<bool>,
 ) -> Option<ParentCheck<B>>
 where
-    S: Scheme,
-    B: Block + Clone,
+    B: Block,
 {
-    let (parent_view, parent_commitment) = context.parent;
-    let parent_request = marshal.subscribe_by_commitment(
-        parent_commitment,
-        CommitmentFallback::FetchByRound {
-            round: Round::new(context.epoch(), parent_view),
-        },
-    );
     // If consensus drops the receiver, we can stop work early.
     let parent = select! {
         _ = tx.closed() => {
@@ -182,7 +179,7 @@ where
 
 /// Runs application verification over the two-block ancestry prefix.
 ///
-/// The block must already have passed [`fetch_and_validate_parent`]. Returns `None` when
+/// The block must already have passed [`await_and_validate_parent`]. Returns `None` when
 /// work should stop early (receiver dropped). The store is intentionally separate so callers
 /// can run it concurrently with this verification (durability is independent of validity).
 #[inline]

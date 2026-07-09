@@ -281,10 +281,11 @@ rational::log2_ceil/value=1:2 precision=4
 1. Make changes in relevant primitive directory
 2. Run `just test -p <crate-name> <test_name>` for quick iteration
 3. Run `just test -p <crate-name>` to verify all crate tests pass
-4. Run `just lint` before committing (or `just fix-fmt` to auto-fix)
+4. Run `just fmt-fix && just clippy` before committing
+    - For broader lint checks prior to creating a PR, use `just lint` instead of `just clippy`
 5. Run `just pre-pr` before creating a PR
 
-_Avoid building or testing the entire workspace unless absolutely necessary. The repository is large and full workspace builds/tests can take a VERY long time. Prefer targeting specific crates (e.g., `cargo build -p commonware-runtime`, `just test -p commonware-runtime`)._
+_Avoid building or testing the entire workspace unless absolutely necessary. The repository is large and full workspace builds/tests can take a VERY long time. Prefer targeting specific crates (e.g., `cargo build -p commonware-runtime`, `just test -p commonware-runtime`, `just clippy -p commonware-runtime`)._
 
 ## Reviewing PRs
 

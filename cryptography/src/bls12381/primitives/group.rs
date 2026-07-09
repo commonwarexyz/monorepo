@@ -2295,12 +2295,9 @@ mod tests {
         assert_eq!(g2_set.len(), NUM_ITEMS);
 
         // Verify that `BTreeSet` iteration is sorted, which relies on `Ord`.
-        let scalars: Vec<_> = scalar_set.iter().collect();
-        assert!(scalars.windows(2).all(|w| w[0] <= w[1]));
-        let g1s: Vec<_> = g1_set.iter().collect();
-        assert!(g1s.windows(2).all(|w| w[0] <= w[1]));
-        let g2s: Vec<_> = g2_set.iter().collect();
-        assert!(g2s.windows(2).all(|w| w[0] <= w[1]));
+        assert!(scalar_set.iter().is_sorted());
+        assert!(g1_set.iter().is_sorted());
+        assert!(g2_set.iter().is_sorted());
 
         // Test that we can use these types as keys in hash maps, which relies on `Hash` and `Eq`.
         let scalar_map: HashMap<_, _> = scalar_set.iter().cloned().zip(0..).collect();

@@ -399,7 +399,7 @@ mod test {
                     namespace: union(namespace::APPLICATION, b"_ENGINE"),
                     output: self.output.clone(),
                     share: share.clone(),
-                    partition_prefix: format!("validator_{}", &pk),
+                    partition_prefix: format!("validator_{}", pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),
                     strategy: Sequential,
