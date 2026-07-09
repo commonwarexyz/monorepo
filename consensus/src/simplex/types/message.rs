@@ -27,16 +27,16 @@ pub trait Attributable {
 
 /// A validator's vote over a [Phase]-specific payload.
 #[derive(Clone, Debug)]
-pub struct Signed<P: Phase<D>, S: Scheme, D: Digest> {
+pub struct Signed<P: Phase, S: Scheme, D: Digest> {
     /// Claim covered by the vote.
-    pub claim: P::Claim,
+    pub claim: P::Claim<D>,
     /// Scheme-specific attestation material.
     pub attestation: Attestation<S>,
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Signed<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Signed<P, S, D> {
     /// Signs a vote over the provided claim.
-    pub fn sign(scheme: &S, claim: P::Claim) -> Option<Self>
+    pub fn sign(scheme: &S, claim: P::Claim<D>) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
@@ -67,71 +67,71 @@ impl<P: Phase<D>, S: Scheme, D: Digest> Signed<P, S, D> {
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> PartialEq for Signed<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> PartialEq for Signed<P, S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.claim == other.claim && self.attestation == other.attestation
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Eq for Signed<P, S, D> {}
+impl<P: Phase, S: Scheme, D: Digest> Eq for Signed<P, S, D> {}
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Hash for Signed<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Hash for Signed<P, S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.claim.hash(state);
         self.attestation.hash(state);
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Write for Signed<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Write for Signed<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.claim.write(writer);
         self.attestation.write(writer);
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> EncodeSize for Signed<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> EncodeSize for Signed<P, S, D> {
     fn encode_size(&self) -> usize {
         self.claim.encode_size() + self.attestation.encode_size()
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Read for Signed<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Read for Signed<P, S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let claim = P::Claim::read(reader)?;
+        let claim = <P::Claim<D>>::read(reader)?;
         let attestation = Attestation::read(reader)?;
 
         Ok(Self { claim, attestation })
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Attributable for Signed<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Attributable for Signed<P, S, D> {
     fn signer(&self) -> Participant {
         self.attestation.signer
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Epochable for Signed<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Epochable for Signed<P, S, D> {
     fn epoch(&self) -> Epoch {
         self.claim.epoch()
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Viewable for Signed<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Viewable for Signed<P, S, D> {
     fn view(&self) -> View {
         self.claim.view()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: Phase<D>, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Signed<P, S, D>
+impl<P: Phase, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Signed<P, S, D>
 where
-    P::Claim: for<'a> arbitrary::Arbitrary<'a>,
+    P::Claim<D>: for<'a> arbitrary::Arbitrary<'a>,
     S::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let claim = P::Claim::arbitrary(u)?;
+        let claim = <P::Claim<D>>::arbitrary(u)?;
         let attestation = Attestation::arbitrary(u)?;
         Ok(Self { claim, attestation })
     }
@@ -151,14 +151,14 @@ pub type Finalize<S, D> = Signed<phase::Finalize, S, D>;
 
 /// An aggregated certificate recovered from a quorum of votes over a [Phase]-specific claim.
 #[derive(Clone, Debug)]
-pub struct Certified<P: Phase<D>, S: Scheme, D: Digest> {
+pub struct Certified<P: Phase, S: Scheme, D: Digest> {
     /// Claim covered by the certificate.
-    pub claim: P::Claim,
+    pub claim: P::Claim<D>,
     /// The recovered certificate for the claim.
     pub certificate: S::Certificate,
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Certified<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Certified<P, S, D> {
     /// Builds a certificate from votes over the same claim.
     pub fn from_votes<'a, I>(scheme: &S, votes: I, strategy: &impl Strategy) -> Option<Self>
     where
@@ -167,8 +167,13 @@ impl<P: Phase<D>, S: Scheme, D: Digest> Certified<P, S, D> {
     {
         let mut iter = votes.into_iter().peekable();
         let claim = iter.peek()?.claim.clone();
-        let certificate =
-            scheme.assemble::<_, N3f1>(iter.map(|v| v.attestation.clone()), strategy)?;
+        let certificate = scheme.assemble::<_, N3f1>(
+            iter.map(|v| {
+                debug_assert_eq!(v.claim, claim, "votes must cover the same claim");
+                v.attestation.clone()
+            }),
+            strategy,
+        )?;
 
         Some(Self { claim, certificate })
     }
@@ -196,65 +201,65 @@ impl<P: Phase<D>, S: Scheme, D: Digest> Certified<P, S, D> {
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> PartialEq for Certified<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> PartialEq for Certified<P, S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.claim == other.claim && self.certificate == other.certificate
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Eq for Certified<P, S, D> {}
+impl<P: Phase, S: Scheme, D: Digest> Eq for Certified<P, S, D> {}
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Hash for Certified<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Hash for Certified<P, S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.claim.hash(state);
         self.certificate.hash(state);
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Write for Certified<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Write for Certified<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.claim.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> EncodeSize for Certified<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> EncodeSize for Certified<P, S, D> {
     fn encode_size(&self) -> usize {
         self.claim.encode_size() + self.certificate.encode_size()
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Read for Certified<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Read for Certified<P, S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let claim = P::Claim::read(reader)?;
+        let claim = <P::Claim<D>>::read(reader)?;
         let certificate = S::Certificate::read_cfg(reader, cfg)?;
 
         Ok(Self { claim, certificate })
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Epochable for Certified<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Epochable for Certified<P, S, D> {
     fn epoch(&self) -> Epoch {
         self.claim.epoch()
     }
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> Viewable for Certified<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> Viewable for Certified<P, S, D> {
     fn view(&self) -> View {
         self.claim.view()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: Phase<D>, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certified<P, S, D>
+impl<P: Phase, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certified<P, S, D>
 where
-    P::Claim: for<'a> arbitrary::Arbitrary<'a>,
+    P::Claim<D>: for<'a> arbitrary::Arbitrary<'a>,
     S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let claim = P::Claim::arbitrary(u)?;
+        let claim = <P::Claim<D>>::arbitrary(u)?;
         let certificate = S::Certificate::arbitrary(u)?;
         Ok(Self { claim, certificate })
     }
@@ -298,6 +303,16 @@ impl<S: Scheme, D: Digest> Vote<S, D> {
             Self::Notarize(_) => Tag::Notarize,
             Self::Nullify(_) => Tag::Nullify,
             Self::Finalize(_) => Tag::Finalize,
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Attributable for Vote<S, D> {
+    fn signer(&self) -> Participant {
+        match self {
+            Self::Notarize(v) => v.signer(),
+            Self::Nullify(v) => v.signer(),
+            Self::Finalize(v) => v.signer(),
         }
     }
 }
@@ -398,11 +413,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Returns the stable trace field value for this certificate's type.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn kind(&self) -> &'static str {
-        match self.phase() {
-            Tag::Notarize => "notarization",
-            Tag::Nullify => "nullification",
-            Tag::Finalize => "finalization",
-        }
+        self.phase().certificate_label()
     }
 
     /// Verifies the certificate against the provided signing scheme.
@@ -613,6 +624,18 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             notarizes: AttributableMap::new(participants),
             nullifies: AttributableMap::new(participants),
             finalizes: AttributableMap::new(participants),
+        }
+    }
+
+    /// Inserts a vote into the map of its phase, keyed by signer.
+    ///
+    /// Returns `true` if the vote was inserted, `false` if the signer already
+    /// voted in that phase.
+    pub fn insert(&mut self, vote: Vote<S, D>) -> bool {
+        match vote {
+            Vote::Notarize(v) => self.notarizes.insert(v),
+            Vote::Nullify(v) => self.nullifies.insert(v),
+            Vote::Finalize(v) => self.finalizes.insert(v),
         }
     }
 }

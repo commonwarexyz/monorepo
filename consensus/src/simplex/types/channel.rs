@@ -32,7 +32,7 @@ pub enum Artifact<S: Scheme, D: Digest> {
     ///
     /// Storage-only counterpart of [Activity::Certification], which reports the
     /// certified [Notarization] itself.
-    Certification(Round, bool),
+    CertificationOutcome(Round, bool),
     /// A validator's nullify vote used to skip the current view.
     Nullify(Nullify<S, D>),
     /// A recovered certificate for a nullification.
@@ -49,7 +49,7 @@ impl<S: Scheme, D: Digest> Artifact<S, D> {
         match self {
             Self::Notarize(_) => 0,
             Self::Notarization(_) => 1,
-            Self::Certification(..) => 2,
+            Self::CertificationOutcome(..) => 2,
             Self::Nullify(_) => 3,
             Self::Nullification(_) => 4,
             Self::Finalize(_) => 5,
@@ -64,7 +64,7 @@ impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
         match self {
             Self::Notarize(v) => v.write(writer),
             Self::Notarization(v) => v.write(writer),
-            Self::Certification(r, b) => {
+            Self::CertificationOutcome(r, b) => {
                 r.write(writer);
                 b.write(writer);
             }
@@ -81,7 +81,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Artifact<S, D> {
         1 + match self {
             Self::Notarize(v) => v.encode_size(),
             Self::Notarization(v) => v.encode_size(),
-            Self::Certification(r, b) => r.encode_size() + b.encode_size(),
+            Self::CertificationOutcome(r, b) => r.encode_size() + b.encode_size(),
             Self::Nullify(v) => v.encode_size(),
             Self::Nullification(v) => v.encode_size(),
             Self::Finalize(v) => v.encode_size(),
@@ -98,7 +98,7 @@ impl<S: Scheme, D: Digest> Read for Artifact<S, D> {
         match tag {
             0 => Ok(Self::Notarize(Notarize::read(reader)?)),
             1 => Ok(Self::Notarization(Notarization::read_cfg(reader, cfg)?)),
-            2 => Ok(Self::Certification(
+            2 => Ok(Self::CertificationOutcome(
                 Round::read(reader)?,
                 bool::read(reader)?,
             )),
@@ -119,7 +119,7 @@ impl<S: Scheme, D: Digest> Epochable for Artifact<S, D> {
         match self {
             Self::Notarize(v) => v.epoch(),
             Self::Notarization(v) => v.epoch(),
-            Self::Certification(r, _) => r.epoch(),
+            Self::CertificationOutcome(r, _) => r.epoch(),
             Self::Nullify(v) => v.epoch(),
             Self::Nullification(v) => v.epoch(),
             Self::Finalize(v) => v.epoch(),
@@ -133,7 +133,7 @@ impl<S: Scheme, D: Digest> Viewable for Artifact<S, D> {
         match self {
             Self::Notarize(v) => v.view(),
             Self::Notarization(v) => v.view(),
-            Self::Certification(r, _) => r.view(),
+            Self::CertificationOutcome(r, _) => r.view(),
             Self::Nullify(v) => v.view(),
             Self::Nullification(v) => v.view(),
             Self::Finalize(v) => v.view(),
@@ -173,7 +173,7 @@ where
         match u.int_in_range(0..=6)? {
             0 => Ok(Self::Notarize(Notarize::arbitrary(u)?)),
             1 => Ok(Self::Notarization(Notarization::arbitrary(u)?)),
-            2 => Ok(Self::Certification(
+            2 => Ok(Self::CertificationOutcome(
                 Round::arbitrary(u)?,
                 bool::arbitrary(u)?,
             )),
@@ -211,7 +211,7 @@ pub enum Activity<S: Scheme, D: Digest> {
     Notarization(Notarization<S, D>),
     /// A notarization was locally certified.
     ///
-    /// Reported only on success; the journal's [Artifact::Certification] records the
+    /// Reported only on success; the journal's [Artifact::CertificationOutcome] records the
     /// outcome as a [Round] and flag.
     Certification(Notarization<S, D>),
     /// A validator's nullify vote used to skip the current view.
@@ -418,6 +418,16 @@ impl<S: Scheme, D: Digest> Viewable for Activity<S, D> {
             Self::ConflictingNotarize(v) => v.view(),
             Self::ConflictingFinalize(v) => v.view(),
             Self::NullifyFinalize(v) => v.view(),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> From<Vote<S, D>> for Activity<S, D> {
+    fn from(vote: Vote<S, D>) -> Self {
+        match vote {
+            Vote::Notarize(v) => Self::Notarize(v),
+            Vote::Nullify(v) => Self::Nullify(v),
+            Vote::Finalize(v) => Self::Finalize(v),
         }
     }
 }

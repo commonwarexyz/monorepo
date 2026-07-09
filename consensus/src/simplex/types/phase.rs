@@ -33,6 +33,16 @@ pub enum Tag {
 impl Tag {
     /// All tags, in wire-tag order.
     pub const ALL: [Self; 3] = [Self::Notarize, Self::Nullify, Self::Finalize];
+
+    /// Stable lowercase label of this phase's certificate for trace fields.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const fn certificate_label(&self) -> &'static str {
+        match self {
+            Self::Notarize => "notarization",
+            Self::Nullify => "nullification",
+            Self::Finalize => "finalization",
+        }
+    }
 }
 
 const _: () = {
@@ -87,13 +97,19 @@ impl<T> Claim for T where
 /// A type-level vote phase: defines the claim the phase attests and binds a
 /// claim into the [Subject] covering it.
 ///
+/// The phase itself is independent of the digest; only its claim is
+/// digest-parametric.
+///
 /// This trait is sealed: the only phases are [Notarize], [Nullify], and [Finalize].
-pub trait Phase<D: Digest>: sealed::Sealed + Clone + Debug + Send + Sync + 'static {
+pub trait Phase: sealed::Sealed + Clone + Debug + Send + Sync + 'static {
+    /// Runtime tag of this phase.
+    const TAG: Tag;
+
     /// The claim attested by votes and certificates of this phase.
-    type Claim: Claim;
+    type Claim<D: Digest>: Claim;
 
     /// Binds `claim` into the domain-separated subject covering it.
-    fn subject(claim: &Self::Claim) -> Subject<'_, D>;
+    fn subject<D: Digest>(claim: &Self::Claim<D>) -> Subject<'_, D>;
 }
 
 mod sealed {
@@ -108,10 +124,12 @@ mod sealed {
 #[derive(Clone, Debug)]
 pub struct Notarize;
 
-impl<D: Digest> Phase<D> for Notarize {
-    type Claim = Proposal<D>;
+impl Phase for Notarize {
+    const TAG: Tag = Tag::Notarize;
 
-    fn subject(claim: &Self::Claim) -> Subject<'_, D> {
+    type Claim<D: Digest> = Proposal<D>;
+
+    fn subject<D: Digest>(claim: &Self::Claim<D>) -> Subject<'_, D> {
         Subject::Notarize { proposal: claim }
     }
 }
@@ -120,10 +138,12 @@ impl<D: Digest> Phase<D> for Notarize {
 #[derive(Clone, Debug)]
 pub struct Nullify;
 
-impl<D: Digest> Phase<D> for Nullify {
-    type Claim = Round;
+impl Phase for Nullify {
+    const TAG: Tag = Tag::Nullify;
 
-    fn subject(claim: &Self::Claim) -> Subject<'_, D> {
+    type Claim<D: Digest> = Round;
+
+    fn subject<D: Digest>(claim: &Self::Claim<D>) -> Subject<'_, D> {
         Subject::Nullify { round: *claim }
     }
 }
@@ -132,10 +152,12 @@ impl<D: Digest> Phase<D> for Nullify {
 #[derive(Clone, Debug)]
 pub struct Finalize;
 
-impl<D: Digest> Phase<D> for Finalize {
-    type Claim = Proposal<D>;
+impl Phase for Finalize {
+    const TAG: Tag = Tag::Finalize;
 
-    fn subject(claim: &Self::Claim) -> Subject<'_, D> {
+    type Claim<D: Digest> = Proposal<D>;
+
+    fn subject<D: Digest>(claim: &Self::Claim<D>) -> Subject<'_, D> {
         Subject::Finalize { proposal: claim }
     }
 }

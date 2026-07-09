@@ -32,7 +32,9 @@
 //! constructors and codec reject pairs that do not conflict. There is no
 //! `ConflictingNullify`: a nullify's claim is the round itself, so two nullifies from
 //! the same signer in the same round cannot differ. Equivocation is only possible where
-//! the claim is a proposal, while a nullify contradicts a finalize by rule.
+//! the claim is a [Proposal] (the same-phase [Contradicts] impl is restricted
+//! accordingly, making such evidence unrepresentable), while a nullify contradicts a
+//! finalize by rule.
 //!
 //! # Channels
 //!

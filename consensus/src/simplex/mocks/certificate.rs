@@ -10,10 +10,10 @@ use commonware_parallel::Sequential;
 /// Signs a vote of phase `P` over `claim` with each scheme.
 pub fn sign_votes<'a, P, S, D>(
     schemes: impl IntoIterator<Item = &'a S>,
-    claim: &P::Claim,
+    claim: &P::Claim<D>,
 ) -> Vec<Signed<P, S, D>>
 where
-    P: Phase<D>,
+    P: Phase,
     S: Scheme<D> + 'a,
     D: Digest,
 {
@@ -26,7 +26,7 @@ where
 /// Builds a certificate of phase `P` from `votes`, assembled by `assembler`.
 pub fn build_certificate<P, S, D>(assembler: &S, votes: &[Signed<P, S, D>]) -> Certified<P, S, D>
 where
-    P: Phase<D>,
+    P: Phase,
     S: Scheme<D>,
     D: Digest,
 {

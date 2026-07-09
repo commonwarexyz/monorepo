@@ -8211,7 +8211,7 @@ mod tests {
     ///
     /// 1. First run: follower certifies a view successfully, which is persisted to journal.
     /// 2. Abort the voter.
-    /// 3. Second run: voter replays journal and processes the Artifact::Certification entry,
+    /// 3. Second run: voter replays journal and processes the Artifact::CertificationOutcome entry,
     ///    advancing past the certified view without re-certifying.
     fn successful_certification_replayed_after_restart<S, F>(mut fixture: F)
     where
@@ -8358,7 +8358,7 @@ mod tests {
             // Abort first voter.
             handle.abort();
 
-            // Second run: replay should process Artifact::Certification from journal.
+            // Second run: replay should process Artifact::CertificationOutcome from journal.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
             let app_cfg = mocks::application::Config {
@@ -8624,7 +8624,7 @@ mod tests {
             // Abort first voter.
             handle.abort();
 
-            // Second run: replay should process Artifact::Certification(false) from journal.
+            // Second run: replay should process Artifact::CertificationOutcome(false) from journal.
             let app_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),

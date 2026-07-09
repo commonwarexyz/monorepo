@@ -2,7 +2,7 @@
 
 use super::{
     message::{Attributable, Finalize, Notarize, Nullify, Signed},
-    phase::Phase,
+    phase::{Phase, Proposal},
 };
 use crate::{
     simplex::scheme,
@@ -26,7 +26,17 @@ pub trait Contradicts<Rhs = Self> {
 }
 
 /// Votes of the same phase contradict when they cover different claims (equivocation).
-impl<P: Phase<D>, S: Scheme, D: Digest> Contradicts for Signed<P, S, D> {
+///
+/// Restricted to phases whose claim is a [Proposal]: only such claims carry information
+/// beyond the round itself, so only they can be equivocated. A nullify's claim is the
+/// round, so two nullifies from the same signer in the same round cannot differ and
+/// nullify-nullify evidence is unrepresentable.
+impl<P, S, D> Contradicts for Signed<P, S, D>
+where
+    P: Phase<Claim<D> = Proposal<D>>,
+    S: Scheme,
+    D: Digest,
+{
     fn contradicts(&self, other: &Self) -> bool {
         self.claim != other.claim
     }
@@ -41,6 +51,9 @@ impl<S: Scheme, D: Digest> Contradicts<Finalize<S, D>> for Nullify<S, D> {
 }
 
 /// Evidence of a Byzantine validator producing two contradictory votes in the same round.
+///
+/// Same-phase evidence produced by the protocol orders the two votes by claim, so one
+/// equivocation has one encoding; the codec accepts either order.
 #[derive(Clone, Debug)]
 pub struct Conflicting<A, B = A> {
     /// The first conflicting vote.
@@ -106,8 +119,8 @@ where
 
 impl<PA, PB, S, D> Conflicting<Signed<PA, S, D>, Signed<PB, S, D>>
 where
-    PA: Phase<D>,
-    PB: Phase<D>,
+    PA: Phase,
+    PB: Phase,
     S: Scheme,
     D: Digest,
     Signed<PA, S, D>: Contradicts<Signed<PB, S, D>>,

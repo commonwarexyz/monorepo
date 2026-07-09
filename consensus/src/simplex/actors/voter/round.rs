@@ -42,14 +42,14 @@ enum CertifyState {
 ///
 /// A certificate is returned for broadcast at most once; replayed broadcasts are
 /// honored even when the certificate itself is not restored.
-struct CertSlot<P: Phase<D>, S: Scheme, D: Digest> {
+struct CertSlot<P: Phase, S: Scheme, D: Digest> {
     /// The certificate, if we have received or constructed one.
     certificate: Option<Certified<P, S, D>>,
     /// Whether we have already broadcast the certificate.
     broadcast: bool,
 }
 
-impl<P: Phase<D>, S: Scheme, D: Digest> CertSlot<P, S, D> {
+impl<P: Phase, S: Scheme, D: Digest> CertSlot<P, S, D> {
     const fn new() -> Self {
         Self {
             certificate: None,
@@ -638,7 +638,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             Artifact::Finalization(_) => {
                 self.finalization.mark_broadcast();
             }
-            Artifact::Certification(_, success) => {
+            Artifact::CertificationOutcome(_, success) => {
                 self.certified(*success);
             }
         }

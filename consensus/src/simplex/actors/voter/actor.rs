@@ -446,7 +446,7 @@ impl<
         let notarization = self.state.certified(view, success)?;
 
         // Persist certification result for recovery
-        let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
+        let artifact = Artifact::CertificationOutcome(Rnd::new(self.state.epoch(), view), success);
         self.append_journal(view, artifact.clone()).await;
         self.sync_journal(view).await;
 
@@ -949,7 +949,7 @@ impl<
                         resolver.updated(Certificate::Notarization(notarization.clone()));
                         self.reporter.report(Activity::Notarization(notarization));
                     }
-                    Artifact::Certification(round, success) => {
+                    Artifact::CertificationOutcome(round, success) => {
                         let Some(notarization) =
                             self.handle_certification(round.view(), success).await
                         else {
