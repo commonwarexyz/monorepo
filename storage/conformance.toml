@@ -82,19 +82,19 @@ hash = "0ed326c34e7094465994353e7d50b8a2aeb57ab4210041a6ef67699d6037891e"
 n_cases = 512
 hash = "ed3d31fad3d7d716e55f30fc3b54d9c47832162598033aa70a8ffb71622e14f8"
 
-["commonware_storage::merkle::conformance::MmbRootStability"]
+["commonware_storage::merkle::conformance::tests::MmbRootStability"]
 n_cases = 200
 hash = "7db87b0f0b2d10f3571bfc38a9bb0aa0045b8ef884da5a10dd2e758f9b3399a5"
 
-["commonware_storage::merkle::conformance::MmrRootStability"]
+["commonware_storage::merkle::conformance::tests::MmrRootStability"]
 n_cases = 200
 hash = "4078ce1f5e242f8edb1d41575d51e166af620404036124f8094fc74d4b401047"
 
-["commonware_storage::merkle::conformance::StorageConformance<MmbFullWorkload>"]
+["commonware_storage::merkle::conformance::tests::StorageConformance<MmbFullWorkload>"]
 n_cases = 256
 hash = "ada8c9009770f44a95da03f2ba7ccda29b271df3353f90c747f32d1b3507dcfb"
 
-["commonware_storage::merkle::conformance::StorageConformance<MmrFullWorkload>"]
+["commonware_storage::merkle::conformance::tests::StorageConformance<MmrFullWorkload>"]
 n_cases = 256
 hash = "76a1e549e9c7e239e85bf074d53255502dc9b6ee50278ae9a7644cbce53e44a2"
 

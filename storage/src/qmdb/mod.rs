@@ -60,7 +60,7 @@ pub mod any;
 pub mod batch_chain;
 pub(crate) mod bitmap;
 pub(crate) mod compact;
-#[cfg(test)]
+#[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 pub mod current;
 pub mod immutable;

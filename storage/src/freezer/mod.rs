@@ -209,7 +209,7 @@
 //! });
 //! ```
 
-#[cfg(test)]
+#[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 mod storage;
 use commonware_runtime::buffer::paged::CacheRef;
