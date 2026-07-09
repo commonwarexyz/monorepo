@@ -1848,6 +1848,66 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_init_zero_bit_bitmap_retains_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-ordinal".into(),
+                items_per_blob: NZU64!(10),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            // Write a record into section 1 and sync it.
+            {
+                let mut store =
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
+                        .await
+                        .expect("Failed to initialize store");
+                store
+                    .put(10, FixedBytes::new([10u8; 32]))
+                    .await
+                    .expect("Failed to put data");
+                store.sync().await.expect("Failed to sync data");
+            }
+
+            // Restart with section 1 explicitly listed but no bits set: nothing is committed
+            // yet, but the section's records must survive on disk.
+            let empty = Some(BitMap::zeroes(10));
+            {
+                let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
+                bits_map.insert(1, &empty);
+                let store = Ordinal::<_, FixedBytes<32>>::init(
+                    context.child("second"),
+                    cfg.clone(),
+                    Some(bits_map),
+                )
+                .await
+                .expect("Failed to initialize store with zero-bit bitmap");
+                assert!(!store.has(10));
+            }
+
+            // Restart again with the record's bit set: it must recover the synced value.
+            let mut bitmap = BitMap::zeroes(10);
+            bitmap.set(0, true); // Index 10
+            let committed = Some(bitmap);
+            {
+                let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
+                bits_map.insert(1, &committed);
+                let store =
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("third"), cfg, Some(bits_map))
+                        .await
+                        .expect("Failed to initialize store with committed bit");
+                assert!(store.has(10));
+                assert_eq!(
+                    store.get(10).await.unwrap().unwrap(),
+                    FixedBytes::new([10u8; 32])
+                );
+            }
+        });
+    }
+
+    #[test_traced]
     fn test_init_none_option_all_records_exist() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();

@@ -158,14 +158,12 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let mut items = 0;
         let mut intervals = RMap::new();
         if let Some(bits) = &bits {
-            // Drop sections the committed bits do not cover
+            // Drop sections omitted from `bits`. An explicitly listed section is retained
+            // even when its bitmap has no set bits: unset records are left on disk
+            // untouched, so a later restart can commit them.
             let sections = blobs.keys().copied().collect::<Vec<_>>();
             for section in sections {
-                let keep = match bits.get(&section) {
-                    Some(Some(bits)) => bits.count_ones() != 0,
-                    Some(None) => true,
-                    None => false,
-                };
+                let keep = bits.contains_key(&section);
                 if !keep {
                     context
                         .remove(&config.partition, Some(&section.to_be_bytes()))
