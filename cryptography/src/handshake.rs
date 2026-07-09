@@ -40,7 +40,7 @@ use crate::{
 };
 use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
 use core::ops::Range;
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 
 mod error;
 pub use error::Error;

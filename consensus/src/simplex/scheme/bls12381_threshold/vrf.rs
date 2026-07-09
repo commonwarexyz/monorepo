@@ -59,7 +59,8 @@ use commonware_cryptography::{
 use commonware_macros::stability;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults};
-use rand::{rngs::StdRng, CryptoRng, SeedableRng};
+use rand::rngs::StdRng;
+use rand_core::{CryptoRng, SeedableRng};
 use std::{
     collections::{BTreeSet, HashMap},
     fmt::Debug,
@@ -295,7 +296,7 @@ pub fn fixture<V, R>(
 >
 where
     V: Variant,
-    R: rand::Rng + rand::CryptoRng,
+    R: rand_core::CryptoRng,
 {
     commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
         rng,

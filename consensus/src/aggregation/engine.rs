@@ -33,7 +33,7 @@ use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::{
     cmp::max,
     collections::BTreeMap,

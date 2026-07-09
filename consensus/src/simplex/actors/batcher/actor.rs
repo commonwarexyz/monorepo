@@ -29,7 +29,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::ordered::{Quorum, Set};
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::collections::BTreeMap;
 use tracing::{debug, info_span, trace, Span};
 

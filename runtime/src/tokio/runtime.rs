@@ -31,7 +31,7 @@ use commonware_macros::{select, stability};
 use commonware_parallel::ThreadPool;
 use commonware_utils::{sync::Mutex, sys_rng, NZUsize};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use rand::{Rng, TryCryptoRng, TryRng};
+use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{

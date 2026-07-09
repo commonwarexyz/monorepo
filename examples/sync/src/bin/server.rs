@@ -30,7 +30,7 @@ use commonware_utils::{
     sync::{AsyncRwLock, Mutex},
     sys_rng, DurationExt,
 };
-use rand::{Rng, RngExt as _};
+use rand_core::Rng;
 use std::{
     future::Future,
     net::{Ipv4Addr, SocketAddr},
@@ -926,7 +926,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
                 .to_string();
             // Only add suffix if using the default value
             if storage_dir == "/tmp/commonware-sync/server" {
-                let suffix: u64 = sys_rng().random();
+                let suffix: u64 = sys_rng().next_u64();
                 format!("{storage_dir}-{suffix}")
             } else {
                 storage_dir

@@ -24,7 +24,7 @@ use commonware_cryptography::{sha256, Sha256};
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64};
+use commonware_utils::{channel::mpsc, non_empty_range, NZUsize, TestRng, NZU16, NZU64};
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
 use std::{
@@ -815,7 +815,7 @@ pub(crate) mod harnesses {
     }
 
     fn variable_create_ops_seeded<F: Family>(n: usize, seed: u64) -> Vec<VariableOp<F>> {
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut ops = Vec::with_capacity(n);
         for _ in 0..n {
             let len = (rng.next_u32() % 100 + 1) as usize;

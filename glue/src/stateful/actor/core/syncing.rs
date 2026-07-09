@@ -30,7 +30,7 @@ use commonware_utils::{
     sync::AsyncMutex,
     Acknowledgement,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{debug, error, info_span, Instrument as _, Span};
 

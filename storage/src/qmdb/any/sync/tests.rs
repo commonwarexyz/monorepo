@@ -2099,7 +2099,7 @@ mod harnesses {
     use commonware_cryptography::sha256::Digest;
     use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic::Context, BufferPooler};
-    use commonware_utils::test_rng_seeded;
+    use commonware_utils::TestRng;
     use rand::Rng;
 
     // ===== Family-generic op creation helpers =====
@@ -2112,7 +2112,7 @@ mod harnesses {
         seed: u64,
     ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>> {
         use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -2138,7 +2138,7 @@ mod harnesses {
         seed: u64,
     ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>> {
         use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -2159,7 +2159,7 @@ mod harnesses {
         seed: u64,
     ) -> Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Vec<u8>>> {
         use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -2186,7 +2186,7 @@ mod harnesses {
         seed: u64,
     ) -> Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Vec<u8>>> {
         use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {

@@ -14,7 +14,7 @@ use commonware_storage::{
     metadata::{self, Metadata},
     translator::TwoCap,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::{
     cmp::max,
     collections::BTreeMap,

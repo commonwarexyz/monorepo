@@ -4,7 +4,7 @@ use core::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 
 const P: u64 = 4_611_686_018_427_389_243;
 const Q: u64 = 9_223_372_036_854_778_487;

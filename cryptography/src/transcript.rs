@@ -14,7 +14,7 @@ use commonware_utils::{Array, Span};
 #[commonware_macros::stability(ALPHA)]
 use core::num::NonZeroU64;
 use core::{convert::Infallible, fmt::Display, ops::Deref};
-use rand::{CryptoRng, TryCryptoRng, TryRng};
+use rand_core::{CryptoRng, TryCryptoRng, TryRng};
 use zeroize::ZeroizeOnDrop;
 
 /// Provides an implementation of [CryptoRng].
@@ -480,7 +480,7 @@ mod test {
     use commonware_codec::{DecodeExt as _, Encode};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
-    use rand::Rng;
+    use rand_core::Rng;
 
     #[test]
     fn test_namespace_affects_summary() {

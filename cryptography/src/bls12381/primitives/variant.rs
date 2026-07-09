@@ -19,7 +19,7 @@ use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {

@@ -49,7 +49,7 @@ use core::{
     ptr,
 };
 use ctutils::{Choice, CtEq};
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 fn all_zero(bytes: &[u8]) -> Choice {

@@ -11,7 +11,7 @@ use commonware_cryptography::{
     certificate::{self, Signers},
     sha256::Digest as Sha256Digest,
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::collections::{HashMap, HashSet};
 
 pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {

@@ -9,7 +9,7 @@ use crate::{
     ed25519,
 };
 use commonware_utils::{ordered::Set, N3f1};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRng;
 
 /// Builds ed25519 identities and matching BLS12-381 threshold schemes.
 pub fn fixture<S, V, R>(
@@ -21,7 +21,7 @@ pub fn fixture<S, V, R>(
 ) -> Fixture<S>
 where
     V: Variant,
-    R: Rng + CryptoRng,
+    R: CryptoRng,
     S: Scheme<PublicKey = ed25519::PublicKey>,
 {
     assert!(n > 0);

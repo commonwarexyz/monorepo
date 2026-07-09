@@ -48,7 +48,7 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 const CURVE_NAME: &str = "bls12381";

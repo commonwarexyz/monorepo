@@ -53,7 +53,7 @@ use futures::{
     future::{join, join_all},
     try_join,
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::{debug, info_span, warn, Instrument as _, Span};
 

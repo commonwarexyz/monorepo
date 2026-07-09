@@ -4,7 +4,7 @@ use commonware_macros::stability;
 #[stability(ALPHA)]
 use core::{convert::Infallible, mem::size_of};
 #[stability(BETA)]
-use rand::{rand_core::UnwrapErr, rngs::SysRng};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, CryptoRng};
 #[stability(ALPHA)]
 use rand::{rngs::StdRng, SeedableRng, TryCryptoRng, TryRng};
 
@@ -17,25 +17,57 @@ use rand::{rngs::StdRng, SeedableRng, TryCryptoRng, TryRng};
 ///
 /// Panics if the operating system fails to provide randomness.
 #[stability(BETA)]
-pub const fn sys_rng() -> UnwrapErr<SysRng> {
+pub fn sys_rng() -> impl CryptoRng {
     UnwrapErr(SysRng)
+}
+
+/// A deterministic RNG for testing.
+///
+/// Like [FuzzRng], this is a named type so tests and helpers can refer to it
+/// in signatures. The underlying generator is private, so consumers can only
+/// interact with it through the RNG traits. Construct it with [test_rng] or
+/// [TestRng::new].
+#[stability(ALPHA)]
+#[derive(Debug)]
+pub struct TestRng(StdRng);
+
+#[stability(ALPHA)]
+impl TryRng for TestRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        self.0.try_next_u32()
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        self.0.try_next_u64()
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        self.0.try_fill_bytes(dest)
+    }
+}
+
+#[stability(ALPHA)]
+impl TryCryptoRng for TestRng {}
+
+#[stability(ALPHA)]
+impl TestRng {
+    /// Returns a deterministic RNG seeded with the provided value.
+    ///
+    /// Use this when you need multiple independent RNG streams in the same test,
+    /// or when a helper function needs its own RNG that won't collide with the caller's.
+    pub fn new(seed: u64) -> Self {
+        Self(StdRng::seed_from_u64(seed))
+    }
 }
 
 /// Returns a seeded RNG for deterministic testing.
 ///
 /// Uses seed 0 by default to ensure reproducible test results.
 #[stability(ALPHA)]
-pub fn test_rng() -> StdRng {
-    StdRng::seed_from_u64(0)
-}
-
-/// Returns a seeded RNG with a custom seed for deterministic testing.
-///
-/// Use this when you need multiple independent RNG streams in the same test,
-/// or when a helper function needs its own RNG that won't collide with the caller's.
-#[stability(ALPHA)]
-pub fn test_rng_seeded(seed: u64) -> StdRng {
-    StdRng::seed_from_u64(seed)
+pub fn test_rng() -> TestRng {
+    TestRng::new(0)
 }
 
 /// Applies a SplitMix64-style finalizer to a deterministic input word.
@@ -413,7 +445,7 @@ mod tests {
 
         impl Conformance for FuzzRngConformance {
             async fn commit(seed: u64) -> Vec<u8> {
-                let mut seed_rng = test_rng_seeded(seed);
+                let mut seed_rng = TestRng::new(seed);
                 let len = seed_rng.random_range(1..=64);
                 let mut input = vec![0u8; len];
                 seed_rng.fill_bytes(&mut input);

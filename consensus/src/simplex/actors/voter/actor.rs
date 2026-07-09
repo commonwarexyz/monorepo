@@ -36,7 +36,7 @@ use commonware_storage::journal::segmented::variable::{Config as JConfig, Journa
 use commonware_utils::{channel::oneshot, futures::AbortablePool};
 use core::{future::Future, panic};
 use futures::{pin_mut, StreamExt};
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::{
     num::NonZeroUsize,
     pin::Pin,

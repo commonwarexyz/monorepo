@@ -18,7 +18,7 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
 

@@ -10,7 +10,8 @@ use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{ordered::Set, Faults, N3f1, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, CryptoRng, SeedableRng};
+use rand::{rngs::StdRng, SeedableRng};
+use rand_core::CryptoRng;
 use std::{collections::BTreeMap, hint::black_box};
 
 type V = MinSig;

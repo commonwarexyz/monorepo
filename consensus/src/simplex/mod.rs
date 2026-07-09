@@ -456,10 +456,13 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks, Clock,
         IoBuf, Metrics as _, Quota, Runner, Spawner, Supervisor as _,
     };
-    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{
+        ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, TestRng, NZU16,
+    };
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+    use rand_core::CryptoRng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -1563,7 +1566,7 @@ mod tests {
     fn unclean_shutdown<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -5814,7 +5817,7 @@ mod tests {
     }
 
     fn twins_campaign<S, F, L>(
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRng,
         campaign: TwinsCampaign,
         link: Link,
         mut fixture: F,

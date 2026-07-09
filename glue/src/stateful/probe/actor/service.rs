@@ -14,7 +14,7 @@ use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::channel::fallible::OneshotExt;
 use futures::future::{self, Either};
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use tracing::debug;
 
 /// The service phase of [`Probe`](super::Probe).

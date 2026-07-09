@@ -180,7 +180,7 @@ fn generate_identities(
     // Generate p2p private keys
     let mut rng = sys_rng();
     let peer_signers = (0..num_peers)
-        .map(|_| PrivateKey::random(rng))
+        .map(|_| PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
 
     // Generate consensus key

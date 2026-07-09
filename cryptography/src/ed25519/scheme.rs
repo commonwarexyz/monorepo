@@ -15,7 +15,7 @@ use core::{
     hash::Hash,
     ops::Deref,
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
 use zeroize::Zeroizing;

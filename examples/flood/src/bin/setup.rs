@@ -125,7 +125,7 @@ fn main() {
     );
     let mut rng = sys_rng();
     let peer_schemes = (0..peers)
-        .map(|_| ed25519::PrivateKey::random(rng))
+        .map(|_| ed25519::PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
     let allowed_peers: Vec<String> = peer_schemes
         .iter()

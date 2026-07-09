@@ -182,6 +182,7 @@ prost-build = "0.14.1"
 quote = "1.0"
 rand = { version = "0.10.2", default-features = false }
 rand_chacha = { version = "0.10.0", default-features = false }
+rand_core = { version = "0.10.1", default-features = false }
 rand_distr = "0.6.0"
 ratatui = "0.29.0"
 rayon = { version = "1.10.0", default-features = false }

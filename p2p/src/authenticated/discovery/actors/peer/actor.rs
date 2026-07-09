@@ -19,7 +19,7 @@ use commonware_runtime::{
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 

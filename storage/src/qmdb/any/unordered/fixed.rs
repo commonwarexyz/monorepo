@@ -141,7 +141,7 @@ pub(crate) mod test {
         deterministic::{self, Context},
         Metrics as _, Runner as _, Supervisor as _, ThreadPooler as _,
     };
-    use commonware_utils::{test_rng_seeded, NZUsize, NZU64};
+    use commonware_utils::{NZUsize, TestRng, NZU64};
     use core::num::NonZeroUsize;
     use rand::Rng;
     use std::collections::HashMap;
@@ -191,7 +191,7 @@ pub(crate) mod test {
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
             let mut db = ParTest::init(context, cfg).await.unwrap();
 
-            let mut rng = test_rng_seeded(7);
+            let mut rng = TestRng::new(7);
             let mut keys = Vec::with_capacity(4300);
             let mut batch = db.new_batch();
             for _ in 0..4200 {
@@ -232,7 +232,7 @@ pub(crate) mod test {
         n: usize,
         seed: u64,
     ) -> Vec<Operation<mmr::Family, Digest, Digest>> {
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -407,7 +407,7 @@ pub(crate) mod test {
             // and creates of fresh keys. `make` re-derives the set from a seed so both paths and
             // both depths see identical mutations.
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
-                let mut rng = test_rng_seeded(salt);
+                let mut rng = TestRng::new(salt);
                 let mut out = Vec::new();
                 for _ in 0..600 {
                     let r = rng.next_u32() % 100;

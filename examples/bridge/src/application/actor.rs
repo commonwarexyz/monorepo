@@ -20,7 +20,8 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{Metrics, Sink, Spawner, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use rand::{CryptoRng, RngExt as _};
+use rand::RngExt as _;
+use rand_core::CryptoRng;
 use tracing::{debug, info};
 
 /// Application actor.

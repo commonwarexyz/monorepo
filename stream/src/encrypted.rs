@@ -72,7 +72,7 @@ use commonware_runtime::{
     Stream,
 };
 use commonware_utils::SystemTimeExt;
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
 

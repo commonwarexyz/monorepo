@@ -73,7 +73,7 @@ use commonware_codec::{
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::BitMap, ordered::Set, Faults, Participant};
 use core::{fmt::Debug, hash::Hash};
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 

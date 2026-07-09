@@ -101,7 +101,7 @@ use commonware_math::{
     algebra::{CryptoGroup, Field, Random, Space},
     synthetic::Synthetic,
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 
 /// Generators used by the proof system.
 ///

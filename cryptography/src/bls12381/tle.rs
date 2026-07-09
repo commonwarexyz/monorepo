@@ -95,7 +95,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::CryptoGroup;
 use commonware_utils::sequence::FixedBytes;
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 /// Domain separation tag for hashing the `h3` message to a scalar.

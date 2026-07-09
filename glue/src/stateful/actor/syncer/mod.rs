@@ -16,7 +16,7 @@ use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
-use rand::Rng;
+use rand_core::Rng;
 
 mod actor;
 pub(crate) use actor::{Config, Syncer};

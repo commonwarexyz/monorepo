@@ -9,7 +9,7 @@ use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_math::algebra::Random;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::marker::PhantomData;
 use tracing::debug;
 

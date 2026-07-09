@@ -37,7 +37,7 @@ pub fn compute_public<V: Variant>(private: &Private) -> V::Public {
 }
 
 /// Returns a new keypair derived from the provided randomness.
-pub fn keypair<R: rand::CryptoRng, V: Variant>(rng: &mut R) -> (Private, V::Public) {
+pub fn keypair<R: rand_core::CryptoRng, V: Variant>(rng: &mut R) -> (Private, V::Public) {
     let private = Private::random(rng);
     let public = compute_public::<V>(&private);
     (private, public)

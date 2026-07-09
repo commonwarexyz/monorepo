@@ -26,6 +26,7 @@ commonware-stream.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

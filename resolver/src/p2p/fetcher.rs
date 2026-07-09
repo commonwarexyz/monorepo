@@ -11,7 +11,8 @@ use commonware_runtime::{
     Clock, Metrics,
 };
 use commonware_utils::{PrioritySet, Span, SystemTimeExt};
-use rand::{seq::SliceRandom, Rng};
+use rand::seq::SliceRandom;
+use rand_core::Rng;
 use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,

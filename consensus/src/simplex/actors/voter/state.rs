@@ -21,7 +21,7 @@ use commonware_runtime::{
     Clock, Metrics,
 };
 use commonware_utils::futures::Aborter;
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     mem::{replace, take},

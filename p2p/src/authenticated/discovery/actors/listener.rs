@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::{net::SocketAddr, num::NonZeroU32};
 use tracing::debug;
 

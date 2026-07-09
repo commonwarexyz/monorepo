@@ -33,7 +33,7 @@ mod harnesses {
     use super::*;
     use crate::merkle::{self, mmb, mmr};
     use commonware_math::algebra::Random;
-    use commonware_utils::test_rng_seeded;
+    use commonware_utils::TestRng;
 
     type OrderedFixedDb<F> = crate::qmdb::current::ordered::fixed::Db<
         F,
@@ -82,7 +82,7 @@ mod harnesses {
     ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>> {
         use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -104,7 +104,7 @@ mod harnesses {
     ) -> Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>> {
         use crate::qmdb::any::operation::{update::Unordered as Update, Operation};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -126,7 +126,7 @@ mod harnesses {
     ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>> {
         use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut ops = Vec::new();
         for i in 0..n {
             if i % 10 == 0 && i > 0 {
@@ -152,7 +152,7 @@ mod harnesses {
     ) -> Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>> {
         use crate::qmdb::any::operation::{update::Ordered as Update, Operation};
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut ops = Vec::new();
         for i in 0..n {
             let key = Digest::random(&mut rng);

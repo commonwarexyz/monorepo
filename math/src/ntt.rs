@@ -7,7 +7,7 @@ use core::{
     num::NonZeroU32,
     ops::{Index, IndexMut},
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 

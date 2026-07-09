@@ -148,7 +148,7 @@ use commonware_utils::{
 };
 pub use evrf::{PrivateKey, PublicKey, Setup};
 use evrf::{Signature, VrfCommitments};
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU32};
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_GOLDEN_DKG";
@@ -1235,7 +1235,7 @@ mod test_plan {
 
         /// Run a fresh (honest) DKG round and return the output and per-player shares.
         pub fn run_fresh(
-            rng: &mut StdRng,
+            rng: &mut impl CryptoRng,
             setup: &Setup,
             dealer_keys: &[PrivateKey],
             player_keys: &[PrivateKey],

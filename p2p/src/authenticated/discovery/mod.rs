@@ -275,7 +275,7 @@ mod tests {
         IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{channel::mpsc, hostname, ordered::Set, NZUsize, TryCollect, NZU32};
-    use rand::{CryptoRng, Rng};
+    use rand_core::{CryptoRng, Rng};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},

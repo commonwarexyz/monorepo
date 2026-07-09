@@ -13,7 +13,7 @@ use p256::{
     ecdsa::{SigningKey, VerifyingKey},
     elliptic_curve::Generate,
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 pub const CURVE_NAME: &str = "secp256r1";
@@ -211,7 +211,7 @@ macro_rules! impl_private_key_wrapper {
         impl crate::PrivateKey for $name {}
 
         impl commonware_math::algebra::Random for $name {
-            fn random(rng: impl rand::CryptoRng) -> Self {
+            fn random(rng: impl rand_core::CryptoRng) -> Self {
                 Self(PrivateKeyInner::random(rng))
             }
         }

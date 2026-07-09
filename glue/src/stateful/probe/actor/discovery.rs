@@ -25,7 +25,7 @@ use commonware_utils::{
     Faults, N3f1, NonZeroDuration,
 };
 use futures::future::{self, Either};
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::collections::BTreeMap;
 use tracing::debug;
 

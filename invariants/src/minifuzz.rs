@@ -52,8 +52,9 @@
 
 use arbitrary::Unstructured;
 use commonware_formatting::from_hex;
-use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng as _, SeedableRng};
+use rand::rngs::SysRng;
 use rand_chacha::ChaCha8Rng;
+use rand_core::{Rng as _, SeedableRng, UnwrapErr};
 use std::{
     panic::{catch_unwind, AssertUnwindSafe, UnwindSafe},
     time::{Duration, Instant},

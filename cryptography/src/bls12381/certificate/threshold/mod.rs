@@ -28,7 +28,7 @@ use commonware_codec::{types::lazy::Lazy, Error, FixedSize, Read, ReadExt, Write
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults, Participant};
 use core::fmt::Debug;
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -508,7 +508,7 @@ macro_rules! impl_certificate_bls12381_threshold {
         ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
         where
             V: $crate::bls12381::primitives::variant::Variant,
-            R: rand::Rng + rand::CryptoRng,
+            R: rand_core::CryptoRng,
         {
             $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
                 rng,
@@ -601,7 +601,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand::CryptoRng,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 M: commonware_utils::Faults,
             {
@@ -616,7 +616,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand::CryptoRng,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 M: commonware_utils::Faults,
@@ -670,7 +670,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand::CryptoRng,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
                 self.generic
@@ -685,7 +685,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
-                R: rand::CryptoRng,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 I::IntoIter: Send
@@ -1375,10 +1375,7 @@ mod tests {
         signer_shares_must_match_participant_indices::<MinSig>();
     }
 
-    fn make_participants<R: rand::Rng + rand::CryptoRng>(
-        rng: &mut R,
-        n: u32,
-    ) -> Set<ed25519::PublicKey> {
+    fn make_participants<R: rand_core::CryptoRng>(rng: &mut R, n: u32) -> Set<ed25519::PublicKey> {
         (0..n)
             .map(|_| Ed25519PrivateKey::random(&mut *rng).public_key())
             .try_collect()

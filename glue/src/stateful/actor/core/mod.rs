@@ -28,7 +28,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{channel::oneshot, sync::AsyncMutex};
 use futures::join;
-use rand::Rng;
+use rand_core::Rng;
 use std::{num::NonZeroUsize, sync::Arc};
 
 mod mailbox;

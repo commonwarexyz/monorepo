@@ -17,7 +17,7 @@ use commonware_runtime::{
     Clock, Metrics, Spawner,
 };
 use commonware_utils::channel::oneshot;
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{debug, info_span, Instrument as _};
 

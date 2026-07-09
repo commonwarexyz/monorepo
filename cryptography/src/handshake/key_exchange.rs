@@ -1,6 +1,6 @@
 use crate::Secret;
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 
 /// A shared secret derived from X25519 key exchange.
 pub struct SharedSecret {

@@ -36,7 +36,7 @@ use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 
 /// Size of a CRC32 checksum in bytes.
 const SIZE: usize = 4;

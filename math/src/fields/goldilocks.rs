@@ -1,7 +1,7 @@
 use crate::algebra::{Additive, Field, FieldNTT, Multiplicative, Object, Random, Ring};
 use commonware_codec::{FixedSize, Read, Write};
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 
 /// The modulus P := 2^64 - 2^32 + 1.
 ///

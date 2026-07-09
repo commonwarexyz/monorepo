@@ -19,7 +19,7 @@ use commonware_utils::{
     ordered::{BiMap, Quorum, Set},
     Faults, Participant,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::{CryptoRng, Rng};
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -354,7 +354,7 @@ macro_rules! impl_certificate_secp256r1 {
             n: u32,
         ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey>>
         where
-            R: rand::Rng + rand::CryptoRng,
+            R: rand_core::CryptoRng,
         {
             $crate::secp256r1::certificate::mocks::fixture(
                 rng,
@@ -414,7 +414,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand::CryptoRng,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 M: commonware_utils::Faults,
             {
@@ -432,7 +432,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand::CryptoRng,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 M: commonware_utils::Faults,
@@ -486,7 +486,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand::CryptoRng,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
                 self.generic
@@ -501,7 +501,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
-                R: rand::CryptoRng,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
             {
@@ -543,7 +543,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::{ordered::BiMap, test_rng, Faults, N3f1, TryCollect};
-    use rand::CryptoRng;
+    use rand_core::CryptoRng;
 
     const NAMESPACE: &[u8] = b"test-secp256r1";
     const MESSAGE: &[u8] = b"test message";

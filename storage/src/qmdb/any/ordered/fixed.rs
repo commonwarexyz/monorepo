@@ -154,7 +154,7 @@ pub(crate) mod test {
         deterministic::{self, Context},
         Runner as _, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZU64};
+    use commonware_utils::{sequence::FixedBytes, TestRng, NZU64};
     use futures::StreamExt as _;
     use rand::{rngs::StdRng, seq::IteratorRandom, Rng, SeedableRng};
     use std::collections::{BTreeMap, HashMap};
@@ -210,7 +210,7 @@ pub(crate) mod test {
         n: usize,
         seed: u64,
     ) -> Vec<Operation<mmr::Family, Digest, Digest>> {
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -296,7 +296,7 @@ pub(crate) mod test {
             // and creates of fresh keys. `make` re-derives the set from a seed so both paths
             // and all depths see identical mutations.
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
-                let mut rng = test_rng_seeded(salt);
+                let mut rng = TestRng::new(salt);
                 let mut out = Vec::new();
                 for _ in 0..200 {
                     let r = rng.next_u32() % 100;

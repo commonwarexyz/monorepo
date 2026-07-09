@@ -27,7 +27,7 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use rand::CryptoRng;
+use rand_core::CryptoRng;
 use std::num::NonZeroU32;
 use zeroize::Zeroizing;
 

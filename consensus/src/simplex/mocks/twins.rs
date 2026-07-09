@@ -1232,7 +1232,7 @@ mod tests {
         types::Epoch,
     };
     use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
-    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded};
+    use commonware_utils::{ordered::Set, test_rng, TestRng};
     use std::collections::HashSet;
 
     fn round(_: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
@@ -1890,7 +1890,7 @@ mod tests {
     fn unique_index_sampling_handles_near_full_ranges() {
         let total = 100_000u128;
         let samples = 99_999usize;
-        let mut rng = test_rng_seeded(9);
+        let mut rng = TestRng::new(9);
         let sampled = sample_unique_indices(&mut rng, total, samples);
         assert_eq!(sampled.len(), samples);
         assert_eq!(

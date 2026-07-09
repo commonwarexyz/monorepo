@@ -19,7 +19,7 @@ commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
 libfuzzer-sys.workspace = true
-rand.workspace = true
+rand = { workspace = true, features = ["std_rng"] }
 thiserror.workspace = true
 
 [[bin]]
