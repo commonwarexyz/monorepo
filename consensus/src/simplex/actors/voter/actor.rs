@@ -34,10 +34,11 @@ use commonware_runtime::{
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{channel::oneshot, futures::AbortablePool};
-use core::{future::Future, panic};
+use core::{future::Future, mem, panic};
 use futures::{pin_mut, StreamExt};
 use rand_core::CryptoRng;
 use std::{
+    collections::BTreeSet,
     num::NonZeroUsize,
     pin::Pin,
     task::{self, Poll},
@@ -118,6 +119,7 @@ pub struct Actor<
     write_buffer: NonZeroUsize,
     page_cache: CacheRef,
     journal: Option<Journal<E, Artifact<S, D>>>,
+    dirty: BTreeSet<u64>,
 
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
@@ -183,6 +185,7 @@ impl<
                 write_buffer: cfg.write_buffer,
                 page_cache: cfg.page_cache,
                 journal: None,
+                dirty: BTreeSet::new(),
 
                 mailbox_receiver,
 
@@ -228,36 +231,65 @@ impl<
                 ))
                 .await
                 .expect("unable to prune journal");
+
+            // Pruned sections can no longer be synced, so drop any pending syncs for them.
+            self.dirty = self.dirty.split_off(&min_active.get());
         }
     }
 
     /// Appends a verified message to the journal.
+    ///
+    /// The append is not immediately durable. Sections with pending appends are
+    /// tracked and synced together by [Self::sync_journal].
     async fn append_journal(&mut self, view: View, artifact: Artifact<S, D>) {
         if let Some(journal) = self.journal.as_mut() {
             journal
                 .append(view.get(), &artifact)
                 .await
                 .expect("unable to append to journal");
+            self.dirty.insert(view.get());
         }
     }
 
-    /// Syncs the journal so other replicas can recover messages in `view`.
-    #[tracing::instrument(name = "simplex.voter.journal.sync", level = "info", skip_all, fields(epoch = self.state.epoch().traced(), view = view.traced()))]
-    async fn sync_journal(&mut self, view: View) {
-        if let Some(journal) = self.journal.as_mut() {
-            journal
-                .sync(view.get())
-                .await
-                .expect("unable to sync journal");
+    /// Syncs all journal sections with pending appends.
+    ///
+    /// Invoked before any broadcast so everything we tell the network is
+    /// recoverable after a restart. Deferring syncs to this point (rather than
+    /// syncing after each append) coalesces back-to-back appends in the same
+    /// loop iteration into a single sync.
+    async fn sync_journal(&mut self) {
+        if self.dirty.is_empty() {
+            return;
         }
+        let journal = self
+            .journal
+            .as_mut()
+            .expect("pending journal sections without a journal");
+        let sections: Vec<u64> = mem::take(&mut self.dirty).into_iter().collect();
+        let span = info_span!(
+            "simplex.voter.journal.sync",
+            epoch = self.state.epoch().traced(),
+            views = ?sections
+        );
+        journal
+            .sync(sections)
+            .instrument(span)
+            .await
+            .expect("unable to sync journal");
     }
 
     /// Send a vote to every peer.
-    fn broadcast_vote<T: Sender>(
+    ///
+    /// Syncs pending journal appends first. A vote must be durable before it
+    /// reaches the network so a restart cannot cause us to equivocate.
+    async fn broadcast_vote<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Vote<S, D>>,
         vote: Vote<S, D>,
     ) {
+        // Persist anything we've journaled before the vote reaches the network
+        self.sync_journal().await;
+
         // Update outbound metrics
         let metric = match &vote {
             Vote::Notarize(_) => metrics::Outbound::notarize(),
@@ -271,11 +303,17 @@ impl<
     }
 
     /// Send a certificate to every peer.
-    fn broadcast_certificate<T: Sender>(
+    ///
+    /// Syncs pending journal appends first so any state we advertise to the
+    /// network survives a restart.
+    async fn broadcast_certificate<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Certificate<S, D>>,
         certificate: Certificate<S, D>,
     ) {
+        // Persist anything we've journaled before the certificate reaches the network
+        self.sync_journal().await;
+
         // Update outbound metrics
         let metric = match &certificate {
             Certificate::Notarization(_) => metrics::Outbound::notarization(),
@@ -360,14 +398,12 @@ impl<
         if !retry {
             batcher.constructed(Vote::Nullify(nullify.clone()));
             self.handle_nullify(nullify.clone()).await;
-
-            // Sync the journal so first-attempt nullify votes survive restarts.
-            self.sync_journal(nullify.view()).await;
         }
 
         // Broadcast nullify vote (regardless)
         debug!(round=?nullify.round(), "broadcasting nullify");
-        self.broadcast_vote(vote_sender, Vote::Nullify(nullify));
+        self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
+            .await;
     }
 
     /// Handle a timeout.
@@ -395,7 +431,8 @@ impl<
             .previous()
             .expect("we should never be in the genesis view");
         if let Some(certificate) = self.state.get_best_certificate(past_view) {
-            self.broadcast_certificate(certificate_sender, certificate);
+            self.broadcast_certificate(certificate_sender, certificate)
+                .await;
         }
     }
 
@@ -453,10 +490,10 @@ impl<
         // Get the notarization before advancing state
         let notarization = self.state.certified(view, success)?;
 
-        // Persist certification result for recovery
+        // Record the certification result for recovery. It is synced with our
+        // next broadcast (at the latest, the vote this result unlocks).
         let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
-        self.append_journal(view, artifact.clone()).await;
-        self.sync_journal(view).await;
+        self.append_journal(view, artifact).await;
 
         Some(notarization)
     }
@@ -494,15 +531,14 @@ impl<
         batcher.constructed(Vote::Notarize(notarize.clone()));
         // Record the vote locally before sharing it.
         self.handle_notarize(notarize.clone()).await;
-        // Keep the vote durable for crash recovery.
-        self.sync_journal(view).await;
 
         // Broadcast the notarize vote
         debug!(
             proposal=?notarize.proposal,
             "broadcasting notarize"
         );
-        self.broadcast_vote(vote_sender, Vote::Notarize(notarize));
+        self.broadcast_vote(vote_sender, Vote::Notarize(notarize))
+            .await;
     }
 
     /// Share a notarization certificate once we can assemble it locally.
@@ -530,14 +566,13 @@ impl<
         }
         // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
-        // Persist the certificate before informing others.
-        self.sync_journal(view).await;
         // Broadcast the notarization certificate
         debug!(proposal=?notarization.proposal, "broadcasting notarization");
         self.broadcast_certificate(
             certificate_sender,
             Certificate::Notarization(notarization.clone()),
-        );
+        )
+        .await;
         // Surface the event to the application for observability.
         self.reporter.report(Activity::Notarization(notarization));
     }
@@ -576,16 +611,15 @@ impl<
         // Track the certificate locally to avoid rebuilding it.
         if let Some(floor) = self.handle_nullification(nullification.clone()).await {
             warn!(?floor, "broadcasting nullification floor");
-            self.broadcast_certificate(certificate_sender, floor);
+            self.broadcast_certificate(certificate_sender, floor).await;
         }
-        // Ensure deterministic restarts.
-        self.sync_journal(view).await;
         // Broadcast the nullification certificate.
         debug!(round=?nullification.round(), "broadcasting nullification");
         self.broadcast_certificate(
             certificate_sender,
             Certificate::Nullification(nullification.clone()),
-        );
+        )
+        .await;
         // Surface the event to the application for observability.
         self.reporter.report(Activity::Nullification(nullification));
     }
@@ -606,15 +640,14 @@ impl<
         batcher.constructed(Vote::Finalize(finalize.clone()));
         // Update the round before persisting.
         self.handle_finalize(finalize.clone()).await;
-        // Keep the vote durable for recovery.
-        self.sync_journal(view).await;
 
         // Broadcast the finalize vote.
         debug!(
             proposal=?finalize.proposal,
             "broadcasting finalize"
         );
-        self.broadcast_vote(vote_sender, Vote::Finalize(finalize));
+        self.broadcast_vote(vote_sender, Vote::Finalize(finalize))
+            .await;
     }
 
     /// Share a finalization certificate and notify observers of the new height.
@@ -642,14 +675,13 @@ impl<
         }
         // Advance the consensus core with the finalization proof.
         self.handle_finalization(finalization.clone()).await;
-        // Persist the proof before broadcasting it.
-        self.sync_journal(view).await;
         // Broadcast the finalization certificate.
         debug!(proposal=?finalization.proposal, "broadcasting finalization");
         self.broadcast_certificate(
             certificate_sender,
             Certificate::Finalization(finalization.clone()),
-        );
+        )
+        .await;
         // Surface the event to the application for observability.
         self.reporter.report(Activity::Finalization(finalization));
     }
@@ -816,7 +848,7 @@ impl<
                         trace!(%view, from_resolver, "received nullification");
                         if let Some(floor) = self.handle_nullification(nullification).await {
                             warn!(?floor, "broadcasting nullification floor");
-                            self.broadcast_certificate(certificate_sender, floor);
+                            self.broadcast_certificate(certificate_sender, floor).await;
                         }
                         if from_resolver {
                             resolved = Resolved::Nullification;
