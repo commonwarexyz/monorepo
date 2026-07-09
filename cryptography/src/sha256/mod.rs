@@ -347,11 +347,11 @@ mod tests {
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
     }
 
-    /// Deterministically exercise the pair (assembly) kernel with the merkle
+    /// Deterministically exercise the pair (assembly) kernel with the MMR
     /// node shape (position || left || right) that motivates it, regardless
     /// of what the fuzz generators happen to sample.
     #[test]
-    fn test_hash_pair_node_shape_matches_streaming() {
+    fn test_hash_pair_mmr_node_shape_matches_streaming() {
         fn node(position: u64, fill: u8) -> Vec<Vec<u8>> {
             vec![
                 position.to_be_bytes().to_vec(),
@@ -360,6 +360,17 @@ mod tests {
             ]
         }
         crate::fuzz::Plan::<Sha256>::new(node(42, 0x11), node(43, 0x33)).run();
+    }
+
+    /// Deterministically exercise the pair (assembly) kernel with the BMT
+    /// node shape (left || right, no position) that motivates it, regardless
+    /// of what the fuzz generators happen to sample.
+    #[test]
+    fn test_hash_pair_bmt_node_shape_matches_streaming() {
+        fn node(fill: u8) -> Vec<Vec<u8>> {
+            vec![vec![fill; 32], vec![fill + 1; 32]]
+        }
+        crate::fuzz::Plan::<Sha256>::new(node(0x11), node(0x33)).run();
     }
 
     #[test]

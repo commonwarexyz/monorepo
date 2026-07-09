@@ -1,6 +1,6 @@
 use super::{
     super::{Digest, DIGEST_LENGTH, IV},
-    NODE_LEN,
+    BMT_NODE_LEN, MMR_NODE_LEN,
 };
 
 /// Wrapper that aligns constant tables for aligned vector loads.
@@ -23,20 +23,32 @@ static K: Align16<[u32; 64]> = Align16([
 static BYTE_SWAP_MASK: Align16<[u8; 16]> =
     Align16([3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12]);
 
-/// The `0x80` terminator following the 8-byte message tail in the padding block.
+/// The `0x80` terminator following the 8-byte message tail in the MMR node's
+/// padding block (message ends 8 bytes into the second block).
 static FINAL_72_PAD: Align16<[u32; 4]> = Align16([0, 0, 0x80000000, 0]);
 
-/// The message bit length in the final words of the padding block.
-static FINAL_72_LENGTH: Align16<[u32; 4]> = Align16([0, 0, 0, (NODE_LEN * 8) as u32]);
+/// The message bit length in the final words of the MMR node's padding block.
+static FINAL_72_LENGTH: Align16<[u32; 4]> = Align16([0, 0, 0, (MMR_NODE_LEN * 8) as u32]);
 
-/// Hash two node-shaped messages with interleaved SHA-NI instructions: one
-/// full block plus a compile-time constant padding block each.
+/// The `0x80` terminator opening the BMT node's padding block (the message
+/// fills the first block exactly, leaving no tail).
+static FINAL_64_PAD: Align16<[u32; 4]> = Align16([0x80000000, 0, 0, 0]);
+
+/// The message bit length in the final words of the BMT node's padding block.
+static FINAL_64_LENGTH: Align16<[u32; 4]> = Align16([0, 0, 0, (BMT_NODE_LEN * 8) as u32]);
+
+/// Hash two MMR node-shaped messages (`position || left || right`, 72 bytes)
+/// with interleaved SHA-NI instructions: one full block plus a compile-time
+/// constant padding block each.
 ///
 /// # Safety
 ///
 /// The `sha`, `avx2`, `ssse3`, and `sse4.1` target features must be available.
 #[target_feature(enable = "sha,avx2,ssse3,sse4.1")]
-pub unsafe fn hash_pair_72(left: &[u8; NODE_LEN], right: &[u8; NODE_LEN]) -> (Digest, Digest) {
+pub unsafe fn hash_pair_72(
+    left: &[u8; MMR_NODE_LEN],
+    right: &[u8; MMR_NODE_LEN],
+) -> (Digest, Digest) {
     let mut left_digest = [0u8; DIGEST_LENGTH];
     let mut right_digest = [0u8; DIGEST_LENGTH];
     // SAFETY: The inputs and outputs are properly sized buffers, the caller
@@ -44,7 +56,10 @@ pub unsafe fn hash_pair_72(left: &[u8; NODE_LEN], right: &[u8; NODE_LEN]) -> (Di
     // written by the asm are listed as outputs.
     unsafe {
         core::arch::asm!(
-            include_str!("sha256_72_2x.asm"),
+            include_str!("sha256_pair_macros.asm"),
+            include_str!("sha256_pair_block1.asm"),
+            include_str!("sha256_pair_tail8.asm"),
+            include_str!("sha256_pair_finish.asm"),
             left = in(reg) left.as_ptr(),
             right = in(reg) right.as_ptr(),
             left_output = in(reg) left_digest.as_mut_ptr(),
@@ -54,6 +69,47 @@ pub unsafe fn hash_pair_72(left: &[u8; NODE_LEN], right: &[u8; NODE_LEN]) -> (Di
             mask = in(reg) BYTE_SWAP_MASK.0.as_ptr(),
             pad = in(reg) FINAL_72_PAD.0.as_ptr(),
             len = in(reg) FINAL_72_LENGTH.0.as_ptr(),
+            out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+            out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+            out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm11") _,
+            out("xmm12") _, out("xmm13") _, out("xmm14") _, out("xmm15") _,
+        );
+    }
+    (Digest(left_digest), Digest(right_digest))
+}
+
+/// Hash two BMT node-shaped messages (`left || right`, 64 bytes) with
+/// interleaved SHA-NI instructions: one full block plus a compile-time
+/// constant padding block each.
+///
+/// # Safety
+///
+/// The `sha`, `avx2`, `ssse3`, and `sse4.1` target features must be available.
+#[target_feature(enable = "sha,avx2,ssse3,sse4.1")]
+pub unsafe fn hash_pair_64(
+    left: &[u8; BMT_NODE_LEN],
+    right: &[u8; BMT_NODE_LEN],
+) -> (Digest, Digest) {
+    let mut left_digest = [0u8; DIGEST_LENGTH];
+    let mut right_digest = [0u8; DIGEST_LENGTH];
+    // SAFETY: The inputs and outputs are properly sized buffers, the caller
+    // guarantees every instruction used here is available, and all registers
+    // written by the asm are listed as outputs.
+    unsafe {
+        core::arch::asm!(
+            include_str!("sha256_pair_macros.asm"),
+            include_str!("sha256_pair_block1.asm"),
+            include_str!("sha256_pair_tail0.asm"),
+            include_str!("sha256_pair_finish.asm"),
+            left = in(reg) left.as_ptr(),
+            right = in(reg) right.as_ptr(),
+            left_output = in(reg) left_digest.as_mut_ptr(),
+            right_output = in(reg) right_digest.as_mut_ptr(),
+            state = in(reg) IV.as_ptr(),
+            k = in(reg) K.0.as_ptr(),
+            mask = in(reg) BYTE_SWAP_MASK.0.as_ptr(),
+            pad = in(reg) FINAL_64_PAD.0.as_ptr(),
+            len = in(reg) FINAL_64_LENGTH.0.as_ptr(),
             out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
             out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
             out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm11") _,

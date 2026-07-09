@@ -145,15 +145,29 @@ impl<D: Digest> Tree<D> {
         let mut current_level = levels.last();
         while !current_level.is_singleton() {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
-            for chunk in current_level.chunks(2) {
-                // If no right child exists, duplicate left child.
-                let right = if chunk.len() == 2 {
-                    &chunk[1]
-                } else {
-                    &chunk[0]
-                };
-                let digest = H::hash(&[chunk[0].as_ref(), right.as_ref()]);
-                next_level.push(digest);
+
+            // Process four nodes (two sibling pairs) at a time, duplicating an unpaired
+            // trailing node. Hashing both pairs together lets the underlying hasher
+            // interleave independent messages (see `Hasher::hash_pair`); a level with no
+            // second pair falls back to a single hash.
+            for group in current_level.chunks(4) {
+                match group {
+                    [a, b, c, d] => {
+                        let (left, right) =
+                            H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), d.as_ref()]);
+                        next_level.push(left);
+                        next_level.push(right);
+                    }
+                    [a, b, c] => {
+                        let (left, right) =
+                            H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), c.as_ref()]);
+                        next_level.push(left);
+                        next_level.push(right);
+                    }
+                    [a, b] => next_level.push(H::hash(&[a.as_ref(), b.as_ref()])),
+                    [a] => next_level.push(H::hash(&[a.as_ref(), a.as_ref()])),
+                    _ => unreachable!("chunks(4) yields at most 4 elements"),
+                }
             }
 
             // Add the computed level to the tree

@@ -12,7 +12,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use core::{fmt::Debug, marker::PhantomData};
 
 /// Pick a contiguous message length biased toward the boundaries of
-/// SHA-256's specialized paths (the pair kernel at 72 bytes and the
+/// SHA-256's specialized paths (the pair kernels at 64 and 72 bytes and the
 /// two-block fixed path limit at 119 bytes), which are harmless biases for
 /// other hashers.
 fn arbitrary_len(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
