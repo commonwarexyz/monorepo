@@ -208,13 +208,10 @@ mod tests {
         proposal: &Proposal<Sha256Digest>,
         count: usize,
     ) -> Notarization<S, Sha256Digest> {
-        let votes: Vec<_> = schemes
-            .iter()
-            .take(count)
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        Notarization::from_votes(&schemes[0], &votes, &Sequential)
-            .expect("notarization requires a quorum of votes")
+        mocks::certificate::build_certificate(
+            &schemes[0],
+            &mocks::certificate::sign_votes(schemes.iter().take(count), proposal),
+        )
     }
 
     fn build_nullification<S: Scheme<Sha256Digest>>(
@@ -222,13 +219,10 @@ mod tests {
         round: Round,
         count: usize,
     ) -> Nullification<S, Sha256Digest> {
-        let votes: Vec<_> = schemes
-            .iter()
-            .take(count)
-            .map(|scheme| Nullify::<_, Sha256Digest>::sign(scheme, round).unwrap())
-            .collect();
-        Nullification::from_votes(&schemes[0], &votes, &Sequential)
-            .expect("nullification requires a quorum of votes")
+        mocks::certificate::build_certificate(
+            &schemes[0],
+            &mocks::certificate::sign_votes(schemes.iter().take(count), &round),
+        )
     }
 
     fn build_finalization<S: Scheme<Sha256Digest>>(
@@ -236,13 +230,10 @@ mod tests {
         proposal: &Proposal<Sha256Digest>,
         count: usize,
     ) -> Finalization<S, Sha256Digest> {
-        let votes: Vec<_> = schemes
-            .iter()
-            .take(count)
-            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        Finalization::from_votes(&schemes[0], &votes, &Sequential)
-            .expect("finalization requires a quorum of votes")
+        mocks::certificate::build_certificate(
+            &schemes[0],
+            &mocks::certificate::sign_votes(schemes.iter().take(count), proposal),
+        )
     }
 
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)

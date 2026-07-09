@@ -216,77 +216,50 @@ impl<
         let incoming =
             Certificate::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
 
-        // Validate message
-        match incoming {
+        // Validate the certificate references an acceptable view.
+        match &incoming {
             Certificate::Notarization(notarization) => {
-                let notarization_view = notarization.view();
                 if notarization.view() < view {
                     debug!(%view, received = %notarization.view(), "notarization below view");
                     return None;
                 }
-                if notarization.epoch() != self.epoch {
+                if self.state.is_failed(notarization.view()) {
                     debug!(
-                        epoch = %notarization.epoch(),
-                        expected = %self.epoch,
-                        "rejecting notarization from different epoch"
-                    );
-                    return None;
-                }
-                if self.state.is_failed(notarization_view) {
-                    debug!(
-                        %notarization_view,
+                        notarization_view = %notarization.view(),
                         "rejecting notarization for view with failed certification"
                     );
                     return None;
                 }
-                if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
-                    debug!(%view, "notarization failed verification");
-                    return None;
-                }
-                debug!(%view, received = %notarization_view, "received notarization for request");
-                Some(Certificate::Notarization(notarization))
             }
             Certificate::Finalization(finalization) => {
                 if finalization.view() < view {
                     debug!(%view, received = %finalization.view(), "finalization below view");
                     return None;
                 }
-                if finalization.epoch() != self.epoch {
-                    debug!(
-                        epoch = %finalization.epoch(),
-                        expected = %self.epoch,
-                        "rejecting finalization from different epoch"
-                    );
-                    return None;
-                }
-                if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
-                    debug!(%view, "finalization failed verification");
-                    return None;
-                }
-                debug!(%view, received = %finalization.view(), "received finalization for request");
-                Some(Certificate::Finalization(finalization))
             }
             Certificate::Nullification(nullification) => {
                 if nullification.view() != view {
                     debug!(%view, received = %nullification.view(), "nullification view mismatch");
                     return None;
                 }
-                if nullification.epoch() != self.epoch {
-                    debug!(
-                        epoch = %nullification.epoch(),
-                        expected = %self.epoch,
-                        "rejecting nullification from different epoch"
-                    );
-                    return None;
-                }
-                if !nullification.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
-                    debug!(%view, "nullification failed verification");
-                    return None;
-                }
-                debug!(%view, received = %nullification.view(), "received nullification for request");
-                Some(Certificate::Nullification(nullification))
             }
         }
+
+        // Validate the certificate itself.
+        if incoming.epoch() != self.epoch {
+            debug!(
+                epoch = %incoming.epoch(),
+                expected = %self.epoch,
+                "rejecting certificate from different epoch"
+            );
+            return None;
+        }
+        if !incoming.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
+            debug!(%view, "certificate failed verification");
+            return None;
+        }
+        debug!(%view, received = %incoming.view(), "received certificate for request");
+        Some(incoming)
     }
 
     /// Handles a message from the [p2p::Engine].

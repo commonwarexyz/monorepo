@@ -85,7 +85,6 @@ mod tests {
         simulated::{Config as NConfig, Link, Network, Oracle},
         Recipients,
     };
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics as _, Quota,
         Runner, Supervisor as _,
@@ -134,13 +133,8 @@ mod tests {
         Vec<Notarize<S, Sha256Digest>>,
         Notarization<S, Sha256Digest>,
     ) {
-        let votes: Vec<_> = schemes
-            .iter()
-            .take(count as usize)
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        let certificate = Notarization::from_votes(&schemes[0], &votes, &Sequential)
-            .expect("notarization requires a quorum of votes");
+        let votes = mocks::certificate::sign_votes(schemes.iter().take(count as usize), proposal);
+        let certificate = mocks::certificate::build_certificate(&schemes[0], &votes);
         (votes, certificate)
     }
 
@@ -152,13 +146,8 @@ mod tests {
         Vec<Finalize<S, Sha256Digest>>,
         Finalization<S, Sha256Digest>,
     ) {
-        let votes: Vec<_> = schemes
-            .iter()
-            .take(count as usize)
-            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        let certificate = Finalization::from_votes(&schemes[0], &votes, &Sequential)
-            .expect("finalization requires a quorum of votes");
+        let votes = mocks::certificate::sign_votes(schemes.iter().take(count as usize), proposal);
+        let certificate = mocks::certificate::build_certificate(&schemes[0], &votes);
         (votes, certificate)
     }
 
@@ -170,13 +159,8 @@ mod tests {
         Vec<Nullify<S, Sha256Digest>>,
         Nullification<S, Sha256Digest>,
     ) {
-        let votes: Vec<_> = schemes
-            .iter()
-            .take(count as usize)
-            .map(|scheme| Nullify::<_, Sha256Digest>::sign(scheme, round).unwrap())
-            .collect();
-        let certificate = Nullification::from_votes(&schemes[0], &votes, &Sequential)
-            .expect("nullification requires a quorum of votes");
+        let votes = mocks::certificate::sign_votes(schemes.iter().take(count as usize), &round);
+        let certificate = mocks::certificate::build_certificate(&schemes[0], &votes);
         (votes, certificate)
     }
 

@@ -52,13 +52,7 @@ impl<S: Scheme, D: Digest> Message<S, D> {
 
     // Return whether two votes would produce the same retained actor action.
     fn similar(a: &Vote<S, D>, b: &Vote<S, D>) -> bool {
-        a.view() == b.view()
-            && matches!(
-                (a, b),
-                (Vote::Notarize(_), Vote::Notarize(_))
-                    | (Vote::Nullify(_), Vote::Nullify(_))
-                    | (Vote::Finalize(_), Vote::Finalize(_))
-            )
+        a.view() == b.view() && a.phase() == b.phase()
     }
 }
 

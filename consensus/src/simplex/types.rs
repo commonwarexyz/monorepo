@@ -3,7 +3,7 @@
 use crate::{
     simplex::scheme::{self, CertificateVerifier},
     types::{Epoch, Participant, Round, View},
-    Epochable, Viewable,
+    Epochable, Roundable, Viewable,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
@@ -14,7 +14,7 @@ use commonware_cryptography::{
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
 use rand_core::CryptoRng;
-use std::{collections::HashSet, fmt::Debug, hash::Hash};
+use std::{collections::HashSet, fmt::Debug, hash::Hash, iter, slice};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
@@ -163,7 +163,16 @@ impl<T: Attributable> AttributableMap<T> {
     /// Returns an iterator over items in the map, ordered by signer index
     /// ([Attributable::signer()]).
     pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.data.iter().filter_map(|o| o.as_ref())
+        self.into_iter()
+    }
+}
+
+impl<'a, T: Attributable> IntoIterator for &'a AttributableMap<T> {
+    type Item = &'a T;
+    type IntoIter = iter::FilterMap<slice::Iter<'a, Option<T>>, fn(&'a Option<T>) -> Option<&'a T>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.data.iter().filter_map(Option::as_ref)
     }
 }
 
@@ -228,6 +237,17 @@ pub enum Vote<S: Scheme, D: Digest> {
     Nullify(Nullify<S, D>),
     /// A validator's finalize vote over a proposal.
     Finalize(Finalize<S, D>),
+}
+
+impl<S: Scheme, D: Digest> Vote<S, D> {
+    /// Returns the phase of this vote.
+    pub const fn phase(&self) -> Phase {
+        match self {
+            Self::Notarize(_) => Phase::Notarize,
+            Self::Nullify(_) => Phase::Nullify,
+            Self::Finalize(_) => Phase::Finalize,
+        }
+    }
 }
 
 impl<S: Scheme, D: Digest> Write for Vote<S, D> {
@@ -339,14 +359,37 @@ pub enum Certificate<S: Scheme, D: Digest> {
     Finalization(Finalization<S, D>),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl<S: Scheme, D: Digest> Certificate<S, D> {
-    /// Returns the stable trace field value for this certificate's type.
-    pub(crate) const fn kind(&self) -> &'static str {
+    /// Returns the phase of this certificate.
+    pub const fn phase(&self) -> Phase {
         match self {
-            Self::Notarization(_) => "notarization",
-            Self::Nullification(_) => "nullification",
-            Self::Finalization(_) => "finalization",
+            Self::Notarization(_) => Phase::Notarize,
+            Self::Nullification(_) => Phase::Nullify,
+            Self::Finalization(_) => Phase::Finalize,
+        }
+    }
+
+    /// Returns the stable trace field value for this certificate's type.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self.phase() {
+            Phase::Notarize => "notarization",
+            Phase::Nullify => "nullification",
+            Phase::Finalize => "finalization",
+        }
+    }
+
+    /// Verifies the certificate against the provided signing scheme.
+    pub fn verify<R: CryptoRng>(
+        &self,
+        rng: &mut R,
+        scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
+        strategy: &impl Strategy,
+    ) -> bool {
+        match self {
+            Self::Notarization(n) => n.verify(rng, scheme, strategy),
+            Self::Nullification(n) => n.verify(rng, scheme, strategy),
+            Self::Finalization(f) => f.verify(rng, scheme, strategy),
         }
     }
 }
@@ -741,6 +784,17 @@ where
 ///
 /// The implementations ([kind::Notarize], [kind::Nullify], [kind::Finalize]) instantiate
 /// [Signed], [Certified], and [Conflicting] for each vote phase.
+/// A vote phase, the value-level counterpart of [Kind].
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum Phase {
+    /// Endorsing a proposal for notarization.
+    Notarize,
+    /// Skipping the current round.
+    Nullify,
+    /// Finalizing a proposal.
+    Finalize,
+}
+
 pub trait Kind<D: Digest>: Clone + Debug + Send + Sync + 'static {
     /// Data attested by votes and certificates of this kind.
     type Payload: Clone
@@ -757,6 +811,9 @@ pub trait Kind<D: Digest>: Clone + Debug + Send + Sync + 'static {
         + Sync
         + 'static;
 
+    /// The value-level phase of this kind.
+    const PHASE: Phase;
+
     /// Builds the domain-separated subject covering `payload`.
     fn subject(payload: &Self::Payload) -> Subject<'_, D>;
 }
@@ -770,6 +827,8 @@ pub mod kind {
     pub struct Notarize;
 
     impl<D: Digest> super::Kind<D> for Notarize {
+        const PHASE: super::Phase = super::Phase::Notarize;
+
         type Payload = Proposal<D>;
 
         fn subject(payload: &Self::Payload) -> Subject<'_, D> {
@@ -782,6 +841,8 @@ pub mod kind {
     pub struct Nullify;
 
     impl<D: Digest> super::Kind<D> for Nullify {
+        const PHASE: super::Phase = super::Phase::Nullify;
+
         type Payload = Round;
 
         fn subject(payload: &Self::Payload) -> Subject<'_, D> {
@@ -794,6 +855,8 @@ pub mod kind {
     pub struct Finalize;
 
     impl<D: Digest> super::Kind<D> for Finalize {
+        const PHASE: super::Phase = super::Phase::Finalize;
+
         type Payload = Proposal<D>;
 
         fn subject(payload: &Self::Payload) -> Subject<'_, D> {
@@ -843,7 +906,7 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Signed<K, S, D> {
 
     /// Returns the round associated with this vote.
     pub fn round(&self) -> Round {
-        Round::new(self.payload.epoch(), self.payload.view())
+        self.payload.round()
     }
 }
 
@@ -999,7 +1062,7 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Certified<K, S, D> {
 
     /// Returns the round associated with the certified payload.
     pub fn round(&self) -> Round {
-        Round::new(self.payload.epoch(), self.payload.view())
+        self.payload.round()
     }
 }
 
@@ -1763,6 +1826,15 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Conflicting<K, S, D> {
         first.round() == second.round()
             && first.signer() == second.signer()
             && first.payload != second.payload
+    }
+
+    /// Creates conflicting evidence from two votes if they conflict: same round and
+    /// signer, differing payloads.
+    pub fn try_new(first: &Signed<K, S, D>, second: &Signed<K, S, D>) -> Option<Self> {
+        Self::conflicts(first, second).then(|| Self {
+            first: first.clone(),
+            second: second.clone(),
+        })
     }
 
     /// Creates new conflicting evidence from two conflicting votes.

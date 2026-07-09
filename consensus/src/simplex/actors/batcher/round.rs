@@ -4,7 +4,7 @@ use crate::{
         actors::span::ViewSpan,
         scheme::Scheme,
         types::{
-            Activity, Attributable, AttributableMap, Certified, ConflictingFinalize,
+            Activity, Attributable, AttributableMap, Certificate, Certified, ConflictingFinalize,
             ConflictingNotarize, Finalization, Kind, Notarization, Nullification, NullifyFinalize,
             Proposal, Signed, Vote, VoteTracker,
         },
@@ -131,19 +131,13 @@ impl<
         self.finalization.is_some()
     }
 
-    /// Stores a notarization certificate.
-    pub fn set_notarization(&mut self, notarization: Notarization<S, D>) {
-        self.notarization = Some(notarization);
-    }
-
-    /// Stores a nullification certificate.
-    pub fn set_nullification(&mut self, nullification: Nullification<S, D>) {
-        self.nullification = Some(nullification);
-    }
-
-    /// Stores a finalization certificate.
-    pub fn set_finalization(&mut self, finalization: Finalization<S, D>) {
-        self.finalization = Some(finalization);
+    /// Stores a verified certificate.
+    pub fn set_certificate(&mut self, certificate: Certificate<S, D>) {
+        match certificate {
+            Certificate::Notarization(notarization) => self.notarization = Some(notarization),
+            Certificate::Nullification(nullification) => self.nullification = Some(nullification),
+            Certificate::Finalization(finalization) => self.finalization = Some(finalization),
+        }
     }
 
     /// Adds a vote from the network to this round's verifier.
@@ -166,8 +160,7 @@ impl<
                 // Try to reserve
                 match self.pending_votes.notarizes.get(index) {
                     Some(previous) => {
-                        if previous.payload != notarize.payload {
-                            let activity = ConflictingNotarize::new(previous.clone(), notarize);
+                        if let Some(activity) = ConflictingNotarize::try_new(previous, &notarize) {
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity));
                             commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
@@ -233,8 +226,7 @@ impl<
                 // Try to reserve
                 match self.pending_votes.finalizes.get(index) {
                     Some(previous) => {
-                        if previous.payload != finalize.payload {
-                            let activity = ConflictingFinalize::new(previous.clone(), finalize);
+                        if let Some(activity) = ConflictingFinalize::try_new(previous, &finalize) {
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity));
                             commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
@@ -454,7 +446,7 @@ impl<
             return None;
         }
         let _span = span();
-        let certificate = Certified::from_votes(scheme, votes.iter(), strategy)?;
+        let certificate = Certified::from_votes(scheme, votes, strategy)?;
         *slot = Some(certificate.clone());
         Some(certificate)
     }

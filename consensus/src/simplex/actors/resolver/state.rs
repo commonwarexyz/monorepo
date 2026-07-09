@@ -262,15 +262,13 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
+            mocks,
             scheme::ed25519,
-            types::{
-                Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
-            },
+            types::{Finalization, Notarization, Nullification, Proposal},
         },
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
-    use commonware_parallel::Sequential;
     use commonware_utils::{test_rng, NZUsize};
 
     const NAMESPACE: &[u8] = b"resolver-state";
@@ -292,11 +290,10 @@ mod tests {
         view: View,
     ) -> Nullification<TestScheme, Sha256Digest> {
         let round = Round::new(EPOCH, view);
-        let votes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Nullify::<_, Sha256Digest>::sign(scheme, round).unwrap())
-            .collect();
-        Nullification::from_votes(verifier, &votes, &Sequential).expect("nullification quorum")
+        mocks::certificate::build_certificate(
+            verifier,
+            &mocks::certificate::sign_votes(schemes, &round),
+        )
     }
 
     fn build_notarization(
@@ -309,11 +306,10 @@ mod tests {
             view.previous().unwrap_or(View::zero()),
             Sha256Digest::from([view.get() as u8; 32]),
         );
-        let votes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        Notarization::from_votes(verifier, &votes, &Sequential).expect("notarization quorum")
+        mocks::certificate::build_certificate(
+            verifier,
+            &mocks::certificate::sign_votes(schemes, &proposal),
+        )
     }
 
     fn build_finalization(
@@ -326,11 +322,10 @@ mod tests {
             view.previous().unwrap_or(View::zero()),
             Sha256Digest::from([view.get() as u8; 32]),
         );
-        let votes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        Finalization::from_votes(verifier, &votes, &Sequential).expect("finalization quorum")
+        mocks::certificate::build_certificate(
+            verifier,
+            &mocks::certificate::sign_votes(schemes, &proposal),
+        )
     }
 
     fn fetch(view: u64, cause: u64, reason: FetchReason) -> Effect {

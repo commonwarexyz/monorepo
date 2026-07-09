@@ -1,4 +1,5 @@
-use commonware_cryptography::PublicKey;
+use crate::simplex::types::{Certificate, Phase, Vote};
+use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_runtime::telemetry::metrics::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
 use commonware_utils::Array;
 
@@ -70,45 +71,36 @@ pub enum MessageType {
     Finalization,
 }
 
+impl<S: Scheme, D: Digest> From<&Vote<S, D>> for MessageType {
+    fn from(vote: &Vote<S, D>) -> Self {
+        match vote.phase() {
+            Phase::Notarize => Self::Notarize,
+            Phase::Nullify => Self::Nullify,
+            Phase::Finalize => Self::Finalize,
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> From<&Certificate<S, D>> for MessageType {
+    fn from(certificate: &Certificate<S, D>) -> Self {
+        match certificate.phase() {
+            Phase::Notarize => Self::Notarization,
+            Phase::Nullify => Self::Nullification,
+            Phase::Finalize => Self::Finalization,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Outbound {
     pub message: MessageType,
 }
 
 impl Outbound {
-    pub const fn notarize() -> &'static Self {
-        &Self {
-            message: MessageType::Notarize,
-        }
-    }
-
-    pub const fn notarization() -> &'static Self {
-        &Self {
-            message: MessageType::Notarization,
-        }
-    }
-
-    pub const fn nullify() -> &'static Self {
-        &Self {
-            message: MessageType::Nullify,
-        }
-    }
-
-    pub const fn nullification() -> &'static Self {
-        &Self {
-            message: MessageType::Nullification,
-        }
-    }
-
-    pub const fn finalize() -> &'static Self {
-        &Self {
-            message: MessageType::Finalize,
-        }
-    }
-
-    pub const fn finalization() -> &'static Self {
-        &Self {
-            message: MessageType::Finalization,
+    /// Returns the outbound label for a message.
+    pub fn new(message: impl Into<MessageType>) -> Self {
+        Self {
+            message: message.into(),
         }
     }
 }
@@ -120,45 +112,11 @@ pub struct Inbound {
 }
 
 impl Inbound {
-    pub fn notarize(peer: &impl Array) -> Self {
+    /// Returns the inbound label for a message from `peer`.
+    pub fn new(peer: &impl Array, message: impl Into<MessageType>) -> Self {
         Self {
             peer: peer.to_string(),
-            message: MessageType::Notarize,
-        }
-    }
-
-    pub fn nullify(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Nullify,
-        }
-    }
-
-    pub fn finalize(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Finalize,
-        }
-    }
-
-    pub fn notarization(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Notarization,
-        }
-    }
-
-    pub fn nullification(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Nullification,
-        }
-    }
-
-    pub fn finalization(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Finalization,
+            message: message.into(),
         }
     }
 }

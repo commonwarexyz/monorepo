@@ -259,12 +259,8 @@ impl<
         vote: Vote<S, D>,
     ) {
         // Update outbound metrics
-        let metric = match &vote {
-            Vote::Notarize(_) => metrics::Outbound::notarize(),
-            Vote::Nullify(_) => metrics::Outbound::nullify(),
-            Vote::Finalize(_) => metrics::Outbound::finalize(),
-        };
-        self.outbound_messages.get_or_create(metric).inc();
+        let metric = metrics::Outbound::new(&vote);
+        self.outbound_messages.get_or_create(&metric).inc();
 
         // Broadcast vote
         sender.send(Recipients::All, vote, true);
@@ -277,12 +273,8 @@ impl<
         certificate: Certificate<S, D>,
     ) {
         // Update outbound metrics
-        let metric = match &certificate {
-            Certificate::Notarization(_) => metrics::Outbound::notarization(),
-            Certificate::Nullification(_) => metrics::Outbound::nullification(),
-            Certificate::Finalization(_) => metrics::Outbound::finalization(),
-        };
-        self.outbound_messages.get_or_create(metric).inc();
+        let metric = metrics::Outbound::new(&certificate);
+        self.outbound_messages.get_or_create(&metric).inc();
 
         // Broadcast certificate
         sender.send(Recipients::All, certificate, true);

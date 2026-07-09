@@ -143,12 +143,7 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                     },
                 ) => {
                     new_certificate.view() == old_certificate.view()
-                        && matches!(
-                            (new_certificate, old_certificate),
-                            (Certificate::Notarization(_), Certificate::Notarization(_))
-                                | (Certificate::Nullification(_), Certificate::Nullification(_))
-                                | (Certificate::Finalization(_), Certificate::Finalization(_))
-                        )
+                        && new_certificate.phase() == old_certificate.phase()
                 }
                 (
                     Self::Certified {

@@ -393,11 +393,7 @@ where
                 };
 
                 // Update metrics
-                let label = match &message {
-                    Certificate::Notarization(_) => Inbound::notarization(&sender),
-                    Certificate::Nullification(_) => Inbound::nullification(&sender),
-                    Certificate::Finalization(_) => Inbound::finalization(&sender),
-                };
+                let label = Inbound::new(&sender, &message);
                 self.inbound_messages.get_or_create(&label).inc();
 
                 // If the epoch is not the current epoch, block
@@ -444,53 +440,17 @@ where
                 );
                 let _guard = span.entered();
 
-                match message {
-                    Certificate::Notarization(notarization) => {
-                        // Verify the certificate
-                        if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
-                        {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid notarization");
-                            continue;
-                        }
-
-                        // Store and forward to voter
-                        work.entry(view)
-                            .or_insert_with(|| self.new_round(view))
-                            .set_notarization(notarization.clone());
-                        voter.recovered(Certificate::Notarization(notarization));
-                    }
-                    Certificate::Nullification(nullification) => {
-                        // Verify the certificate
-                        if !nullification.verify(
-                            self.context.as_mut(),
-                            &self.scheme,
-                            &self.strategy,
-                        ) {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid nullification");
-                            continue;
-                        }
-
-                        // Store and forward to voter
-                        work.entry(view)
-                            .or_insert_with(|| self.new_round(view))
-                            .set_nullification(nullification.clone());
-                        voter.recovered(Certificate::Nullification(nullification));
-                    }
-                    Certificate::Finalization(finalization) => {
-                        // Verify the certificate
-                        if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
-                        {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid finalization");
-                            continue;
-                        }
-
-                        // Store and forward to voter
-                        work.entry(view)
-                            .or_insert_with(|| self.new_round(view))
-                            .set_finalization(finalization.clone());
-                        voter.recovered(Certificate::Finalization(finalization));
-                    }
+                // Verify the certificate
+                if !message.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
+                    commonware_p2p::block!(self.blocker, sender, %view, "invalid certificate");
+                    continue;
                 }
+
+                // Store and forward to voter
+                work.entry(view)
+                    .or_insert_with(|| self.new_round(view))
+                    .set_certificate(message.clone());
+                voter.recovered(message);
 
                 // Certificates are already forwarded to voter, no need for construction
                 continue;
@@ -504,11 +464,7 @@ where
                 };
 
                 // Update metrics
-                let label = match &message {
-                    Vote::Notarize(_) => Inbound::notarize(&sender),
-                    Vote::Nullify(_) => Inbound::nullify(&sender),
-                    Vote::Finalize(_) => Inbound::finalize(&sender),
-                };
+                let label = Inbound::new(&sender, &message);
                 self.inbound_messages.get_or_create(&label).inc();
 
                 // If the epoch is not the current epoch, block

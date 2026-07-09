@@ -1,6 +1,7 @@
 //! Collection of mocks used to test `simplex`.
 
 pub mod application;
+pub mod certificate;
 pub mod conflicter;
 pub mod equivocator;
 pub mod impersonator;

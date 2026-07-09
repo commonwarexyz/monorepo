@@ -431,7 +431,7 @@ mod tests {
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
                 Notarization as TNotarization, Notarize as TNotarize,
-                Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
+                Nullification as TNullification, Proposal, Vote,
             },
         },
         types::{Epoch, Participant, Round},
@@ -4991,26 +4991,23 @@ mod tests {
 
             // Helper: assemble finalization from explicit signer indices
             let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
-                let votes: Vec<_> = (0..=quorum)
-                    .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
-                    .collect();
-                TFinalization::from_votes(&schemes[0], &votes, &Sequential)
-                    .expect("finalization quorum")
+                mocks::certificate::build_certificate(
+                    &schemes[0],
+                    &mocks::certificate::sign_votes(&schemes[..=quorum], proposal),
+                )
             };
             // Helper: assemble notarization from explicit signer indices
             let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
-                let votes: Vec<_> = (0..=quorum)
-                    .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
-                    .collect();
-                TNotarization::from_votes(&schemes[0], &votes, &Sequential)
-                    .expect("notarization quorum")
+                mocks::certificate::build_certificate(
+                    &schemes[0],
+                    &mocks::certificate::sign_votes(&schemes[..=quorum], proposal),
+                )
             };
             let build_nullification = |round: Round| -> TNullification<_, D> {
-                let votes: Vec<_> = (0..=quorum)
-                    .map(|i| TNullify::<_, D>::sign(&schemes[i], round).unwrap())
-                    .collect();
-                TNullification::from_votes(&schemes[0], &votes, &Sequential)
-                    .expect("nullification quorum")
+                mocks::certificate::build_certificate(
+                    &schemes[0],
+                    &mocks::certificate::sign_votes(&schemes[..=quorum], &round),
+                )
             };
             // Choose F=1 and construct B_1, B_2A, B_2B
             let f_view = 1;
