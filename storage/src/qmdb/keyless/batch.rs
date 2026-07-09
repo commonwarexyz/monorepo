@@ -195,7 +195,7 @@ where
             return Ok(Vec::new());
         }
         assert!(
-            locs.windows(2).all(|w| w[0] < w[1]),
+            locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
         let mut results = Vec::with_capacity(locs.len());
@@ -363,7 +363,7 @@ where
             return Ok(Vec::new());
         }
         assert!(
-            locs.windows(2).all(|w| w[0] < w[1]),
+            locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
         let mut results = Vec::with_capacity(locs.len());

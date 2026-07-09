@@ -15,7 +15,7 @@ pub mod segmented;
 /// Assert the batched-read caller contract that positions are strictly increasing.
 pub(crate) fn assert_positions_increasing(positions: &[u64]) {
     assert!(
-        positions.windows(2).all(|w| w[0] < w[1]),
+        positions.is_sorted_by(|a, b| a < b),
         "positions must be strictly increasing"
     );
 }

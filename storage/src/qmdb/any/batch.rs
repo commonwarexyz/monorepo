@@ -38,11 +38,6 @@ use tracing::debug;
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 
-/// User mutation recorded before `ops` and `diff` materialization.
-///
-/// `(key, superseded committed location, new value)` where `None` means delete.
-type EmitEvent<K, F, V> = (K, Option<Location<F>>, Option<V>);
-
 /// One contiguous chunk of floor-raise candidates paired with their resolved operations.
 type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 
@@ -889,7 +884,7 @@ where
             strategy.sort_by(&mut superseded_locs, |a, b| a.cmp(b));
             superseded_locs.dedup();
 
-            // The raise appends at most `total_steps` moved ops plus the CommitFloor; reserve
+            // The raise appends at most `total_steps` moved ops plus the CommitFloor. Reserve
             // once instead of growing mid-loop.
             ops.reserve(total_steps as usize + 1);
 
@@ -909,6 +904,11 @@ where
                 if candidates.is_empty() {
                     break;
                 }
+
+                // Both `sorted_contains` cursors rely on the candidate sequence ascending
+                // across the whole raise. `floor` is one past the last processed candidate.
+                assert!(candidates[0] >= floor);
+                assert!(candidates.is_sorted_by(|a, b| a < b));
 
                 // `read_candidates` omits locations already superseded by this diff. Keep
                 // `resolved` and `outcomes` in that filtered order, then walk `candidates`
@@ -1592,10 +1592,12 @@ where
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would
     /// otherwise require) and accepts the floor-raise candidate source.
     ///
-    /// The callback may skip locations only when it knows they are inactive. The floor-raise
-    /// loop revalidates each returned candidate against the batch diff, ancestor diffs, and
-    /// snapshot because the bitmap reflects committed state only -- uncommitted ancestor ops
-    /// aren't tracked, and bits can be set for locations superseded by an overlay in this chain.
+    /// The callback must yield candidates in ascending location order, both within one call
+    /// and across successive calls (the floor raise asserts this). It may skip locations only
+    /// when it knows they are inactive. The floor-raise loop revalidates each returned
+    /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
+    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
+    /// be set for locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -1614,19 +1616,40 @@ where
         let locations = m.gather_existing_locations(&mutations, db, false);
         let results = m.read_ops(&locations, &[], &db.log).await?;
 
-        // Record user mutations as events in op order; `ops` and `diff` are materialized from
-        // them across the strategy below.
-        let mut events: Vec<EmitEvent<K, F, V::Value>> =
+        // Generate user mutation operations.
+        let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
+            Vec::with_capacity(mutations.len() + staged_updates.len() + 1);
+        let mut diff: DiffVec<K, F, V::Value> =
             Vec::with_capacity(mutations.len() + staged_updates.len());
         let mut active_keys_delta: isize = 0;
+        let mut user_steps: u64 = 0;
 
         // Write a user mutation at the next batch location, preserving the previous committed
         // location of the key it supersedes.
         let mut emit = |key: K, base_old_loc: Option<Location<F>>, mutation: Option<V::Value>| {
-            if mutation.is_none() {
-                active_keys_delta -= 1;
+            let new_loc = Location::new(m.base_size + ops.len() as u64);
+            match mutation {
+                Some(value) => {
+                    ops.push(Operation::Update(update::Unordered(
+                        key.clone(),
+                        value.clone(),
+                    )));
+                    diff.push((
+                        key,
+                        DiffEntry::Active {
+                            value,
+                            loc: new_loc,
+                            base_old_loc,
+                        },
+                    ));
+                }
+                None => {
+                    ops.push(Operation::Delete(key.clone()));
+                    diff.push((key, DiffEntry::Deleted { base_old_loc }));
+                    active_keys_delta -= 1;
+                }
             }
-            events.push((key, base_old_loc, mutation));
+            user_steps += 1;
         };
 
         // Process updates/deletes of existing keys in location order, merging staged entries
@@ -1669,10 +1692,6 @@ where
             emit(key, Some(loc), mutation);
         }
 
-        // Floor-raise steps cover the user mutations recorded so far; creates below add
-        // active keys without stepping the floor.
-        let user_steps = events.len() as u64;
-
         // Handle parent-deleted keys that the child wants to re-create.
         let parent_deleted_creates = m.extract_parent_deleted_creates(&mut mutations);
 
@@ -1691,37 +1710,23 @@ where
         db.strategy()
             .sort_by(&mut creates, |(a, _, _), (b, _, _)| a.cmp(b));
         for (key, value, base_old_loc) in creates {
+            let new_loc = Location::new(m.base_size + ops.len() as u64);
+            ops.push(Operation::Update(update::Unordered(
+                key.clone(),
+                value.clone(),
+            )));
+            diff.push((
+                key,
+                DiffEntry::Active {
+                    value,
+                    loc: new_loc,
+                    base_old_loc,
+                },
+            ));
             active_keys_delta += 1;
-            events.push((key, base_old_loc, Some(value)));
         }
 
-        // Materialize `ops` and `diff` from the recorded events.
-        let strategy = db.strategy();
-        let ops: Vec<Operation<F, update::Unordered<K, V>>> =
-            strategy.map_collect_vec(&events, |(key, _, mutation)| {
-                mutation.as_ref().map_or_else(
-                    || Operation::Delete(key.clone()),
-                    |value| Operation::Update(update::Unordered(key.clone(), value.clone())),
-                )
-            });
-        let mut diff: DiffVec<K, F, V::Value> = strategy.map_collect_vec(
-            events.into_iter().enumerate(),
-            |(i, (key, base_old_loc, mutation))| {
-                let loc = Location::new(m.base_size + i as u64);
-                match mutation {
-                    Some(value) => (
-                        key,
-                        DiffEntry::Active {
-                            value,
-                            loc,
-                            base_old_loc,
-                        },
-                    ),
-                    None => (key, DiffEntry::Deleted { base_old_loc }),
-                }
-            },
-        );
-        strategy.sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
+        db.strategy().sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish(
@@ -1777,10 +1782,12 @@ where
     /// resolution would otherwise require: the caller's new value and the cached next key feed
     /// op generation directly) and accepts the floor-raise candidate source.
     ///
-    /// The callback may skip locations only when it knows they are inactive. The floor-raise
-    /// loop revalidates each returned candidate against the batch diff, ancestor diffs, and
-    /// snapshot because the bitmap reflects committed state only -- uncommitted ancestor ops
-    /// aren't tracked, and bits can be set for locations superseded by an overlay in this chain.
+    /// The callback must yield candidates in ascending location order, both within one call
+    /// and across successive calls (the floor raise asserts this). It may skip locations only
+    /// when it knows they are inactive. The floor-raise loop revalidates each returned
+    /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
+    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
+    /// be set for locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
