@@ -1273,12 +1273,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     }
 
     /// Verifies the certificates contained in this response against the signing scheme.
-    pub fn verify<R: CryptoRng>(
-        &self,
-        rng: &mut R,
-        scheme: &S,
-        strategy: &impl Strategy,
-    ) -> bool
+    pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         S: scheme::Scheme<D>,
     {
@@ -1510,12 +1505,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// This method **always** performs verification regardless of whether the activity has been
     /// previously verified. Callers can use [`Activity::verified`] to check if verification is
     /// necessary before calling this method.
-    pub fn verify<R: CryptoRng>(
-        &self,
-        rng: &mut R,
-        scheme: &S,
-        strategy: &impl Strategy,
-    ) -> bool
+    pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         S: scheme::Scheme<D>,
     {
