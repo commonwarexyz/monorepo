@@ -24,7 +24,7 @@ commonware-p2p.workspace = true
 commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-rand = { workspace = true, features = ["small_rng"] }
+rand = { workspace = true, features = ["std_rng", "sys_rng"] }
 serde = { workspace = true, features = ["derive"] }
 serde_yaml.workspace = true
 tracing.workspace = true

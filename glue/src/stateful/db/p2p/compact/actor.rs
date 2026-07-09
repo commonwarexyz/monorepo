@@ -14,14 +14,14 @@ use commonware_storage::{
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
-    sync::AsyncRwLock,
+    sync::TracedAsyncRwLock,
 };
 use futures::future;
 use rand::Rng;
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
 use tracing::info;
 
-type DbResolver<DB> = Arc<AsyncRwLock<DB>>;
+type DbResolver<DB> = Arc<TracedAsyncRwLock<DB>>;
 type DbOp<DB> = <DbResolver<DB> as compact::Resolver>::Op;
 type Pending<F, Op, D> =
     oneshot::Sender<Result<compact::FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
@@ -319,9 +319,7 @@ where
             return false;
         }
 
-        let hasher = qmdb::hasher::<H>();
-        qmdb::verify_proof(
-            &hasher,
+        qmdb::verify_proof::<H, _, _>(
             &state.last_commit_proof,
             Location::new(*state.leaf_count - 1),
             std::slice::from_ref(&state.last_commit_op),
@@ -360,7 +358,7 @@ mod tests {
     use commonware_utils::{
         channel::{mpsc, oneshot},
         sequence::U64,
-        sync::AsyncRwLock,
+        sync::TracedAsyncRwLock,
         NZUsize,
     };
     use std::{sync::Arc, time::Duration};
@@ -406,7 +404,7 @@ mod tests {
     type TestOp = KeylessOp<mmr::Family, U64>;
 
     fn test_config(
-        database: Option<Arc<AsyncRwLock<TestDb>>>,
+        database: Option<Arc<TracedAsyncRwLock<TestDb>>>,
     ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestDb> {
         Config {
             peer_provider: DummyProvider,
@@ -423,13 +421,23 @@ mod tests {
     }
 
     async fn init_db(context: deterministic::Context) -> TestDb {
+        let witness = commonware_storage::journal::contiguous::variable::Config {
+            partition: "compact-p2p-test-witness".into(),
+            items_per_section: commonware_utils::NZU64!(64),
+            compression: None,
+            codec_config: (),
+            page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
+                &context,
+                commonware_utils::NZU16!(1024),
+                NZUsize!(64),
+            ),
+            write_buffer: NZUsize!(1024),
+        };
         TestDb::init(
             context,
             keyless_fixed::CompactConfig {
-                merkle: commonware_storage::merkle::compact::Config {
-                    partition: "compact-p2p-test".into(),
-                    strategy: Sequential,
-                },
+                strategy: Sequential,
+                witness,
                 commit_codec_config: (),
             },
         )
@@ -450,13 +458,15 @@ mod tests {
             db.inactivity_floor_loc(),
         ))
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
-        let target = db.current_target();
-        let fetch =
-            compact::Resolver::get_compact_state(&Arc::new(AsyncRwLock::new(db)), target.clone())
-                .await
-                .expect("compact state should be available");
+        let target = db.target();
+        let fetch = compact::Resolver::get_compact_state(
+            &Arc::new(TracedAsyncRwLock::new("test", db)),
+            target.clone(),
+        )
+        .await
+        .expect("compact state should be available");
         (target, fetch)
     }
 
@@ -565,8 +575,8 @@ mod tests {
     fn produce_serves_attached_database() {
         deterministic::Runner::default().start(|context| async move {
             let db = init_db(context.child("db")).await;
-            let target = db.current_target();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let target = db.target();
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
             let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(db)));
             let request = handler::Request::from_target(target.clone());
             let (response_tx, response_rx) = oneshot::channel();

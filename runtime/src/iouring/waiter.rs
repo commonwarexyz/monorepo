@@ -399,7 +399,7 @@ mod tests {
 
     /// Build a `Sync` request backed by a socket fd so waiter tests can
     /// exercise slot lifecycle without touching the filesystem.
-    fn make_sync_request() -> (Request, oneshot::Receiver<std::io::Result<()>>) {
+    fn make_sync_request() -> (Request, oneshot::Receiver<Result<(), crate::Error>>) {
         let (sock_left, _sock_right) =
             std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
         // SAFETY: sock_left is a valid fd that we own.

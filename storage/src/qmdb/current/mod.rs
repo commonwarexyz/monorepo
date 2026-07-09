@@ -319,9 +319,9 @@
 //! against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
-//! verifying ops proofs directly should use [`crate::qmdb::hasher`]. After sync, the bitmap and
-//! grafted tree are reconstructed deterministically from the operations, and the canonical root is
-//! computed. [proof::OpsRootWitness] can be used to validate that a particular ops root is
+//! verifying ops proofs directly should use [`crate::qmdb::verify_proof`]. After sync, the bitmap
+//! and grafted tree are reconstructed deterministically from the operations, and the canonical root
+//! is computed. [proof::OpsRootWitness] can be used to validate that a particular ops root is
 //! committed by a trusted canonical root; the sync engine does not perform this check itself.
 
 use crate::{
@@ -332,7 +332,6 @@ use crate::{
     },
     merkle::{self, full::Config as MerkleConfig, Location},
     qmdb::{
-        self,
         any::{
             self,
             operation::{Operation, Update},
@@ -346,8 +345,10 @@ use crate::{
 };
 use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
+use commonware_utils::bitmap::Prunable as BitMap;
+use core::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub mod batch;
@@ -375,6 +376,10 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// The translator used by the compressed index.
     pub translator: T,
+
+    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
+    /// collisions without re-reading the log; `None` disables it.
+    pub init_cache_size: Option<NonZeroUsize>,
 }
 
 impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
@@ -383,6 +388,7 @@ impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S>
             merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
+            init_cache_size: cfg.init_cache_size,
         }
     }
 }
@@ -394,6 +400,7 @@ pub type FixedConfig<T, S> = Config<T, FConfig, S>;
 pub type VariableConfig<T, C, S> = Config<T, VConfig<C>, S>;
 
 /// Initialize a `Current` authenticated db from the given config.
+#[boxed]
 pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
     context: E,
     config: Config<T, J::Config, S>,
@@ -440,11 +447,9 @@ where
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
 
     // Build the grafted tree from the bitmap and ops tree.
-    let hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = crate::merkle::Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
-        &hasher,
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
@@ -454,16 +459,14 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(
+    let storage = grafting::Storage::<F, H, _, _>::new(
         &grafted_tree,
         grafting::height::<N>(),
         &any.log.merkle,
-        hasher.clone(),
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.root();
-    let root = db::compute_db_root(
-        &hasher,
+    let root = db::compute_db_root::<F, H, _, _, N>(
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
@@ -477,7 +480,7 @@ where
     let db = db::Db {
         any,
         grafted_tree,
-        metadata: AsyncMutex::new(metadata),
+        metadata,
         strategy,
         root,
         metrics,
@@ -496,7 +499,7 @@ pub trait BitmapPrunedBits {
     fn get_bit(&self, index: u64) -> bool;
 
     /// Returns the position of the oldest retained bit.
-    fn oldest_retained(&self) -> impl core::future::Future<Output = u64> + Send;
+    fn oldest_retained(&self) -> u64;
 }
 
 #[cfg(test)]
@@ -506,14 +509,14 @@ pub mod tests {
     pub use super::BitmapPrunedBits;
     use super::{ordered, unordered, FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig};
     use crate::{
-        merkle::{self, mmb, mmr, Bagging::ForwardFold},
+        merkle::{self, mmb, mmr},
         qmdb::{
-            self,
             any::{
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
+            verify_proof,
         },
         translator::Translator,
     };
@@ -526,7 +529,7 @@ pub mod tests {
     use commonware_utils::{bitmap::Readable, NZUsize, NZU16, NZU64};
     use core::future::Future;
     use ordered::tests::test_build_small_close_reopen as test_ordered_build_small_close_reopen;
-    use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         num::{NonZeroU16, NonZeroUsize},
         sync::Arc,
@@ -541,6 +544,206 @@ pub mod tests {
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(88);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
+
+    /// Instantiate the staged-merkleize parity test for one current DB kind, with `$open_db` as
+    /// the kind's test DB constructor.
+    ///
+    /// The staged path (`stage` + `Staged::merkleize`) must produce a root byte-identical to an
+    /// explicit `get_many` + `write` + `merkleize` over the current layer, across updates,
+    /// deletes (which fall back to normal mutations and, for the ordered kind, rewrite
+    /// predecessors via a snapshot-bucket scan), upserts, duplicate read slots, missing keys,
+    /// and prefix-then-suffix expansion, rooted at the DB (D=0) and through one or two pending
+    /// ancestors (D=1/D=2). This guards the current-layer threading of
+    /// `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`, and
+    /// `compute_current_layer` for non-empty staged updates. Collision-prone translators in
+    /// `$open_db` (e.g. `OneCap`) stress predecessor rewrites.
+    macro_rules! staged_merkleize_parity_test {
+        ($name:ident, $open_db:path) => {
+            #[test_traced("WARN")]
+            pub fn $name() {
+                fn key(i: u64) -> Digest {
+                    Sha256::hash(&i.to_be_bytes())
+                }
+                fn val(i: u64) -> Digest {
+                    Sha256::hash(&(i + 10000).to_be_bytes())
+                }
+
+                deterministic::Runner::default().start(|ctx| async move {
+                    let mut db = $open_db(ctx.child("current"), "staged-parity".to_string()).await;
+
+                    let mut seed = db.new_batch();
+                    for i in 0..2000u64 {
+                        seed = seed.write(key(i), Some(val(i)));
+                    }
+                    let seed = seed.merkleize(&db, None).await.unwrap();
+                    db.apply_batch(seed).await.unwrap();
+                    db.commit().await.unwrap();
+
+                    for depth in [0u8, 1u8, 2u8] {
+                        // Keep every uncommitted ancestor alive until the child is merkleized.
+                        // Speculative batch Merkle lookups walk weak parent links for in-memory
+                        // ancestor nodes.
+                        let mut stack = Vec::new();
+                        match depth {
+                            0 => {}
+                            1 => {
+                                let mut p = db.new_batch();
+                                for i in 0..50u64 {
+                                    p = p.write(key(i), Some(val(i + 1_000)));
+                                }
+                                for i in 100..110u64 {
+                                    p = p.write(key(i), None);
+                                }
+                                stack.push(p.merkleize(&db, None).await.unwrap());
+                            }
+                            2 => {
+                                let mut grandparent = db.new_batch();
+                                for i in 0..10u64 {
+                                    grandparent = grandparent.write(key(i), Some(val(i + 1_000)));
+                                }
+                                for i in 100..110u64 {
+                                    grandparent = grandparent.write(key(i), None);
+                                }
+                                let grandparent = grandparent.merkleize(&db, None).await.unwrap();
+
+                                let mut p = grandparent.new_batch::<Sha256>();
+                                for i in 20..30u64 {
+                                    p = p.write(key(i), Some(val(i + 2_000)));
+                                }
+                                let p = p.merkleize(&db, None).await.unwrap();
+                                stack.push(grandparent);
+                                stack.push(p);
+                            }
+                            _ => unreachable!("covered depths"),
+                        };
+                        let new_batch = || {
+                            stack
+                                .last()
+                                .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
+                        };
+
+                        // key(60) is untouched by the depth-1/2 ancestors, so its staged read
+                        // stays committed-resolved and exercises staged cached-location reuse
+                        // behind stacked batches.
+                        let read_keys = [
+                            key(5),
+                            key(6),
+                            key(9000),
+                            key(5),
+                            key(0),
+                            key(20),
+                            key(60),
+                            key(105),
+                        ];
+                        let keys: Vec<&Digest> = read_keys.iter().collect();
+                        let indexed_updates = vec![
+                            (0, Some(val(5_000))),
+                            (2, Some(val(5_001))),
+                            (3, Some(val(5_002))),
+                            (4, Some(val(5_003))),
+                            (5, None),
+                            (6, Some(val(5_004))),
+                            (7, Some(val(5_005))),
+                        ];
+                        let upserts = vec![
+                            (key(7000), Some(val(6_000))),
+                            (key(30), Some(val(6_001))),
+                            (key(5), Some(val(6_002))),
+                            (key(31), None),
+                        ];
+
+                        let mut explicit = new_batch();
+                        let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
+                        for (slot, value) in &indexed_updates {
+                            explicit = explicit.write(read_keys[*slot], *value);
+                        }
+                        for (k, v) in &upserts {
+                            explicit = explicit.write(*k, *v);
+                        }
+                        let explicit_root = explicit.merkleize(&db, None).await.unwrap().root();
+
+                        let (staged_values, staged) = new_batch().stage(&keys, &db).await.unwrap();
+                        let staged_root = staged
+                            .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
+                            .await
+                            .unwrap()
+                            .root();
+
+                        assert_eq!(
+                            explicit_values, staged_values,
+                            "value mismatch at depth={depth}"
+                        );
+                        assert_eq!(explicit_root, staged_root, "root mismatch at depth={depth}");
+
+                        let split = 3;
+                        let (mut expanded_values, staged) =
+                            new_batch().stage(&keys[..split], &db).await.unwrap();
+                        let (range, suffix_values, staged) =
+                            staged.expand(&keys[split..], &db).await.unwrap();
+                        assert_eq!(range, split..keys.len());
+                        expanded_values.extend(suffix_values);
+                        let expanded_root = staged
+                            .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
+                            .await
+                            .unwrap()
+                            .root();
+
+                        assert_eq!(
+                            explicit_values, expanded_values,
+                            "expanded value mismatch at depth={depth}"
+                        );
+                        assert_eq!(
+                            explicit_root, expanded_root,
+                            "expanded root mismatch at depth={depth}"
+                        );
+
+                        let planned = val(7_000);
+                        let duplicate_update = val(7_001);
+                        let (first_values, staged) =
+                            new_batch().stage(&keys[..1], &db).await.unwrap();
+                        let (duplicate_range, duplicate_values, staged) =
+                            staged.expand(&keys[..1], &db).await.unwrap();
+                        assert_eq!(duplicate_range, 1..2);
+                        assert_eq!(
+                            first_values[0], duplicate_values[0],
+                            "duplicate expansion must assign a new slot without changing the base read"
+                        );
+                        assert_ne!(
+                            duplicate_values[0],
+                            Some(planned),
+                            "expand must not observe values computed for earlier staged slots"
+                        );
+
+                        let duplicate_root = staged
+                            .merkleize(
+                                vec![
+                                    (0, Some(planned)),
+                                    (duplicate_range.start, Some(duplicate_update)),
+                                ],
+                                Vec::new(),
+                                None,
+                                &db,
+                            )
+                            .await
+                            .unwrap()
+                            .root();
+                        let expected_duplicate_root = new_batch()
+                            .write(read_keys[0], Some(planned))
+                            .write(read_keys[0], Some(duplicate_update))
+                            .merkleize(&db, None)
+                            .await
+                            .unwrap()
+                            .root();
+                        assert_eq!(
+                            expected_duplicate_root, duplicate_root,
+                            "duplicate expanded slots should use normal update-order semantics"
+                        );
+                    }
+                });
+            }
+        };
+    }
+    pub(crate) use staged_merkleize_parity_test;
 
     /// Shared config factory for fixed-value Current QMDB tests.
     pub(crate) fn fixed_config<T: Translator + Default>(
@@ -565,6 +768,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -593,29 +797,35 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
     /// Commit a set of writes as a single batch.
-    async fn commit_writes<F: merkle::Graftable, C: DbAny<F>>(
-        db: &mut C,
-        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny<F>>::Value>)>,
-    ) -> Result<(), Error<F>> {
-        let mut batch = db.new_batch();
-        for (k, v) in writes {
-            batch = batch.write(k, v);
-        }
-        let merkleized = batch.merkleize(db, None).await?;
-        db.apply_batch(merkleized).await?;
-        db.commit().await?;
-        Ok(())
+    ///
+    /// Returns a boxed future so the merkleize/apply/commit chain does not inflate the futures
+    /// (and poll frames) of every test composing commits, which overflow the stack on platforms
+    /// with small defaults.
+    fn commit_writes<'a, F: merkle::Graftable, C: DbAny<F>>(
+        db: &'a mut C,
+        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny<F>>::Value>)> + 'a,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), Error<F>>> + 'a>> {
+        Box::pin(async move {
+            let mut batch = db.new_batch();
+            for (k, v) in writes {
+                batch = batch.write(k, v);
+            }
+            let merkleized = batch.merkleize(db, None).await?;
+            db.apply_batch(merkleized).await?;
+            db.commit().await?;
+            Ok(())
+        })
     }
 
     /// Apply random operations to the given db, committing them (randomly and at the end) only if
     /// `commit_changes` is true. Returns the db; callers should commit if needed.
-    ///
-    /// Returns a boxed future to prevent stack overflow when monomorphized across many DB variants.
-    async fn apply_random_ops_inner<F, C>(
+    #[boxed]
+    pub async fn apply_random_ops<F, C>(
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
@@ -664,31 +874,49 @@ pub mod tests {
         Ok(db)
     }
 
-    pub fn apply_random_ops<F, C>(
-        num_elements: u64,
-        commit_changes: bool,
-        rng_seed: u64,
-        db: C,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error<F>>>>>
+    /// Build a random database, close and reopen it, and return the auditor state.
+    #[boxed]
+    async fn build_random_close_reopen_round<M, C, F, Fut>(
+        mut context: Context,
+        mut open_db: F,
+    ) -> String
     where
-        F: merkle::Graftable + 'static,
-        C: DbAny<F> + 'static,
+        M: merkle::Graftable + 'static,
+        C: DbAny<M> + 'static,
         C::Key: TestKey,
-        <C as DbAny<F>>::Value: TestValue,
+        <C as DbAny<M>>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut,
+        Fut: Future<Output = C>,
     {
-        Box::pin(apply_random_ops_inner::<F, C>(
-            num_elements,
-            commit_changes,
-            rng_seed,
-            db,
-        ))
+        const ELEMENTS: u64 = 1000;
+
+        let partition = "build-random".to_string();
+        let rng_seed = context.next_u64();
+        let mut db: C = open_db(context.child("first"), partition.clone()).await;
+        db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+            .await
+            .unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.sync().await.unwrap();
+
+        // Drop and reopen the db
+        let root = db.root();
+        drop(db);
+        let db: C = open_db(context.child("second"), partition).await;
+
+        // Ensure the root matches
+        assert_eq!(db.root(), root);
+
+        db.destroy().await.unwrap();
+        context.auditor().state()
     }
 
     /// Run `test_build_random_close_reopen` against a database factory.
     ///
     /// The factory should return a database when given a context and partition name.
     /// The factory will be called multiple times to test reopening.
-    pub async fn test_build_random_close_reopen<M, C, F, Fut>(mut context: Context, mut open_db: F)
+    pub async fn test_build_random_close_reopen<M, C, F, Fut>(context: Context, open_db: F)
     where
         M: merkle::Graftable + 'static,
         C: DbAny<M> + 'static,
@@ -697,54 +925,14 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        const ELEMENTS: u64 = 1000;
-
         // Run on the provided runner.
-        let mut open_db_clone = open_db.clone();
-        let state1 = {
-            let partition = "build-random".to_string();
-            let rng_seed = context.next_u64();
-            let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
-            db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
-                .await
-                .unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.sync().await.unwrap();
-
-            // Drop and reopen the db
-            let root = db.root();
-            drop(db);
-            let db: C = open_db_clone(context.child("second"), partition).await;
-
-            // Ensure the root matches
-            assert_eq!(db.root(), root);
-
-            db.destroy().await.unwrap();
-            context.auditor().state()
-        };
+        let state1 =
+            build_random_close_reopen_round::<M, C, F, Fut>(context, open_db.clone()).await;
 
         // Run again on a fresh runner to verify determinism.
         let executor = deterministic::Runner::default();
-        let state2 = executor.start(|mut context| async move {
-            let partition = "build-random".to_string();
-            let rng_seed = context.next_u64();
-            let mut db: C = open_db(context.child("first"), partition.clone()).await;
-            db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
-                .await
-                .unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.sync().await.unwrap();
-
-            let root = db.root();
-            drop(db);
-            let db: C = open_db(context.child("second"), partition).await;
-            assert_eq!(db.root(), root);
-
-            db.destroy().await.unwrap();
-            context.auditor().state()
-        });
+        let state2 = executor
+            .start(|context| build_random_close_reopen_round::<M, C, F, Fut>(context, open_db));
 
         assert_eq!(state1, state2);
     }
@@ -761,7 +949,7 @@ pub mod tests {
     {
         let mut open_db_clone = open_db.clone();
         let partition = "commit-after-sync".to_string();
-        let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
         let key0 = <<C as DbAny<M>>::Key as TestKey>::from_seed(0);
         let key1 = <<C as DbAny<M>>::Key as TestKey>::from_seed(1);
         let value0 = <C as DbAny<M>>::Value::from_seed(100);
@@ -778,12 +966,12 @@ pub mod tests {
             .await
             .unwrap();
         let committed_root = db.root();
-        let committed_size = db.size().await;
+        let committed_size = db.size();
         drop(db);
 
-        let db: C = open_db(context.child("second"), partition).await;
+        let db: C = Box::pin(open_db(context.child("second"), partition)).await;
         assert_eq!(db.root(), committed_root);
-        assert_eq!(db.size().await, committed_size);
+        assert_eq!(db.size(), committed_size);
         assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
 
@@ -807,14 +995,14 @@ pub mod tests {
 
         let partition = "build-random-fail-commit".to_string();
         let rng_seed = context.next_u64();
-        let mut db: C = open_db(context.child("first"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db(context.child("first"), partition.clone())).await;
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
             .await
             .unwrap();
         commit_writes(&mut db, []).await.unwrap();
         let committed_root = db.root();
-        let committed_op_count = db.bounds().await.end;
-        db.prune(db.sync_boundary().await).await.unwrap();
+        let committed_op_count = db.bounds().end;
+        db.prune(db.sync_boundary()).await.unwrap();
 
         // Perform more random operations without committing any of them.
         let db = apply_random_ops::<M, C>(ELEMENTS, false, rng_seed + 1, db)
@@ -824,13 +1012,13 @@ pub mod tests {
         // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
         // state of the DB should be as of the last commit.
         drop(db);
-        let db: C = open_db(
+        let db: C = Box::pin(open_db(
             context.child("scenario").with_attribute("index", 1),
             partition.clone(),
-        )
+        ))
         .await;
         assert_eq!(db.root(), committed_root);
-        assert_eq!(db.bounds().await.end, committed_op_count);
+        assert_eq!(db.bounds().end, committed_op_count);
 
         // Re-apply the exact same operations, this time committed.
         let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
@@ -840,22 +1028,22 @@ pub mod tests {
         // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
         // before sync/prune is called. We do this by dropping the db without calling
         // sync or prune.
-        let committed_op_count = db.bounds().await.end;
+        let committed_op_count = db.bounds().end;
         drop(db);
 
         // We should be able to recover, so the root should differ from the previous commit, and
         // the op count should be greater than before.
-        let db: C = open_db(
+        let db: C = Box::pin(open_db(
             context.child("scenario").with_attribute("index", 2),
             partition.clone(),
-        )
+        ))
         .await;
         let scenario_2_root = db.root();
 
         // To confirm the second committed hash is correct we'll re-build the DB in a new
         // partition, but without any failures. They should have the exact same state.
         let fresh_partition = "build-random-fail-commit-fresh".to_string();
-        let mut db: C = open_db(context.child("fresh"), fresh_partition.clone()).await;
+        let mut db: C = Box::pin(open_db(context.child("fresh"), fresh_partition.clone())).await;
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
             .await
             .unwrap();
@@ -863,9 +1051,9 @@ pub mod tests {
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
             .await
             .unwrap();
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
         // State from scenario #2 should match that of a successful commit.
-        assert_eq!(db.bounds().await.end, committed_op_count);
+        assert_eq!(db.bounds().end, committed_op_count);
         assert_eq!(db.root(), scenario_2_root);
 
         db.destroy().await.unwrap();
@@ -890,9 +1078,13 @@ pub mod tests {
 
         let mut open_db_clone = open_db.clone();
         // Create two databases that are identical other than how they are pruned.
-        let mut db_no_pruning: C =
-            open_db_clone(context.child("no_pruning"), "no-pruning-test".into()).await;
-        let mut db_pruning: C = open_db(context.child("pruning"), "pruning-test".into()).await;
+        let mut db_no_pruning: C = Box::pin(open_db_clone(
+            context.child("no_pruning"),
+            "no-pruning-test".into(),
+        ))
+        .await;
+        let mut db_pruning: C =
+            Box::pin(open_db(context.child("pruning"), "pruning-test".into())).await;
 
         // Apply identical operations to both databases, but only prune one.
         // Accumulate writes between commits.
@@ -914,7 +1106,7 @@ pub mod tests {
                     .await
                     .unwrap();
                 db_pruning
-                    .prune(db_no_pruning.sync_boundary().await)
+                    .prune(db_no_pruning.sync_boundary())
                     .await
                     .unwrap();
             }
@@ -935,8 +1127,8 @@ pub mod tests {
 
         // Also verify inactivity floors match
         assert_eq!(
-            db_no_pruning.inactivity_floor_loc().await,
-            db_pruning.inactivity_floor_loc().await
+            db_no_pruning.inactivity_floor_loc(),
+            db_pruning.inactivity_floor_loc()
         );
 
         db_no_pruning.destroy().await.unwrap();
@@ -964,7 +1156,7 @@ pub mod tests {
         let mut open_db_clone = open_db.clone();
         let partition = "sync-bitmap-pruning".to_string();
         let rng_seed = context.next_u64();
-        let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
 
         // Apply random operations with commits to advance the inactivity floor.
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
@@ -974,14 +1166,14 @@ pub mod tests {
         db.apply_batch(merkleized).await.unwrap();
 
         // Prune to flatten bitmap layers and advance pruned_chunks.
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
 
         let pruned_bits_before = db.pruned_bits();
         warn!(
             "pruned_bits_before={}, inactivity_floor={}, op_count={}",
             pruned_bits_before,
-            *db.inactivity_floor_loc().await,
-            *db.bounds().await.end
+            *db.inactivity_floor_loc(),
+            *db.bounds().end
         );
 
         // Verify we actually have some pruning (otherwise the test is meaningless).
@@ -998,7 +1190,7 @@ pub mod tests {
         drop(db);
 
         // Reopen the database.
-        let db: C = open_db(context.child("second"), partition).await;
+        let db: C = Box::pin(open_db(context.child("second"), partition)).await;
 
         // The pruned bits count should match. If sync() didn't persist the bitmap pruned
         // state, this would be 0.
@@ -1033,7 +1225,7 @@ pub mod tests {
         const ELEMENTS: u64 = 1000;
 
         let mut open_db_clone = open_db.clone();
-        let mut db: C = open_db_clone(context.child("first"), "build-big".into()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("first"), "build-big".into())).await;
 
         let mut map = std::collections::HashMap::<C::Key, <C as DbAny<M>>::Value>::default();
 
@@ -1074,7 +1266,7 @@ pub mod tests {
 
         // Sync and prune.
         db.sync().await.unwrap();
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
 
         // Record root before dropping.
         let root = db.root();
@@ -1082,7 +1274,7 @@ pub mod tests {
         drop(db);
 
         // Reopen the db and verify it has exactly the same state.
-        let db: C = open_db(context.child("second"), "build-big".into()).await;
+        let db: C = Box::pin(open_db(context.child("second"), "build-big".into())).await;
         assert_eq!(root, db.root());
 
         // Confirm the db's state matches that of the separate map we computed independently.
@@ -1111,7 +1303,11 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
-        let mut db: C = open_db(context.child("db"), "stale-side-effect-free".into()).await;
+        let mut db: C = Box::pin(open_db(
+            context.child("db"),
+            "stale-side-effect-free".into(),
+        ))
+        .await;
 
         let key1 = <C::Key as TestKey>::from_seed(1);
         let key2 = <C::Key as TestKey>::from_seed(2);
@@ -1127,7 +1323,7 @@ pub mod tests {
 
         db.apply_batch(batch_a).await.unwrap();
         let expected_root = db.root();
-        let expected_bounds = db.bounds().await;
+        let expected_bounds = db.bounds();
         let expected_metadata = db.get_metadata().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1.clone()));
         assert_eq!(db.get(&key2).await.unwrap(), None);
@@ -1138,7 +1334,7 @@ pub mod tests {
             "expected StaleBatch error, got {result:?}"
         );
         assert_eq!(db.root(), expected_root);
-        assert_eq!(db.bounds().await, expected_bounds);
+        assert_eq!(db.bounds(), expected_bounds);
         assert_eq!(db.get_metadata().await.unwrap(), expected_metadata);
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
         assert_eq!(db.get(&key2).await.unwrap(), None);
@@ -1148,7 +1344,7 @@ pub mod tests {
 
     use crate::translator::OneCap;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
-    use commonware_macros::{test_group, test_traced};
+    use commonware_macros::{boxed, test_group, test_traced};
 
     type OrderedFixedDb =
         ordered::fixed::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
@@ -1359,6 +1555,112 @@ pub mod tests {
         32,
         Sequential,
     >;
+
+    // Regression test for a forged exclusion proof against the ordered partitioned index with
+    // variable-length keys shorter than the partition prefix. The buggy router zero-padded a short
+    // key into the lowest partition, so its `next_key` wrapped around the whole keyspace and the
+    // resulting authenticated span covered a live key, letting a prover forge that key's exclusion.
+    // Order-preserving routing keeps the key in lexicographic position, so the span no longer covers
+    // it.
+    #[test_traced]
+    fn test_partitioned_ordered_short_key_exclusion_not_forgeable() {
+        type ForgedExclusionDb = ordered::variable::partitioned::Db<
+            mmr::Family,
+            Context,
+            Vec<u8>,
+            Vec<u8>,
+            Sha256,
+            OneCap,
+            2,
+            32,
+            Sequential,
+        >;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = VariableConfig {
+                merkle_config: MerkleConfig {
+                    journal_partition: "forged-exclusion-journal".to_string(),
+                    metadata_partition: "forged-exclusion-metadata".to_string(),
+                    items_per_blob: NZU64!(11),
+                    write_buffer: NZUsize!(1024),
+                    strategy: Sequential,
+                    page_cache: page_cache.clone(),
+                },
+                journal_config: VConfig {
+                    partition: "forged-exclusion-log".to_string(),
+                    items_per_section: NZU64!(7),
+                    compression: None,
+                    codec_config: (((0..=8).into(), ()), ((0..=8).into(), ())),
+                    page_cache,
+                    write_buffer: NZUsize!(1024),
+                },
+                grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
+                translator: OneCap,
+                init_cache_size: Some(NZUsize!(1024)),
+            };
+            let mut db = ForgedExclusionDb::init(context.child("db"), cfg)
+                .await
+                .unwrap();
+
+            // `b` is shorter than the 2-byte prefix and lexicographically falls between `a` and `c`
+            // (`b` is a proper prefix of `c`). The bug routed `b` to partition 0x0001 instead of
+            // 0x0100, below `a` at 0x0080.
+            let a = vec![0x00u8, 0x80];
+            let b = vec![0x01u8];
+            let c = vec![0x01u8, 0x00];
+            let (va, vb, vc) = (vec![0x0au8], vec![0x0bu8], vec![0x0cu8]);
+
+            // Commit `a` and `b` (ring a -> b -> a), then `c` in a later batch.
+            let merkleized = db
+                .new_batch()
+                .write(a.clone(), Some(va.clone()))
+                .write(b.clone(), Some(vb.clone()))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .write(c.clone(), Some(vc.clone()))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            let root = db.root();
+
+            // All three keys are live.
+            assert_eq!(db.get(&a).await.unwrap(), Some(va));
+            assert_eq!(db.get(&b).await.unwrap(), Some(vb));
+            assert_eq!(db.get(&c).await.unwrap(), Some(vc));
+
+            // Root cause: the ring must link keys in lexicographic order, so `b`'s successor is `c`
+            // (pre-fix it wrapped around to `a`).
+            let (_, span_b) = db.get_span(&b).await.unwrap().unwrap();
+            assert_eq!(
+                span_b.next_key, c,
+                "b.next_key must be c, not the wrapped-around a"
+            );
+
+            // Honest exclusion proving refuses a live key.
+            assert!(matches!(
+                db.exclusion_proof(&c).await,
+                Err(Error::KeyExists)
+            ));
+
+            // Forge attempt: package `b`'s authenticated update as an exclusion proof for `c`. The
+            // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
+            // [b, a), which cyclically covered `c` and verified).
+            let kvp = db.key_value_proof(b.clone()).await.unwrap();
+            let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
+            assert!(!ForgedExclusionDb::verify_exclusion_proof(
+                &c, &forged, &root
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
 
     // Helper macro to create an open_db closure for a specific variant.
     macro_rules! open_db_fn {
@@ -1571,7 +1873,7 @@ pub mod tests {
             )
             .await
             .unwrap();
-            let initial_size = db.bounds().await.end;
+            let initial_size = db.bounds().end;
             let initial_root = db.root();
             let initial_ops_root = db.ops_root();
             let initial_floor = db.inactivity_floor_loc();
@@ -1584,7 +1886,7 @@ pub mod tests {
             )
             .await;
             assert_eq!(first_range.start, initial_size);
-            let size_before = db.bounds().await.end;
+            let size_before = db.bounds().end;
             let root_before = db.root();
             let ops_root_before = db.ops_root();
             let floor_before = db.inactivity_floor_loc();
@@ -1609,7 +1911,7 @@ pub mod tests {
             assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
 
             db.rewind(size_before).await.unwrap();
-            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.bounds().end, size_before);
             assert_eq!(db.root(), root_before);
             assert_eq!(db.ops_root(), ops_root_before);
             assert_eq!(db.inactivity_floor_loc(), floor_before);
@@ -1627,7 +1929,7 @@ pub mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(reopened.bounds().await.end, size_before);
+            assert_eq!(reopened.bounds().end, size_before);
             assert_eq!(reopened.root(), root_before);
             assert_eq!(reopened.ops_root(), ops_root_before);
             assert_eq!(reopened.inactivity_floor_loc(), floor_before);
@@ -1638,7 +1940,7 @@ pub mod tests {
 
             let mut reopened = reopened;
             reopened.rewind(initial_size).await.unwrap();
-            assert_eq!(reopened.bounds().await.end, initial_size);
+            assert_eq!(reopened.bounds().end, initial_size);
             assert_eq!(reopened.root(), initial_root);
             assert_eq!(reopened.ops_root(), initial_ops_root);
             assert_eq!(reopened.inactivity_floor_loc(), initial_floor);
@@ -1656,7 +1958,7 @@ pub mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(reopened_initial.bounds().await.end, initial_size);
+            assert_eq!(reopened_initial.bounds().end, initial_size);
             assert_eq!(reopened_initial.root(), initial_root);
             assert_eq!(reopened_initial.ops_root(), initial_ops_root);
             assert_eq!(reopened_initial.inactivity_floor_loc(), initial_floor);
@@ -1692,7 +1994,7 @@ pub mod tests {
                 )
                 .await;
                 history.push((
-                    db.bounds().await.end,
+                    db.bounds().end,
                     db.inactivity_floor_loc(),
                     db.root(),
                     db.ops_root(),
@@ -1705,7 +2007,7 @@ pub mod tests {
             db.prune(Location::new(1)).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(pruned_bits > 0, "expected bitmap pruning for rewind test");
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
 
             let (target_size, target_root, target_ops_root, target_value) = history
                 .iter()
@@ -1728,7 +2030,7 @@ pub mod tests {
             db.rewind(target_size).await.unwrap();
             assert_eq!(db.root(), target_root);
             assert_eq!(db.ops_root(), target_ops_root);
-            assert_eq!(db.bounds().await.end, target_size);
+            assert_eq!(db.bounds().end, target_size);
             assert_eq!(db.get(&key0).await.unwrap(), Some(target_value));
 
             db.commit().await.unwrap();
@@ -1742,7 +2044,7 @@ pub mod tests {
             .unwrap();
             assert_eq!(reopened.root(), target_root);
             assert_eq!(reopened.ops_root(), target_ops_root);
-            assert_eq!(reopened.bounds().await.end, target_size);
+            assert_eq!(reopened.bounds().end, target_size);
             assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_value));
 
             let metadata_after_rewind = val(30_000);
@@ -1757,7 +2059,7 @@ pub mod tests {
             .end;
             let root_after_new_write = reopened.root();
             let ops_root_after_new_write = reopened.ops_root();
-            assert_eq!(reopened.bounds().await.end, expected_end);
+            assert_eq!(reopened.bounds().end, expected_end);
             assert_eq!(reopened.get_metadata().await.unwrap(), Some(metadata_after_rewind));
             assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_value));
             assert_eq!(reopened.get(&new_key).await.unwrap(), Some(new_value));
@@ -1771,7 +2073,7 @@ pub mod tests {
             .unwrap();
             assert_eq!(reopened_after_new_write.root(), root_after_new_write);
             assert_eq!(reopened_after_new_write.ops_root(), ops_root_after_new_write);
-            assert_eq!(reopened_after_new_write.bounds().await.end, expected_end);
+            assert_eq!(reopened_after_new_write.bounds().end, expected_end);
             assert_eq!(
                 reopened_after_new_write.get_metadata().await.unwrap(),
                 Some(metadata_after_rewind)
@@ -1847,8 +2149,7 @@ pub mod tests {
             assert_eq!(reopened.get(&k).await.unwrap(), expected);
 
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
-            let hasher = qmdb::hasher::<Sha256>();
-            let _proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let _proof = reopened.key_value_proof(k).await.unwrap();
 
             reopened.destroy().await.unwrap();
         });
@@ -1878,7 +2179,7 @@ pub mod tests {
                 let merkleized = batch.merkleize(&db, None).await.unwrap();
                 db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap();
-                history.push((db.bounds().await.end, db.inactivity_floor_loc()));
+                history.push((db.bounds().end, db.inactivity_floor_loc()));
             }
 
             db.prune(db.sync_boundary()).await.unwrap();
@@ -1968,10 +2269,10 @@ pub mod tests {
                 "delayed-merge lag must be strictly active: boundary={boundary}, floor={floor}"
             );
             assert!(
-                db.bounds().await.start <= boundary,
+                db.bounds().start <= boundary,
                 "ops journal was pruned past the settled bitmap boundary: \
                  bounds.start={}, boundary={boundary}",
-                db.bounds().await.start
+                db.bounds().start
             );
 
             db.destroy().await.unwrap();
@@ -2016,9 +2317,9 @@ pub mod tests {
                 "MMR lag should be only chunk alignment: boundary={boundary}, floor={floor}, chunk_bits={chunk_bits}"
             );
             assert!(
-                db.bounds().await.start <= boundary,
+                db.bounds().start <= boundary,
                 "ops journal bounds must be <= sync_boundary: bounds.start={}, boundary={boundary}",
-                db.bounds().await.start
+                db.bounds().start
             );
 
             db.destroy().await.unwrap();
@@ -2051,9 +2352,9 @@ pub mod tests {
             db.prune(small).await.unwrap();
 
             assert!(
-                db.bounds().await.start <= small,
+                db.bounds().start <= small,
                 "journal pruning exceeded the caller-supplied target: bounds.start={}, requested={small}",
-                db.bounds().await.start
+                db.bounds().start
             );
 
             db.destroy().await.unwrap();
@@ -2088,10 +2389,8 @@ pub mod tests {
                 mmb_commit(&mut db, [(key(1), Some(val(round)))]).await;
             }
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = db.key_value_proof(&hasher, k).await.unwrap();
+            let proof = db.key_value_proof(k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2111,10 +2410,8 @@ pub mod tests {
 
             assert_eq!(reopened.root(), target_root);
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let proof = reopened.key_value_proof(&hasher, k).await.unwrap();
+            let proof = reopened.key_value_proof(k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2338,11 +2635,9 @@ pub mod tests {
                     "root mismatch after prune at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -2371,11 +2666,9 @@ pub mod tests {
                     "value mismatch after reopen at round {round}"
                 );
 
-                let hasher = qmdb::hasher::<Sha256>();
-                let proof = db.key_value_proof(&hasher, k).await.unwrap();
+                let proof = db.key_value_proof(k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -2486,7 +2779,7 @@ pub mod tests {
                 .await;
 
                 history.push((
-                    db.bounds().await.end,
+                    db.bounds().end,
                     db.root(),
                     db.ops_root(),
                     key0_value,
@@ -2500,7 +2793,7 @@ pub mod tests {
             let (target_size, target_root, target_ops_root, target_key0, target_key1) = target;
 
             db.rewind(target_size).await.unwrap();
-            assert_eq!(db.bounds().await.end, target_size);
+            assert_eq!(db.bounds().end, target_size);
             assert_eq!(db.root(), target_root);
             assert_eq!(db.ops_root(), target_ops_root);
             assert_eq!(db.get(&key0).await.unwrap(), Some(target_key0));
@@ -2515,7 +2808,7 @@ pub mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(reopened.bounds().await.end, target_size);
+            assert_eq!(reopened.bounds().end, target_size);
             assert_eq!(reopened.root(), target_root);
             assert_eq!(reopened.ops_root(), target_ops_root);
             assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_key0));
@@ -2559,7 +2852,7 @@ pub mod tests {
                 first_range.start
             );
 
-            let oldest_retained = db.bounds().await.start;
+            let oldest_retained = db.bounds().start;
             let boundary_err = db.rewind(oldest_retained).await.unwrap_err();
             assert!(
                 matches!(
@@ -2605,7 +2898,7 @@ pub mod tests {
                     None,
                 )
                 .await;
-                history.push((db.bounds().await.end, db.inactivity_floor_loc()));
+                history.push((db.bounds().end, db.inactivity_floor_loc()));
             }
             assert!(db.inactivity_floor_loc() > Location::new(64));
 
@@ -2615,7 +2908,7 @@ pub mod tests {
             db.prune(prune_loc).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(pruned_bits > 0);
-            let retained_start = db.bounds().await.start;
+            let retained_start = db.bounds().start;
 
             // Pick a historical commit that is still within retained log bounds but whose floor is
             // below the bitmap pruning boundary.
@@ -2672,7 +2965,7 @@ pub mod tests {
         // 260 writes + 1 CommitFloor = 261 operations, completing one chunk with 5 ops in the
         // next partial chunk. This ensures the grafted root computation must handle the
         // newly completed chunk.
-        let mut db: C = open_db_clone(context.child("init"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("init"), partition.clone())).await;
         let mut batch = db.new_batch();
         for i in 0..260 {
             batch = batch.write(TestKey::from_seed(i), Some(TestValue::from_seed(i + 1000)));
@@ -2685,7 +2978,7 @@ pub mod tests {
         db.sync().await.unwrap();
         drop(db);
 
-        let db: C = open_db(context.child("reopen"), partition).await;
+        let db: C = Box::pin(open_db(context.child("reopen"), partition)).await;
         assert_eq!(db.root(), speculative_root);
 
         db.destroy().await.unwrap();
@@ -2983,16 +3276,13 @@ pub mod tests {
             let parent_merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(parent_merkleized).await.unwrap();
 
-            let (child_merkleized, commit_result) = futures::join!(
-                async {
-                    assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
-                    let mut child = db.new_batch();
-                    child = child.write(key(1), Some(val(1)));
-                    child.merkleize(&db, None).await.unwrap()
-                },
-                db.commit(),
-            );
-            commit_result.unwrap();
+            let child_merkleized = {
+                assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+                let mut child = db.new_batch();
+                child = child.write(key(1), Some(val(1)));
+                child.merkleize(&db, None).await.unwrap()
+            };
+            db.commit().await.unwrap();
 
             db.apply_batch(child_merkleized).await.unwrap();
             db.commit().await.unwrap();
@@ -3780,9 +4070,6 @@ pub mod tests {
     /// Regression: `ops_historical_proof` must verify with QMDB's ops-tree hasher configuration.
     #[test_traced("INFO")]
     fn test_current_mmb_ops_historical_proof_verifies_with_backward_bagging() {
-        use crate::{merkle::hasher::Standard, qmdb::verify_proof};
-        use commonware_utils::NZU64;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
@@ -3799,26 +4086,14 @@ pub mod tests {
             commit_writes(&mut db, writes).await.unwrap();
 
             let ops_root = db.ops_root();
-            let historical_size = db.bounds().await.end;
+            let historical_size = db.bounds().end;
             let (proof, ops) = db
                 .ops_historical_proof(historical_size, Location::new(0), NZU64!(32))
                 .await
                 .unwrap();
 
             // Verifies under the QMDB ops-tree hasher configuration.
-            let hasher = qmdb::hasher::<Sha256>();
-            assert!(verify_proof(
-                &hasher,
-                &proof,
-                Location::new(0),
-                &ops,
-                &ops_root
-            ));
-
-            // Sanity: a different Merkle hasher configuration must not accept this proof.
-            let plain = Standard::<Sha256>::new(ForwardFold);
-            assert!(!verify_proof(
-                &plain,
+            assert!(verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(0),
                 &ops,

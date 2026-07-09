@@ -10,12 +10,12 @@ use commonware_utils::{
     ordered::{Map, Set},
     TryCollect as _,
 };
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 
 /// Generates ed25519 identity participants.
 pub fn participants<R>(rng: &mut R, n: u32) -> Map<PublicKey, PrivateKey>
 where
-    R: RngCore + CryptoRng,
+    R: Rng + CryptoRng,
 {
     (0..n)
         .map(|_| {
@@ -36,7 +36,7 @@ pub fn fixture<S, R>(
     verifier: impl Fn(&[u8], Set<PublicKey>) -> S,
 ) -> Fixture<S>
 where
-    R: RngCore + CryptoRng,
+    R: Rng + CryptoRng,
     S: Scheme<PublicKey = PublicKey>,
 {
     assert!(n > 0);

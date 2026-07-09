@@ -1,18 +1,13 @@
 //! End-to-end `BufferPool` allocation benchmarks.
 //!
 //! This module compares pooled allocation against direct aligned allocation for
-//! the steady-state hot path we care about here: allocate, touch the requested
-//! bytes at page granularity, and drop.
+//! the steady-state hot path we care about here: allocate and drop, optionally
+//! touching the requested bytes at page granularity.
 //!
-//! # Metrics
+//! # Touch Modes
 //!
-//! - **raw**: end-to-end time for allocate + page-touch + drop.
-//! - **adjusted**: raw time minus the cost of repeatedly touching pages on an
-//!   already-materialized buffer. This isolates allocator overhead. The
-//!   baseline is always measured single-threaded because each thread writes to
-//!   private memory, so the touch cost is the same per iteration regardless of
-//!   thread count, and single-threaded measurement avoids scheduling noise that
-//!   would swamp the subtraction signal.
+//! - **touch=false**: allocate and drop only.
+//! - **touch=true**: allocate, touch one byte per page, and drop.
 //!
 //! # Thread Configurations
 //!
@@ -32,10 +27,9 @@
 //! materialization and makes the comparison between direct aligned allocation
 //! and pooled reuse fairer.
 //!
-//! For large sizes this means much of the raw benchmark measures page writes
-//! rather than allocator bookkeeping. That is acceptable because both
-//! implementations pay the same page-touch cost, so the relative comparison
-//! still isolates the allocation strategy.
+//! The no-touch mode keeps the allocator-only shape visible. The touch mode
+//! measures the cost observed by callers that actually use the buffer, including
+//! first-touch behavior for pages that have not yet been materialized.
 
 use super::utils::{measure, Threading};
 use commonware_runtime::{
@@ -47,31 +41,16 @@ use std::{hint::black_box, num::NonZeroUsize};
 const SIZES: &[usize] = &[256, 1024, 4096, 65536, 1024 * 1024, 8 * 1024 * 1024];
 
 #[derive(Clone, Copy)]
-enum Metric {
-    Raw,
-    Adjusted,
-}
-
-impl Metric {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Raw => "raw",
-            Self::Adjusted => "adjusted",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Mode {
+enum Allocation {
     Direct,
-    Pool,
+    Pooled,
 }
 
-impl Mode {
+impl Allocation {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Direct => "direct",
-            Self::Pool => "pool",
+            Self::Pooled => "pooled",
         }
     }
 }
@@ -90,35 +69,27 @@ pub fn bench(c: &mut Criterion) {
         let alignment = pool.config().alignment.get();
 
         for threading in threadings {
-            for metric in [Metric::Raw, Metric::Adjusted] {
+            for touch in [false, true] {
                 bench_case(
                     c,
-                    Mode::Direct,
+                    Allocation::Direct,
                     size,
                     threading,
-                    metric,
-                    || {
-                        let mut buf =
-                            IoBufMut::with_alignment(size, NonZeroUsize::new(alignment).unwrap());
-                        touch_pages(buf.as_mut_ptr(), size, page_size);
-                        buf
-                    },
+                    touch,
+                    || IoBufMut::with_alignment(size, NonZeroUsize::new(alignment).unwrap()),
                     page_size,
                 );
                 bench_case(
                     c,
-                    Mode::Pool,
+                    Allocation::Pooled,
                     size,
                     threading,
-                    metric,
+                    touch,
                     {
                         let pool = pool.clone();
                         move || {
-                            let mut buf = pool
-                                .try_alloc(size)
-                                .expect("buffer pool exhausted during benchmark");
-                            touch_pages(buf.as_mut_ptr(), size, page_size);
-                            buf
+                            pool.try_alloc(size)
+                                .expect("buffer pool exhausted during benchmark")
                         }
                     },
                     page_size,
@@ -130,42 +101,47 @@ pub fn bench(c: &mut Criterion) {
 
 fn bench_case(
     c: &mut Criterion,
-    mode: Mode,
+    allocation: Allocation,
     size: usize,
     threading: Threading,
-    metric: Metric,
-    work: impl Fn() -> IoBufMut + Sync,
+    touch: bool,
+    alloc: impl Fn() -> IoBufMut + Sync,
     page_size: usize,
 ) {
-    let name = bench_name(mode, metric, size, threading);
-    c.bench_function(&name, |b| {
-        b.iter_custom(|iters| {
-            let full = measure(
-                iters,
-                threading,
-                || {},
-                |_| {
-                    let buffer = black_box(work());
-                    drop(buffer);
-                },
-            );
-
-            if matches!(metric, Metric::Raw) {
-                return full;
-            }
-
-            // Measure the cost of touching pages on a pre-allocated buffer.
-            // Always single-threaded: each thread writes to private memory so
-            // the per-iteration touch cost is the same regardless of thread
-            // count, and single-threaded avoids wall-clock noise from thread
-            // scheduling that would swamp the subtraction signal.
-            let baseline = measure(iters, Threading::Single, &work, |buffer| {
-                touch_pages(buffer.as_mut_ptr(), size, page_size)
+    let name = bench_name(allocation, touch, size, threading);
+    match touch {
+        false => {
+            c.bench_function(&name, |b| {
+                b.iter_custom(|iters| {
+                    measure(
+                        iters,
+                        threading,
+                        || {},
+                        |_| {
+                            let buffer = alloc();
+                            drop(black_box(buffer));
+                        },
+                    )
+                });
             });
-
-            full.saturating_sub(baseline)
-        });
-    });
+        }
+        true => {
+            c.bench_function(&name, |b| {
+                b.iter_custom(|iters| {
+                    measure(
+                        iters,
+                        threading,
+                        || {},
+                        |_| {
+                            let mut buffer = alloc();
+                            touch_pages(buffer.as_mut_ptr(), size, page_size);
+                            drop(black_box(buffer));
+                        },
+                    )
+                });
+            });
+        }
+    }
 }
 
 #[inline]
@@ -197,13 +173,13 @@ fn touch_pages(ptr: *mut u8, size: usize, page_size: usize) {
     }
 }
 
-fn bench_name(mode: Mode, metric: Metric, size: usize, threading: Threading) -> String {
+fn bench_name(allocation: Allocation, touch: bool, size: usize, threading: Threading) -> String {
     let threads = threading.threads();
     let mut name = format!(
-        "{}/mode={} size={size} threads={threads} metric={}",
+        "{}/allocation={} touch={} size={size} threads={threads}",
         module_path!(),
-        mode.as_str(),
-        metric.as_str(),
+        allocation.as_str(),
+        touch,
     );
     if let Threading::Multi { pattern, .. } = threading {
         name.push_str(&format!(" pattern={}", pattern.as_str()));
@@ -215,9 +191,9 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
     let max_per_class =
         u32::try_from(threads * 4).expect("bench capacity must fit in u32 slot ids");
     let cfg = BufferPoolConfig::for_network()
-        .with_pool_min_size(1024)
-        .with_min_size(NZUsize!(size.max(1024)))
-        .with_max_size(NZUsize!(size.max(1024)))
+        .with_pool_min_size(0)
+        .with_min_size(NZUsize!(size))
+        .with_max_size(NZUsize!(size))
         .with_max_per_class(NZU32!(max_per_class))
         .with_parallelism(NZUsize!(threads))
         .with_prefill(true);

@@ -98,7 +98,7 @@ use rand::Rng;
 use std::future::Future;
 
 mod actor;
-pub use actor::{Config, Mailbox, Stateful, SyncPlan};
+pub use actor::{Config, Mailbox, PruneConfig, Stateful, SyncPlan};
 
 pub mod db;
 pub mod probe;
@@ -255,10 +255,21 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
 
-    /// Observe a block after its database batches have been durably finalized.
+    /// Observe a finalized block after it is reflected in durable state.
     ///
-    /// Called only after [`DatabaseSet::finalize`] succeeds. Implementations
-    /// may use this to run post-finalization maintenance such as pruning.
+    /// Once the database set is ready, the wrapper calls this for every
+    /// finalized block it receives from marshal before releasing that block's
+    /// marshal acknowledgement. Blocks applied through normal processing are
+    /// reported after [`DatabaseSet::finalize`] succeeds. Blocks already
+    /// reflected by startup reconciliation or completed state sync are reported
+    /// without reapplying them.
+    ///
+    /// During peer state sync, finalized blocks observed before sync completes
+    /// are used to update the sync target and are not reported here.
+    ///
+    /// Inherited from marshal's reporter stream, this is an at-least-once notification:
+    /// a crash after this hook runs but before the marshal acknowledgement is
+    /// durable may cause the same block to be reported again after restart.
     ///
     /// # Panics
     ///

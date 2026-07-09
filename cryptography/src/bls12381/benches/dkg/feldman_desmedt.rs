@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::{
-        dkg::feldman_desmedt::{deal, Dealer, Info, Logs, Player},
+        dkg::feldman_desmedt::{deal, Dealer, Info, Logs, Player, Verdict},
         primitives::variant::MinSig,
     },
     ed25519::{Batch, PrivateKey, PublicKey},
@@ -11,7 +11,7 @@ use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{ordered::Set, Faults, N3f1, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{collections::BTreeMap, hint::black_box};
 
 type V = MinSig;
@@ -23,7 +23,7 @@ struct Bench {
 }
 
 impl Bench {
-    fn new(mut rng: impl CryptoRngCore, reshare: bool, n: u32) -> Self {
+    fn new(mut rng: impl CryptoRng, reshare: bool, n: u32) -> Self {
         let private_keys = (0..n)
             .map(|_| PrivateKey::random(&mut rng))
             .collect::<Vec<_>>();
@@ -83,7 +83,7 @@ impl Bench {
             for (target_pk, priv_msg) in priv_msgs {
                 // The only missing player should be ourselves.
                 if let Some(player) = player_states.get_mut(&target_pk) {
-                    if let Some(ack) =
+                    if let Verdict::Valid(ack) =
                         player.dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
                     {
                         dealer.receive_player_ack(target_pk.clone(), ack).unwrap();

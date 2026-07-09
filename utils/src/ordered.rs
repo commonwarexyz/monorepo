@@ -9,11 +9,10 @@ use core::{
     hash::Hash,
     ops::{Deref, Index, Range},
 };
-#[cfg(not(feature = "std"))]
 use hashbrown::HashSet;
-#[cfg(feature = "std")]
-use std::collections::HashSet;
 use thiserror::Error;
+
+type Hasher = ahash::RandomState;
 
 #[cfg(not(feature = "std"))]
 type VecIntoIter<T> = alloc::vec::IntoIter<T>;
@@ -724,7 +723,7 @@ impl<K, V: Eq + Hash> TryFrom<Map<K, V>> for BiMap<K, V> {
 
     fn try_from(map: Map<K, V>) -> Result<Self, Self::Error> {
         {
-            let mut seen = HashSet::with_capacity(map.values.len());
+            let mut seen = HashSet::with_capacity_and_hasher(map.values.len(), Hasher::default());
             for value in map.values.iter() {
                 if !seen.insert(value) {
                     return Err(Error::DuplicateValue);

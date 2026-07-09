@@ -81,6 +81,7 @@ impl Threading {
 /// `setup` runs per-worker before timing starts and returns state passed to
 /// each `step` invocation. For multi-threaded runs, all workers synchronize
 /// via a barrier after setup so timing captures concurrent execution only.
+#[inline]
 pub fn measure<T>(
     iters: u64,
     threading: Threading,

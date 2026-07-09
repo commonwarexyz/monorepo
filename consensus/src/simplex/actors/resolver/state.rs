@@ -4,12 +4,47 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_resolver::Resolver;
-use commonware_utils::sequence::U64;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     num::NonZeroUsize,
 };
+
+/// Why a resolver fetch was requested.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FetchReason {
+    MissingNullification,
+    CertificationFailed,
+    SatisfiedByFailedNotarization,
+}
+
+impl FetchReason {
+    /// Returns the stable trace field value for this reason.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingNullification => "missing_nullification",
+            Self::CertificationFailed => "certification_failed",
+            Self::SatisfiedByFailedNotarization => "satisfied_by_failed_notarization",
+        }
+    }
+}
+
+/// Side effects requested by resolver state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Effect {
+    /// Issue a resolver fetch for `view`.
+    Fetch {
+        /// The view to fetch.
+        view: View,
+        /// The view whose processing caused this fetch.
+        cause: View,
+        /// Why the fetch is needed.
+        reason: FetchReason,
+    },
+    /// Drop all subscribers for this view.
+    Remove(View),
+    /// Retain only views above this floor.
+    RetainAbove(View),
+}
 
 /// Tracks all known certificates from the last
 /// certified notarization or finalized view to the current view.
@@ -56,26 +91,22 @@ impl<S: Scheme, D: Digest> State<S, D> {
         self.failed_views.contains(&view)
     }
 
-    /// Handle a new certificate and update the [Resolver] accordingly.
+    /// Handle a new certificate and return any effects the resolver actor should apply.
     ///
     /// The `request` parameter is the view that was originally requested
     /// when this certificate was fetched. If the certificate is a notarization
     /// at a higher view, we track that the request was "satisfied by" this
     /// notarization so we can re-request on certification failure.
-    pub fn handle(
-        &mut self,
-        certificate: Certificate<S, D>,
-        request: Option<View>,
-        resolver: &mut impl Resolver<Key = U64, Subscriber = ()>,
-    ) {
+    pub fn handle(&mut self, certificate: Certificate<S, D>, request: Option<View>) -> Vec<Effect> {
+        let cause = certificate.view();
+        let mut effects = Vec::new();
         match certificate {
             Certificate::Nullification(nullification) => {
                 let view = nullification.view();
                 if self.encounter_view(view) {
                     self.nullifications
                         .insert(view, Certificate::Nullification(nullification));
-                    let request = view.into();
-                    resolver.retain(move |candidate, _| *candidate != request);
+                    effects.push(Effect::Remove(view));
                 }
             }
             Certificate::Notarization(notarization) => {
@@ -92,22 +123,19 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 let view = finalization.view();
                 if self.encounter_view(view) || self.can_upgrade_floor(view) {
                     self.floor = Some(Certificate::Finalization(finalization));
-                    self.prune(resolver);
+                    effects.push(self.prune());
                 }
             }
         }
 
         // Request missing nullifications
-        self.fetch(resolver);
+        effects.extend(self.fetch(cause, FetchReason::MissingNullification));
+        effects
     }
 
     /// Handle a certification result from the voter.
-    pub fn handle_certified(
-        &mut self,
-        view: View,
-        success: bool,
-        resolver: &mut impl Resolver<Key = U64, Subscriber = ()>,
-    ) {
+    pub fn handle_certified(&mut self, view: View, success: bool) -> Vec<Effect> {
+        let mut effects = Vec::new();
         if success {
             // Certification passed - set floor to notarization if we have it.
             //
@@ -116,7 +144,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             if let Some(notarization) = self.notarizations.remove(&view) {
                 if view > self.floor_view() {
                     self.floor = Some(Certificate::Notarization(notarization));
-                    self.prune(resolver);
+                    effects.push(self.prune());
                 }
             }
 
@@ -131,16 +159,25 @@ impl<S: Scheme, D: Digest> State<S, D> {
             // Request nullification for this view (if above floor)
             let floor = self.floor_view();
             if view > floor {
-                resolver.fetch(U64::from(view));
+                effects.push(Effect::Fetch {
+                    view,
+                    cause: view,
+                    reason: FetchReason::CertificationFailed,
+                });
             }
 
             // Re-request any lower views this notarization had satisfied
             if let Some(satisfied_views) = self.satisfied_by.remove(&view) {
                 for &v in satisfied_views.iter().filter(|v| **v > floor) {
-                    resolver.fetch(U64::from(v));
+                    effects.push(Effect::Fetch {
+                        view: v,
+                        cause: view,
+                        reason: FetchReason::SatisfiedByFailedNotarization,
+                    });
                 }
             }
         }
+        effects
     }
 
     /// Get the best certificate for a given view (or the floor
@@ -184,8 +221,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
         )
     }
 
-    /// Inform the [Resolver] of any missing nullifications.
-    fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64, Subscriber = ()>) {
+    /// Return requests for any missing nullifications.
+    fn fetch(&mut self, cause: View, reason: FetchReason) -> Vec<Effect> {
         // We must either receive a nullification at the current view or a notarization/finalization at the current
         // view or higher, so we don't need to worry about getting stuck (where peers cannot resolve our requests).
         let start = self.fetch_floor.max(self.floor_view().next());
@@ -199,19 +236,24 @@ impl<S: Scheme, D: Digest> State<S, D> {
             self.fetch_floor = last.next();
         }
 
-        // Send the requests to the resolver.
-        let requests = views.into_iter().map(U64::from).collect();
-        resolver.fetch_all(requests);
+        views
+            .into_iter()
+            .map(|view| Effect::Fetch {
+                view,
+                cause,
+                reason,
+            })
+            .collect()
     }
 
     /// Prune stored certificates and requests that are not higher than the floor.
-    fn prune(&mut self, resolver: &mut impl Resolver<Key = U64, Subscriber = ()>) {
+    fn prune(&mut self) -> Effect {
         let floor = self.floor_view();
         self.notarizations.retain(|view, _| *view > floor);
         self.nullifications.retain(|view, _| *view > floor);
         self.satisfied_by.retain(|view, _| *view > floor);
         self.failed_views.retain(|view| *view > floor);
-        resolver.retain(move |request, _| *request > floor.into());
+        Effect::RetainAbove(floor)
     }
 }
 
@@ -227,91 +269,14 @@ mod tests {
         },
         types::{Epoch, Round, View},
     };
-    use commonware_actor::Feedback;
-    use commonware_cryptography::{
-        certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
-    };
+    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Fetch, TargetedResolver};
-    use commonware_utils::{sync::Mutex, test_rng, vec::NonEmptyVec, NZUsize};
-    use std::{collections::BTreeSet, sync::Arc};
+    use commonware_utils::{test_rng, NZUsize};
 
     const NAMESPACE: &[u8] = b"resolver-state";
     const EPOCH: Epoch = Epoch::new(9);
 
     type TestScheme = ed25519::Scheme;
-
-    #[derive(Clone, Default)]
-    struct MockResolver {
-        outstanding: Arc<Mutex<BTreeSet<U64>>>,
-    }
-
-    impl MockResolver {
-        fn outstanding(&self) -> Vec<u64> {
-            self.outstanding
-                .lock()
-                .iter()
-                .map(|key| key.into())
-                .collect()
-        }
-    }
-
-    impl Resolver for MockResolver {
-        type Key = U64;
-        type Subscriber = ();
-
-        fn fetch<R>(&mut self, request: R) -> Feedback
-        where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            let key = request.into().key;
-            self.outstanding.lock().insert(key);
-            Feedback::Ok
-        }
-
-        fn fetch_all<R>(&mut self, requests: Vec<R>) -> Feedback
-        where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            for request in requests {
-                self.outstanding.lock().insert(request.into().key);
-            }
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
-            self.outstanding.lock().retain(|key| predicate(key, &()));
-            Feedback::Ok
-        }
-    }
-
-    impl TargetedResolver for MockResolver {
-        type PublicKey = PublicKey;
-
-        fn fetch_targeted(
-            &mut self,
-            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            _targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback {
-            <Self as Resolver>::fetch(self, fetch)
-        }
-
-        fn fetch_all_targeted<F>(
-            &mut self,
-            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            <Self as Resolver>::fetch_all(
-                self,
-                fetches.into_iter().map(|(fetch, _)| fetch).collect(),
-            )
-        }
-    }
 
     fn ed25519_fixture() -> (Vec<TestScheme>, TestScheme) {
         let mut rng = test_rng();
@@ -368,99 +333,109 @@ mod tests {
         Finalization::from_finalizes(verifier, &votes, &Sequential).expect("finalization quorum")
     }
 
+    fn fetch(view: u64, cause: u64, reason: FetchReason) -> Effect {
+        Effect::Fetch {
+            view: View::new(view),
+            cause: View::new(cause),
+            reason,
+        }
+    }
+
     #[test]
     fn handle_nullification_requests_missing_views() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(2));
-        let mut resolver = MockResolver::default();
 
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
-        state.handle(
-            Certificate::Nullification(nullification_v4.clone()),
-            None,
-            &mut resolver,
-        );
+        let effects = state.handle(Certificate::Nullification(nullification_v4.clone()), None);
         assert_eq!(state.current_view, View::new(4));
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
-        assert_eq!(resolver.outstanding(), vec![1, 2]); // limited to concurrency
+        assert_eq!(
+            effects,
+            vec![
+                Effect::Remove(View::new(4)),
+                fetch(1, 4, FetchReason::MissingNullification),
+                fetch(2, 4, FetchReason::MissingNullification),
+            ]
+        );
 
         let nullification_v2 = build_nullification(&schemes, &verifier, View::new(2));
-        state.handle(
-            Certificate::Nullification(nullification_v2.clone()),
-            None,
-            &mut resolver,
-        );
+        let effects = state.handle(Certificate::Nullification(nullification_v2.clone()), None);
         assert_eq!(state.current_view, View::new(4));
         assert!(
             matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
-        assert_eq!(resolver.outstanding(), vec![1, 3]); // limited to concurrency
+        assert_eq!(
+            effects,
+            vec![
+                Effect::Remove(View::new(2)),
+                fetch(3, 2, FetchReason::MissingNullification),
+            ]
+        );
 
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
-        state.handle(
-            Certificate::Nullification(nullification_v1.clone()),
-            None,
-            &mut resolver,
-        );
+        let effects = state.handle(Certificate::Nullification(nullification_v1.clone()), None);
         assert_eq!(state.current_view, View::new(4));
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Nullification(n)) if n == &nullification_v1)
         );
-        assert_eq!(resolver.outstanding(), vec![3]);
+        assert_eq!(effects, vec![Effect::Remove(View::new(1))]);
     }
 
     #[test]
     fn floor_prunes_outstanding_requests() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10));
-        let mut resolver = MockResolver::default();
 
         for view in 4..=6 {
             let nullification = build_nullification(&schemes, &verifier, View::new(view));
-            state.handle(
-                Certificate::Nullification(nullification),
-                None,
-                &mut resolver,
-            );
+            let effects = state.handle(Certificate::Nullification(nullification), None);
+            if view == 4 {
+                assert_eq!(
+                    effects,
+                    vec![
+                        Effect::Remove(View::new(4)),
+                        fetch(1, 4, FetchReason::MissingNullification),
+                        fetch(2, 4, FetchReason::MissingNullification),
+                        fetch(3, 4, FetchReason::MissingNullification),
+                    ]
+                );
+            } else {
+                assert_eq!(effects, vec![Effect::Remove(View::new(view))]);
+            }
         }
         assert_eq!(state.current_view, View::new(6));
-        assert_eq!(resolver.outstanding(), vec![1, 2, 3]);
 
         // Notarization does not set floor or prune
         let notarization = build_notarization(&schemes, &verifier, View::new(6));
-        state.handle(Certificate::Notarization(notarization), None, &mut resolver);
+        let effects = state.handle(Certificate::Notarization(notarization), None);
 
         assert!(state.floor.is_none());
         assert_eq!(state.nullifications.len(), 3); // nullifications remain
-        assert_eq!(resolver.outstanding(), vec![1, 2, 3]); // requests remain
+        assert!(effects.is_empty());
 
         // Finalization sets floor and prunes
         let finalization = build_finalization(&schemes, &verifier, View::new(6));
-        state.handle(
-            Certificate::Finalization(finalization.clone()),
-            None,
-            &mut resolver,
-        );
+        let effects = state.handle(Certificate::Finalization(finalization.clone()), None);
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization)
         );
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(6))]);
+        assert!(state.notarizations.is_empty());
+        assert!(state.nullifications.is_empty());
     }
 
     #[test]
     fn produce_returns_floor_or_nullifications() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(2));
-        let mut resolver = MockResolver::default();
 
         // Finalization sets floor
         let finalization = build_finalization(&schemes, &verifier, View::new(3));
-        state.handle(
-            Certificate::Finalization(finalization.clone()),
-            None,
-            &mut resolver,
-        );
+        let effects = state.handle(Certificate::Finalization(finalization.clone()), None);
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(3))]);
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
@@ -470,11 +445,8 @@ mod tests {
 
         // New nullification is kept
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
-        state.handle(
-            Certificate::Nullification(nullification_v4.clone()),
-            None,
-            &mut resolver,
-        );
+        let effects = state.handle(Certificate::Nullification(nullification_v4.clone()), None);
+        assert_eq!(effects, vec![Effect::Remove(View::new(4))]);
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
@@ -484,11 +456,8 @@ mod tests {
 
         // Old nullification is ignored
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
-        state.handle(
-            Certificate::Nullification(nullification_v1),
-            None,
-            &mut resolver,
-        );
+        let effects = state.handle(Certificate::Nullification(nullification_v1), None);
+        assert!(effects.is_empty());
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
@@ -501,21 +470,27 @@ mod tests {
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
-        assert!(resolver.outstanding().is_empty());
     }
 
     #[test]
     fn certification_failure_re_requests_satisfied_views() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10));
-        let mut resolver = MockResolver::default();
 
         // Notarization at view 5 satisfies request for view 2
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
-        state.handle(
+        let effects = state.handle(
             Certificate::Notarization(notarization_v5),
             Some(View::new(2)),
-            &mut resolver,
+        );
+        assert_eq!(
+            effects,
+            vec![
+                fetch(1, 5, FetchReason::MissingNullification),
+                fetch(2, 5, FetchReason::MissingNullification),
+                fetch(3, 5, FetchReason::MissingNullification),
+                fetch(4, 5, FetchReason::MissingNullification),
+            ]
         );
 
         // Verify tracking
@@ -524,41 +499,52 @@ mod tests {
         assert!(!state.is_failed(View::new(5)));
 
         // Certification fails for view 5
-        state.handle_certified(View::new(5), false, &mut resolver);
+        let effects = state.handle_certified(View::new(5), false);
 
         // View 5 should be marked as failed
         assert!(state.is_failed(View::new(5)));
         // Satisfied_by should be cleaned up
         assert!(!state.satisfied_by.contains_key(&View::new(5)));
-        // Both view 5 and view 2 should have requests
-        let outstanding = resolver.outstanding();
-        assert!(outstanding.contains(&5));
-        assert!(outstanding.contains(&2));
+        assert_eq!(
+            effects,
+            vec![
+                fetch(5, 5, FetchReason::CertificationFailed),
+                fetch(2, 5, FetchReason::SatisfiedByFailedNotarization),
+            ]
+        );
     }
 
     #[test]
     fn certification_success_clears_tracking() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10));
-        let mut resolver = MockResolver::default();
 
         // Notarization at view 5 satisfies request for view 2
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
-        state.handle(
+        let effects = state.handle(
             Certificate::Notarization(notarization_v5.clone()),
             Some(View::new(2)),
-            &mut resolver,
+        );
+        assert_eq!(
+            effects,
+            vec![
+                fetch(1, 5, FetchReason::MissingNullification),
+                fetch(2, 5, FetchReason::MissingNullification),
+                fetch(3, 5, FetchReason::MissingNullification),
+                fetch(4, 5, FetchReason::MissingNullification),
+            ]
         );
 
         assert!(state.satisfied_by.contains_key(&View::new(5)));
 
         // Certification succeeds for view 5
-        state.handle_certified(View::new(5), true, &mut resolver);
+        let effects = state.handle_certified(View::new(5), true);
 
         // Floor should be set
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
         );
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
         // Tracking should be cleaned up
         assert!(!state.satisfied_by.contains_key(&View::new(5)));
         // View 5 should not be marked as failed
@@ -569,16 +555,21 @@ mod tests {
     fn finalization_upgrades_certified_notarization_at_same_view() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10));
-        let mut resolver = MockResolver::default();
 
         // Create and certify a notarization at view 5
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
-        state.handle(
-            Certificate::Notarization(notarization_v5.clone()),
-            None,
-            &mut resolver,
+        let effects = state.handle(Certificate::Notarization(notarization_v5.clone()), None);
+        assert_eq!(
+            effects,
+            vec![
+                fetch(1, 5, FetchReason::MissingNullification),
+                fetch(2, 5, FetchReason::MissingNullification),
+                fetch(3, 5, FetchReason::MissingNullification),
+                fetch(4, 5, FetchReason::MissingNullification),
+            ]
         );
-        state.handle_certified(View::new(5), true, &mut resolver);
+        let effects = state.handle_certified(View::new(5), true);
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
 
         // Floor should be the notarization at view 5
         assert!(
@@ -588,15 +579,12 @@ mod tests {
 
         // A finalization at the same view should upgrade the floor
         let finalization_v5 = build_finalization(&schemes, &verifier, View::new(5));
-        state.handle(
-            Certificate::Finalization(finalization_v5.clone()),
-            None,
-            &mut resolver,
-        );
+        let effects = state.handle(Certificate::Finalization(finalization_v5.clone()), None);
 
         // Floor should now be the finalization (stronger proof)
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization_v5)
         );
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
     }
 }

@@ -8,10 +8,12 @@
 //! ```rust
 //! use commonware_cryptography::{secp256r1, PrivateKey, PublicKey, Signature, Recoverable, Verifier as _, Signer as _};
 //! use commonware_math::algebra::Random;
-//! use rand::rngs::OsRng;
+//! use rand::{rngs::StdRng, SeedableRng};
+//!
+//! let mut rng = StdRng::seed_from_u64(0);
 //!
 //! // Generate a new private key
-//! let mut signer = secp256r1::standard::PrivateKey::random(&mut OsRng);
+//! let mut signer = secp256r1::standard::PrivateKey::random(&mut rng);
 //!
 //! // Create a message to sign
 //! let namespace = b"demo";
@@ -24,7 +26,7 @@
 //! assert!(signer.public_key().verify(namespace, msg, &signature));
 //!
 //! // Generate a new private key that supports recoverable signatures
-//! let mut signer = secp256r1::recoverable::PrivateKey::random(&mut OsRng);
+//! let mut signer = secp256r1::recoverable::PrivateKey::random(&mut rng);
 //!
 //! // Sign the message
 //! let signature = signer.sign(namespace, msg);

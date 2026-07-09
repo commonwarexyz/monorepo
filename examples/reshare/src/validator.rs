@@ -13,6 +13,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
+use commonware_macros::boxed;
 use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{tokio, Quota, Supervisor as _, ThreadPooler};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
@@ -35,6 +36,7 @@ const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Run the validator node service.
+#[boxed]
 pub async fn run<S, L>(
     context: tokio::Context,
     args: super::ParticipantArgs,
@@ -170,7 +172,7 @@ mod test {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use commonware_macros::{select, test_group, test_traced};
+    use commonware_macros::{boxed, select, test_group, test_traced};
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
         utils::mux,
@@ -185,8 +187,8 @@ mod test {
         channel::{mpsc, oneshot},
         test_rng_seeded, union, N3f1, TryCollect,
     };
-    use rand::seq::SliceRandom;
-    use rand_core::CryptoRngCore;
+    use rand::seq::IndexedRandom;
+    use rand_core::CryptoRng;
     use std::{
         collections::{btree_map::Entry, BTreeMap, HashSet},
         future::Future,
@@ -274,7 +276,7 @@ mod test {
     }
 
     impl Team {
-        fn reshare(mut rng: impl CryptoRngCore, total: u32, per_round: &[u32]) -> Self {
+        fn reshare(mut rng: impl CryptoRng, total: u32, per_round: &[u32]) -> Self {
             let mut participants = (0..total)
                 .map(|i| {
                     let sk = PrivateKey::from_seed(i as u64);
@@ -324,6 +326,7 @@ mod test {
             }
         }
 
+        #[boxed]
         async fn start_one<S, L>(
             &mut self,
             ctx: &deterministic::Context,
@@ -396,7 +399,7 @@ mod test {
                     namespace: union(namespace::APPLICATION, b"_ENGINE"),
                     output: self.output.clone(),
                     share: share.clone(),
-                    partition_prefix: format!("validator_{}", &pk),
+                    partition_prefix: format!("validator_{}", pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),
                     strategy: Sequential,
@@ -418,6 +421,7 @@ mod test {
 
         /// Start a participant using the appropriate scheme based on whether
         /// we have an initial output (reshare mode) or not (DKG mode).
+        #[boxed]
         async fn start_participant(
             &mut self,
             ctx: &deterministic::Context,
@@ -434,6 +438,7 @@ mod test {
             }
         }
 
+        #[boxed]
         async fn start(
             &mut self,
             ctx: &deterministic::Context,
@@ -808,7 +813,7 @@ mod test {
                             team.participants.keys().cloned().collect();
                         let crash_count = (*count).min(all_participants.len());
                         let to_crash: Vec<PublicKey> = all_participants
-                            .choose_multiple(&mut ctx, crash_count)
+                            .sample(&mut ctx, crash_count)
                             .cloned()
                             .collect();
                         for pk in to_crash {

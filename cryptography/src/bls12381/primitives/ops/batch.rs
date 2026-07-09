@@ -21,7 +21,7 @@ use super::{
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// Segment tree for batch verification bisection.
 ///
@@ -145,7 +145,8 @@ fn bisect<V: Variant>(
     }
 
     // Single chunk: skip aggregate verification if caller already checked it.
-    let par_hint = strategy.parallelism_hint();
+    let manual = strategy.manual();
+    let par_hint = manual.parallelism_hint();
     let chunk_size = entries.len().div_ceil(par_hint);
     if entries.len() <= chunk_size {
         let mut out = SegmentTree::<V>::build(entries).verify(hm, aggregate_invalid);
@@ -154,7 +155,7 @@ fn bisect<V: Variant>(
     }
 
     // Multiple chunks: verify each chunk root (may be valid or invalid).
-    let mut out = strategy.fold(
+    let mut out = manual.fold(
         entries.chunks(chunk_size).enumerate(),
         || Vec::with_capacity(entries.len()),
         |mut acc, (i, chunk)| {
@@ -204,7 +205,7 @@ pub fn verify_same_message<R, V>(
     par: &impl Strategy,
 ) -> Vec<usize>
 where
-    R: CryptoRngCore,
+    R: CryptoRng,
     V: Variant,
 {
     if entries.is_empty() {
@@ -258,7 +259,7 @@ pub fn verify_same_signer<'a, R, V, I>(
     strategy: &impl Strategy,
 ) -> Result<(), Error>
 where
-    R: CryptoRngCore,
+    R: CryptoRng,
     V: Variant,
     I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], V::Signature)>,
 {

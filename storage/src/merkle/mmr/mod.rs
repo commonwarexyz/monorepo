@@ -121,41 +121,46 @@ impl merkle::Family for Family {
 
     fn position_to_location(pos: Position) -> Option<Location> {
         let pos = *pos;
-        // Position 0 is always the first leaf at location 0.
-        if pos == 0 {
-            return Some(Location::new(0));
-        }
 
-        // Find the height of the perfect binary tree containing this position.
-        // Safe: pos + 1 cannot overflow since pos <= MAX_NODES (checked by caller).
-        let start = u64::MAX >> (pos + 1).leading_zeros();
-        let height = start.trailing_ones();
-        // Height 0 means this position is a peak (not a leaf in a tree).
-        if height == 0 {
-            return None;
-        }
-        let mut two_h = 1 << (height - 1);
-        let mut cur_node = start - 1;
-        let mut leaf_loc_floor = 0u64;
+        // Invert `pos = 2*n - popcount(n)` for the leaf count `n`. The forward map is strictly
+        // increasing (consecutive leaves differ by at least one node), so for a given `pos` there
+        // is at most one `n`, and a position is a leaf iff that `n` exists.
+        //
+        // We find `n` by a Newton-style estimate followed by an exact check of the candidates:
+        //
+        //   1. Estimate. Treating `popcount` as locally constant, `f(n) = 2*n - c` inverts to
+        //      `n = (pos + c)/2`. Iterating `n <- (pos + popcount(n))/2` from `n = pos/2` lands
+        //      within 1 of the answer after three steps for every valid leaf position: for a leaf
+        //      at location `n*`, `pos + popcount(n*) == 2*n*` exactly, so `n*` is a fixed point
+        //      and each step's error is half the popcount change caused by the previous error.
+        //      Popcount changes from offsets smaller than 64 depend only on the low 6 bits of
+        //      `n*` and the length of the run of identical bits just above them, which reduces
+        //      all 2^62 possible inputs to ~300k distinct behaviors; exhaustively checking them
+        //      (see `test_position_to_location_behavior_classes`) shows the error after three
+        //      steps always lies in [-1, 1].
+        //   2. Verify. Check `n` and its neighbors exactly. A location is returned only when
+        //      `f(n) == pos` holds identically, so a wrong answer is impossible; the bound above
+        //      guarantees the true leaf is always among the candidates. A non-leaf `pos` has no
+        //      `n` with `f(n) == pos` at all, so every candidate fails and we return `None`.
+        //
+        // `pos <= MAX_NODES = 2^63 - 1` (checked by the caller), so every `2*n` below stays within
+        // `u64` and every `2*n - popcount(n)` is non-negative.
+        let mut n = pos >> 1;
+        n = (pos + n.count_ones() as u64) >> 1;
+        n = (pos + n.count_ones() as u64) >> 1;
+        n = (pos + n.count_ones() as u64) >> 1;
 
-        while two_h > 1 {
-            if cur_node == pos {
-                return None;
-            }
-            let left_pos = cur_node - two_h;
-            two_h >>= 1;
-            if pos > left_pos {
-                // The leaf is in the right subtree, so we must account for the leaves in the left
-                // subtree all of which precede it.
-                leaf_loc_floor += two_h;
-                cur_node -= 1; // move to the right child
-            } else {
-                // The node is in the left subtree
-                cur_node = left_pos;
-            }
+        let f = |n: u64| 2 * n - n.count_ones() as u64;
+        if f(n) == pos {
+            return Some(Location::new(n));
         }
-
-        Some(Location::new(leaf_loc_floor))
+        if n > 0 && f(n - 1) == pos {
+            return Some(Location::new(n - 1));
+        }
+        if f(n + 1) == pos {
+            return Some(Location::new(n + 1));
+        }
+        None
     }
 
     fn to_nearest_size(size: Position) -> Position {
@@ -538,6 +543,86 @@ mod tests {
             Location::try_from(overflow_pos).unwrap_err(),
             merkle::Error::PositionOverflow(p) if p == overflow_pos
         ));
+    }
+
+    /// Power-of-two boundaries are the stress case for the popcount-based inversion: `2^m - 1` has
+    /// a full run of ones (popcount `m`) adjacent to `2^m` (popcount 1), so the Newton estimate's
+    /// transient error is largest here. Verify round-trips on every leaf count near each boundary.
+    #[test]
+    fn test_position_to_location_power_of_two_boundaries() {
+        let fwd = <Family as crate::merkle::Family>::location_to_position;
+        let inv = <Family as crate::merkle::Family>::position_to_location;
+        for m in 1..=62u64 {
+            let base = 1u64 << m;
+            for delta in -64i64..=64 {
+                let n = base as i64 + delta;
+                if n < 0 || (n as u64) > *MAX_LEAVES {
+                    continue;
+                }
+                let n = n as u64;
+                let pos = fwd(Location::new(n));
+                assert_eq!(
+                    inv(pos),
+                    Some(Location::new(n)),
+                    "leaf n={n} (2^{m}{delta:+})"
+                );
+            }
+        }
+    }
+
+    /// Round-trip the extreme leaf counts, including the inclusive `MAX_LEAVES` bound.
+    #[test]
+    fn test_position_to_location_max_boundary() {
+        let fwd = <Family as crate::merkle::Family>::location_to_position;
+        let inv = <Family as crate::merkle::Family>::position_to_location;
+        for n in (*MAX_LEAVES - 64)..=*MAX_LEAVES {
+            let pos = fwd(Location::new(n));
+            assert_eq!(inv(pos), Some(Location::new(n)), "leaf n={n}");
+        }
+    }
+
+    /// Round-trip one witness leaf count per behavior class of the estimate's error dynamics,
+    /// covering every valid input.
+    ///
+    /// The three-step estimate's error trajectory depends only on the low 6 bits of the leaf
+    /// count, the length of the run of identical bits just above them (which bounds the single
+    /// carry or borrow an offset below 64 can ripple), and the total popcount (which sets the
+    /// starting error). Bits above the run are invisible to the dynamics, so one witness per
+    /// combination exercises the behavior of every leaf count sharing that structure.
+    #[test]
+    fn test_position_to_location_behavior_classes() {
+        let fwd = <Family as crate::merkle::Family>::location_to_position;
+        let inv = <Family as crate::merkle::Family>::position_to_location;
+        let check = |n: u64| {
+            let pos = fwd(Location::new(n));
+            assert_eq!(inv(pos), Some(Location::new(n)), "leaf n={n}");
+        };
+
+        // Leaf counts below 64 have no upper bits; check them directly.
+        for n in 0..64u64 {
+            check(n);
+        }
+
+        // Witnesses n = 64*h + low. For each trailing-run length, `extra` additional one bits
+        // above the run sweep the popcount; constructed in u128 to avoid shift overflow, with
+        // out-of-range counts (infeasible combinations) skipped.
+        for low in 0..64u64 {
+            for run in 1..=56u32 {
+                for extra in 0..56u32 {
+                    // h odd: `run` trailing ones, a zero, then `extra` ones.
+                    let h_odd = (((1u128 << extra) - 1) << (run + 1)) | ((1u128 << run) - 1);
+                    // h even: `run` trailing zeros, then `extra + 1` ones.
+                    let h_even = ((1u128 << (extra + 1)) - 1) << run;
+                    for h in [h_odd, h_even] {
+                        let n = 64 * h + low as u128;
+                        if n > 1u128 << 62 {
+                            continue;
+                        }
+                        check(n as u64);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

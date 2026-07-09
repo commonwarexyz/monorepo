@@ -9,7 +9,7 @@ use commonware_conformance::{conformance_tests, Conformance};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
-use rand::Rng;
+use rand::RngExt as _;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
 const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(1024);
@@ -42,12 +42,12 @@ impl Conformance for ArchivePrunable {
             .unwrap();
 
             // Write random items
-            let items_count = context.gen_range(100..500);
+            let items_count = context.random_range(100..500);
             for i in 0..items_count {
                 let mut key_bytes = [0u8; 64];
                 context.fill(&mut key_bytes);
                 let key = FixedBytes::<64>::decode(key_bytes.as_ref()).unwrap();
-                let value: i32 = context.gen();
+                let value: i32 = context.random();
                 archive.put(i as u64, key, value).await.unwrap();
             }
             archive.sync().await.unwrap();
@@ -65,13 +65,13 @@ impl Conformance for ArchiveImmutable {
         runner.start(|mut context| async move {
             let config = immutable::Config {
                 metadata_partition: format!("archive-immutable-metadata-{seed}"),
-                freezer_table_partition: format!("archive-immutable-table-{seed}"),
+                freezer_table_partition: format!("archive-immutable-freezer-table-{seed}"),
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 2,
                 freezer_table_resize_chunk_size: 32,
-                freezer_key_partition: format!("archive-immutable-key-{seed}"),
+                freezer_key_partition: format!("archive-immutable-freezer-key-{seed}"),
                 freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                freezer_value_partition: format!("archive-immutable-value-{seed}"),
+                freezer_value_partition: format!("archive-immutable-freezer-value-{seed}"),
                 freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: None,
                 ordinal_partition: format!("archive-immutable-ordinal-{seed}"),
@@ -90,12 +90,12 @@ impl Conformance for ArchiveImmutable {
             .unwrap();
 
             // Write random items
-            let items_count = context.gen_range(100..500);
+            let items_count = context.random_range(100..500);
             for i in 0..items_count {
                 let mut key_bytes = [0u8; 64];
                 context.fill(&mut key_bytes);
                 let key = FixedBytes::<64>::decode(key_bytes.as_ref()).unwrap();
-                let value: i32 = context.gen();
+                let value: i32 = context.random();
                 archive.put(i as u64, key, value).await.unwrap();
             }
             archive.sync().await.unwrap();

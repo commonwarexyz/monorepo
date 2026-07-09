@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervi
 use commonware_storage::journal::{
     contiguous::{
         fixed::{Config as JournalConfig, Journal},
-        Many, Mutable as _, Reader,
+        Contiguous, Many, Mutable as _,
     },
     Error,
 };
@@ -33,6 +33,19 @@ fn bounded_append_count(u: &mut Unstructured<'_>) -> Result<u8> {
 fn bounded_positions(u: &mut Unstructured<'_>) -> Result<Vec<u64>> {
     let len = u.int_in_range(0..=MAX_READ_MANY)?;
     (0..len).map(|_| u64::arbitrary(u)).collect()
+}
+
+/// Generate a size for `init_at_size`, biased toward the `u64` boundary so the fuzzer reliably
+/// exercises the successor-arithmetic overflow paths (e.g. `init_at_size(u64::MAX)` rejection and
+/// appends that push the size to its representable limit).
+fn boundary_size(u: &mut Unstructured<'_>) -> Result<u64> {
+    Ok(match u.int_in_range(0..=4u8)? {
+        0 => u64::MAX,
+        1 => u64::MAX - 1,
+        2 => u64::MAX - u.int_in_range(0..=64u64)?,
+        3 => u.int_in_range(0..=256u64)?,
+        _ => u64::arbitrary(u)?,
+    })
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -82,6 +95,7 @@ enum JournalOperation {
     },
     PruningBoundary,
     InitAtSize {
+        #[arbitrary(with = boundary_size)]
         size: u64,
     },
 }
@@ -128,21 +142,22 @@ fn fuzz(input: FuzzInput) {
             match op {
                 JournalOperation::Append { value } => {
                     let digest = Sha256::hash(&value.to_be_bytes());
-                    let _pos = journal.append(&digest).await.unwrap();
-                    journal_size += 1;
+                    match journal.append(&digest).await {
+                        Ok(_pos) => journal_size += 1,
+                        Err(Error::SizeOverflow) => {}
+                        Err(e) => panic!("unexpected append error: {e:?}"),
+                    }
                 }
 
                 JournalOperation::Read { pos } => {
-                    let reader = journal.reader().await;
-                    let bounds = reader.bounds();
+                    let bounds = journal.bounds();
                     if bounds.contains(pos) {
-                        reader.read(*pos).await.unwrap();
+                        journal.read(*pos).await.unwrap();
                     }
                 }
 
                 JournalOperation::ReadMany { positions } => {
-                    let reader = journal.reader().await;
-                    let bounds = reader.bounds();
+                    let bounds = journal.bounds();
                     // Map fuzz positions into valid, sorted, deduplicated positions
                     let mut mapped: Vec<u64> = positions
                         .iter()
@@ -157,18 +172,18 @@ fn fuzz(input: FuzzInput) {
                     mapped.sort_unstable();
                     mapped.dedup();
                     if !mapped.is_empty() {
-                        let batch = reader.read_many(&mapped).await.unwrap();
+                        let batch = journal.read_many(&mapped).await.unwrap();
                         assert_eq!(batch.len(), mapped.len());
                         // Cross-check against individual reads
                         for (i, &pos) in mapped.iter().enumerate() {
-                            let single = reader.read(pos).await.unwrap();
+                            let single = journal.read(pos).await.unwrap();
                             assert_eq!(batch[i], single);
                         }
                     }
                 }
 
                 JournalOperation::Size => {
-                    let size = journal.size().await;
+                    let size = journal.size();
                     assert_eq!(journal_size, size, "unexpected size");
                 }
 
@@ -181,26 +196,25 @@ fn fuzz(input: FuzzInput) {
                         journal.rewind(*size).await.unwrap();
                         journal.sync().await.unwrap();
                         journal_size = *size;
-                        oldest_retained_pos = journal.reader().await.bounds().start;
+                        oldest_retained_pos = journal.bounds().start;
                     }
                 }
 
                 JournalOperation::Bounds => {
-                    let _bounds = journal.reader().await.bounds();
+                    let _bounds = journal.bounds();
                 }
 
                 JournalOperation::Prune { min_pos } => {
                     if *min_pos <= journal_size {
                         journal.prune(*min_pos).await.unwrap();
-                        oldest_retained_pos = journal.reader().await.bounds().start;
+                        oldest_retained_pos = journal.bounds().start;
                     }
                 }
 
                 JournalOperation::Replay { buffer, start_pos } => {
-                    let reader = journal.reader().await;
-                    let bounds = reader.bounds();
+                    let bounds = journal.bounds();
                     let start_pos = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
-                    let replay = reader.replay(NZUsize!(*buffer), start_pos).await;
+                    let replay = journal.replay(start_pos, NZUsize!(*buffer)).await;
 
                     match replay {
                         Ok(stream) => {
@@ -231,8 +245,8 @@ fn fuzz(input: FuzzInput) {
                     .unwrap();
                     restarts += 1;
                     // Reset tracking variables to match recovered state
-                    journal_size = journal.size().await;
-                    oldest_retained_pos = journal.reader().await.bounds().start;
+                    journal_size = journal.size();
+                    oldest_retained_pos = journal.bounds().start;
                 }
 
                 JournalOperation::Destroy => {
@@ -253,8 +267,11 @@ fn fuzz(input: FuzzInput) {
                                 d
                             })
                             .collect();
-                        journal.append_many(Many::Flat(&items)).await.unwrap();
-                        journal_size += *count as u64;
+                        match journal.append_many(Many::Flat(&items)).await {
+                            Ok(_) => journal_size += *count as u64,
+                            Err(Error::SizeOverflow) => {}
+                            Err(e) => panic!("unexpected append_many error: {e:?}"),
+                        }
                     }
                 }
 
@@ -284,8 +301,11 @@ fn fuzz(input: FuzzInput) {
                             })
                             .collect();
                         let slices: &[&[_]] = &[&items_a, &items_b];
-                        journal.append_many(Many::Nested(slices)).await.unwrap();
-                        journal_size += *count_a as u64 + *count_b as u64;
+                        match journal.append_many(Many::Nested(slices)).await {
+                            Ok(_) => journal_size += *count_a as u64 + *count_b as u64,
+                            Err(Error::SizeOverflow) => {}
+                            Err(e) => panic!("unexpected append_many error: {e:?}"),
+                        }
                     }
                 }
 
@@ -295,43 +315,47 @@ fn fuzz(input: FuzzInput) {
                         let new_size = journal.rewind_to(|item| *item == target).await.unwrap();
                         journal.sync().await.unwrap();
                         journal_size = new_size;
-                        oldest_retained_pos = journal.reader().await.bounds().start;
+                        oldest_retained_pos = journal.bounds().start;
                     }
                 }
 
                 JournalOperation::TryReadSync { pos } => {
-                    let reader = journal.reader().await;
-                    let bounds = reader.bounds();
+                    let bounds = journal.bounds();
                     if bounds.contains(pos) {
                         // Cross-check: sync result must match async result
-                        if let Some(sync_val) = reader.try_read_sync(*pos) {
-                            let async_val = reader.read(*pos).await.unwrap();
+                        if let Some(sync_val) = journal.try_read_sync(*pos) {
+                            let async_val = journal.read(*pos).await.unwrap();
                             assert_eq!(sync_val, async_val);
                         }
                     }
                 }
 
                 JournalOperation::PruningBoundary => {
-                    let boundary = journal.pruning_boundary().await;
+                    let boundary = journal.pruning_boundary();
                     assert_eq!(boundary, oldest_retained_pos);
                 }
 
                 JournalOperation::InitAtSize { size } => {
-                    // Cap to avoid excessive memory use
-                    let target_size = *size % 256;
                     drop(journal);
-                    journal = Journal::init_at_size(
-                        context
-                            .child("journal")
-                            .with_attribute("instance", restarts),
-                        cfg.clone(),
-                        target_size,
-                    )
-                    .await
-                    .unwrap();
+                    let attempt = context
+                        .child("journal")
+                        .with_attribute("instance", restarts);
                     restarts += 1;
-                    journal_size = journal.size().await;
-                    oldest_retained_pos = journal.reader().await.bounds().start;
+                    journal = match Journal::init_at_size(attempt, cfg.clone(), *size).await {
+                        Ok(j) => j,
+                        // `u64::MAX` is rejected (no append could ever succeed) before any reset
+                        // is staged, so the prior on-disk state is intact. Reopen it to continue.
+                        Err(Error::SizeOverflow) => {
+                            let reopen = context
+                                .child("journal")
+                                .with_attribute("instance", restarts);
+                            restarts += 1;
+                            Journal::init(reopen, cfg.clone()).await.unwrap()
+                        }
+                        Err(e) => panic!("unexpected init_at_size error: {e:?}"),
+                    };
+                    journal_size = journal.size();
+                    oldest_retained_pos = journal.bounds().start;
                 }
             }
         }

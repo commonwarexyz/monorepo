@@ -57,6 +57,10 @@ where
 /// See [partitioned::Db] for the generic type, or use the convenience aliases:
 /// - [partitioned::p256::Db] for 256 partitions (P=1)
 /// - [partitioned::p64k::Db] for 65,536 partitions (P=2)
+///
+/// `p256` suits smaller datasets, but its partitions spill to a `BTreeMap` once the index holds more
+/// than 130,816 entries (see [`crate::index::partitioned::ordered`]); prefer `p64k` to keep ordered
+/// access mostly inline at larger scale.
 pub mod partitioned {
     pub use super::{Operation, Update};
     use crate::{
@@ -155,7 +159,7 @@ pub(crate) mod test {
         BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
-    use rand::RngCore;
+    use rand::Rng;
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
@@ -188,6 +192,7 @@ pub(crate) mod test {
                 page_cache,
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -451,7 +456,7 @@ pub(crate) mod test {
             let base = db.to_batch();
 
             // Parent batch: insert key_a.
-            let key_a = Digest::random(&mut test_rng_seeded(800));
+            let key_a = Digest::random(test_rng_seeded(800));
             let val_a = vec![1u8; 10];
             let parent_batch = base
                 .new_batch::<Sha256>()
@@ -461,7 +466,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // Child batch: insert key_b.
-            let key_b = Digest::random(&mut test_rng_seeded(801));
+            let key_b = Digest::random(test_rng_seeded(801));
             let val_b = vec![2u8; 10];
             let child_batch = parent_batch
                 .new_batch::<Sha256>()
@@ -499,7 +504,7 @@ pub(crate) mod test {
 
             let base = db.to_batch();
 
-            let key_x = Digest::random(&mut test_rng_seeded(810));
+            let key_x = Digest::random(test_rng_seeded(810));
             let val_x = vec![10u8; 8];
             let parent_batch = base
                 .new_batch::<Sha256>()
@@ -543,7 +548,7 @@ pub(crate) mod test {
 
             let base = db.to_batch();
 
-            let key_x = Digest::random(&mut test_rng_seeded(820));
+            let key_x = Digest::random(test_rng_seeded(820));
             let val_a = vec![10u8; 8];
             let parent_batch = base
                 .new_batch::<Sha256>()

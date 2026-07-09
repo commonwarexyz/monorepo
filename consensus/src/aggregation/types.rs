@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{channel::oneshot, union, N3f1};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::hash::Hash;
 
 /// Error that may be encountered when interacting with `aggregation`.
@@ -135,6 +135,8 @@ impl<D: Digest> EncodeSize for Item<D> {
     }
 }
 
+/// The signed message covers only the height and digest, intentionally excluding the epoch.
+/// See the [module docs](super#epoch-independent-signatures).
 impl<D: Digest> Subject for &Item<D> {
     type Namespace = Namespace;
 
@@ -165,7 +167,10 @@ where
 pub struct Ack<S: Scheme, D: Digest> {
     /// The item being acknowledged
     pub item: Item<D>,
-    /// The epoch in which this acknowledgment was created
+    /// The epoch in which this acknowledgment was created.
+    ///
+    /// Not part of the signed message: it selects the scheme used to verify the attestation and
+    /// assemble a certificate. See the [module docs](super#epoch-independent-signatures).
     pub epoch: Epoch,
     /// Scheme-specific attestation material
     pub attestation: Attestation<S>,
@@ -178,7 +183,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     /// Domain separation is automatically applied to prevent signature reuse.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_attestation::<_, D>(rng, &self.item, &self.attestation, strategy)
@@ -186,7 +191,9 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
     ///
-    /// The signature uses domain separation to prevent cross-protocol attacks.
+    /// The signature uses domain separation to prevent cross-protocol attacks. The epoch is
+    /// carried in the ack but is not part of the signed message. See the
+    /// [module docs](super#epoch-independent-signatures).
     ///
     /// # Determinism
     ///
@@ -327,7 +334,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Verifies the recovered certificate for the item.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: CryptoRngCore,
+        R: CryptoRng,
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D, N3f1>(rng, &self.item, &self.certificate, strategy)

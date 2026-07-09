@@ -48,6 +48,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
             page_cache,
         },
         translator: Translator::default(),
+        init_cache_size: Some(NZUsize!(1 << 16)),
     }
 }
 
@@ -135,11 +136,11 @@ impl<E> crate::databases::Syncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
-    async fn size(&self) -> Location {
-        self.bounds().await.end
+    fn size(&self) -> Location {
+        self.bounds().end
     }
 
-    async fn sync_boundary(&self) -> Location {
+    fn sync_boundary(&self) -> Location {
         self.sync_boundary()
     }
 

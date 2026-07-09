@@ -18,10 +18,22 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{channel::fallible::OneshotExt, Acknowledgement};
+use futures::{
+    future::{ready, Either},
+    FutureExt,
+};
 use rand::Rng;
-use tracing::debug;
+use std::sync::mpsc::TryRecvError;
+use tracing::{debug, info_span, Instrument as _};
 
-pub(super) struct Processing<E, A, S, V, R>
+/// A single unit of work for the processing loop: either a mailbox message to
+/// handle or a deferred prune to run while the mailbox is idle.
+enum Step<M, P> {
+    Message(M),
+    Prune(P),
+}
+
+pub(super) struct Processing<E, A, S, V>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -40,13 +52,6 @@ where
     /// Marshal mailbox used for lazy block lookup.
     pub(super) marshal: MarshalMailbox<S, V>,
 
-    /// State sync resolvers stay alive here so peers can keep syncing from us.
-    #[expect(
-        dead_code,
-        reason = "processing keeps resolver handles alive for peer state sync"
-    )]
-    pub(super) resolvers: R,
-
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
 
@@ -55,7 +60,7 @@ where
     pub(super) skip_finalized_until: Option<Height>,
 }
 
-impl<E, A, S, V, R> Processing<E, A, S, V, R>
+impl<E, A, S, V> Processing<E, A, S, V>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -64,20 +69,42 @@ where
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub async fn start(mut self) {
+        let mut pending_prune = None;
         select_loop! {
             self.context,
-            on_stopped => {
-                debug!("processor received shutdown signal");
+            on_start => {
+                // Pruning is non-critical work. We only run it when the mailbox is idle, and
+                // it is never raced against the mailbox due to its internal lock acquisition.
+                // If a message is ready, it is always processed immediately.
+                let next = match self.mailbox.try_recv() {
+                    // A message is ready: handle it now, regardless of any queued prune.
+                    Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
+                    Err(TryRecvError::Empty) => match pending_prune.take() {
+                        // No message, but a prune is queued: run it.
+                        Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
+                        // No message and nothing to prune: wait on the mailbox as normal.
+                        None => Either::Right(self.mailbox.recv().map(|m| m.map(Step::Message))),
+                    },
+                    Err(TryRecvError::Disconnected) => {
+                        debug!("mailbox closed, stopping processing");
+                        return;
+                    }
+                };
             },
-            Some(message) = self.mailbox.recv() else {
-                debug!("mailbox closed, shutting down processor");
+            on_stopped => {
+                debug!("shutdown signal received, stopping processing");
+            },
+            Some(step) = next else {
+                debug!("mailbox closed, stopping processing");
                 break;
-            } => match message {
-                Message::Propose {
+            } => match step {
+                Step::Message(Message::Propose {
+                    span,
                     context,
                     ancestry,
                     response,
-                } => {
+                }) => {
+                    let process = info_span!(parent: &span, "stateful.actor.propose");
                     self.processor
                         .propose(
                             self.context.as_present(),
@@ -87,13 +114,16 @@ where
                             &mut self.input_provider,
                             response,
                         )
+                        .instrument(process)
                         .await;
                 }
-                Message::Verify {
+                Step::Message(Message::Verify {
+                    span,
                     context,
                     ancestry,
                     response,
-                } => {
+                }) => {
+                    let process = info_span!(parent: &span, "stateful.actor.verify");
                     self.processor
                         .verify(
                             self.context.as_present(),
@@ -102,25 +132,43 @@ where
                             ancestry,
                             response,
                         )
+                        .instrument(process)
                         .await;
                 }
-                Message::Finalized {
+                Step::Message(Message::Finalized {
+                    span,
                     block,
                     acknowledgement,
-                } => {
-                    if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                }) => {
+                    let process = info_span!(parent: &span, "stateful.actor.finalized");
+                    let prune = async {
+                        if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                            self.processor
+                                .notify_finalized(self.context.as_present(), &block)
+                                .await;
+                            acknowledgement.acknowledge();
+                            return None;
+                        }
+                        let (status, prune) = self.processor.finalize(&self.context, block).await;
+                        if let FinalizeStatus::Persisted { height } = status {
+                            debug!(height = height.get(), "persisted finalized database batch");
+                        }
                         acknowledgement.acknowledge();
-                        continue;
+                        prune
                     }
-                    if let FinalizeStatus::Persisted { height } =
-                        self.processor.finalize(&self.context, block).await
-                    {
-                        debug!(height = height.get(), "persisted finalized database batch");
+                    .instrument(process)
+                    .await;
+                    if let Some(prune) = prune {
+                        pending_prune = Some(prune);
                     }
-                    acknowledgement.acknowledge();
                 }
-                Message::SubscribeDatabases { response } => {
+                Step::Message(Message::SubscribeDatabases { response }) => {
                     response.send_lossy(self.processor.databases().clone());
+                }
+                Step::Prune(prune) => {
+                    prune
+                        .run(self.processor.databases_mut(), &self.marshal)
+                        .await;
                 }
             },
         }

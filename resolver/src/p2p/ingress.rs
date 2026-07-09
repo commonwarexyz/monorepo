@@ -12,7 +12,7 @@ pub type Message<K, P, S> = ingress::Message<K, S, Option<NonEmptyVec<P>>>;
 fn fetch_key<K, P, S>(fetch: Fetch<K, S>, targets: Option<NonEmptyVec<P>>) -> FetchKey<K, P, S> {
     FetchKey {
         key: fetch.key,
-        subscribers: NonEmptyVec::new(fetch.subscriber),
+        subscribers: NonEmptyVec::new((fetch.subscriber, fetch.span)),
         metadata: targets,
     }
 }
@@ -50,10 +50,14 @@ where
     where
         D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
-        let Fetch { key, subscriber } = key.into();
+        let Fetch {
+            key,
+            subscriber,
+            span,
+        } = key.into();
         self.sender.enqueue(Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::new(subscriber),
+            subscribers: NonEmptyVec::new((subscriber, span)),
             metadata: None,
         }]))
     }
@@ -114,10 +118,14 @@ where
         key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         targets: NonEmptyVec<Self::PublicKey>,
     ) -> Feedback {
-        let Fetch { key, subscriber } = key.into();
+        let Fetch {
+            key,
+            subscriber,
+            span,
+        } = key.into();
         self.sender.enqueue(Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::new(subscriber),
+            subscribers: NonEmptyVec::new((subscriber, span)),
             metadata: Some(targets),
         }]))
     }
@@ -148,7 +156,7 @@ mod tests {
     fn fetch(key: u8, subscriber: u16, targets: Option<NonEmptyVec<u8>>) -> TestMessage {
         Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::new(subscriber),
+            subscribers: NonEmptyVec::new((subscriber, tracing::Span::none())),
             metadata: targets,
         }])
     }
@@ -160,7 +168,12 @@ mod tests {
     ) -> TestMessage {
         Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::from_unchecked(subscribers),
+            subscribers: NonEmptyVec::from_unchecked(
+                subscribers
+                    .into_iter()
+                    .map(|subscriber| (subscriber, tracing::Span::none()))
+                    .collect(),
+            ),
             metadata: targets,
         }])
     }
@@ -213,7 +226,12 @@ mod tests {
         };
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].key, expected_key);
-        assert_eq!(&keys[0].subscribers[..], expected_subscribers);
+        let actual: Vec<_> = keys[0]
+            .subscribers
+            .iter()
+            .map(|(subscriber, _)| *subscriber)
+            .collect();
+        assert_eq!(actual, expected_subscribers);
     }
 
     #[test]

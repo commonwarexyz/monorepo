@@ -183,10 +183,11 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         }
     }
 
-    /// Create a new [`CodedBlock`] from a [`Block`] and trusted [`Commitment`].
-    pub fn new_trusted(inner: B, commitment: Commitment) -> Self {
+    /// Create a new [`CodedBlock`] from an owned or shared [`Block`] and
+    /// trusted [`Commitment`].
+    pub fn new_trusted(inner: impl Into<Arc<B>>, commitment: Commitment) -> Self {
         Self {
-            inner: Arc::new(inner),
+            inner: inner.into(),
             config: commitment.config(),
             commitment: commitment.root(),
             shards: None,
@@ -410,12 +411,12 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 /// The [`Read`] implementation performs a light verification (block digest check)
 /// to detect storage corruption, but does not re-encode the block.
 pub struct StoredCodedBlock<B: Block, C: Scheme, H: Hasher> {
-    inner: B,
+    inner: Arc<B>,
     commitment: Commitment,
     _scheme: PhantomData<(C, H)>,
 }
 
-impl<B: CertifiableBlock + Clone, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
     /// Create a [`StoredCodedBlock`] from a verified [`CodedBlock`].
     ///
     /// The caller must ensure the [`CodedBlock`] has been properly verified
@@ -423,7 +424,7 @@ impl<B: CertifiableBlock + Clone, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H
     pub fn new(block: CodedBlock<B, C, H>) -> Self {
         Self {
             commitment: block.commitment(),
-            inner: block.into_inner(),
+            inner: block.inner,
             _scheme: PhantomData,
         }
     }
@@ -437,7 +438,7 @@ impl<B: CertifiableBlock + Clone, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H
     }
 
     /// Returns a reference to the inner block.
-    pub const fn inner(&self) -> &B {
+    pub fn inner(&self) -> &B {
         &self.inner
     }
 }
@@ -449,11 +450,11 @@ impl<B: Block, C: Scheme, H: Hasher> From<StoredCodedBlock<B, C, H>> for CodedBl
     }
 }
 
-impl<B: Block + Clone, C: Scheme, H: Hasher> Clone for StoredCodedBlock<B, C, H> {
+impl<B: Block, C: Scheme, H: Hasher> Clone for StoredCodedBlock<B, C, H> {
     fn clone(&self) -> Self {
         Self {
             commitment: self.commitment,
-            inner: self.inner.clone(),
+            inner: Arc::clone(&self.inner),
             _scheme: PhantomData,
         }
     }
@@ -509,7 +510,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for StoredCodedBlock<B, C, H> {
 
         Ok(Self {
             commitment,
-            inner,
+            inner: Arc::new(inner),
             _scheme: PhantomData,
         })
     }

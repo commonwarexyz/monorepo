@@ -1138,7 +1138,7 @@ mod loom_tests {
         tests::{eventfd_count, state_bits, submitted_seq},
         *,
     };
-    use commonware_utils::test_rng;
+    use commonware_utils::test_rng_seeded;
     use loom::{
         sync::{
             atomic::{AtomicU32, Ordering},
@@ -1146,7 +1146,8 @@ mod loom_tests {
         },
         thread,
     };
-    use rand::Rng;
+    use rand::{Rng, RngExt as _};
+    use rstest::rstest;
 
     // This module uses loom to model the waker's producer/loop protocol over
     // the packed atomic state word. The model keeps the production sequence and
@@ -1301,7 +1302,7 @@ mod loom_tests {
         fn generate_program(rng: &mut impl Rng, len: usize) -> Vec<Self> {
             (0..len)
                 .map(|_| {
-                    if rng.gen_bool(0.5) {
+                    if rng.random_bool(0.5) {
                         Self::Publish
                     } else {
                         Self::Wake
@@ -1860,8 +1861,11 @@ mod loom_tests {
         });
     }
 
-    #[test]
-    fn generated_producer_only_programs() {
+    #[rstest]
+    #[case(8, 0)]
+    #[case(8, 1)]
+    #[case(8, 2)]
+    fn generated_producer_only_programs(#[case] cases: usize, #[case] seed: u64) {
         // Generate deterministic producer-only programs before entering loom,
         // then model each case with two concurrent producers. Each producer
         // runs a short sequence of `publish()` and out-of-band `wake()` calls
@@ -1873,11 +1877,10 @@ mod loom_tests {
         // never armed in this test, producers must also leave no wait target
         // armed and must not queue modeled eventfd readiness. A sticky wake bit
         // may remain because there is intentionally no loop to consume it.
-        const CASES: usize = 24;
         const OPS_PER_PROGRAM: usize = 5;
 
-        let mut rng = test_rng();
-        let programs = (0..CASES)
+        let mut rng = test_rng_seeded(seed);
+        let programs = (0..cases)
             .map(|_| {
                 [
                     ProducerOp::generate_program(&mut rng, OPS_PER_PROGRAM),
@@ -1932,9 +1935,10 @@ mod loom_tests {
     fn generated_loop_programs(
         cases: usize,
         ops_per_program: usize,
+        seed: u64,
         simulate_loop_until: fn(&Waker, u32, u32) -> u32,
     ) {
-        let mut rng = test_rng();
+        let mut rng = test_rng_seeded(seed);
         let programs = (0..cases)
             .map(|_| ProducerOp::generate_program(&mut rng, ops_per_program))
             .collect::<Vec<_>>();
@@ -1982,8 +1986,11 @@ mod loom_tests {
         }
     }
 
-    #[test]
-    fn generated_eventfd_loop_programs() {
+    #[rstest]
+    #[case(32, 10)]
+    #[case(32, 11)]
+    #[case(32, 12)]
+    fn generated_eventfd_loop_programs(#[case] cases: usize, #[case] seed: u64) {
         // Generate deterministic single-producer programs before entering loom,
         // then model each case with one producer and the eventfd loop simulator.
         // The producer may interleave out-of-band `wake()` calls before,
@@ -1994,14 +2001,16 @@ mod loom_tests {
         // `pending()` or through the arm, eventfd readiness, and `clear_wait()`
         // path. Pure wakes are allowed to resume the loop, but they must not
         // create sequence progress or disturb producer accounting.
-        const CASES: usize = 96;
         const OPS_PER_PROGRAM: usize = 3;
 
-        generated_loop_programs(CASES, OPS_PER_PROGRAM, simulate_eventfd_loop_until);
+        generated_loop_programs(cases, OPS_PER_PROGRAM, seed, simulate_eventfd_loop_until);
     }
 
-    #[test]
-    fn generated_futex_loop_programs() {
+    #[rstest]
+    #[case(6, 20)]
+    #[case(5, 21)]
+    #[case(5, 22)]
+    fn generated_futex_loop_programs(#[case] cases: usize, #[case] seed: u64) {
         // Generate deterministic single-producer programs before entering loom,
         // then model each case with one producer and the futex idle loop
         // simulator. The producer may interleave out-of-band `wake()` calls
@@ -2011,9 +2020,8 @@ mod loom_tests {
         // The loop simulator must drain exactly the generated publish count
         // through `pending()` or `park_idle()`, while pure wakes may resume the
         // futex wait without creating sequence progress.
-        const CASES: usize = 16;
         const OPS_PER_PROGRAM: usize = 3;
 
-        generated_loop_programs(CASES, OPS_PER_PROGRAM, simulate_futex_loop_until);
+        generated_loop_programs(cases, OPS_PER_PROGRAM, seed, simulate_futex_loop_until);
     }
 }

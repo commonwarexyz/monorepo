@@ -10,7 +10,8 @@ use crate::{
             Unmerkleized as _,
         },
         probe::{Config as ProbeConfig, Probe},
-        Application, Config as StatefulConfig, Proposed, Stateful as StatefulActor, SyncPlan,
+        Application, Config as StatefulConfig, Proposed, PruneConfig, Stateful as StatefulActor,
+        SyncPlan,
     },
 };
 use commonware_broadcast::buffered;
@@ -45,7 +46,7 @@ use commonware_runtime::{
     Supervisor as _,
 };
 use commonware_storage::{
-    archive::immutable,
+    archive::prunable,
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, full::Config as MmrJournalConfig, Location},
     qmdb::{
@@ -57,7 +58,7 @@ use commonware_storage::{
 use commonware_utils::{
     non_empty_range,
     range::NonEmptyRange,
-    sync::{AsyncRwLock, Mutex},
+    sync::{Mutex, TracedAsyncRwLock},
     test_rng, NZDuration, NZUsize, NZU64,
 };
 use futures::{Stream, StreamExt};
@@ -68,7 +69,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-pub(crate) type SingleDatabaseSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
+pub(crate) type SingleDatabaseSet<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
 
 /// A block carrying key-value mutations with embedded consensus context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -364,6 +365,7 @@ impl EngineDefinition for SingleDbEngine {
                 write_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         };
 
         // Destructure the 7 channels.
@@ -407,15 +409,15 @@ impl EngineDefinition for SingleDbEngine {
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
         broadcast_engine.start(broadcast_network);
 
-        // Immutable archives
-        let finalizations_by_height = immutable::Archive::init(
+        // Prunable archives so marshal pruning takes effect.
+        let finalizations_by_height = prunable::Archive::init(
             context.child("finalizations_by_height"),
             archive_config(&partition_prefix, "finalizations", page_cache.clone(), ()),
         )
         .await
         .expect("failed to initialize finalizations archive");
 
-        let finalized_blocks = immutable::Archive::init(
+        let finalized_blocks = prunable::Archive::init(
             context.child("finalized_blocks"),
             archive_config(&partition_prefix, "blocks", page_cache.clone(), ()),
         )
@@ -513,13 +515,30 @@ impl EngineDefinition for SingleDbEngine {
                 db_config,
                 input_provider: (),
                 marshal: marshal_mailbox.clone(),
-                max_pending_acks,
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: self.sync_config,
+                prune_config: Some(PruneConfig {
+                    max_pending_acks,
+                    maintenance_interval: NZUsize!(5),
+                    retained_marshal_blocks: 10,
+                    retained_qmdb_blocks: 0,
+                }),
             },
         );
+
+        // Observe the oldest operation QMDB still retains, to assert pruning ran.
+        let prune_observer = stateful_mailbox.clone();
+        let oldest_retained: OldestRetained = Arc::new(move || {
+            let mailbox = prune_observer.clone();
+            Box::pin(async move {
+                let databases = mailbox.subscribe_databases().await;
+                let guard = databases.read().await;
+                let bounds = guard.bounds();
+                *bounds.start
+            })
+        });
 
         // Deferred wrapper
         let deferred = Deferred::new(
@@ -600,6 +619,7 @@ impl EngineDefinition for SingleDbEngine {
                     .copied()
                     .unwrap_or(0),
                 state_sync_height,
+                oldest_retained,
             },
         )
     }

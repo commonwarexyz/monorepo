@@ -23,10 +23,11 @@ use commonware_storage::{
         Error,
     },
 };
-use commonware_utils::{channel::mpsc, sync::AsyncRwLock};
+use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock};
 use std::{ops::Deref, sync::Arc};
 
-type KeylessUnjournaledDbHandle<F, E, V, H, C, S> = Arc<AsyncRwLock<CompactDb<F, E, V, H, C, S>>>;
+type KeylessUnjournaledDbHandle<F, E, V, H, C, S> =
+    Arc<TracedAsyncRwLock<CompactDb<F, E, V, H, C, S>>>;
 
 /// Wraps an unjournaled keyless batch before merkleization.
 pub struct KeylessUnjournaledUnmerkleized<F, E, V, H, S, C = ()>
@@ -203,7 +204,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         KeylessUnjournaledUnmerkleized {
             batch: inner.new_batch(),
@@ -219,28 +220,26 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner)?;
-        self.sync().await?;
-        Ok(())
+        self.sync().await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
-        self.current_target()
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        Self::prune(self, target.leaf_count).await
+    }
+
+    fn sync_target(&self) -> Self::SyncTarget {
+        self.target()
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        // Compact storage only retains the previous logical commit range.
-        self.rewind().await?;
+        self.rewind(target.leaf_count).await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
-            "rewound database target mismatch after one-step rewind",
+            "rewound database target mismatch after rewind",
         );
         Ok(())
-    }
-
-    fn max_rewind_depth() -> Option<usize> {
-        Some(1)
     }
 }
 
@@ -264,7 +263,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         KeylessUnjournaledUnmerkleized {
             batch: inner.new_batch(),
@@ -280,28 +279,26 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner)?;
-        self.sync().await?;
-        Ok(())
+        self.sync().await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
-        self.current_target()
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        Self::prune(self, target.leaf_count).await
+    }
+
+    fn sync_target(&self) -> Self::SyncTarget {
+        self.target()
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        // Compact storage only retains the previous logical commit range.
-        self.rewind().await?;
+        self.rewind(target.leaf_count).await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
-            "rewound database target mismatch after one-step rewind",
+            "rewound database target mismatch after rewind",
         );
         Ok(())
-    }
-
-    fn max_rewind_depth() -> Option<usize> {
-        Some(1)
     }
 }
 
@@ -383,8 +380,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::select;
+    use futures::pin_mut;
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Spawner as _,
@@ -392,11 +390,10 @@ mod tests {
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::{compact::Config as MerkleConfig, full::Config as FullMerkleConfig, mmr},
+        merkle::{full::Config as MerkleConfig, mmr},
         qmdb::keyless as storage_keyless,
     };
     use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
-    use futures::pin_mut;
     use std::time::Duration;
 
     type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
@@ -438,11 +435,16 @@ mod tests {
         }
     }
 
-    fn fixed_config(suffix: &str) -> fixed::CompactConfig<Sequential> {
+    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::CompactConfig<Sequential> {
         fixed::CompactConfig {
-            merkle: MerkleConfig {
-                partition: format!("stateful-keyless-unjournaled-{suffix}"),
-                strategy: Sequential,
+            strategy: Sequential,
+            witness: commonware_storage::journal::contiguous::variable::Config {
+                partition: format!("stateful-keyless-unjournaled-{suffix}-witness"),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11)),
+                write_buffer: NZUsize!(1024),
             },
             commit_codec_config: (),
         }
@@ -454,7 +456,7 @@ mod tests {
     ) -> storage_keyless::fixed::Config<Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
         storage_keyless::fixed::Config {
-            merkle: FullMerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("stateful-keyless-full-journal-{suffix}"),
                 metadata_partition: format!("stateful-keyless-full-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -500,9 +502,9 @@ mod tests {
     #[test]
     fn managed_db_finalize_commits_fixed_keyless_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("managed-db");
+            let config = fixed_config("managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -525,7 +527,7 @@ mod tests {
             assert_eq!(guard.root(), expected_root);
             assert_eq!(guard.get_metadata(), Some(U64::new(9)));
 
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard).await;
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard);
             assert_eq!(target.root, guard.root());
             assert_eq!(target.leaf_count, mmr::Location::new(3));
         });
@@ -534,9 +536,9 @@ mod tests {
     #[test]
     fn managed_db_matches_sync_target_rejects_wrong_leaf_count() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("matches-sync-target");
+            let config = fixed_config("matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -570,9 +572,10 @@ mod tests {
     #[test]
     fn state_sync_fetches_fixed_keyless_compact_state() {
         deterministic::Runner::default().start(|context| async move {
-            let mut source = FixedDb::init(context.child("source"), fixed_config("source"))
-                .await
-                .unwrap();
+            let mut source =
+                FixedDb::init(context.child("source"), fixed_config("source", &context))
+                    .await
+                    .unwrap();
             let floor = source.inactivity_floor_loc();
             let batch =
                 source
@@ -582,11 +585,11 @@ mod tests {
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
 
-            let target = source.current_target();
+            let target = source.target();
             let (_update_tx, update_rx) = mpsc::channel(1);
             let synced = <FixedDb as StateSyncDb<_, Arc<FixedDb>>>::sync_db(
                 context.child("target"),
-                fixed_config("target"),
+                fixed_config("target", &context),
                 Arc::new(source),
                 target.clone(),
                 update_rx,
@@ -597,17 +600,77 @@ mod tests {
             .await
             .unwrap();
 
-            assert_eq!(synced.current_target(), target);
+            assert_eq!(synced.target(), target);
             assert_eq!(synced.get_metadata(), Some(U64::new(9)));
         });
     }
 
     #[test]
+    fn state_sync_drains_queued_target_before_reporting_reached() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut source = FullFixedDb::init(
+                context.child("source"),
+                full_fixed_config("source", &context),
+            )
+            .await
+            .unwrap();
+
+            let floor = source.inactivity_floor_loc();
+            let batch =
+                source
+                    .new_batch()
+                    .append(U64::new(7))
+                    .merkleize(&source, Some(U64::new(9)), floor);
+            source.apply_batch(batch).await.unwrap();
+            source.sync().await.unwrap();
+            let first_target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: source.bounds().end,
+            };
+
+            let floor = source.inactivity_floor_loc();
+            let batch = source.new_batch().append(U64::new(8)).merkleize(
+                &source,
+                Some(U64::new(10)),
+                floor,
+            );
+            source.apply_batch(batch).await.unwrap();
+            source.sync().await.unwrap();
+            let second_target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: source.bounds().end,
+            };
+
+            let (update_tx, update_rx) = mpsc::channel(1);
+            update_tx.send(second_target.clone()).await.unwrap();
+            let (reached_tx, mut reached_rx) = mpsc::channel(1);
+            let synced = <FixedDb as StateSyncDb<_, Arc<FullFixedDb>>>::sync_db(
+                context.child("target"),
+                fixed_config("target", &context),
+                Arc::new(source),
+                first_target,
+                update_rx,
+                None,
+                Some(reached_tx),
+                sync_config(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(reached_rx.recv().await, Some(second_target.clone()));
+            assert_eq!(synced.target(), second_target);
+            assert_eq!(synced.get_metadata(), Some(U64::new(10)));
+        });
+    }
+
+
+    #[test]
     fn state_sync_reports_compact_progress() {
         deterministic::Runner::default().start(|context| async move {
-            let mut source = FixedDb::init(context.child("source"), fixed_config("source"))
-                .await
-                .unwrap();
+            let mut source =
+                FixedDb::init(context.child("source"), fixed_config("source", &context))
+                    .await
+                    .unwrap();
             let floor = source.inactivity_floor_loc();
             let batch =
                 source
@@ -616,7 +679,7 @@ mod tests {
                     .merkleize(&source, Some(U64::new(9)), floor);
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
-            let target = source.current_target();
+            let target = source.target();
 
             // A larger target the resolver never serves. Its sync attempt
             // hangs so the test can observe the gauges while they diverge.
@@ -636,7 +699,7 @@ mod tests {
             let (reached_tx, mut reached_rx) = mpsc::channel(1);
             let sync = <FixedDb as StateSyncDb<_, _>>::sync_db(
                 context.child("client"),
-                fixed_config("client"),
+                fixed_config("client", &context),
                 resolver,
                 target.clone(),
                 update_rx,
@@ -685,70 +748,14 @@ mod tests {
     }
 
     #[test]
-    fn state_sync_drains_queued_target_before_reporting_reached() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut source = FullFixedDb::init(
-                context.child("source"),
-                full_fixed_config("source", &context),
-            )
-            .await
-            .unwrap();
-
-            let floor = source.inactivity_floor_loc();
-            let batch =
-                source
-                    .new_batch()
-                    .append(U64::new(7))
-                    .merkleize(&source, Some(U64::new(9)), floor);
-            source.apply_batch(batch).await.unwrap();
-            source.sync().await.unwrap();
-            let first_target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: source.bounds().await.end,
-            };
-
-            let floor = source.inactivity_floor_loc();
-            let batch = source.new_batch().append(U64::new(8)).merkleize(
-                &source,
-                Some(U64::new(10)),
-                floor,
-            );
-            source.apply_batch(batch).await.unwrap();
-            source.sync().await.unwrap();
-            let second_target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: source.bounds().await.end,
-            };
-
-            let (update_tx, update_rx) = mpsc::channel(1);
-            update_tx.send(second_target.clone()).await.unwrap();
-            let (reached_tx, mut reached_rx) = mpsc::channel(1);
-            let synced = <FixedDb as StateSyncDb<_, Arc<FullFixedDb>>>::sync_db(
-                context.child("target"),
-                fixed_config("target"),
-                Arc::new(source),
-                first_target,
-                update_rx,
-                None,
-                Some(reached_tx),
-                sync_config(),
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(reached_rx.recv().await, Some(second_target.clone()));
-            assert_eq!(synced.current_target(), second_target);
-            assert_eq!(synced.get_metadata(), Some(U64::new(10)));
-        });
-    }
-
-    #[test]
     fn state_sync_supersedes_in_flight_stale_compact_target() {
         deterministic::Runner::default().start(|context| async move {
-            let mut source =
-                FixedDb::init(context.child("source"), fixed_config("supersede-source"))
-                    .await
-                    .unwrap();
+            let mut source = FixedDb::init(
+                context.child("source"),
+                fixed_config("supersede-source", &context),
+            )
+            .await
+            .unwrap();
 
             let floor = source.inactivity_floor_loc();
             let batch =
@@ -758,7 +765,7 @@ mod tests {
                     .merkleize(&source, Some(U64::new(9)), floor);
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
-            let stale_target = source.current_target();
+            let stale_target = source.target();
 
             let floor = source.inactivity_floor_loc();
             let batch = source.new_batch().append(U64::new(8)).merkleize(
@@ -768,7 +775,7 @@ mod tests {
             );
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
-            let latest_target = source.current_target();
+            let latest_target = source.target();
 
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
             let resolver = SupersedingCompactResolver {
@@ -781,7 +788,7 @@ mod tests {
             let sync_handle = context.child("sync").spawn(move |context| async move {
                 <FixedDb as StateSyncDb<_, _>>::sync_db(
                     context.child("target"),
-                    fixed_config("supersede-target"),
+                    fixed_config("supersede-target", &context),
                     resolver,
                     stale_target,
                     update_rx,
@@ -807,15 +814,15 @@ mod tests {
                 .expect("spawned sync task should complete")
                 .unwrap();
 
-            assert_eq!(synced.current_target(), latest_target);
+            assert_eq!(synced.target(), latest_target);
             assert_eq!(synced.get_metadata(), Some(U64::new(10)));
         });
     }
 
     #[test]
-    fn managed_db_rewinds_fixed_keyless_unjournaled_one_commit_range() {
+    fn managed_db_rewinds_fixed_keyless_unjournaled_multiple_commit_ranges() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("rewind");
+            let config = fixed_config("rewind", &context);
             let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
 
             let floor = db.inactivity_floor_loc();
@@ -825,25 +832,71 @@ mod tests {
                     .merkleize(&db, Some(U64::new(11)), floor);
             db.apply_batch(batch).unwrap();
             db.sync().await.unwrap();
-            let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db).await;
+            let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
 
-            let floor = db.inactivity_floor_loc();
-            let batch =
-                db.new_batch()
-                    .append(U64::new(2))
-                    .merkleize(&db, Some(U64::new(22)), floor);
-            db.apply_batch(batch).unwrap();
-            db.sync().await.unwrap();
-            let second_target = <FixedDb as ManagedDb<_>>::sync_target(&db).await;
-            assert_ne!(second_target, first_target);
+            // Commit two more ranges so the rewind below spans multiple commits.
+            for i in [2u64, 3] {
+                let floor = db.inactivity_floor_loc();
+                let batch = db.new_batch().append(U64::new(i)).merkleize(
+                    &db,
+                    Some(U64::new(i * 11)),
+                    floor,
+                );
+                db.apply_batch(batch).unwrap();
+                db.sync().await.unwrap();
+            }
+            let third_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            assert_ne!(third_target, first_target);
 
             <FixedDb as ManagedDb<_>>::rewind_to_target(&mut db, first_target.clone())
                 .await
                 .unwrap();
 
-            let rewound_target = <FixedDb as ManagedDb<_>>::sync_target(&db).await;
+            let rewound_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
             assert_eq!(rewound_target, first_target);
             assert_eq!(db.get_metadata(), Some(U64::new(11)));
+        });
+    }
+
+    #[test]
+    fn managed_db_prune_bounds_fixed_keyless_unjournaled_rewind_history() {
+        deterministic::Runner::default().start(|context| async move {
+            // One witness entry per section so pruning takes effect at entry granularity.
+            let mut config = fixed_config("prune", &context);
+            config.witness.items_per_section = NZU64!(1);
+            let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
+
+            // Commit three ranges, recording each target.
+            let mut targets = Vec::new();
+            for i in [1u64, 2, 3] {
+                let floor = db.inactivity_floor_loc();
+                let batch = db.new_batch().append(U64::new(i)).merkleize(
+                    &db,
+                    Some(U64::new(i * 11)),
+                    floor,
+                );
+                db.apply_batch(batch).unwrap();
+                db.sync().await.unwrap();
+                targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));
+            }
+
+            assert_ne!(targets[0], targets[1]);
+
+            // Prune to the second target: the first is no longer a rewind target, but the
+            // second still is.
+            <FixedDb as ManagedDb<_>>::prune(&mut db, &targets[1])
+                .await
+                .unwrap();
+            assert!(matches!(
+                db.rewind(targets[0].leaf_count).await,
+                Err(Error::Merkle(
+                    commonware_storage::merkle::Error::RewindBeyondHistory
+                ))
+            ));
+            <FixedDb as ManagedDb<_>>::rewind_to_target(&mut db, targets[1].clone())
+                .await
+                .unwrap();
+            assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), targets[1]);
         });
     }
 }

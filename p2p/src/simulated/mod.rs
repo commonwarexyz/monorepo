@@ -201,7 +201,7 @@ mod tests {
         ordered::{Map, Set},
         NZUsize, NZU32,
     };
-    use rand::Rng;
+    use rand::RngExt as _;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         net::SocketAddr,
@@ -308,7 +308,7 @@ mod tests {
                     let keys = agents.keys().cloned().collect::<Vec<_>>();
 
                     loop {
-                        let index = context.gen_range(0..keys.len());
+                        let index = context.random_range(0..keys.len());
                         let sender = &keys[index];
                         let msg = format!("hello from {sender:?}");
                         let msg = IoBuf::copy_from_slice(msg.as_bytes());
@@ -380,7 +380,7 @@ mod tests {
 
             // Send invalid message
             let keys = agents.keys().collect::<Vec<_>>();
-            let index = context.gen_range(0..keys.len());
+            let index = context.random_range(0..keys.len());
             let sender = keys[index];
             let mut message_sender = agents.get(sender).unwrap().clone();
             let mut msg = vec![0u8; 1024 * 1024 + 1];
@@ -985,8 +985,8 @@ mod tests {
         expected_duration_ms: u64,
     ) {
         // Create two agents
-        let pk1 = PrivateKey::from_seed(context.gen::<u64>()).public_key();
-        let pk2 = PrivateKey::from_seed(context.gen::<u64>()).public_key();
+        let pk1 = PrivateKey::from_seed(context.random::<u64>()).public_key();
+        let pk2 = PrivateKey::from_seed(context.random::<u64>()).public_key();
         let (mut sender, _) = oracle
             .control(pk1.clone())
             .register(0, TEST_QUOTA)

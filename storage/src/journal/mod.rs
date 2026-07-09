@@ -9,6 +9,7 @@ use thiserror::Error;
 
 commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
 pub mod contiguous;
+mod frame;
 pub mod segmented;
 
 #[cfg(all(test, feature = "arbitrary"))]
@@ -41,6 +42,8 @@ pub enum Error {
     UsizeTooSmall,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("size overflow")]
+    SizeOverflow,
     #[error("unexpected size: expected={0} actual={1}")]
     UnexpectedSize(u32, u32),
     #[error("missing blob: {0}")]

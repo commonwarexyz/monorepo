@@ -57,6 +57,7 @@ stability_scope!(BETA {
         io::Error as IoError,
         net::SocketAddr,
         num::NonZeroUsize,
+        sync::Arc,
         time::{Duration, SystemTime},
     };
     pub(crate) use telemetry::metrics::{child_label, prefixed_name, METRICS_PREFIX};
@@ -77,12 +78,14 @@ stability_scope!(BETA {
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
     /// Errors that can occur when interacting with the runtime.
-    #[derive(Error, Debug)]
+    #[derive(Error, Debug, Clone)]
     pub enum Error {
         #[error("exited")]
         Exited,
         #[error("closed")]
         Closed,
+        #[error("aborted")]
+        Aborted,
         #[error("timeout")]
         Timeout,
         #[error("bind failed")]
@@ -108,13 +111,13 @@ stability_scope!(BETA {
         #[error("partition corrupt: {0}")]
         PartitionCorrupt(String),
         #[error("blob open failed: {0}/{1} error: {2}")]
-        BlobOpenFailed(String, String, IoError),
+        BlobOpenFailed(String, String, Arc<IoError>),
         #[error("blob missing: {0}/{1}")]
         BlobMissing(String, String),
         #[error("blob resize failed: {0}/{1} error: {2}")]
-        BlobResizeFailed(String, String, IoError),
+        BlobResizeFailed(String, String, Arc<IoError>),
         #[error("blob sync failed: {0}/{1} error: {2}")]
-        BlobSyncFailed(String, String, IoError),
+        BlobSyncFailed(String, String, Arc<IoError>),
         #[error("blob insufficient length")]
         BlobInsufficientLength,
         #[error("blob corrupt: {0}/{1} reason: {2}")]
@@ -129,9 +132,15 @@ stability_scope!(BETA {
         #[error("offset overflow")]
         OffsetOverflow,
         #[error("io error: {0}")]
-        Io(#[from] IoError),
+        Io(Arc<IoError>),
         #[error("buffer pool: {0}")]
         Pool(#[from] PoolError),
+    }
+
+    impl From<IoError> for Error {
+        fn from(err: IoError) -> Self {
+            Self::Io(Arc::new(err))
+        }
     }
 
     /// Interface that any task scheduler must implement to start
@@ -374,37 +383,6 @@ stability_scope!(BETA {
         }
     }
 
-    /// Interface to register task traces.
-    pub trait Tracing: Supervisor {
-        /// Return a context that wraps the next spawned task in a `tracing` span.
-        ///
-        /// The span's `name` field and OpenTelemetry attributes are derived from
-        /// [`Supervisor::name`]. The flag is consumed by the next
-        /// [`Spawner::spawn`] call on the returned context.
-        ///
-        /// [`Supervisor::child`] creates a new child context and does not inherit
-        /// the span flag. [`Supervisor::with_attribute`], [`Spawner::shared`],
-        /// and [`Spawner::dedicated`] keep operating on the same handle, so they
-        /// can be chained before the spawn:
-        ///
-        /// ```ignore
-        /// context
-        ///     .child("verify")
-        ///     .with_attribute("round", round)
-        ///     .with_span()
-        ///     .dedicated()
-        ///     .spawn(|context| async move {
-        ///         // work
-        ///     });
-        /// ```
-        ///
-        /// Enabling the span only affects tracing. It does not change which
-        /// metrics are registered, nor does it widen the cardinality of runtime
-        /// task metrics.
-        #[must_use]
-        fn with_span(self) -> Self;
-    }
-
     /// Interface to register and encode metrics.
     pub trait Metrics: Supervisor {
         /// Register a metric with the runtime.
@@ -433,31 +411,6 @@ stability_scope!(BETA {
         /// Encode all metrics into a buffer.
         fn encode(&self) -> String;
     }
-
-    /// Interface for both [`Tracing`] and [`Metrics`].
-    ///
-    /// A context carries multiple pieces of observability state. They compose
-    /// freely, but they do not all feed into the same sinks:
-    ///
-    /// - `label` (set by [`Supervisor::child`]): prefix applied to metrics
-    ///   registered with [`Metrics::register`]. It also populates the `name`
-    ///   field of runtime-internal task metrics (`runtime_tasks_spawned`,
-    ///   `runtime_tasks_running`).
-    /// - `attributes` (set by [`Supervisor::with_attribute`]): Prometheus label
-    ///   dimensions on metrics registered with [`Metrics::register`]. They are
-    ///   also emitted as OpenTelemetry attributes on the per-task tracing span
-    ///   when [`Tracing::with_span`] is enabled. Runtime task metrics ignore
-    ///   attributes to keep their cardinality bounded.
-    /// - `span` (set by [`Tracing::with_span`]): wraps the next spawned task in
-    ///   a `tracing` span populated from the current `label` and `attributes`.
-    ///   It never touches metrics.
-    ///
-    /// | Builder | Registered metric name | Registered metric labels | Runtime task metrics | Tracing span |
-    /// | --- | :---: | :---: | :---: | :---: |
-    /// | `child` | prefix | - | `name` | `name` field when `with_span` is set |
-    /// | `with_attribute` | - | label dimension | - | OTel attribute when `with_span` is set |
-    /// | `with_span` | - | - | - | enables span creation |
-    pub trait Observer: Tracing + Metrics {}
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
     ///
@@ -714,6 +667,19 @@ stability_scope!(BETA {
         /// If no `name` is provided, the entire partition is removed.
         ///
         /// An Ok result indicates the blob is durably removed.
+        ///
+        /// # Read-after-remove
+        ///
+        /// Removal unlinks the blob's name but does not invalidate previously opened handles:
+        /// they remain fully readable until dropped, whether the blob was removed by name or by
+        /// removing its entire partition. This includes bytes written but never synced. Physical
+        /// resources are reclaimed once the last handle is dropped.
+        ///
+        /// Re-opening a removed blob's name creates a new, independent blob; handles opened
+        /// before the removal continue to observe the removed blob's contents.
+        ///
+        /// Mutating a removed blob (e.g. via [`Blob::write_at`], [`Blob::resize`], or
+        /// [`Blob::sync`]) is unspecified: implementations may succeed or return an error.
         fn remove(
             &self,
             partition: &str,
@@ -800,6 +766,12 @@ stability_scope!(BETA {
 
         /// Ensure all pending data is durably persisted.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Request that all pending data is durably persisted.
+        ///
+        /// Awaiting this future waits until the sync has started. Awaiting the returned
+        /// [`Handle`] waits for the same durability guarantee as [`Blob::sync`].
+        fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
     }
 
     /// Interface that any runtime must implement to provide buffer pools.
@@ -869,19 +841,18 @@ stability_scope!(BETA, cfg(feature = "external") {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::{
-        metrics::{
-            count_running_tasks,
-            raw::{Counter, Family},
-            EncodeLabelKey, EncodeLabelSetTrait as EncodeLabelSet,
-            EncodeLabelValueTrait as EncodeLabelValue, LabelSetEncoder,
-        },
-        traces::collector::TraceStorage,
+    use crate::telemetry::metrics::{
+        count_running_tasks,
+        raw::{Counter, Family},
+        EncodeLabelKey, EncodeLabelSetTrait as EncodeLabelSet,
+        EncodeLabelValueTrait as EncodeLabelValue, LabelSetEncoder,
     };
     use bytes::Bytes;
-    use commonware_macros::{select, test_collect_traces};
+    use commonware_macros::select;
+    use commonware_parallel::Strategy as _;
     use commonware_utils::{
         channel::{mpsc, oneshot},
+        futures::Pool as FuturesPool,
         sync::Mutex,
         NZUsize, SystemTimeExt, NZU32,
     };
@@ -911,6 +882,15 @@ mod tests {
         }
         let result = runner.start(|_| error_future());
         assert_eq!(result, Err("An error occurred"));
+    }
+
+    #[test]
+    fn test_handle_can_use_futures_pool() {
+        deterministic::Runner::default().start(|_| async move {
+            let mut pool = FuturesPool::<Result<(), Error>>::default();
+            pool.push(Handle::ready(Ok(())));
+            assert!(pool.next_completed().await.is_ok());
+        });
     }
 
     fn test_clock_sleep<R: Runner>(runner: R)
@@ -3464,61 +3444,6 @@ mod tests {
         test_metrics(executor);
     }
 
-    #[test_collect_traces]
-    fn test_deterministic_instrument_tasks(traces: TraceStorage) {
-        let executor = deterministic::Runner::new(deterministic::Config::default());
-        executor.start(|context| async move {
-            context
-                .child("test")
-                .with_span()
-                .spawn(|context| async move {
-                    tracing::info!(field = "test field", "test log");
-
-                    context
-                        .child("inner")
-                        .with_span()
-                        .spawn(|_| async move {
-                            tracing::info!("inner log");
-                        })
-                        .await
-                        .unwrap();
-                })
-                .await
-                .unwrap();
-        });
-
-        let info_traces = traces.get_by_level(Level::INFO);
-        assert_eq!(info_traces.len(), 2);
-
-        // Outer log (single span)
-        info_traces
-            .expect_event_at_index(0, |event| {
-                event.metadata.expect_content_exact("test log")?;
-                event.metadata.expect_field_count(1)?;
-                event.metadata.expect_field_exact("field", "test field")?;
-                event.expect_span_count(1)?;
-                event.expect_span_at_index(0, |span| {
-                    span.expect_content_exact("task")?;
-                    span.expect_field_count(1)?;
-                    span.expect_field_exact("name", "test")
-                })
-            })
-            .unwrap();
-
-        info_traces
-            .expect_event_at_index(1, |event| {
-                event.metadata.expect_content_exact("inner log")?;
-                event.metadata.expect_field_count(0)?;
-                event.expect_span_count(1)?;
-                event.expect_span_at_index(0, |span| {
-                    span.expect_content_exact("task")?;
-                    span.expect_field_count(1)?;
-                    span.expect_field_exact("name", "test_inner")
-                })
-            })
-            .unwrap();
-    }
-
     #[test]
     fn test_deterministic_resolver() {
         let executor = deterministic::Runner::default();
@@ -3854,7 +3779,7 @@ mod tests {
             // Configure telemetry
             tokio::telemetry::init(
                 context.child("metrics"),
-                tokio::telemetry::Logging {
+                tokio::telemetry::Logs {
                     level: Level::INFO,
                     json: false,
                 },
@@ -4003,6 +3928,42 @@ mod tests {
             pool.install(|| {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
+        });
+    }
+
+    #[test]
+    fn test_deterministic_nested_parallel_strategy_uses_spawn_worker() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context
+                .child("pool")
+                .create_strategy(NZUsize!(1))
+                .unwrap()
+                .manual();
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
+        });
+    }
+
+    #[test]
+    fn test_tokio_nested_parallel_strategy_uses_spawn_worker() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context
+                .child("pool")
+                .create_strategy(NZUsize!(1))
+                .unwrap()
+                .manual();
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
         });
     }
 

@@ -21,7 +21,7 @@ use estimator::{
     mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
 };
 use futures::future::try_join_all;
-use rand::RngCore;
+use rand::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU32,
@@ -290,7 +290,7 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNetwork + RngCore>(
+async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNetwork + Rng>(
     context: C,
     proposer_idx: usize,
     peers: usize,

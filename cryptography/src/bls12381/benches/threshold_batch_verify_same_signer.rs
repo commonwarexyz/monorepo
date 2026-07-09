@@ -9,7 +9,7 @@ use commonware_cryptography::{
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{Faults, N3f1, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::hint::black_box;
 
 fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {

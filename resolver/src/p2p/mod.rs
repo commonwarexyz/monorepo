@@ -2050,10 +2050,12 @@ mod tests {
             mailbox1.fetch(Fetch {
                 key: key.clone(),
                 subscriber: dropped_subscriber,
+                span: tracing::Span::none(),
             });
             mailbox1.fetch(Fetch {
                 key: key.clone(),
                 subscriber: kept_subscriber.clone(),
+                span: tracing::Span::none(),
             });
 
             context.sleep(Duration::from_millis(100)).await;
@@ -2108,10 +2110,12 @@ mod tests {
             mailbox1.fetch(Fetch {
                 key: key.clone(),
                 subscriber: second_subscriber.clone(),
+                span: tracing::Span::none(),
             });
             mailbox1.fetch(Fetch {
                 key: key.clone(),
                 subscriber: first_subscriber.clone(),
+                span: tracing::Span::none(),
             });
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
@@ -2121,7 +2125,10 @@ mod tests {
                 delivery,
                 Delivery {
                     key,
-                    subscribers: non_empty_vec![first_subscriber, second_subscriber],
+                    subscribers: non_empty_vec![
+                        (first_subscriber, tracing::Span::none()),
+                        (second_subscriber, tracing::Span::none())
+                    ],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
@@ -2168,10 +2175,12 @@ mod tests {
             mailbox1.fetch(Fetch {
                 key: key.clone(),
                 subscriber: first_subscriber.clone(),
+                span: tracing::Span::none(),
             });
             mailbox1.fetch(Fetch {
                 key: key.clone(),
                 subscriber: second_subscriber.clone(),
+                span: tracing::Span::none(),
             });
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
@@ -2181,7 +2190,10 @@ mod tests {
                 delivery,
                 Delivery {
                     key: key.clone(),
-                    subscribers: non_empty_vec![first_subscriber, second_subscriber],
+                    subscribers: non_empty_vec![
+                        (first_subscriber, tracing::Span::none()),
+                        (second_subscriber, tracing::Span::none())
+                    ],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
@@ -2241,6 +2253,7 @@ mod tests {
             mailbox1.fetch(Fetch {
                 key: key.clone(),
                 subscriber: first_subscriber.clone(),
+                span: tracing::Span::none(),
             });
 
             let delivery = started.recv().await.expect("delivery did not start");
@@ -2248,13 +2261,14 @@ mod tests {
                 delivery,
                 Delivery {
                     key: key.clone(),
-                    subscribers: non_empty_vec![first_subscriber.clone()],
+                    subscribers: non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
                 }
             );
 
             mailbox1.fetch(Fetch {
                 key: key.clone(),
                 subscriber: second_subscriber.clone(),
+                span: tracing::Span::none(),
             });
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(
@@ -2268,7 +2282,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: key.clone(),
-                    subscribers: non_empty_vec![first_subscriber],
+                    subscribers: non_empty_vec![(first_subscriber, tracing::Span::none())],
                 }
             );
             assert_eq!(value, first_response);
@@ -2283,7 +2297,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: key.clone(),
-                    subscribers: non_empty_vec![second_subscriber.clone()],
+                    subscribers: non_empty_vec![(second_subscriber.clone(), tracing::Span::none())],
                 }
             );
 
@@ -2293,7 +2307,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: key.clone(),
-                    subscribers: non_empty_vec![second_subscriber],
+                    subscribers: non_empty_vec![(second_subscriber, tracing::Span::none())],
                 }
             );
             assert_eq!(value, first_response);
@@ -2365,6 +2379,7 @@ mod tests {
             mailbox1.fetch(Fetch {
                 key: blocked_key.clone(),
                 subscriber: SubscriberTag(1),
+                span: tracing::Span::none(),
             });
             started
                 .recv()
@@ -2377,6 +2392,7 @@ mod tests {
                 Fetch {
                     key: waiting_key,
                     subscriber: SubscriberTag(2),
+                    span: tracing::Span::none(),
                 },
                 non_empty_vec![peers[1].clone()],
             );
@@ -2387,6 +2403,7 @@ mod tests {
             mailbox1.fetch(Fetch {
                 key: main_key.clone(),
                 subscriber: first_subscriber.clone(),
+                span: tracing::Span::none(),
             });
 
             let delivery = started.recv().await.expect("delivery did not start");
@@ -2394,13 +2411,14 @@ mod tests {
                 delivery,
                 Delivery {
                     key: main_key.clone(),
-                    subscribers: non_empty_vec![first_subscriber.clone()],
+                    subscribers: non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
                 }
             );
 
             mailbox1.fetch(Fetch {
                 key: main_key.clone(),
                 subscriber: second_subscriber.clone(),
+                span: tracing::Span::none(),
             });
             context.sleep(Duration::from_millis(100)).await;
 
@@ -2410,7 +2428,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: main_key.clone(),
-                    subscribers: non_empty_vec![first_subscriber],
+                    subscribers: non_empty_vec![(first_subscriber, tracing::Span::none())],
                 }
             );
             assert_eq!(value, data);
@@ -2425,7 +2443,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: main_key,
-                    subscribers: non_empty_vec![second_subscriber],
+                    subscribers: non_empty_vec![(second_subscriber, tracing::Span::none())],
                 }
             );
         });
@@ -2471,6 +2489,7 @@ mod tests {
             mailbox1.fetch(Fetch {
                 key: key.clone(),
                 subscriber: subscriber.clone(),
+                span: tracing::Span::none(),
             });
 
             context.sleep(Duration::from_millis(100)).await;
@@ -2484,7 +2503,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key,
-                    subscribers: non_empty_vec![subscriber],
+                    subscribers: non_empty_vec![(subscriber, tracing::Span::none())],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
@@ -2530,6 +2549,7 @@ mod tests {
             mailbox1.fetch(Fetch {
                 key: key.clone(),
                 subscriber: subscriber.clone(),
+                span: tracing::Span::none(),
             });
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
@@ -2538,7 +2558,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key,
-                    subscribers: non_empty_vec![subscriber],
+                    subscribers: non_empty_vec![(subscriber, tracing::Span::none())],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));

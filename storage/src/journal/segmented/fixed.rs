@@ -25,8 +25,9 @@ use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
-    Blob, Buf, Metrics, Storage,
+    Blob, Buf, Handle, Metrics, Storage,
 };
+use commonware_utils::NZUsize;
 use futures::{
     stream::{self, Stream},
     StreamExt,
@@ -95,7 +96,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Repair any blobs with trailing bytes (incomplete items from crash)
         let sections: Vec<_> = manager.sections().collect();
         for section in sections {
-            let size = manager.size(section).await?;
+            let size = manager.size(section)?;
             if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
                 let valid_size = size - (size % Self::CHUNK_SIZE_U64);
                 warn!(
@@ -123,38 +124,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn append(&mut self, section: u64, item: &A) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
 
-        let size = blob.size().await;
-        if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
-            return Err(Error::InvalidBlobSize(section, size));
-        }
-        let position = size / Self::CHUNK_SIZE_U64;
-
         // Encode the item
         let buf = item.encode_mut();
-        blob.append(&buf).await?;
+        let offset = blob.append(&buf).await?;
+        if !offset.is_multiple_of(Self::CHUNK_SIZE_U64) {
+            return Err(Error::InvalidBlobSize(section, offset));
+        }
+        let position = offset / Self::CHUNK_SIZE_U64;
         trace!(section, position, "appended item");
 
         Ok(position)
-    }
-
-    /// Append pre-encoded bytes to the given section.
-    ///
-    /// The buffer must contain one or more encoded items with size [Self::CHUNK_SIZE] each.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `buf` is empty or not a multiple of [Self::CHUNK_SIZE].
-    pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<(), Error> {
-        assert!(!buf.is_empty());
-        assert!(buf.len().is_multiple_of(Self::CHUNK_SIZE));
-        let blob = self.manager.get_or_create(section).await?;
-        blob.append(buf).await?;
-        trace!(
-            section,
-            count = buf.len() / Self::CHUNK_SIZE,
-            "appended items"
-        );
-        Ok(())
     }
 
     /// Read the item at the given section and position.
@@ -173,14 +152,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let offset = position
             .checked_mul(Self::CHUNK_SIZE_U64)
             .ok_or(Error::ItemOutOfRange(position))?;
-        let end = offset
-            .checked_add(Self::CHUNK_SIZE_U64)
-            .ok_or(Error::ItemOutOfRange(position))?;
-        if end > blob.size().await {
-            return Err(Error::ItemOutOfRange(position));
-        }
 
-        let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
+        // The read validates bounds against the blob's logical size.
+        let buf = blob
+            .read_at(offset, Self::CHUNK_SIZE)
+            .await
+            .map_err(|err| match err {
+                commonware_runtime::Error::BlobInsufficientLength
+                | commonware_runtime::Error::OffsetOverflow => Error::ItemOutOfRange(position),
+                err => Error::Runtime(err),
+            })?;
         A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
@@ -188,15 +169,27 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// `buf` must be at least `positions.len() * CHUNK_SIZE` bytes. All positions must be
     /// strictly increasing and within the section's bounds.
+    ///
+    /// Returns the decoded items and the number served without a blob read (page cache or tip
+    /// buffer hits).
     pub async fn get_many(
         &self,
         section: u64,
         positions: &[u64],
         buf: &mut [u8],
-    ) -> Result<Vec<A>, Error> {
+    ) -> Result<(Vec<A>, usize), Error> {
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
         if positions.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
+        assert!(
+            buf.len() >= positions.len() * Self::CHUNK_SIZE,
+            "get_many requires buf.len() >= positions.len() * CHUNK_SIZE"
+        );
+        let buf = &mut buf[..positions.len() * Self::CHUNK_SIZE];
         let blob = self
             .manager
             .get(section)?
@@ -210,42 +203,28 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             })
             .collect::<Result<_, _>>()?;
 
-        blob.read_many_into(buf, &offsets, Self::CHUNK_SIZE).await?;
+        let hits = blob
+            .read_many_into(buf, &offsets, NZUsize!(Self::CHUNK_SIZE))
+            .await?;
 
         let mut items = Vec::with_capacity(positions.len());
         for i in 0..positions.len() {
             let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
             items.push(A::decode(slice).map_err(Error::Codec)?);
         }
-        Ok(items)
+        Ok((items, hits))
     }
 
     /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
     pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
-        let mut buf = vec![0u8; Self::CHUNK_SIZE];
-        self.try_get_sync_into(section, position, &mut buf)
-    }
-
-    /// Get an item synchronously using caller-provided buffer.
-    ///
-    /// `buf` must be at least [Self::CHUNK_SIZE] bytes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `buf` is smaller than [Self::CHUNK_SIZE].
-    pub fn try_get_sync_into(&self, section: u64, position: u64, buf: &mut [u8]) -> Option<A> {
-        assert!(
-            buf.len() >= Self::CHUNK_SIZE,
-            "try_get_sync_into requires buf.len() >= CHUNK_SIZE"
-        );
         let blob = self.manager.get(section).ok()??;
         let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
-        let remaining = blob.try_size()?.checked_sub(offset)?;
+        let remaining = blob.size().checked_sub(offset)?;
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
-        let buf = &mut buf[..Self::CHUNK_SIZE];
-        if !blob.try_read_sync(offset, buf) {
+        let mut buf = vec![0u8; Self::CHUNK_SIZE];
+        if !blob.try_read_sync_into(&mut buf, offset) {
             return None;
         }
         A::decode(&buf[..]).ok()
@@ -265,7 +244,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             .get(section)?
             .ok_or(Error::SectionOutOfRange(section))?;
 
-        let size = blob.size().await;
+        let size = blob.size();
         if size < Self::CHUNK_SIZE_U64 {
             return Ok(None);
         }
@@ -280,19 +259,22 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Each item is returned as (section, position, item).
     pub async fn replay(
-        &self,
+        &mut self,
         start_section: u64,
         start_position: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + Send + '_, Error> {
-        // Pre-create readers from blobs (async operation)
+        // Pre-create readers from blobs. This validates replay setup but does not allocate
+        // `buffer` bytes per blob; page buffers are allocated later by `Replay::ensure`.
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
-            let blob_size = blob.size().await;
+            let blob_size = blob.size();
             let mut replay = blob.replay(buffer).await?;
             // For the first section, seek to the start position
             let initial_position = if section == start_section {
-                let start = start_position * Self::CHUNK_SIZE_U64;
+                let start = start_position
+                    .checked_mul(Self::CHUNK_SIZE_U64)
+                    .ok_or(Error::ItemOutOfRange(start_position))?;
                 if start > blob_size {
                     return Err(Error::ItemOutOfRange(start_position));
                 }
@@ -369,13 +351,21 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         )
     }
 
-    /// Sync the given section to storage.
-    pub async fn sync(&self, section: u64) -> Result<(), Error> {
-        self.manager.sync(section).await
+    /// Sync the given `sections` to storage.
+    pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
+        self.manager.sync(sections).await
+    }
+
+    /// Start syncing the given `sections` to storage.
+    pub async fn start_sync(
+        &mut self,
+        sections: impl crate::Sections,
+    ) -> Result<Handle<()>, Error> {
+        self.manager.start_sync(sections).await
     }
 
     /// Sync all sections to storage.
-    pub async fn sync_all(&self) -> Result<(), Error> {
+    pub async fn sync_all(&mut self) -> Result<(), Error> {
         self.manager.sync_all().await
     }
 
@@ -396,18 +386,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Returns an iterator over all section numbers.
     pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
-        self.manager.sections_from(0).map(|(section, _)| *section)
+        self.manager.sections()
     }
 
     /// Returns the number of items in the given section.
-    pub async fn section_len(&self, section: u64) -> Result<u64, Error> {
-        let size = self.manager.size(section).await?;
+    pub fn section_len(&self, section: u64) -> Result<u64, Error> {
+        let size = self.manager.size(section)?;
         Ok(size / Self::CHUNK_SIZE_U64)
     }
 
     /// Returns the byte size of the given section.
-    pub async fn size(&self, section: u64) -> Result<u64, Error> {
-        self.manager.size(section).await
+    pub fn size(&self, section: u64) -> Result<u64, Error> {
+        self.manager.size(section)
     }
 
     /// Rewind the journal to a specific section and byte offset.
@@ -436,15 +426,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn clear(&mut self) -> Result<(), Error> {
         self.manager.clear().await
     }
-
-    /// Ensure a section exists, creating an empty blob if needed.
-    ///
-    /// This is used to maintain the invariant that at least one blob always exists
-    /// (the "tail" blob), which allows reconstructing journal size on reopen.
-    pub(crate) async fn ensure_section_exists(&mut self, section: u64) -> Result<(), Error> {
-        self.manager.get_or_create(section).await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -453,11 +434,18 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{fail_pending_syncs, release_pending_syncs, DelayedSyncContext},
+        BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{sync::Mutex, NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(44);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
@@ -545,7 +533,7 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -609,7 +597,7 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -699,6 +687,10 @@ mod tests {
             assert!(matches!(result, Err(Error::ItemOutOfRange(100))));
             drop(result);
 
+            let result = journal.replay(1, u64::MAX, NZUsize!(1024)).await;
+            assert!(matches!(result, Err(Error::ItemOutOfRange(u64::MAX))));
+            drop(result);
+
             journal.destroy().await.expect("failed to destroy");
         });
     }
@@ -755,27 +747,58 @@ mod tests {
 
             // Verify all sections exist
             for section in 1u64..=3 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert!(size > 0, "section {section} should have data");
             }
 
             // Rewind to section 1 (should remove sections 2, 3)
-            let size = journal.size(1).await.expect("failed to get size");
+            let size = journal.size(1).expect("failed to get size");
             journal.rewind(1, size).await.expect("failed to rewind");
 
             // Verify section 1 still has data
-            let size = journal.size(1).await.expect("failed to get size");
+            let size = journal.size(1).expect("failed to get size");
             assert!(size > 0, "section 1 should still have data");
 
             // Verify sections 2, 3 are removed
             for section in 2u64..=3 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert_eq!(size, 0, "section {section} should be removed");
             }
 
             // Verify data in section 1 is still readable
             let item = journal.get(1, 0).await.expect("failed to get");
             assert_eq!(item, test_digest(1));
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_rewind_max_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Append to the maximal section. `section + 1` has no representable successor.
+            journal
+                .append(u64::MAX, &test_digest(0))
+                .await
+                .expect("failed to append");
+            journal.sync_all().await.expect("failed to sync");
+
+            // Rewinding the maximal section removes no sections above it and must not panic.
+            let size = journal.size(u64::MAX).expect("failed to get size");
+            journal
+                .rewind(u64::MAX, size)
+                .await
+                .expect("failed to rewind");
+
+            // The section is intact and readable.
+            assert_eq!(journal.size(u64::MAX).expect("failed to get size"), size);
+            assert_eq!(journal.get(u64::MAX, 0).await.unwrap(), test_digest(0));
 
             journal.destroy().await.expect("failed to destroy");
         });
@@ -800,18 +823,18 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
 
             // Rewind to section 5 (should remove sections 6-10)
-            let size = journal.size(5).await.expect("failed to get size");
+            let size = journal.size(5).expect("failed to get size");
             journal.rewind(5, size).await.expect("failed to rewind");
 
             // Verify sections 1-5 still have data
             for section in 1u64..=5 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert!(size > 0, "section {section} should still have data");
             }
 
             // Verify sections 6-10 are removed
             for section in 6u64..=10 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert_eq!(size, 0, "section {section} should be removed");
             }
 
@@ -857,7 +880,7 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
 
             // Rewind to section 2
-            let size = journal.size(2).await.expect("failed to get size");
+            let size = journal.size(2).expect("failed to get size");
             journal.rewind(2, size).await.expect("failed to rewind");
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
@@ -869,13 +892,13 @@ mod tests {
 
             // Verify sections 1-2 have data
             for section in 1u64..=2 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert!(size > 0, "section {section} should have data after restart");
             }
 
             // Verify sections 3-5 are gone
             for section in 3u64..=5 {
-                let size = journal.size(section).await.expect("failed to get size");
+                let size = journal.size(section).expect("failed to get size");
                 assert_eq!(size, 0, "section {section} should be gone after restart");
             }
 
@@ -914,7 +937,7 @@ mod tests {
             blob.resize(size - 1).await.expect("failed to truncate");
             blob.sync().await.expect("failed to sync");
 
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -973,6 +996,51 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_segmented_fixed_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // One sub-page item per section stays buffered until synced.
+            for section in 1u64..=3 {
+                journal
+                    .append(section, &test_digest(section))
+                    .await
+                    .expect("failed to append");
+            }
+
+            // Sync sections 1 and 3; a nonexistent section (99) is skipped, not an error.
+            journal
+                .sync(&[1, 3, 99])
+                .await
+                .expect("failed to sync sections");
+            drop(journal);
+
+            // Only the synced sections survive the unclean drop.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .expect("failed to re-init");
+            assert_eq!(
+                journal.get(1, 0).await.expect("section 1 durable"),
+                test_digest(1)
+            );
+            assert_eq!(
+                journal.get(3, 0).await.expect("section 3 durable"),
+                test_digest(3)
+            );
+            assert!(matches!(
+                journal.get(2, 0).await,
+                Err(Error::ItemOutOfRange(0)) | Err(Error::SectionOutOfRange(2))
+            ));
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
     fn test_segmented_fixed_section_len() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -981,7 +1049,7 @@ mod tests {
                 .await
                 .expect("failed to init");
 
-            assert_eq!(journal.section_len(1).await.unwrap(), 0);
+            assert_eq!(journal.section_len(1).unwrap(), 0);
 
             for i in 0u64..5 {
                 journal
@@ -990,8 +1058,8 @@ mod tests {
                     .expect("failed to append");
             }
 
-            assert_eq!(journal.section_len(1).await.unwrap(), 5);
-            assert_eq!(journal.section_len(2).await.unwrap(), 0);
+            assert_eq!(journal.section_len(1).unwrap(), 5);
+            assert_eq!(journal.section_len(2).unwrap(), 0);
 
             journal.destroy().await.expect("failed to destroy");
         });
@@ -1041,7 +1109,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -1125,13 +1193,13 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
 
             // Verify section lengths
-            assert_eq!(journal.section_len(1).await.unwrap(), 1);
-            assert_eq!(journal.section_len(2).await.unwrap(), 0);
-            assert_eq!(journal.section_len(3).await.unwrap(), 1);
+            assert_eq!(journal.section_len(1).unwrap(), 1);
+            assert_eq!(journal.section_len(2).unwrap(), 0);
+            assert_eq!(journal.section_len(3).unwrap(), 1);
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -1232,11 +1300,11 @@ mod tests {
                 .expect("failed to re-init");
 
             // Verify section now has only 2 items
-            assert_eq!(journal.section_len(1).await.unwrap(), 2);
+            assert_eq!(journal.section_len(1).unwrap(), 2);
 
             // Verify size is the expected multiple of ITEM_SIZE (this would fail if we didn't trim
             // items and just relied on page-level checksum recovery).
-            assert_eq!(journal.size(1).await.unwrap(), 64);
+            assert_eq!(journal.size(1).unwrap(), 64);
 
             // Items 0 and 1 should still be readable
             let item0 = journal.get(1, 0).await.expect("failed to get item 0");
@@ -1395,11 +1463,12 @@ mod tests {
             let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
             journal.append(0, &test_digest(0)).await.unwrap();
-            assert_eq!(journal.section_len(0).await.unwrap(), 1);
+            assert_eq!(journal.section_len(0).unwrap(), 1);
 
             let mut buf = [];
-            let items = journal.get_many(0, &[], &mut buf).await.unwrap();
+            let (items, hits) = journal.get_many(0, &[], &mut buf).await.unwrap();
             assert!(items.is_empty());
+            assert_eq!(hits, 0);
 
             journal.destroy().await.unwrap();
         });
@@ -1415,12 +1484,13 @@ mod tests {
             for i in 0..5 {
                 journal.append(0, &test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.section_len(0).await.unwrap(), 5);
+            assert_eq!(journal.section_len(0).unwrap(), 5);
 
-            // Read all 5 items in one call.
+            // Read all 5 items in one call. The reusable buffer is intentionally oversized:
+            // get_many slices it to the exact length the batch needs.
             let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
-            let mut buf = vec![0u8; 5 * chunk];
-            let items = journal
+            let mut buf = vec![0u8; 6 * chunk];
+            let (items, _) = journal
                 .get_many(0, &[0, 1, 2, 3, 4], &mut buf)
                 .await
                 .unwrap();
@@ -1444,12 +1514,12 @@ mod tests {
             for i in 0..10 {
                 journal.append(0, &test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.section_len(0).await.unwrap(), 10);
+            assert_eq!(journal.section_len(0).unwrap(), 10);
 
             let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
             let positions = [1, 4, 7, 9];
             let mut buf = vec![0u8; positions.len() * chunk];
-            let items = journal.get_many(0, &positions, &mut buf).await.unwrap();
+            let (items, _) = journal.get_many(0, &positions, &mut buf).await.unwrap();
 
             for (i, &pos) in positions.iter().enumerate() {
                 assert_eq!(items[i], test_digest(pos));
@@ -1487,13 +1557,13 @@ mod tests {
             for i in 0..8 {
                 journal.append(0, &test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.section_len(0).await.unwrap(), 8);
+            assert_eq!(journal.section_len(0).unwrap(), 8);
             journal.sync_all().await.unwrap();
 
             let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
             let positions: Vec<u64> = (0..8).collect();
             let mut buf = vec![0u8; positions.len() * chunk];
-            let batch = journal.get_many(0, &positions, &mut buf).await.unwrap();
+            let (batch, _) = journal.get_many(0, &positions, &mut buf).await.unwrap();
 
             for pos in &positions {
                 let single = journal.get(0, *pos).await.unwrap();
@@ -1501,6 +1571,266 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_prune_waits_for_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            let handle = journal.start_sync(1).await.expect("failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("prune").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                assert!(journal.prune(2).await.expect("failed to prune"));
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                journal
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "prune must wait for in-flight syncs on pruned sections"
+            );
+
+            release_pending_syncs(&pending);
+            handle
+                .await
+                .expect("sync handle should complete despite pruning");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let journal = waiter.await.expect("prune task failed");
+            assert_eq!(journal.oldest_section(), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_destroy_waits_for_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            let handle = journal.start_sync(1).await.expect("failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("destroy").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                journal.destroy().await.expect("failed to destroy");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "destroy must wait for in-flight syncs"
+            );
+
+            release_pending_syncs(&pending);
+            handle
+                .await
+                .expect("sync handle should complete despite destruction");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            waiter.await.expect("destroy task failed");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_clear_waits_for_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            let handle = journal.start_sync(1).await.expect("failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("clear").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                journal.clear().await.expect("failed to clear");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                journal
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "clear must wait for in-flight syncs"
+            );
+
+            release_pending_syncs(&pending);
+            handle
+                .await
+                .expect("sync handle should complete despite clearing");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let mut journal = waiter.await.expect("clear task failed");
+
+            // The journal must remain usable after clear.
+            assert_eq!(journal.oldest_section(), None);
+            let position = journal
+                .append(1, &test_digest(1))
+                .await
+                .expect("failed to append after clear");
+            assert_eq!(position, 0);
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_rewind_waits_for_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            journal
+                .append(2, &test_digest(1))
+                .await
+                .expect("failed to append");
+            let handle = journal.start_sync(2).await.expect("failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let size = journal.size(1).expect("failed to get size");
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("rewind").spawn(move |_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                journal.rewind(1, size).await.expect("failed to rewind");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                journal
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "rewind must wait for in-flight syncs on removed sections"
+            );
+
+            release_pending_syncs(&pending);
+            handle
+                .await
+                .expect("sync handle should complete despite rewind");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let journal = waiter.await.expect("rewind task failed");
+            assert_eq!(journal.size(2).expect("failed to get size"), 0);
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_prune_surfaces_failed_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            let handle = journal.start_sync(1).await.expect("failed to start sync");
+            fail_pending_syncs(&pending);
+
+            let err = journal
+                .prune(2)
+                .await
+                .expect_err("prune must surface a failed in-flight sync");
+            assert!(matches!(err, Error::Runtime(RError::Io(_))));
+
+            let err = handle.await.expect_err("sync handle should fail");
+            assert!(matches!(err, RError::Io(_)));
         });
     }
 }

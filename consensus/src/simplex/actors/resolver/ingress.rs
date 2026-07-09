@@ -1,25 +1,58 @@
-use crate::{simplex::types::Certificate, types::View, Viewable};
+use crate::{
+    simplex::types::Certificate,
+    types::{Round as Rnd, View},
+    Epochable, Viewable,
+};
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer, Delivery};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
+use tracing::{info_span, Span};
 
 /// Messages sent to the resolver actor from the voter.
 pub enum MailboxMessage<S: Scheme, D: Digest> {
     /// A certificate was received or produced.
-    Certificate(Certificate<S, D>),
-    /// Certification result for a view.
-    Certified { view: View, success: bool },
+    Certificate {
+        /// The span carried with this message.
+        span: Span,
+        /// The certificate.
+        certificate: Certificate<S, D>,
+    },
+    /// Certification result for a round.
+    Certified {
+        /// The span carried with this message.
+        span: Span,
+        /// The certified round.
+        round: Rnd,
+        /// Whether certification succeeded.
+        success: bool,
+    },
 }
 
 impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
-    // Return the message view used for pruning and deduplication.
-    fn view(&self) -> View {
+    /// Returns the message view used for pruning and deduplication.
+    pub(crate) fn view(&self) -> View {
         match self {
-            Self::Certificate(c) => c.view(),
-            Self::Certified { view, .. } => *view,
+            Self::Certificate { certificate, .. } => certificate.view(),
+            Self::Certified { round, .. } => round.view(),
+        }
+    }
+
+    /// Returns the span carried with this message.
+    pub(crate) const fn span(&self) -> &Span {
+        match self {
+            Self::Certificate { span, .. } | Self::Certified { span, .. } => span,
+        }
+    }
+
+    /// Returns the operation name of this message.
+    pub(crate) const fn name(&self) -> &'static str {
+        match self {
+            Self::Certificate { .. } => "certificate",
+            Self::Certified { .. } => "certified",
         }
     }
 }
@@ -73,14 +106,20 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
         let new_view = message.view();
         if matches!(
             overflow.finalization.as_ref(),
-            Some(Self::Certificate(Certificate::Finalization(old_finalized)))
+            Some(Self::Certificate { certificate: Certificate::Finalization(old_finalized), .. })
                 if old_finalized.view() >= new_view
         ) {
             return;
         }
 
         // Retain only the highest-view finalization and any messages with a view greater than the new view
-        if matches!(&message, Self::Certificate(Certificate::Finalization(_))) {
+        if matches!(
+            &message,
+            Self::Certificate {
+                certificate: Certificate::Finalization(_),
+                ..
+            }
+        ) {
             overflow
                 .messages
                 .retain(|old_message| old_message.view() > new_view);
@@ -93,7 +132,16 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
             .messages
             .iter()
             .any(|old_message| match (&message, old_message) {
-                (Self::Certificate(new_certificate), Self::Certificate(old_certificate)) => {
+                (
+                    Self::Certificate {
+                        certificate: new_certificate,
+                        ..
+                    },
+                    Self::Certificate {
+                        certificate: old_certificate,
+                        ..
+                    },
+                ) => {
                     new_certificate.view() == old_certificate.view()
                         && matches!(
                             (new_certificate, old_certificate),
@@ -103,9 +151,13 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                         )
                 }
                 (
-                    Self::Certified { view: new_view, .. },
-                    Self::Certified { view: old_view, .. },
-                ) => new_view == old_view,
+                    Self::Certified {
+                        round: new_round, ..
+                    },
+                    Self::Certified {
+                        round: old_round, ..
+                    },
+                ) => new_round.view() == old_round.view(),
                 _ => false,
             })
         {
@@ -128,22 +180,35 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 
     /// Send a certificate.
     pub fn updated(&mut self, certificate: Certificate<S, D>) {
-        let _ = self
-            .sender
-            .enqueue(MailboxMessage::Certificate(certificate));
+        let _ = self.sender.enqueue(MailboxMessage::Certificate {
+            span: info_span!(
+                "simplex.resolver.mailbox.updated",
+                epoch = certificate.epoch().traced(),
+                view = certificate.view().traced()
+            ),
+            certificate,
+        });
     }
 
     /// Notify the resolver of a certification result.
-    pub fn certified(&mut self, view: View, success: bool) {
-        let _ = self
-            .sender
-            .enqueue(MailboxMessage::Certified { view, success });
+    pub fn certified(&mut self, round: Rnd, success: bool) {
+        let _ = self.sender.enqueue(MailboxMessage::Certified {
+            span: info_span!(
+                "simplex.resolver.mailbox.certified",
+                epoch = round.epoch().traced(),
+                view = round.view().traced(),
+                success
+            ),
+            round,
+            success,
+        });
     }
 }
 
 #[derive(Debug)]
 pub(crate) enum HandlerMessage {
     Deliver {
+        span: Span,
         view: View,
         data: Bytes,
         response: oneshot::Sender<bool>,
@@ -223,7 +288,9 @@ impl Consumer for Handler {
         value: Self::Value,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
+        let (_, span) = delivery.subscribers.first().clone();
         let _ = self.sender.enqueue(HandlerMessage::Deliver {
+            span,
             view: View::new(delivery.key.into()),
             data: value,
             response,
@@ -315,6 +382,23 @@ mod tests {
         messages
     }
 
+    fn certificate_msg(
+        certificate: Certificate<TestScheme, Sha256Digest>,
+    ) -> MailboxMessage<TestScheme, Sha256Digest> {
+        MailboxMessage::Certificate {
+            span: Span::none(),
+            certificate,
+        }
+    }
+
+    fn certified_msg(view: View, success: bool) -> MailboxMessage<TestScheme, Sha256Digest> {
+        MailboxMessage::Certified {
+            span: Span::none(),
+            round: Round::new(EPOCH, view),
+            success,
+        }
+    }
+
     #[test]
     fn handler_drain_skips_closed_responses() {
         let mut overflow = HandlerPending::default();
@@ -354,121 +438,72 @@ mod tests {
     #[test]
     fn finalization_prunes_stale_certificates_and_results() {
         let mut overflow = Pending::default();
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(2))),
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certified {
-                view: View::new(2),
-                success: false,
-            },
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(5))),
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certified {
-                view: View::new(5),
-                success: false,
-            },
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(3))),
-        );
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(2))));
+        MailboxMessage::handle(&mut overflow, certified_msg(View::new(2), false));
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(5))));
+        MailboxMessage::handle(&mut overflow, certified_msg(View::new(5), false));
+        MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 3);
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate(Certificate::Finalization(f)))
+            Some(MailboxMessage::Certificate { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(3)
         ));
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate(Certificate::Nullification(n)))
+            Some(MailboxMessage::Certificate { certificate: Certificate::Nullification(n), .. })
                 if n.view() == View::new(5)
         ));
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
-                success: false
-            }) if view == View::new(5)
+                round,
+                success: false,
+                ..
+            }) if round.view() == View::new(5)
         ));
     }
 
     #[test]
     fn duplicate_certified_result_is_ignored() {
         let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certified {
-                view: View::new(4),
-                success: false,
-            },
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certified {
-                view: View::new(4),
-                success: true,
-            },
-        );
+        MailboxMessage::handle(&mut overflow, certified_msg(View::new(4), false));
+        MailboxMessage::handle(&mut overflow, certified_msg(View::new(4), true));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
+                round,
                 success: false,
-            }) if view == View::new(4)
+                ..
+            }) if round.view() == View::new(4)
         ));
     }
 
     #[test]
     fn queued_finalization_rejects_covered_messages() {
         let mut overflow = Pending::default();
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(3))),
-        );
+        MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
 
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(2))),
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certified {
-                view: View::new(2),
-                success: false,
-            },
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(2))),
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(4))),
-        );
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(2))));
+        MailboxMessage::handle(&mut overflow, certified_msg(View::new(2), false));
+        MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(2))));
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(4))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate(Certificate::Finalization(f)))
+            Some(MailboxMessage::Certificate { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(3)
         ));
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate(Certificate::Nullification(n)))
+            Some(MailboxMessage::Certificate { certificate: Certificate::Nullification(n), .. })
                 if n.view() == View::new(4)
         ));
     }
@@ -476,20 +511,14 @@ mod tests {
     #[test]
     fn duplicate_finalization_is_dropped() {
         let mut overflow = Pending::default();
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(3))),
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(3))),
-        );
+        MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
+        MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate(Certificate::Finalization(f)))
+            Some(MailboxMessage::Certificate { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(3)
         ));
     }
@@ -497,31 +526,16 @@ mod tests {
     #[test]
     fn newer_finalization_replaces_older_pruning_floor() {
         let mut overflow = Pending::default();
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(3))),
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(4))),
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certified {
-                view: View::new(4),
-                success: false,
-            },
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(5))),
-        );
+        MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(4))));
+        MailboxMessage::handle(&mut overflow, certified_msg(View::new(4), false));
+        MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(5))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate(Certificate::Finalization(f)))
+            Some(MailboxMessage::Certificate { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(5)
         ));
     }
@@ -529,35 +543,24 @@ mod tests {
     #[test]
     fn duplicate_certificate_is_ignored() {
         let mut overflow = Pending::default();
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(4))),
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certified {
-                view: View::new(4),
-                success: true,
-            },
-        );
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(4))),
-        );
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(4))));
+        MailboxMessage::handle(&mut overflow, certified_msg(View::new(4), true));
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(4))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate(Certificate::Nullification(n)))
+            Some(MailboxMessage::Certificate { certificate: Certificate::Nullification(n), .. })
                 if n.view() == View::new(4)
         ));
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
+                round,
                 success: true,
-            }) if view == View::new(4)
+                ..
+            }) if round.view() == View::new(4)
         ));
     }
 }

@@ -49,6 +49,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig,
             page_cache,
         },
         translator: commonware_storage::translator::EightCap,
+        init_cache_size: Some(NZUsize!(1 << 16)),
     }
 }
 
@@ -142,11 +143,11 @@ impl<E> super::Syncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
-    async fn size(&self) -> Location {
-        self.bounds().await.end
+    fn size(&self) -> Location {
+        self.bounds().end
     }
 
-    async fn sync_boundary(&self) -> Location {
+    fn sync_boundary(&self) -> Location {
         self.sync_boundary()
     }
 
@@ -172,7 +173,7 @@ impl<E> super::CompactSyncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
-    async fn current_target(&self) -> compact::Target<Self::Family, Key> {
-        compact::Target::new(self.root(), self.bounds().await.end)
+    fn target(&self) -> compact::Target<Self::Family, Key> {
+        compact::Target::new(self.root(), self.bounds().end)
     }
 }

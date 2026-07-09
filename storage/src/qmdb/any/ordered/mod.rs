@@ -1,8 +1,6 @@
-#[cfg(any(test, feature = "test-traits"))]
-use crate::qmdb::any::traits::PersistableMutableLog;
 use crate::{
     index::Ordered as Index,
-    journal::contiguous::{Contiguous, Reader},
+    journal::contiguous::Contiguous,
     merkle::{Family, Location},
     qmdb::{
         any::{db::Db, ValueEncoding},
@@ -41,7 +39,7 @@ where
     Operation<F, K, V>: Codec,
 {
     async fn get_update_op(
-        reader: &impl Reader<Item = Operation<F, K, V>>,
+        reader: &impl Contiguous<Item = Operation<F, K, V>>,
         loc: Location<F>,
     ) -> Result<Update<K, V>, crate::qmdb::Error<F>> {
         match reader.read(*loc).await? {
@@ -73,10 +71,9 @@ where
         locs: impl IntoIterator<Item = Location<F>>,
         key: &K,
     ) -> Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>> {
-        let reader = self.log.reader().await;
         for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
-            let data = Self::get_update_op(&reader, loc).await?;
+            let data = Self::get_update_op(&self.log, loc).await?;
             if Self::span_contains(&data.key, &data.next_key, key) {
                 return Ok(Some((loc, data)));
             }
@@ -129,9 +126,8 @@ where
     ) -> Result<Option<(Update<K, V>, Location<F>)>, crate::qmdb::Error<F>> {
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
-        let reader = self.log.reader().await;
         for loc in locs {
-            let op = reader.read(*loc).await?;
+            let op = self.log.read(*loc).await?;
             assert!(
                 op.is_update(),
                 "location does not reference update operation. loc={loc}"
@@ -204,10 +200,9 @@ where
         &self,
         locs: impl IntoIterator<Item = &Location<F>>,
     ) -> Result<Vec<Update<K, V>>, crate::qmdb::Error<F>> {
-        let reader = self.log.reader().await;
         let futures = locs
             .into_iter()
-            .map(|loc| Self::get_update_op(&reader, *loc));
+            .map(|loc| Self::get_update_op(&self.log, *loc));
         let mut updates = try_join_all(futures).await?;
         updates.sort_by(|a, b| b.key.cmp(&a.key));
 
@@ -225,6 +220,35 @@ pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
     let idx = possible_next.partition_point(|k| k <= key);
     if idx < possible_next.len() {
         return possible_next[idx].clone();
+    }
+    possible_next
+        .first()
+        .expect("possible_next should not be empty")
+        .clone()
+}
+
+/// Streaming equivalent of [`find_next_key`] for an ascending sequence of queries: `idx`
+/// advances in a linear merge instead of binary-searching per query. Queries must be
+/// non-decreasing; `idx` must start at 0 and be threaded through every call.
+///
+/// # Panics
+///
+/// Panics if `possible_next` is empty, or on any out-of-order query that would return a
+/// wrong result (`idx` has already advanced past a candidate above the query).
+pub(crate) fn find_next_key_ascending<K: Ord + Clone>(
+    key: &K,
+    possible_next: &[K],
+    idx: &mut usize,
+) -> K {
+    assert!(
+        *idx == 0 || possible_next[*idx - 1] <= *key,
+        "queries must be non-decreasing"
+    );
+    while *idx < possible_next.len() && possible_next[*idx] <= *key {
+        *idx += 1;
+    }
+    if *idx < possible_next.len() {
+        return possible_next[*idx].clone();
     }
     possible_next
         .first()
@@ -261,7 +285,7 @@ crate::qmdb::any::traits::impl_db_any! {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<F, K, V>>,
+        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
@@ -279,7 +303,7 @@ crate::qmdb::any::traits::impl_provable! {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<F, K, V>>,
+        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
@@ -297,10 +321,51 @@ mod test {
         qmdb::any::traits::{DbAny, UnmerkleizedBatch as _},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_macros::boxed;
     use commonware_runtime::{deterministic::Context, Supervisor as _};
-    use commonware_utils::sequence::FixedBytes;
+    use commonware_utils::{sequence::FixedBytes, test_rng};
     use core::{future::Future, pin::Pin};
+    use rand::RngExt as _;
 
+    /// [`find_next_key_ascending`] must return exactly what [`find_next_key`] returns for any
+    /// ascending query sequence, including queries past the last candidate (cyclic wrap).
+    #[test]
+    fn find_next_key_ascending_matches_binary_search() {
+        let mut rng = test_rng();
+        for _ in 0..50 {
+            let mut candidates: Vec<u64> = (0..rng.random_range(1..40))
+                .map(|_| rng.random_range(0..60u64))
+                .collect();
+            candidates.sort_unstable();
+            candidates.dedup();
+
+            let mut queries: Vec<u64> = (0..rng.random_range(1..80))
+                .map(|_| rng.random_range(0..70u64))
+                .collect();
+            queries.sort_unstable();
+
+            let mut idx = 0;
+            for q in queries {
+                assert_eq!(
+                    find_next_key(&q, &candidates),
+                    find_next_key_ascending(&q, &candidates, &mut idx),
+                    "query {q} diverged"
+                );
+            }
+        }
+    }
+
+    /// An out-of-order query that would return a wrong result must panic instead.
+    #[test]
+    #[should_panic(expected = "queries must be non-decreasing")]
+    fn find_next_key_ascending_rejects_out_of_order_query() {
+        let candidates = vec![1u64, 5, 9];
+        let mut idx = 0;
+        assert_eq!(find_next_key_ascending(&5, &candidates, &mut idx), 9);
+        find_next_key_ascending(&1, &candidates, &mut idx);
+    }
+
+    #[boxed]
     pub(crate) async fn test_ordered_any_db_empty<
         F: Family,
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
@@ -310,7 +375,7 @@ mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) {
         assert!(db.get_metadata().await.unwrap().is_none());
-        assert!(matches!(db.prune(db.sync_boundary().await).await, Ok(())));
+        assert!(matches!(db.prune(db.sync_boundary()).await, Ok(())));
 
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
@@ -333,7 +398,7 @@ mod test {
         assert_eq!(range.start, Location::new(1));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
-        assert!(matches!(db.prune(db.sync_boundary().await).await, Ok(())));
+        assert!(matches!(db.prune(db.sync_boundary()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
@@ -352,6 +417,7 @@ mod test {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_ordered_any_db_basic<
         F: Family,
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
@@ -472,10 +538,10 @@ mod test {
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
-        let op_count = db.bounds().await.end;
+        let op_count = db.bounds().end;
         let root = db.root();
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
-        assert_eq!(db.bounds().await.end, op_count);
+        assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);
 
         // Re-activate the keys by updating them.
@@ -530,12 +596,12 @@ mod test {
         db.commit().await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
-        let op_count = db.bounds().await.end;
+        let op_count = db.bounds().end;
         let root = db.root();
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
 
         assert_eq!(db.root(), root);
-        assert_eq!(db.bounds().await.end, op_count);
+        assert_eq!(db.bounds().end, op_count);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
@@ -547,7 +613,7 @@ mod test {
 
         // Pruning inactive ops should not affect current state or root.
         let root = db.root();
-        db.prune(db.sync_boundary().await).await.unwrap();
+        db.prune(db.sync_boundary()).await.unwrap();
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -555,6 +621,7 @@ mod test {
 
     /// Builds a db with colliding keys to make sure the "cycle around when there are translated
     /// key collisions" edge case is exercised.
+    #[boxed]
     pub(crate) async fn test_ordered_any_update_collision_edge_case<
         F: Family,
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,

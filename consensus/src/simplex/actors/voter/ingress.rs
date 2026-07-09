@@ -3,33 +3,70 @@ use crate::{
         metrics::TimeoutReason,
         types::{Certificate, Proposal},
     },
-    types::View,
-    Viewable,
+    types::{Round as Rnd, View},
+    Epochable, Viewable,
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use std::collections::VecDeque;
+use tracing::{info_span, Span};
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
-    Proposal(Proposal<D>),
+    Proposal {
+        /// The span carried with this message.
+        span: Span,
+        /// The leader's proposal.
+        proposal: Proposal<D>,
+    },
     /// Signal that the current view should timeout (if not already).
-    Timeout(View, TimeoutReason),
+    Timeout {
+        /// The span carried with this message.
+        span: Span,
+        /// The round to timeout.
+        round: Rnd,
+        /// The reason for the timeout.
+        reason: TimeoutReason,
+    },
     /// Certificate from batcher or resolver.
-    ///
-    /// The boolean indicates if the certificate came from the resolver.
-    /// When true, the voter will not send it back to the resolver (to avoid "boomerang").
-    Verified(Certificate<S, D>, bool),
+    Verified {
+        /// The span carried with this message.
+        span: Span,
+        /// The verified certificate.
+        certificate: Certificate<S, D>,
+        /// Whether the certificate came from the resolver. When true, the voter
+        /// will not send it back to the resolver (to avoid "boomerang").
+        from_resolver: bool,
+    },
 }
 
 impl<S: Scheme, D: Digest> Message<S, D> {
-    // Return the message view used for pruning and deduplication.
-    fn view(&self) -> View {
+    /// Returns the message view used for pruning and deduplication.
+    pub(crate) fn view(&self) -> View {
         match self {
-            Self::Proposal(p) => p.view(),
-            Self::Timeout(v, _) => *v,
-            Self::Verified(c, _) => c.view(),
+            Self::Proposal { proposal, .. } => proposal.view(),
+            Self::Timeout { round, .. } => round.view(),
+            Self::Verified { certificate, .. } => certificate.view(),
+        }
+    }
+
+    /// Returns the span carried with this message.
+    pub(crate) const fn span(&self) -> &Span {
+        match self {
+            Self::Proposal { span, .. }
+            | Self::Timeout { span, .. }
+            | Self::Verified { span, .. } => span,
+        }
+    }
+
+    /// Returns the operation name of this message.
+    pub(crate) const fn name(&self) -> &'static str {
+        match self {
+            Self::Proposal { .. } => "proposal",
+            Self::Timeout { .. } => "timeout",
+            Self::Verified { .. } => "verified",
         }
     }
 }
@@ -83,14 +120,20 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
         let new_view = message.view();
         if matches!(
             overflow.finalization.as_ref(),
-            Some(Self::Verified(Certificate::Finalization(old_finalized), _))
+            Some(Self::Verified { certificate: Certificate::Finalization(old_finalized), .. })
                 if old_finalized.view() >= new_view
         ) {
             return;
         }
 
         // Retain only the highest-view finalization and any messages with a view greater than the new view
-        if matches!(&message, Self::Verified(Certificate::Finalization(_), _)) {
+        if matches!(
+            &message,
+            Self::Verified {
+                certificate: Certificate::Finalization(_),
+                ..
+            }
+        ) {
             overflow
                 .messages
                 .retain(|old_message| old_message.view() > new_view);
@@ -103,11 +146,36 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
             .messages
             .iter()
             .any(|old_message| match (&message, old_message) {
-                (Self::Proposal(new_proposal), Self::Proposal(old_proposal)) => {
-                    new_proposal.view() == old_proposal.view()
+                (
+                    Self::Proposal {
+                        proposal: new_proposal,
+                        ..
+                    },
+                    Self::Proposal {
+                        proposal: old_proposal,
+                        ..
+                    },
+                ) => new_proposal.view() == old_proposal.view(),
+                (
+                    Self::Timeout {
+                        round: new_round, ..
+                    },
+                    Self::Timeout {
+                        round: old_round, ..
+                    },
+                ) => {
+                    new_round.view() == old_round.view() // only retain the first queued timeout reason
                 }
-                (Self::Timeout(new_view, _), Self::Timeout(old_view, _)) => new_view == old_view, // only retain the first queued timeout reason
-                (Self::Verified(new_certificate, _), Self::Verified(old_certificate, _)) => {
+                (
+                    Self::Verified {
+                        certificate: new_certificate,
+                        ..
+                    },
+                    Self::Verified {
+                        certificate: old_certificate,
+                        ..
+                    },
+                ) => {
                     new_certificate.view() == old_certificate.view()
                         && matches!(
                             (new_certificate, old_certificate),
@@ -138,22 +206,56 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 
     /// Send a leader's proposal.
     pub fn proposal(&mut self, proposal: Proposal<D>) {
-        let _ = self.sender.enqueue(Message::Proposal(proposal));
+        let _ = self.sender.enqueue(Message::Proposal {
+            span: info_span!(
+                "simplex.voter.mailbox.proposal",
+                epoch = proposal.epoch().traced(),
+                view = proposal.view().traced()
+            ),
+            proposal,
+        });
     }
 
-    /// Signal that the current view should timeout (if not already).
-    pub fn timeout(&mut self, view: View, reason: TimeoutReason) {
-        let _ = self.sender.enqueue(Message::Timeout(view, reason));
+    /// Signal that the given round should timeout (if not already).
+    pub fn timeout(&mut self, round: Rnd, reason: TimeoutReason) {
+        let _ = self.sender.enqueue(Message::Timeout {
+            span: info_span!(
+                "simplex.voter.mailbox.timeout",
+                epoch = round.epoch().traced(),
+                view = round.view().traced(),
+                reason = reason.as_str()
+            ),
+            round,
+            reason,
+        });
     }
 
     /// Send a recovered certificate.
     pub fn recovered(&mut self, certificate: Certificate<S, D>) {
-        let _ = self.sender.enqueue(Message::Verified(certificate, false));
+        let _ = self.sender.enqueue(Message::Verified {
+            span: info_span!(
+                "simplex.voter.mailbox.recovered",
+                epoch = certificate.epoch().traced(),
+                view = certificate.view().traced(),
+                certificate = certificate.kind()
+            ),
+            certificate,
+            from_resolver: false,
+        });
     }
 
     /// Send a resolved certificate.
     pub fn resolved(&mut self, certificate: Certificate<S, D>) {
-        let _ = self.sender.enqueue(Message::Verified(certificate, true));
+        let _ = self.sender.enqueue(Message::Verified {
+            span: info_span!(
+                "simplex.voter.mailbox.resolved",
+                epoch = certificate.epoch().traced(),
+                view = certificate.view().traced(),
+                certificate = certificate.kind()
+            ),
+            certificate,
+            from_resolver: true,
+        });
     }
 }
 
@@ -216,6 +318,32 @@ mod tests {
         )
     }
 
+    fn proposal_msg(view: View) -> Message<TestScheme, Sha256Digest> {
+        Message::Proposal {
+            span: Span::none(),
+            proposal: proposal(view),
+        }
+    }
+
+    fn timeout_msg(view: View, reason: TimeoutReason) -> Message<TestScheme, Sha256Digest> {
+        Message::Timeout {
+            span: Span::none(),
+            round: Round::new(EPOCH, view),
+            reason,
+        }
+    }
+
+    fn verified_msg(
+        certificate: Certificate<TestScheme, Sha256Digest>,
+        from_resolver: bool,
+    ) -> Message<TestScheme, Sha256Digest> {
+        Message::Verified {
+            span: Span::none(),
+            certificate,
+            from_resolver,
+        }
+    }
+
     fn drain(
         mut overflow: Pending<TestScheme, Sha256Digest>,
     ) -> VecDeque<Message<TestScheme, Sha256Digest>> {
@@ -230,31 +358,31 @@ mod tests {
     #[test]
     fn finalization_prunes_stale_overflow() {
         let mut overflow = Pending::default();
-        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(2))));
+        Message::handle(&mut overflow, proposal_msg(View::new(2)));
         Message::handle(
             &mut overflow,
-            Message::Timeout(View::new(2), TimeoutReason::LeaderTimeout),
+            timeout_msg(View::new(2), TimeoutReason::LeaderTimeout),
         );
         Message::handle(
             &mut overflow,
-            Message::Verified(nullification(View::new(2)), false),
+            verified_msg(nullification(View::new(2)), false),
         );
-        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(4))));
+        Message::handle(&mut overflow, proposal_msg(View::new(4)));
         Message::handle(
             &mut overflow,
-            Message::Verified(finalization(View::new(3)), false),
+            verified_msg(finalization(View::new(3)), false),
         );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified(Certificate::Finalization(f), false))
+            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
                 if f.view() == View::new(3)
         ));
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Proposal(p)) if p.view() == View::new(4)
+            Some(Message::Proposal { proposal: p, .. }) if p.view() == View::new(4)
         ));
     }
 
@@ -262,14 +390,14 @@ mod tests {
     fn duplicate_certificate_is_ignored() {
         let mut overflow = Pending::default();
         let certificate = nullification(View::new(5));
-        Message::handle(&mut overflow, Message::Verified(certificate.clone(), false));
-        Message::handle(&mut overflow, Message::Verified(certificate, true));
+        Message::handle(&mut overflow, verified_msg(certificate.clone(), false));
+        Message::handle(&mut overflow, verified_msg(certificate, true));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified(Certificate::Nullification(n), false))
+            Some(Message::Verified { certificate: Certificate::Nullification(n), from_resolver: false, .. })
                 if n.view() == View::new(5)
         ));
     }
@@ -279,34 +407,34 @@ mod tests {
         let mut overflow = Pending::default();
         Message::handle(
             &mut overflow,
-            Message::Verified(finalization(View::new(3)), false),
+            verified_msg(finalization(View::new(3)), false),
         );
 
-        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(3))));
+        Message::handle(&mut overflow, proposal_msg(View::new(3)));
         Message::handle(
             &mut overflow,
-            Message::Timeout(View::new(2), TimeoutReason::LeaderTimeout),
+            timeout_msg(View::new(2), TimeoutReason::LeaderTimeout),
         );
         Message::handle(
             &mut overflow,
-            Message::Verified(nullification(View::new(2)), false),
+            verified_msg(nullification(View::new(2)), false),
         );
         Message::handle(
             &mut overflow,
-            Message::Verified(finalization(View::new(2)), false),
+            verified_msg(finalization(View::new(2)), false),
         );
-        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(4))));
+        Message::handle(&mut overflow, proposal_msg(View::new(4)));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified(Certificate::Finalization(f), false))
+            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
                 if f.view() == View::new(3)
         ));
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Proposal(p)) if p.view() == View::new(4)
+            Some(Message::Proposal { proposal: p, .. }) if p.view() == View::new(4)
         ));
     }
 
@@ -315,18 +443,18 @@ mod tests {
         let mut overflow = Pending::default();
         Message::handle(
             &mut overflow,
-            Message::Verified(finalization(View::new(3)), false),
+            verified_msg(finalization(View::new(3)), false),
         );
         Message::handle(
             &mut overflow,
-            Message::Verified(finalization(View::new(3)), true),
+            verified_msg(finalization(View::new(3)), true),
         );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified(Certificate::Finalization(f), false))
+            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
                 if f.view() == View::new(3)
         ));
     }
@@ -336,19 +464,19 @@ mod tests {
         let mut overflow = Pending::default();
         Message::handle(
             &mut overflow,
-            Message::Verified(finalization(View::new(3)), false),
+            verified_msg(finalization(View::new(3)), false),
         );
-        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(4))));
+        Message::handle(&mut overflow, proposal_msg(View::new(4)));
         Message::handle(
             &mut overflow,
-            Message::Verified(finalization(View::new(5)), false),
+            verified_msg(finalization(View::new(5)), false),
         );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified(Certificate::Finalization(f), false))
+            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
                 if f.view() == View::new(5)
         ));
     }
@@ -356,15 +484,15 @@ mod tests {
     #[test]
     fn duplicate_proposals_and_timeouts_are_deduplicated() {
         let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
-        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(4))));
-        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(4))));
+        Message::handle(&mut overflow, proposal_msg(View::new(4)));
+        Message::handle(&mut overflow, proposal_msg(View::new(4)));
         Message::handle(
             &mut overflow,
-            Message::Timeout(View::new(4), TimeoutReason::LeaderTimeout),
+            timeout_msg(View::new(4), TimeoutReason::LeaderTimeout),
         );
         Message::handle(
             &mut overflow,
-            Message::Timeout(View::new(4), TimeoutReason::Inactivity),
+            timeout_msg(View::new(4), TimeoutReason::Inactivity),
         );
 
         let overflow = drain(overflow);

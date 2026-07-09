@@ -30,12 +30,12 @@ use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
 use commonware_utils::{sync::Mutex, NZUsize};
-use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use rand::{rngs::OsRng, CryptoRng, RngCore};
+use rand::{rngs::SysRng, TryCryptoRng, TryRng};
 #[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
+    convert::Infallible,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -45,8 +45,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
-use tracing::{info_span, Instrument};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[cfg(feature = "iouring-network")]
 cfg_if::cfg_if! {
@@ -177,7 +175,9 @@ pub struct Config {
 impl Config {
     /// Returns a new [Config] with default values.
     pub fn new() -> Self {
-        let rng = OsRng.next_u64();
+        let rng = SysRng
+            .try_next_u64()
+            .expect("failed to generate randomness");
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
         Self {
             worker_threads: 2,
@@ -498,7 +498,6 @@ impl crate::Runner for Runner {
             storage_buffer_pool,
             tree: Tree::root(),
             execution: Execution::default(),
-            traced: false,
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
@@ -536,7 +535,6 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    traced: bool,
 }
 
 impl Context {
@@ -564,14 +562,12 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         // Get metrics
-        let (label, metric) = spawn_metrics!(self);
+        let (_, metric) = spawn_metrics!(self);
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
-        let traced = self.traced;
         self.execution = Execution::default();
-        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -580,15 +576,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
-        let future = if traced {
-            let span = info_span!("task", name = %label.name());
-            for (key, value) in &self.attributes {
-                span.set_attribute(key.clone(), value.clone());
-            }
-            Either::Left(f(self).instrument(span))
-        } else {
-            Either::Right(f(self))
-        };
+        let future = f(self);
         let (f, handle) = Handle::init(
             future,
             metric,
@@ -683,7 +671,6 @@ impl crate::Supervisor for Context {
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
             execution: Execution::default(),
-            traced: false,
         }
     }
 
@@ -701,13 +688,6 @@ impl crate::Supervisor for Context {
             label: self.name.clone(),
             attributes: self.attributes.clone(),
         }
-    }
-}
-
-impl crate::Tracing for Context {
-    fn with_span(mut self) -> Self {
-        self.traced = true;
-        self
     }
 }
 
@@ -801,25 +781,30 @@ impl crate::Resolver for Context {
     }
 }
 
-impl RngCore for Context {
-    fn next_u32(&mut self) -> u32 {
-        OsRng.next_u32()
+impl TryRng for Context {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(SysRng
+            .try_next_u32()
+            .expect("failed to generate randomness"))
     }
 
-    fn next_u64(&mut self) -> u64 {
-        OsRng.next_u64()
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(SysRng
+            .try_next_u64()
+            .expect("failed to generate randomness"))
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        OsRng.fill_bytes(dest);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        OsRng.try_fill_bytes(dest)
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        SysRng
+            .try_fill_bytes(dest)
+            .expect("failed to generate randomness");
+        Ok(())
     }
 }
 
-impl CryptoRng for Context {}
+impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;

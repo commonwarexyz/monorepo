@@ -80,19 +80,18 @@ use commonware_utils::{
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
-    future::Either,
     task::{waker, ArcWake},
     Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
-use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
-use rand_core::CryptoRngCore;
+use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
+    convert::Infallible,
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -102,8 +101,7 @@ use std::{
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{info_span, trace, Instrument};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing::trace;
 
 #[derive(Debug)]
 struct Metrics {
@@ -185,7 +183,7 @@ impl Auditor {
 }
 
 /// A dynamic RNG that can safely be sent between threads.
-pub type BoxDynRng = Box<dyn CryptoRngCore + Send + 'static>;
+pub type BoxDynRng = Box<dyn CryptoRng + Send + 'static>;
 
 /// Configuration for the `deterministic` runtime.
 pub struct Config {
@@ -880,7 +878,6 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    traced: bool,
 }
 
 impl Context {
@@ -957,7 +954,6 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                traced: false,
             },
             executor,
             panicked,
@@ -1027,7 +1023,6 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                traced: false,
             },
             executor,
             panicked,
@@ -1111,9 +1106,7 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        let traced = self.traced;
         self.execution = Execution::default();
-        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -1122,15 +1115,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future = if traced {
-            let span = info_span!(parent: None, "task", name = %label.name());
-            for (key, value) in &self.attributes {
-                span.set_attribute(key.clone(), value.clone());
-            }
-            Either::Left(f(self).instrument(span))
-        } else {
-            Either::Right(f(self))
-        };
+        let future = f(self);
         let (f, handle) = Handle::init(
             future,
             metric,
@@ -1215,7 +1200,6 @@ impl crate::Supervisor for Context {
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
             execution: Execution::default(),
-            traced: false,
         }
     }
 
@@ -1233,13 +1217,6 @@ impl crate::Supervisor for Context {
             label: self.name.clone(),
             attributes: self.attributes.clone(),
         }
-    }
-}
-
-impl crate::Tracing for Context {
-    fn with_span(mut self) -> Self {
-        self.traced = true;
-        self
     }
 }
 
@@ -1503,44 +1480,38 @@ impl crate::Resolver for Context {
     }
 }
 
-impl RngCore for Context {
-    fn next_u32(&mut self) -> u32 {
+impl TryRng for Context {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
         let result = executor.rng.lock().next_u32();
-        result
+        Ok(result)
     }
 
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
         let result = executor.rng.lock().next_u64();
-        result
+        Ok(result)
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
         executor.rng.lock().fill_bytes(dest);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        let executor = self.executor();
-        executor.auditor.event(b"rand", |hasher| {
-            hasher.update(b"try_fill_bytes");
-        });
-        let result = executor.rng.lock().try_fill_bytes(dest);
-        result
+        Ok(())
     }
 }
 
-impl CryptoRng for Context {}
+impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;

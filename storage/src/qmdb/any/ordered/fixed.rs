@@ -50,6 +50,10 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S
 /// See [partitioned::Db] for the generic type, or use the convenience aliases:
 /// - [partitioned::p256::Db] for 256 partitions (P=1)
 /// - [partitioned::p64k::Db] for 65,536 partitions (P=2)
+///
+/// `p256` suits smaller datasets, but its partitions spill to a `BTreeMap` once the index holds more
+/// than 130,816 entries (see [`crate::index::partitioned::ordered`]); prefer `p64k` to keep ordered
+/// access mostly inline at larger scale.
 pub mod partitioned {
     pub use super::{Operation, Update};
     use crate::{
@@ -128,7 +132,6 @@ pub(crate) mod test {
             Location as GenericLocation,
         },
         qmdb::{
-            self,
             any::{
                 ordered::{
                     test::{
@@ -143,7 +146,7 @@ pub(crate) mod test {
         },
         translator::{OneCap, TwoCap},
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
@@ -153,7 +156,7 @@ pub(crate) mod test {
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZU64};
     use futures::StreamExt as _;
-    use rand::{rngs::StdRng, seq::IteratorRandom, RngCore, SeedableRng};
+    use rand::{rngs::StdRng, seq::IteratorRandom, Rng, SeedableRng};
     use std::collections::{BTreeMap, HashMap};
 
     /// A generic type alias for an Any database parameterized by merkle family.
@@ -251,6 +254,133 @@ pub(crate) mod test {
         }
         let merkleized = batch.merkleize(db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
+    }
+
+    /// Reads on a batch must not perturb `merkleize`: the root must be byte-identical to a
+    /// write-only batch's `merkleize` across updates/deletes/creates, both with the batch
+    /// rooted directly at the DB (D=0) and through pending ancestors (D=1, D=2).
+    #[test_traced("WARN")]
+    fn test_ordered_fixed_read_merkleize_parity() {
+        type ParentChain = Vec<
+            std::sync::Arc<
+                crate::qmdb::any::batch::MerkleizedBatch<
+                    mmr::Family,
+                    Digest,
+                    crate::qmdb::any::operation::update::Ordered<Digest, FixedEncoding<Digest>>,
+                    Sequential,
+                >,
+            >,
+        >;
+
+        fn key(i: u64) -> Digest {
+            Sha256::hash(&i.to_be_bytes())
+        }
+        fn val(i: u64) -> Digest {
+            Sha256::hash(&i.to_le_bytes())
+        }
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = create_test_db(ctx.child("db")).await;
+
+            // Seed 500 keys and commit so they live in the committed snapshot. TwoCap makes
+            // translated-bucket collisions common, stressing the sibling-read paths.
+            let mut seed = db.new_batch();
+            for i in 0..500u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
+            // and creates of fresh keys. `make` re-derives the set from a seed so both paths
+            // and all depths see identical mutations.
+            let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
+                let mut rng = test_rng_seeded(salt);
+                let mut out = Vec::new();
+                for _ in 0..200 {
+                    let r = rng.next_u32() % 100;
+                    if r < 60 {
+                        out.push((key(rng.next_u64() % 500), Some(val(rng.next_u64()))));
+                    } else if r < 80 {
+                        out.push((key(rng.next_u64() % 500), None));
+                    } else {
+                        out.push((key(500 + rng.next_u64() % 500), Some(val(rng.next_u64()))));
+                    }
+                }
+                // Dedup last-write-wins.
+                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                for (k, v) in out {
+                    m.insert(k, v);
+                }
+                m.into_iter().collect()
+            };
+
+            // D=0: batch rooted directly at the DB. D=N: through N pending ancestors.
+            for depth in [0u64, 1, 2] {
+                let mut chain: ParentChain = Vec::new();
+                for d in 0..depth {
+                    let mut p = chain
+                        .last()
+                        .map_or_else(|| db.new_batch(), |l| l.new_batch::<Sha256>());
+                    for (k, v) in make(900 + d) {
+                        p = p.write(k, v);
+                    }
+                    chain.push(p.merkleize(&db, None).await.unwrap());
+                }
+
+                let muts = make(depth + 1);
+                let new_batch = || {
+                    chain
+                        .last()
+                        .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
+                };
+
+                // Normal path.
+                let mut nb = new_batch();
+                for (k, v) in &muts {
+                    nb = nb.write(*k, *v);
+                }
+                let normal_root = nb.merkleize(&db, None).await.unwrap().root();
+
+                // Read-then-write on one batch: values and root must match the write-only
+                // path.
+                let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
+                let mut fb = new_batch();
+                // Keys read but never written (existing and absent) must not affect the
+                // root.
+                let unwritten: Vec<Digest> = (0..40u64)
+                    .map(|i| key(i * 12))
+                    .chain((0..5).map(|i| key(8000 + i)))
+                    .collect();
+                let unwritten_refs: Vec<&Digest> = unwritten.iter().collect();
+                fb.get_many(&unwritten_refs, &db).await.unwrap();
+                let values = fb.get_many(&keys, &db).await.unwrap();
+                let plain = new_batch().get_many(&keys, &db).await.unwrap();
+                assert_eq!(values, plain, "value mismatch at depth={depth}");
+                for (k, v) in &muts {
+                    fb = fb.write(*k, *v);
+                }
+                let fused_root = fb.merkleize(&db, None).await.unwrap().root();
+                assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
+
+                // Multiple disjoint reads and single-key gets must not affect the root.
+                let half = muts.len() / 2;
+                let mut gb = new_batch();
+                gb.get_many(&keys[..half], &db).await.unwrap();
+                for key in &keys[half..] {
+                    gb.get(key, &db).await.unwrap();
+                }
+                for (k, v) in &muts {
+                    gb = gb.write(*k, *v);
+                }
+                let merged_root = gb.merkleize(&db, None).await.unwrap().root();
+                assert_eq!(
+                    normal_root, merged_root,
+                    "merged root mismatch at depth={depth}"
+                );
+            }
+        });
     }
 
     #[test_traced("WARN")]
@@ -369,7 +499,6 @@ pub(crate) mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
             let mut db = open_db(context.child("first")).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -438,7 +567,7 @@ pub(crate) mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = NZU64!(4);
-            let end_loc = db.bounds().await.end;
+            let end_loc = db.bounds().end;
             let start_loc = db.log.merkle.bounds().start;
             // Raise the inactivity floor via an empty batch and make sure historical inactive
             // operations are still provable.
@@ -450,7 +579,7 @@ pub(crate) mod test {
             for i in start_loc.as_u64()..end_loc.as_u64() {
                 let loc = Location::from(i);
                 let (proof, log) = db.proof(loc, max_ops).await.unwrap();
-                assert!(verify_proof(&hasher, &proof, loc, &log, &root));
+                assert!(verify_proof::<Sha256, _, _>(&proof, loc, &log, &root));
             }
 
             db.destroy().await.unwrap();
@@ -480,12 +609,12 @@ pub(crate) mod test {
             }
             db.prune(db.sync_boundary()).await.unwrap();
             let root = db.root();
-            let op_count = db.bounds().await.end;
+            let op_count = db.bounds().end;
             let inactivity_floor_loc = db.inactivity_floor_loc();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.child("second")).await;
-            assert_eq!(db.bounds().await.end, op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
@@ -504,7 +633,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             drop(db);
             let mut db = open_db(context.child("third")).await;
-            assert_eq!(db.bounds().await.end, op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
@@ -513,7 +642,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             drop(db);
             let mut db = open_db(context.child("fourth")).await;
-            assert_eq!(db.bounds().await.end, op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -522,7 +651,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
             let mut db = open_db(context.child("fifth")).await;
-            assert_eq!(db.bounds().await.end, op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
@@ -539,7 +668,7 @@ pub(crate) mod test {
                 db.commit().await.unwrap();
             }
             let db = open_db(context.child("sixth")).await;
-            assert!(db.bounds().await.end > op_count);
+            assert!(db.bounds().end > op_count);
             assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_ne!(db.root(), root);
 
@@ -559,7 +688,7 @@ pub(crate) mod test {
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.child("second")).await;
-            assert_eq!(db.bounds().await.end, 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             fn write_unapplied_batch(db: &mut AnyTest) {
@@ -577,7 +706,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             drop(db);
             let mut db = open_db(context.child("third")).await;
-            assert_eq!(db.bounds().await.end, 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             // Repeat, drop without cleanup again.
@@ -585,7 +714,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             drop(db);
             let mut db = open_db(context.child("fourth")).await;
-            assert_eq!(db.bounds().await.end, 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -594,7 +723,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
             let mut db = open_db(context.child("fifth")).await;
-            assert_eq!(db.bounds().await.end, 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
@@ -611,7 +740,7 @@ pub(crate) mod test {
                 db.commit().await.unwrap();
             }
             let db = open_db(context.child("sixth")).await;
-            assert!(db.bounds().await.end > 1);
+            assert!(db.bounds().end > 1);
             assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -678,9 +807,8 @@ pub(crate) mod test {
             let mut db = create_test_db(context.child("storage")).await;
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
-            let hasher = qmdb::hasher::<Sha256>();
             let root_hash = db.root();
-            let original_op_count = db.bounds().await.end;
+            let original_op_count = db.bounds().end;
 
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
@@ -693,8 +821,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &historical_proof,
                 Location::new(5),
                 &historical_ops,
@@ -716,8 +843,7 @@ pub(crate) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &historical_proof,
                 Location::new(5),
                 &historical_ops,
@@ -732,30 +858,28 @@ pub(crate) mod test {
     fn test_ordered_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
-
             let mut db = create_test_db(context.child("first")).await;
             // Apply ops in multiple batches; each apply_ops ends in a commit, so the size
             // after each batch is a commit-boundary historical size.
             let mut commit_boundary_sizes: Vec<Location> = Vec::new();
             for _ in 0..5 {
                 apply_ops(&mut db, create_test_ops(10)).await;
-                commit_boundary_sizes.push(db.bounds().await.end);
+                commit_boundary_sizes.push(db.bounds().end);
             }
 
             let root = db.root();
-            let full_size = db.bounds().await.end;
+            let full_size = db.bounds().end;
             assert_eq!(full_size, *commit_boundary_sizes.last().unwrap());
 
             // Verify a single-op proof at the full commit size.
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(1),
                 &proof_ops,
-                &root));
+                &root
+            ));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
@@ -802,8 +926,6 @@ pub(crate) mod test {
             let mut db = create_test_db(context.child("storage")).await;
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
-
-            let hasher = qmdb::hasher::<Sha256>();
             let root = db.root();
 
             let start_loc = Location::new(20);
@@ -811,7 +933,7 @@ pub(crate) mod test {
             let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
 
             // Now keep adding operations and make sure we can still generate a historical proof that matches the original.
-            let historical_size = db.bounds().await.end;
+            let historical_size = db.bounds().end;
 
             for i in 1..10 {
                 // Use different seed per iteration to avoid key collisions
@@ -827,8 +949,7 @@ pub(crate) mod test {
                 assert_eq!(proof.digests, historical_proof.digests);
 
                 // Verify proof against reference root
-                assert!(verify_proof(
-                    &hasher,
+                assert!(verify_proof::<Sha256, _, _>(
                     &historical_proof,
                     start_loc,
                     &historical_ops,

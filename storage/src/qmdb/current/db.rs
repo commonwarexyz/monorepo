@@ -5,15 +5,12 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
     merkle::{
-        self,
-        hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
-        mem::Mem,
-        storage::Storage as MerkleStorage,
-        Graftable, Location, Position,
+        self, hasher::Hasher as _, mem::Mem, storage::Storage as MerkleStorage, Graftable,
+        Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
@@ -30,19 +27,19 @@ use crate::{
         operation::Operation as _,
         Error,
     },
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::metrics::{
-    histogram::{duration_histogram, ScopedTimer, Timed},
+    histogram::{ScopedTimer, Timed},
     Counter, Gauge, GaugeExt as _, MetricsExt as _,
 };
 use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
-    sync::AsyncMutex,
 };
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
@@ -57,8 +54,6 @@ const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 /// Metrics for the Current layer.
 pub(crate) struct Metrics<E: Context> {
-    /// Clock used for duration timers.
-    clock: Arc<E>,
     /// Pruned bitmap chunks.
     pruned_chunks: Gauge,
     /// Most recent safe sync/prune boundary location.
@@ -75,37 +70,28 @@ pub(crate) struct Metrics<E: Context> {
     pub prune_calls: Counter,
     /// Duration of Current-layer prune calls.
     prune_duration: Timed,
+    /// Clock used by the duration timers.
+    clock: Arc<E>,
 }
 
 impl<E: Context> Metrics<E> {
-    /// Create and register metrics.
+    /// Register the full metric set under `context`, retaining it as the timers' clock.
     pub fn new(context: E) -> Self {
-        let pruned_chunks = context.gauge("pruned_chunks", "Number of pruned bitmap chunks");
-        let sync_boundary =
-            context.gauge("sync_boundary", "Most recent safe sync boundary location");
-        let apply_batch_calls = context.counter("apply_batch_calls", "Number of apply-batch calls");
-        let apply_batch_duration = duration_histogram(
-            &context,
-            "apply_batch_duration",
-            "Duration of apply-batch calls",
-        );
-        let sync_calls = context.counter("sync_calls", "Number of sync calls");
-        let sync_duration = duration_histogram(&context, "sync_duration", "Duration of sync calls");
-        let prune_calls = context.counter("prune_calls", "Number of prune calls");
-        let prune_duration =
-            duration_histogram(&context, "prune_duration", "Duration of prune calls");
-        let clock = Arc::new(context);
-
         Self {
-            clock,
-            pruned_chunks,
-            sync_boundary,
-            apply_batch_calls,
-            apply_batch_duration: Timed::new(apply_batch_duration),
-            sync_calls,
-            sync_duration: Timed::new(sync_duration),
-            prune_calls,
-            prune_duration: Timed::new(prune_duration),
+            pruned_chunks: context.gauge("pruned_chunks", "Number of pruned bitmap chunks"),
+            sync_boundary: context
+                .gauge("sync_boundary", "Most recent safe sync boundary location"),
+            apply_batch_calls: context.counter("apply_batch_calls", "Number of apply-batch calls"),
+            apply_batch_duration: Timed::register(
+                &context,
+                "apply_batch_duration",
+                "Duration of apply-batch calls",
+            ),
+            sync_calls: context.counter("sync_calls", "Number of sync calls"),
+            sync_duration: Timed::register(&context, "sync_duration", "Duration of sync calls"),
+            prune_calls: context.counter("prune_calls", "Number of prune calls"),
+            prune_duration: Timed::register(&context, "prune_duration", "Duration of prune calls"),
+            clock: Arc::new(context),
         }
     }
 
@@ -154,7 +140,7 @@ pub struct Db<
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
     /// - The grafted tree pinned nodes at key [NODE_PREFIX]
-    pub(super) metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
+    pub(super) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Strategy used to parallelize batch operations across the ops tree, the grafted tree,
     /// and grafted leaf computation.
@@ -199,21 +185,20 @@ where
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    pub async fn bounds(&self) -> std::ops::Range<Location<F>> {
-        self.any.bounds().await
+    pub fn bounds(&self) -> std::ops::Range<Location<F>> {
+        self.any.bounds()
     }
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
-        hasher: &StandardHasher<H>,
         proof: &RangeProof<F, H::Digest>,
         start_loc: Location<F>,
         ops: &[Operation<F, U>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        proof.verify(hasher, start_loc, ops, chunks, root)
+        proof.verify::<H, _, N>(start_loc, ops, chunks, root)
     }
 }
 
@@ -233,11 +218,10 @@ where
     /// or above the grafting height, returns the grafted node. For positions below the grafting
     /// height, the ops tree is used.
     fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
-        grafting::Storage::new(
+        grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
-            qmdb::hasher::<H>(),
         )
     }
 
@@ -269,29 +253,26 @@ where
     /// Returns a witness that this database's canonical root commits to its ops root.
     ///
     /// This can be used to authenticate an ops root against a trusted canonical `current` root.
-    pub async fn ops_root_witness(
-        &self,
-        hasher: &StandardHasher<H>,
-    ) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
+    pub async fn ops_root_witness(&self) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
-        let ops_size = storage.size().await;
+        let ops_size = storage.size();
         let ops_leaves = Location::<F>::try_from(ops_size)?;
         let grafted_root = compute_grafted_root::<F, H, _, _, N>(
-            hasher,
             self.any.bitmap.as_ref(),
             &storage,
             ops_leaves,
             self.any.inactivity_floor_loc,
         )
         .await?;
+        let hasher = qmdb::hasher::<H>();
         let partial_chunk = partial_chunk::<_, N>(self.any.bitmap.as_ref())
-            .map(|(chunk, next_bit)| (next_bit, hasher.digest(&chunk)));
+            .map(|(chunk, next_bit)| (next_bit, hasher.digest(chunk.as_slice())));
         let pending_chunk_digest: F::PendingChunk<H::Digest> = pending_chunk::<F, _, N>(
             self.any.bitmap.as_ref(),
             ops_leaves,
             grafting::height::<N>(),
         )?
-        .map(|chunk| hasher.digest(&chunk))
+        .map(|chunk| hasher.digest(chunk.as_slice()))
         .try_into()
         .expect("pending_chunk must be consistent with family");
         Ok(OpsRootWitness {
@@ -321,13 +302,11 @@ where
     /// Returns a proof for the operation at `loc`.
     pub(super) async fn operation_proof(
         &self,
-        hasher: &StandardHasher<H>,
         loc: Location<F>,
     ) -> Result<OperationProof<F, H::Digest, N>, Error<F>> {
         let storage = self.grafted_storage();
         let ops_root = self.any.root();
-        OperationProof::new(
-            hasher,
+        OperationProof::new::<H, _>(
             self.any.bitmap.as_ref(),
             &storage,
             self.any.inactivity_floor_loc,
@@ -348,16 +327,24 @@ where
     /// [`crate::merkle::Error::LocationOverflow`] if `start_loc` >
     /// [`crate::merkle::Family::MAX_LEAVES`]. Returns [`crate::merkle::Error::RangeOutOfBounds`] if
     /// `start_loc` >= number of leaves in the tree.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.current.db.range_proof",
+        level = "info",
+        skip_all,
+        fields(
+            start_loc = *start_loc,
+            max_ops = max_ops.get(),
+        ),
+    )]
     pub async fn range_proof(
         &self,
-        hasher: &StandardHasher<H>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<F, H::Digest>, Vec<Operation<F, U>>, Vec<[u8; N]>), Error<F>> {
         let storage = self.grafted_storage();
         let ops_root = self.any.root();
-        RangeProof::new_with_ops(
-            hasher,
+        RangeProof::new_with_ops::<H, _, _, N>(
             self.any.bitmap.as_ref(),
             &storage,
             &self.any.log,
@@ -388,7 +375,7 @@ where
     ///
     /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs incorporating the
     /// activity bitmap, this returns ops-tree Merkle proofs suitable for state sync. Direct
-    /// verifiers should use [`crate::qmdb::hasher`].
+    /// verifiers should use [`crate::qmdb::verify_proof`].
     pub async fn ops_historical_proof(
         &self,
         historical_size: Location<F>,
@@ -514,6 +501,7 @@ where
     ///   [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [Error::DataCorrupted] if internal grafted-tree state is inconsistent (a pinned
     ///   or retained node is missing, or the prune location overflows a [Position]).
+    #[tracing::instrument(name = "qmdb.current.db.prune", level = "info", skip_all)]
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
@@ -534,7 +522,7 @@ where
         self.sync_metadata().await?;
 
         self.any.prune_log(prune_loc).await?;
-        self.any.update_metrics().await;
+        self.any.update_metrics();
         self.update_metrics();
         Ok(())
     }
@@ -559,6 +547,7 @@ where
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
     /// [`Db::sync`].
+    #[tracing::instrument(name = "qmdb.current.db.rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
         let current_size = *self.any.last_commit_loc + 1;
@@ -592,9 +581,8 @@ where
         // to a commit with floor below `pruned_bits` would require bitmap chunks we've already
         // discarded.
         {
-            let reader = self.any.log.reader().await;
             let rewind_last_loc = Location::<F>::new(rewind_size - 1);
-            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            let rewind_last_op = self.any.log.read(*rewind_last_loc).await?;
             let Some(rewind_floor) = rewind_last_op.has_floor() else {
                 return Err(Error::<F>::UnexpectedData(rewind_last_loc));
             };
@@ -624,11 +612,9 @@ where
         // the caller; reads through them now return inconsistent data.
         self.any.rewind(size).await?;
 
-        let hasher = qmdb::hasher::<H>();
         let ops_size = self.any.log.merkle.size();
         let ops_leaves = Location::<F>::try_from(ops_size)?;
         let grafted_tree = build_grafted_tree::<F, H, S, N>(
-            &hasher,
             self.any.bitmap.as_ref(),
             &pinned_nodes,
             &self.any.log.merkle,
@@ -636,16 +622,14 @@ where
             &self.strategy,
         )
         .await?;
-        let storage = grafting::Storage::new(
+        let storage = grafting::Storage::<F, H, _, _>::new(
             &grafted_tree,
             grafting::height::<N>(),
             &self.any.log.merkle,
-            hasher.clone(),
         );
         let partial_chunk = partial_chunk(self.any.bitmap.as_ref());
         let ops_root = self.any.root();
-        let root = compute_db_root(
-            &hasher,
+        let root = compute_db_root::<F, H, _, _, N>(
             self.any.bitmap.as_ref(),
             &storage,
             ops_leaves,
@@ -663,16 +647,16 @@ where
     }
 
     /// Sync the metadata to disk.
-    pub(crate) async fn sync_metadata(&self) -> Result<(), Error<F>> {
-        let mut metadata = self.metadata.lock().await;
-        metadata.clear();
+    pub(crate) async fn sync_metadata(&mut self) -> Result<(), Error<F>> {
+        self.metadata.clear();
 
         // Snapshot the pruning boundary under the read lock; the guard drops before any await.
         let pruned_chunks_u64 = self.any.bitmap.pruned_chunks() as u64;
 
         // Write the number of pruned chunks.
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        metadata.put(key, pruned_chunks_u64.to_be_bytes().to_vec());
+        self.metadata
+            .put(key, pruned_chunks_u64.to_be_bytes().to_vec());
 
         // Write the pinned nodes of the grafted tree.
         let pruned_chunks = Location::<F>::new(pruned_chunks_u64);
@@ -682,28 +666,31 @@ where
                 .get_node(grafted_pos)
                 .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
             let key = U64::new(NODE_PREFIX, i as u64);
-            metadata.put(key, digest.to_vec());
+            self.metadata.put(key, digest.to_vec());
         }
 
-        metadata.sync().await?;
+        self.metadata.sync().await?;
 
         Ok(())
     }
 }
 
-/// Compute the safe sync boundary from a pruning boundary and the current ops-tree size.
+/// Compute the safe sync boundary from the chunk-aligned inactivity floor and the current
+/// ops-tree size.
 ///
-/// Shared by the live DB and speculative batch wrappers so they both derive the same range start.
+/// `floor_chunks` is the inactivity floor expressed in bitmap chunks (`floor / CHUNK_SIZE_BITS`),
+/// not the number of physically pruned chunks. Shared by the live DB and speculative batch
+/// wrappers, which both derive it from the inactivity floor so they report the same range start.
 pub(crate) fn sync_boundary<F: Graftable, const N: usize>(
-    mut pruned_chunks: u64,
+    mut floor_chunks: u64,
     ops_leaves: u64,
 ) -> Location<F> {
     let chunk_bits = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
     let grafting_height = grafting::height::<N>();
 
-    while pruned_chunks > 0 {
-        let required_ops = pair_absorption_threshold::<F, N>(pruned_chunks).unwrap_or_else(|| {
-            let youngest_start = (pruned_chunks - 1) * chunk_bits;
+    while floor_chunks > 0 {
+        let required_ops = pair_absorption_threshold::<F, N>(floor_chunks).unwrap_or_else(|| {
+            let youngest_start = (floor_chunks - 1) * chunk_bits;
             let pos = F::subtree_root_position(Location::<F>::new(youngest_start), grafting_height);
             F::peak_birth_size(pos, grafting_height)
         });
@@ -711,22 +698,22 @@ pub(crate) fn sync_boundary<F: Graftable, const N: usize>(
         if ops_leaves >= required_ops {
             break;
         }
-        pruned_chunks -= 1;
+        floor_chunks -= 1;
     }
 
-    Location::new(pruned_chunks * chunk_bits)
+    Location::new(floor_chunks * chunk_bits)
 }
 
-/// For the youngest of `pruned_chunks` chunks, return the `peak_birth_size` of its
+/// For the youngest of `chunk_count` chunks, return the `peak_birth_size` of its
 /// chunk-pair parent at height `gh+1`. Returns `None` for families without delayed merges
 /// (where `peak_birth_size` at height `gh` equals the chunk boundary).
-fn pair_absorption_threshold<F: Graftable, const N: usize>(pruned_chunks: u64) -> Option<u64> {
-    if pruned_chunks == 0 {
+fn pair_absorption_threshold<F: Graftable, const N: usize>(chunk_count: u64) -> Option<u64> {
+    if chunk_count == 0 {
         return None;
     }
 
     let grafting_height = grafting::height::<N>();
-    let youngest = pruned_chunks - 1;
+    let youngest = chunk_count - 1;
     let youngest_start = youngest << grafting_height;
     let youngest_end = (youngest + 1) << grafting_height;
     let youngest_pos =
@@ -748,7 +735,7 @@ where
     F: merkle::Graftable,
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -756,12 +743,14 @@ where
 {
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
-    pub async fn commit(&self) -> Result<(), Error<F>> {
+    #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
+    pub async fn commit(&mut self) -> Result<(), Error<F>> {
         self.any.commit().await
     }
 
     /// Sync all database state to disk.
-    pub async fn sync(&self) -> Result<(), Error<F>> {
+    #[tracing::instrument(name = "qmdb.current.db.sync", level = "info", skip_all)]
+    pub async fn sync(&mut self) -> Result<(), Error<F>> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.any.sync().await?;
@@ -774,8 +763,9 @@ where
     }
 
     /// Destroy the db, removing all data from disk.
+    #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.metadata.into_inner().destroy().await?;
+        self.metadata.destroy().await?;
         self.any.destroy().await
     }
 }
@@ -785,7 +775,7 @@ where
     F: merkle::Graftable,
     E: Context,
     U: Update + 'static,
-    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -795,11 +785,13 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`].
+    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
+    /// more details).
     ///
     /// This publishes the batch to the in-memory Current view and appends it to the journal,
     /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
     /// durability.
+    #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         &mut self,
         batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
@@ -811,32 +803,6 @@ where
         self.root = batch.canonical_root;
         self.update_metrics();
         Ok(range)
-    }
-}
-
-impl<F, E, U, C, I, H, const N: usize, S> Persistable for Db<F, E, C, I, H, U, N, S>
-where
-    F: merkle::Graftable,
-    E: Context,
-    U: Update,
-    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    type Error = Error<F>;
-
-    async fn commit(&self) -> Result<(), Error<F>> {
-        Self::commit(self).await
-    }
-
-    async fn sync(&self) -> Result<(), Error<F>> {
-        Self::sync(self).await
-    }
-
-    async fn destroy(self) -> Result<(), Error<F>> {
-        self.destroy().await
     }
 }
 
@@ -917,12 +883,12 @@ pub(super) fn pending_chunk<F: merkle::Graftable, B: bitmap::Readable<N>, const 
 /// digest size). Different fixed lengths, so the two cannot produce the same input bytes,
 /// even when their digests are identical. Collisions reduce to H.
 pub(super) fn combine_roots<H: Hasher>(
-    hasher: &StandardHasher<H>,
     ops_root: &H::Digest,
     grafted_root: &H::Digest,
     pending: Option<&H::Digest>,
     partial: Option<(u64, &H::Digest)>,
 ) -> H::Digest {
+    let hasher = qmdb::hasher::<H>();
     match (pending, partial) {
         (None, None) => hasher.hash([ops_root.as_ref(), grafted_root.as_ref()]),
         (Some(pe), None) => hasher.hash([ops_root.as_ref(), grafted_root.as_ref(), pe.as_ref()]),
@@ -965,7 +931,6 @@ pub(super) async fn compute_db_root<
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
 >(
-    hasher: &StandardHasher<H>,
     status: &B,
     storage: &S,
     ops_leaves: Location<F>,
@@ -974,15 +939,16 @@ pub(super) async fn compute_db_root<
     ops_root: &H::Digest,
 ) -> Result<H::Digest, Error<F>> {
     let grafted_root =
-        compute_grafted_root(hasher, status, storage, ops_leaves, inactivity_floor).await?;
+        compute_grafted_root::<F, H, B, S, N>(status, storage, ops_leaves, inactivity_floor)
+            .await?;
+    let hasher = qmdb::hasher::<H>();
     let pending = pending_chunk::<F, B, N>(status, ops_leaves, grafting::height::<N>())?
         .map(|chunk| hasher.digest(&chunk));
     let partial = partial_chunk.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
         (next_bit, digest)
     });
-    Ok(combine_roots(
-        hasher,
+    Ok(combine_roots::<H>(
         ops_root,
         &grafted_root,
         pending.as_ref(),
@@ -1006,13 +972,12 @@ pub(super) async fn compute_grafted_root<
     S: MerkleStorage<F, Digest = H::Digest>,
     const N: usize,
 >(
-    hasher: &StandardHasher<H>,
     status: &B,
     storage: &S,
     ops_leaves: Location<F>,
     inactivity_floor: Location<F>,
 ) -> Result<H::Digest, Error<F>> {
-    let size = storage.size().await;
+    let size = storage.size();
     let leaves = Location::try_from(size)?;
 
     // Collect peak digests of the grafted structure.
@@ -1032,6 +997,7 @@ pub(super) async fn compute_grafted_root<
 
     let inactive_peaks =
         grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)?;
+    let hasher = qmdb::hasher::<H>();
 
     // Every peak the storage layer surfaces is either a grafted-tree node (graftable chunks already
     // incorporate `hash(chunk || h_G_node)`), an ops node above G (hashed normally), or an ops node
@@ -1056,7 +1022,6 @@ pub(super) async fn compute_grafted_leaves<
     S: Strategy,
     const N: usize,
 >(
-    hasher: &StandardHasher<H>,
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     strategy: &S,
@@ -1076,23 +1041,7 @@ pub(super) async fn compute_grafted_leaves<
     }))
     .await?;
 
-    // Compute the grafted leaf digest for each chunk. For all-zero chunks, the
-    // grafted leaf equals the chunk_ops_digest directly (zero-chunk identity).
-    let zero_chunk = [0u8; N];
-    Ok(strategy.map_init_collect_vec(
-        inputs,
-        || hasher.clone(),
-        |h, (chunk_idx, chunk_ops_digest, chunk)| {
-            if chunk == zero_chunk {
-                (chunk_idx, chunk_ops_digest)
-            } else {
-                (
-                    chunk_idx,
-                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
-                )
-            }
-        },
-    ))
+    Ok(grafting::graft_chunk_digests::<H, _, N>(strategy, inputs))
 }
 
 /// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree.
@@ -1115,7 +1064,6 @@ pub(super) async fn build_grafted_tree<
     S: Strategy,
     const N: usize,
 >(
-    hasher: &StandardHasher<H>,
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
@@ -1136,7 +1084,6 @@ pub(super) async fn build_grafted_tree<
     // sits at index `graftable_chunks` and is excluded; its digest is hashed directly into
     // the canonical root.
     let leaves = compute_grafted_leaves::<F, H, S, N>(
-        hasher,
         ops_tree,
         (pruned_chunks..graftable_chunks).map(|chunk_idx| (chunk_idx, bitmap.get_chunk(chunk_idx))),
         strategy,
@@ -1144,7 +1091,6 @@ pub(super) async fn build_grafted_tree<
     .await?;
 
     // Build the base grafted tree: either from pruned components or empty.
-    let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
     let mut grafted_tree = if pruned_chunks > 0 {
         let grafted_pruning_boundary = Location::<F>::new(pruned_chunks as u64);
         Mem::from_components(Vec::new(), grafted_pruning_boundary, pinned_nodes.to_vec())
@@ -1156,10 +1102,9 @@ pub(super) async fn build_grafted_tree<
     // Add each grafted leaf digest.
     if !leaves.is_empty() {
         let batch = {
-            let mut batch = grafted_tree.new_batch_with_strategy(strategy.clone());
-            for &(_ops_pos, digest) in &leaves {
-                batch = batch.add_leaf_digest(digest);
-            }
+            let batch = grafted_tree.new_batch_with_strategy(strategy.clone());
+            let batch = batch.add_leaf_digests(leaves.iter().map(|&(_, digest)| digest));
+            let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
             batch.merkleize(&grafted_tree, &grafted_hasher)
         };
         grafted_tree.apply_batch(&batch)?;
@@ -1233,7 +1178,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
 mod tests {
     use super::*;
     use crate::{
-        merkle::{mmb, mmr, Bagging::ForwardFold},
+        merkle::{hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold},
         qmdb::{
             any::traits::{DbAny, UnmerkleizedBatch as _},
             current::{tests::fixed_config, unordered::fixed},
@@ -1283,50 +1228,46 @@ mod tests {
 
     #[test]
     fn combine_roots_deterministic() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
-        let r1 = combine_roots(&hasher, &ops, &grafted, None, None);
-        let r2 = combine_roots(&hasher, &ops, &grafted, None, None);
+        let r1 = combine_roots::<Sha256>(&ops, &grafted, None, None);
+        let r2 = combine_roots::<Sha256>(&ops, &grafted, None, None);
         assert_eq!(r1, r2);
     }
 
     #[test]
     fn combine_roots_with_partial_differs() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let partial_digest = Sha256::hash(b"partial");
 
-        let without = combine_roots(&hasher, &ops, &grafted, None, None);
-        let with = combine_roots(&hasher, &ops, &grafted, None, Some((5, &partial_digest)));
+        let without = combine_roots::<Sha256>(&ops, &grafted, None, None);
+        let with = combine_roots::<Sha256>(&ops, &grafted, None, Some((5, &partial_digest)));
         assert_ne!(without, with);
     }
 
     #[test]
     fn combine_roots_with_pending_differs() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let pending_digest = Sha256::hash(b"pending");
 
-        let without = combine_roots(&hasher, &ops, &grafted, None, None);
-        let with = combine_roots(&hasher, &ops, &grafted, Some(&pending_digest), None);
+        let without = combine_roots::<Sha256>(&ops, &grafted, None, None);
+        let with = combine_roots::<Sha256>(&ops, &grafted, Some(&pending_digest), None);
         assert_ne!(without, with);
     }
 
     #[test]
     fn combine_roots_pending_and_partial_independent() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let pending_digest = Sha256::hash(b"pending");
         let partial_digest = Sha256::hash(b"partial");
 
-        let only_pending = combine_roots(&hasher, &ops, &grafted, Some(&pending_digest), None);
-        let only_partial = combine_roots(&hasher, &ops, &grafted, None, Some((5, &partial_digest)));
-        let both = combine_roots(
-            &hasher,
+        let only_pending = combine_roots::<Sha256>(&ops, &grafted, Some(&pending_digest), None);
+        let only_partial =
+            combine_roots::<Sha256>(&ops, &grafted, None, Some((5, &partial_digest)));
+        let both = combine_roots::<Sha256>(
             &ops,
             &grafted,
             Some(&pending_digest),
@@ -1339,13 +1280,12 @@ mod tests {
 
     #[test]
     fn combine_roots_different_ops_root() {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let ops_a = Sha256::hash(b"ops_a");
         let ops_b = Sha256::hash(b"ops_b");
         let grafted = Sha256::hash(b"grafted");
 
-        let r1 = combine_roots(&hasher, &ops_a, &grafted, None, None);
-        let r2 = combine_roots(&hasher, &ops_b, &grafted, None, None);
+        let r1 = combine_roots::<Sha256>(&ops_a, &grafted, None, None);
+        let r2 = combine_roots::<Sha256>(&ops_b, &grafted, None, None);
         assert_ne!(r1, r2);
     }
 
@@ -1363,19 +1303,19 @@ mod tests {
 
         // Neither pending nor partial.
         assert_eq!(
-            combine_roots(&hasher, &ops, &grafted, None, None),
+            combine_roots::<Sha256>(&ops, &grafted, None, None),
             hasher.hash([ops.as_ref(), grafted.as_ref()])
         );
 
         // Pending only.
         assert_eq!(
-            combine_roots(&hasher, &ops, &grafted, Some(&pending), None),
+            combine_roots::<Sha256>(&ops, &grafted, Some(&pending), None),
             hasher.hash([ops.as_ref(), grafted.as_ref(), pending.as_ref()])
         );
 
         // Partial only.
         assert_eq!(
-            combine_roots(&hasher, &ops, &grafted, None, Some((next_bit, &partial))),
+            combine_roots::<Sha256>(&ops, &grafted, None, Some((next_bit, &partial))),
             hasher.hash([
                 ops.as_ref(),
                 grafted.as_ref(),
@@ -1386,13 +1326,7 @@ mod tests {
 
         // Both: pending precedes partial.
         assert_eq!(
-            combine_roots(
-                &hasher,
-                &ops,
-                &grafted,
-                Some(&pending),
-                Some((next_bit, &partial))
-            ),
+            combine_roots::<Sha256>(&ops, &grafted, Some(&pending), Some((next_bit, &partial))),
             hasher.hash([
                 ops.as_ref(),
                 grafted.as_ref(),
@@ -1457,24 +1391,22 @@ mod tests {
                 populate_fixed_db::<mmr::Family, _>(&mut db, next_idx, 1).await;
                 next_idx += 1;
             }
-
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let witness = db.ops_root_witness().await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
             assert!(witness.partial_chunk.is_none());
-            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
+            assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
 
             let wrong_ops_root = Sha256::hash(b"wrong ops root");
-            assert!(!witness.verify(&hasher, &wrong_ops_root, &canonical_root));
+            assert!(!witness.verify::<Sha256>(&wrong_ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
         });
     }
 
@@ -1489,32 +1421,30 @@ mod tests {
             .await
             .unwrap();
             populate_fixed_db::<mmb::Family, _>(&mut db, 0, 260).await;
-
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let witness = db.ops_root_witness().await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
             assert!(witness.partial_chunk.is_some());
-            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
+            assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
 
             let wrong_ops_root = Sha256::hash(b"wrong ops root");
-            assert!(!witness.verify(&hasher, &wrong_ops_root, &canonical_root));
+            assert!(!witness.verify::<Sha256>(&wrong_ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
 
             let mut tampered = witness.clone();
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
 
             let mut tampered = witness.clone();
             tampered.partial_chunk.as_mut().unwrap().0 += 1;
-            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
 
             let mut tampered = witness;
             tampered.partial_chunk.as_mut().unwrap().1 = Sha256::hash(b"wrong partial chunk");
-            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
         });
     }
 
@@ -1538,20 +1468,18 @@ mod tests {
                 db.any.bitmap.pruned_chunks() > 0,
                 "test requires at least one pruned chunk to exercise the zero-chunk path"
             );
-
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let witness = db.ops_root_witness().await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
-            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
+            assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
         });
     }
 
@@ -1565,13 +1493,11 @@ mod tests {
             )
             .await
             .unwrap();
-
-            let hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&hasher).await.unwrap();
+            let witness = db.ops_root_witness().await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
-            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
+            assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
         });
     }
 }

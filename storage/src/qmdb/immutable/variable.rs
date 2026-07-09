@@ -64,7 +64,7 @@ impl<
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(journal, context, cfg.translator).await
+        Self::init_from_journal(journal, context, cfg.translator, cfg.init_cache_size).await
     }
 }
 
@@ -82,8 +82,14 @@ where
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
-        Self::init_from_merkle(merkle, cfg.commit_codec_config).await
+        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
+        Self::init_from_merkle(
+            merkle,
+            context.child("witness"),
+            cfg.witness,
+            cfg.commit_codec_config,
+        )
+        .await
     }
 }
 
@@ -97,7 +103,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
@@ -129,6 +135,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
@@ -143,9 +150,14 @@ mod tests {
         context: deterministic::Context,
     ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, ((), ()), Sequential> {
         let cfg = CompactConfig {
-            merkle: crate::merkle::compact::Config {
-                partition: "compact-immutable-variable".into(),
-                strategy: Sequential,
+            strategy: Sequential,
+            witness: crate::journal::contiguous::variable::Config {
+                partition: "compact-immutable-variable-witness".into(),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((), ()),
         };
@@ -321,6 +333,7 @@ mod tests {
         });
     }
 
+    #[boxed]
     async fn assert_compact_root_compatibility<F: Family>(ctx: deterministic::Context) {
         let mut db = open_db::<F>(ctx.child("db")).await;
         let mut compact = open_compact::<F>(ctx.child("compact")).await;
@@ -350,7 +363,7 @@ mod tests {
         db.apply_batch(retained).await.unwrap();
         compact.apply_batch(compact_batch).unwrap();
         db.commit().await.unwrap();
-        compact.commit().await.unwrap();
+        compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata));

@@ -24,7 +24,7 @@ use super::Header;
 use crate::{
     iouring::{self},
     telemetry::metrics::Register,
-    utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
+    utils, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
@@ -44,14 +44,14 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
         Error::BlobOpenFailed(
             path.to_string_lossy().to_string(),
             "directory".to_string(),
-            e,
+            e.into(),
         )
     })?;
     dir.sync_all().map_err(|e| {
         Error::BlobSyncFailed(
             path.to_string_lossy().to_string(),
             "directory".to_string(),
-            e,
+            e.into(),
         )
     })
 }
@@ -137,7 +137,7 @@ impl crate::Storage for Storage {
             .create(true)
             .truncate(false)
             .open(&path)
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
 
         // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
@@ -148,13 +148,13 @@ impl crate::Storage for Storage {
             // New (or corrupted) blob - truncate and write header with latest version
             let (header, blob_version) = Header::new(&versions);
             file.set_len(Header::SIZE_U64)
-                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
+                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
             file.seek(SeekFrom::Start(0))
                 .map_err(|_| Error::WriteFailed)?;
             file.write_all(&header.encode())
                 .map_err(|_| Error::WriteFailed)?;
             file.sync_all()
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
 
             // For new files, sync the parent directory to ensure the directory entry is durable.
             if raw_len == 0 {
@@ -379,7 +379,11 @@ impl crate::Blob for Blob {
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
         self.file.set_len(len).map_err(|e| {
-            Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), IoError::other(e))
+            Error::BlobResizeFailed(
+                self.partition.clone(),
+                hex(&self.name),
+                IoError::other(e).into(),
+            )
         })
     }
 
@@ -387,7 +391,24 @@ impl crate::Blob for Blob {
         self.io_handle
             .sync(self.file.clone())
             .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+            .map_err(|err| match err {
+                Error::Io(e) => Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e),
+                err => err,
+            })
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        let receiver = self.io_handle.start_sync(self.file.clone()).await;
+        Handle::from_future(async move {
+            match receiver.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(Error::Io(e))) => Err(Error::BlobSyncFailed(partition, hex(&name), e)),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(Error::Closed),
+            }
+        })
     }
 }
 
@@ -940,6 +961,38 @@ mod tests {
             .sync()
             .await
             .expect_err("sync should fail without a loop");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "blob sync failed: partition/{} error: failed to send work",
+                hex(b"blob")
+            )
+        );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_start_sync_reports_handle_disconnect() {
+        // Verify start_sync completion errors use the same blob-specific wrapper as sync.
+        let storage_directory = create_test_directory();
+        let path = storage_directory.join("disconnected_start_sync");
+        let file = File::create(&path).unwrap();
+
+        let mut registry = Registry::default();
+        let pool = test_pool(&mut registry.sub_registry("pool"));
+        let (submitter, io_loop) = iouring::IoUringLoop::new(
+            iouring::Config::default(),
+            &mut registry.sub_registry("iouring"),
+        );
+        drop(io_loop);
+
+        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
+        let err = blob
+            .start_sync()
+            .await
+            .await
+            .expect_err("start_sync should fail without a loop");
         assert_eq!(
             err.to_string(),
             format!(

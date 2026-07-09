@@ -125,25 +125,26 @@ pub(crate) mod test {
             Location as GenericLocation,
         },
         qmdb::{
-            self,
             any::{
-                test::fixed_db_config,
+                test::{fixed_db_config, fixed_db_config_with_strategy},
                 unordered::{fixed::Operation, Update},
             },
             verify_proof,
         },
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics as _, Runner as _, Supervisor as _,
+        Metrics as _, Runner as _, Supervisor as _, ThreadPooler as _,
     };
-    use commonware_utils::{test_rng_seeded, NZU64};
-    use rand::RngCore;
+    use commonware_utils::{test_rng_seeded, NZUsize, NZU64};
+    use core::num::NonZeroUsize;
+    use rand::Rng;
+    use std::collections::HashMap;
 
     /// A generic type alias for an Any database parameterized by merkle family.
     type AnyTestGeneric<F> = crate::qmdb::any::db::Db<
@@ -175,6 +176,47 @@ pub(crate) mod test {
         let seed = context.next_u64();
         let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
         AnyTest::init(context, cfg).await.unwrap()
+    }
+
+    /// `get_many` over a batch large enough for the fused sharded path matches per-key `get`.
+    #[test_traced]
+    fn test_get_many_fused_sharded_matches_get() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // The fused path requires parallelism > 1 (the Sequential test config never takes
+            // it) and at least 4096 keys. The tiny test page cache pushes most keys through
+            // the batched miss fallback, and TwoCap produces translated-key collisions.
+            type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
+            let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+            let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
+            let mut db = ParTest::init(context, cfg).await.unwrap();
+
+            let mut rng = test_rng_seeded(7);
+            let mut keys = Vec::with_capacity(4300);
+            let mut batch = db.new_batch();
+            for _ in 0..4200 {
+                let key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                keys.push(key);
+                batch = batch.write(key, Some(value));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Mix in absent keys so some probes resolve to nothing.
+            for _ in 0..100 {
+                keys.push(Digest::random(&mut rng));
+            }
+            let refs: Vec<&Digest> = keys.iter().collect();
+            let fused = db.get_many(&refs).await.unwrap();
+            assert_eq!(fused.len(), keys.len());
+            for (key, result) in keys.iter().zip(fused) {
+                assert_eq!(result, db.get(key).await.unwrap());
+            }
+
+            db.destroy().await.unwrap();
+        });
     }
 
     /// Create n random operations using the default seed (0). Some portion of
@@ -253,6 +295,40 @@ pub(crate) mod test {
         Sha256::hash(&(i + 10000).to_be_bytes())
     }
 
+    /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
+    /// with the cache disabled (`init_cache_size = None`) or enabled must produce the identical root.
+    #[test_traced("WARN")]
+    fn test_unordered_fixed_init_cache_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            // Populate a database with churny operations (repeated updates and deletes drive the
+            // collision resolution that the cache accelerates), then commit and drop it.
+            let cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
+            let mut db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
+            apply_ops(&mut db, create_test_ops(10_000)).await;
+            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            // Reopen with the cache disabled and with a large cache; both rebuild the snapshot by
+            // replaying the same immutable log, so both roots must equal the pre-drop root.
+            for cache_size in [None, Some(NZUsize!(1 << 20))] {
+                let mut cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
+                cfg.init_cache_size = cache_size;
+                let ctx = context
+                    .child("reopen")
+                    .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));
+                let db = AnyTest::init(ctx, cfg).await.unwrap();
+                assert_eq!(
+                    db.root(),
+                    root,
+                    "root mismatch at cache_size={cache_size:?}"
+                );
+                drop(db);
+            }
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_any_unordered_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
@@ -281,7 +357,7 @@ pub(crate) mod test {
                 "db_last_commit 3",
                 "db_get_calls_total 1",
                 "db_get_many_calls_total 1",
-                "db_keys_requested_total 2",
+                "db_lookups_requested_total 2",
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 3",
                 "db_commit_calls_total 1",
@@ -295,6 +371,150 @@ pub(crate) mod test {
                 "db_prune_duration_count 1",
             ] {
                 assert!(metrics.contains(expected), "missing {expected}\n{metrics}");
+            }
+        });
+    }
+
+    /// Reads on a batch must not perturb `merkleize`: the root must be byte-identical to a
+    /// write-only batch's `merkleize`, across updates/deletes/creates, both with the batch
+    /// rooted directly at the DB (D=0) and through pending ancestors (D=1, D=2).
+    #[test_traced("WARN")]
+    fn test_unordered_fixed_read_merkleize_parity() {
+        type ParentChain = Vec<
+            std::sync::Arc<
+                crate::qmdb::any::batch::MerkleizedBatch<
+                    mmr::Family,
+                    Digest,
+                    crate::qmdb::any::operation::update::Unordered<Digest, FixedEncoding<Digest>>,
+                    Sequential,
+                >,
+            >,
+        >;
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = create_test_db(ctx.child("db")).await;
+
+            // Seed 2000 keys and commit so they live in the committed snapshot.
+            let mut seed = db.new_batch();
+            for i in 0..2000u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
+            // and creates of fresh keys. `make` re-derives the set from a seed so both paths and
+            // both depths see identical mutations.
+            let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
+                let mut rng = test_rng_seeded(salt);
+                let mut out = Vec::new();
+                for _ in 0..600 {
+                    let r = rng.next_u32() % 100;
+                    if r < 60 {
+                        out.push((key(rng.next_u64() % 2000), Some(val(rng.next_u64()))));
+                    } else if r < 80 {
+                        out.push((key(rng.next_u64() % 2000), None));
+                    } else {
+                        out.push((key(2000 + rng.next_u64() % 2000), Some(val(rng.next_u64()))));
+                    }
+                }
+                // Dedup last-write-wins.
+                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                for (k, v) in out {
+                    m.insert(k, v);
+                }
+                m.into_iter().collect()
+            };
+
+            // D=0: batch rooted directly at the DB. D=N: through N pending ancestors.
+            for depth in [0u64, 1, 2] {
+                let mut chain: ParentChain = Vec::new();
+                for d in 0..depth {
+                    let mut p = chain
+                        .last()
+                        .map_or_else(|| db.new_batch(), |l| l.new_batch::<Sha256>());
+                    for (k, v) in make(900 + d) {
+                        p = p.write(k, v);
+                    }
+                    chain.push(p.merkleize(&db, None).await.unwrap());
+                }
+
+                let muts = make(depth + 1);
+                let new_batch = || {
+                    chain
+                        .last()
+                        .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
+                };
+
+                // Normal path.
+                let mut nb = new_batch();
+                for (k, v) in &muts {
+                    nb = nb.write(*k, *v);
+                }
+                let normal_root = nb.merkleize(&db, None).await.unwrap().root();
+
+                // Read-then-write on one batch. Values and root must match the write-only path.
+                let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
+                let mut fb = new_batch();
+                // Duplicate keys in one read resolve identically per slot.
+                let dup_values = fb.get_many(&[keys[0], keys[0]], &db).await.unwrap();
+                assert_eq!(dup_values[0], dup_values[1]);
+                // Keys read but never written must not affect the root.
+                let unwritten: Vec<Digest> = (0..40u64)
+                    .map(|i| key(i * 50))
+                    .chain((0..5).map(|i| key(8000 + i)))
+                    .collect();
+                let unwritten_refs: Vec<&Digest> = unwritten.iter().collect();
+                fb.get_many(&unwritten_refs, &db).await.unwrap();
+                let values = fb.get_many(&keys, &db).await.unwrap();
+                let plain = new_batch().get_many(&keys, &db).await.unwrap();
+                assert_eq!(values, plain, "value mismatch at depth={depth}");
+                for (k, v) in &muts {
+                    fb = fb.write(*k, *v);
+                }
+                let fused_root = fb.merkleize(&db, None).await.unwrap().root();
+                assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
+
+                // Reads after writes: written keys are answered by the pending mutations and the
+                // root must still match.
+                let half = muts.len() / 2;
+                let mut mb = new_batch();
+                for (k, v) in muts.iter().take(half) {
+                    mb = mb.write(*k, *v);
+                }
+                let values = mb.get_many(&keys, &db).await.unwrap();
+                for (i, (_, v)) in muts.iter().enumerate().take(half) {
+                    assert_eq!(values[i], *v, "pending write not visible at depth={depth}");
+                }
+                assert_eq!(
+                    values[half..],
+                    plain[half..],
+                    "unwritten value mismatch at depth={depth}"
+                );
+                for (k, v) in muts.iter().skip(half) {
+                    mb = mb.write(*k, *v);
+                }
+                let mixed_root = mb.merkleize(&db, None).await.unwrap().root();
+                assert_eq!(
+                    normal_root, mixed_root,
+                    "mixed root mismatch at depth={depth}"
+                );
+
+                // Multiple disjoint reads and single-key gets must not affect the root.
+                let mut gb = new_batch();
+                gb.get_many(&keys[..half], &db).await.unwrap();
+                for key in &keys[half..] {
+                    gb.get(key, &db).await.unwrap();
+                }
+                for (k, v) in &muts {
+                    gb = gb.write(*k, *v);
+                }
+                let merged_root = gb.merkleize(&db, None).await.unwrap().root();
+                assert_eq!(
+                    normal_root, merged_root,
+                    "merged root mismatch at depth={depth}"
+                );
             }
         });
     }
@@ -626,7 +846,7 @@ pub(crate) mod test {
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
             let root_hash = db.root();
-            let original_op_count = db.bounds().await.end;
+            let original_op_count = db.bounds().end;
 
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
@@ -639,9 +859,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            let hasher = qmdb::hasher::<Sha256>();
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
@@ -663,8 +881,7 @@ pub(crate) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
@@ -674,7 +891,7 @@ pub(crate) mod test {
             // Try to get historical proof with op_count > number of operations and confirm it
             // returns RangeOutOfBounds error.
             assert!(matches!(
-                db.historical_proof(db.bounds().await.end + 1, Location::new(6), NZU64!(10))
+                db.historical_proof(db.bounds().end + 1, Location::new(6), NZU64!(10))
                     .await,
                 Err(Error::Merkle(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
@@ -687,30 +904,28 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let hasher = qmdb::hasher::<Sha256>();
-
             let mut db = create_test_db(context.child("first")).await;
             // Apply ops in multiple batches; each apply_ops ends in a commit, so the size
             // after each batch is a commit-boundary historical size.
             let mut commit_boundary_sizes: Vec<Location> = Vec::new();
             for _ in 0..5 {
                 apply_ops(&mut db, create_test_ops(10)).await;
-                commit_boundary_sizes.push(db.bounds().await.end);
+                commit_boundary_sizes.push(db.bounds().end);
             }
 
             let root = db.root();
-            let full_size = db.bounds().await.end;
+            let full_size = db.bounds().end;
             assert_eq!(full_size, *commit_boundary_sizes.last().unwrap());
 
             // Verify a single-op proof at the full commit size.
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &proof,
                 Location::new(1),
                 &proof_ops,
-                &root));
+                &root
+            ));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
@@ -755,7 +970,6 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ops = create_test_ops(100);
-            let hasher = qmdb::hasher::<Sha256>();
             let start_loc = Location::new(2);
             let max_ops = NZU64!(10);
 
@@ -767,7 +981,7 @@ pub(crate) mod test {
                 apply_ops(&mut db, ops[offset..offset + chunk].to_vec()).await;
                 offset += chunk;
 
-                let end_loc = db.bounds().await.end;
+                let end_loc = db.bounds().end;
                 let root = db.root();
                 let (proof, proof_ops) = db.proof(start_loc, max_ops).await.unwrap();
                 checkpoints.push((end_loc, root, proof, proof_ops));
@@ -785,8 +999,7 @@ pub(crate) mod test {
                 assert_eq!(historical_proof.leaves, reference_proof.leaves);
                 assert_eq!(historical_proof.digests, reference_proof.digests);
                 assert_eq!(historical_ops, reference_ops);
-                assert!(verify_proof(
-                    &hasher,
+                assert!(verify_proof::<Sha256, _, _>(
                     &historical_proof,
                     start_loc,
                     &historical_ops,
@@ -797,8 +1010,7 @@ pub(crate) mod test {
             // Verify the current full-size proof against the current root as a final sanity check.
             let full_root = db.root();
             let (full_proof, full_ops) = db.proof(start_loc, max_ops).await.unwrap();
-            assert!(verify_proof(
-                &hasher,
+            assert!(verify_proof::<Sha256, _, _>(
                 &full_proof,
                 start_loc,
                 &full_ops,
@@ -813,6 +1025,8 @@ pub(crate) mod test {
 
     #[allow(dead_code)]
     fn assert_non_trait_futures_are_send(db: &AnyTest, key: Digest, value: Digest) {
+        let reader = db.new_batch();
+        is_send(reader.get_many(&[&key], db));
         let batch = db.new_batch().write(key, Some(value));
         is_send(batch.merkleize(db, None));
         is_send(db.get_with_loc(&key));

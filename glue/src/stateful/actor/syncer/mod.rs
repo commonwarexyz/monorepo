@@ -415,7 +415,7 @@ where
     // have suffered a crash that left the set in an inconsistent state. In this case,
     // we attempt to repair by rewinding the databases back to the marshal floor. If
     // the rewind fails to produce a consistent state, we must crash. This can occur
-    // if the databases were corrupted or pruned to aggressively.
+    // if the databases were corrupted or pruned too aggressively.
     if databases.committed_targets().await != processed_targets {
         databases.rewind_to_targets(processed_targets.clone()).await;
         let rewound_targets = databases.committed_targets().await;

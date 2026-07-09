@@ -13,6 +13,7 @@
 commonware_macros::stability_scope!(ALPHA {
     extern crate alloc;
 
+    pub mod bmt;
     pub mod merkle;
     pub use merkle::{mmb, mmr};
 });
@@ -20,9 +21,10 @@ commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     mod bitmap;
     pub mod qmdb;
     pub use crate::bitmap::{BitMap as AuthenticatedBitMap, MerkleizedBitMap, UnmerkleizedBitMap};
-    pub mod bmt;
     pub mod cache;
     pub mod queue;
+    #[cfg(any(test, feature = "test-utils"))]
+    pub mod utils;
 });
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod archive;
@@ -32,6 +34,82 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod metadata;
     pub mod ordinal;
     pub mod rmap;
+
+    /// Section selector for storage operations that act on one or more sections.
+    pub trait Sections {
+        /// Iterator over selected sections.
+        type Iter: Iterator<Item = u64>;
+
+        /// Convert into selected section indices.
+        ///
+        /// This trait does not impose ordering or uniqueness; each storage operation decides how
+        /// to handle duplicates and missing sections.
+        fn sections(self) -> Self::Iter;
+    }
+
+    impl Sections for u64 {
+        type Iter = core::iter::Once<Self>;
+
+        fn sections(self) -> Self::Iter {
+            core::iter::once(self)
+        }
+    }
+
+    impl<const N: usize> Sections for [u64; N] {
+        type Iter = core::array::IntoIter<u64, N>;
+
+        fn sections(self) -> Self::Iter {
+            self.into_iter()
+        }
+    }
+
+    impl<'a, const N: usize> Sections for &'a [u64; N] {
+        type Iter = core::iter::Copied<core::slice::Iter<'a, u64>>;
+
+        fn sections(self) -> Self::Iter {
+            self.iter().copied()
+        }
+    }
+
+    impl<'a> Sections for &'a [u64] {
+        type Iter = core::iter::Copied<core::slice::Iter<'a, u64>>;
+
+        fn sections(self) -> Self::Iter {
+            self.iter().copied()
+        }
+    }
+
+    impl Sections for Vec<u64> {
+        type Iter = std::vec::IntoIter<u64>;
+
+        fn sections(self) -> Self::Iter {
+            self.into_iter()
+        }
+    }
+
+    impl<'a> Sections for &'a Vec<u64> {
+        type Iter = core::iter::Copied<core::slice::Iter<'a, u64>>;
+
+        fn sections(self) -> Self::Iter {
+            self.iter().copied()
+        }
+    }
+
+    impl Sections for std::collections::BTreeSet<u64> {
+        type Iter = std::collections::btree_set::IntoIter<u64>;
+
+        fn sections(self) -> Self::Iter {
+            self.into_iter()
+        }
+    }
+
+    impl<'a> Sections for &'a std::collections::BTreeSet<u64> {
+        type Iter = core::iter::Copied<std::collections::btree_set::Iter<'a, u64>>;
+
+        fn sections(self) -> Self::Iter {
+            self.iter().copied()
+        }
+    }
 
     /// A runtime context providing storage, timing, and metrics capabilities.
     ///
@@ -45,37 +123,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             T: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
         > Context for T
     {
-    }
-
-    /// A storage structure with capabilities to persist and recover state across restarts.
-    pub trait Persistable {
-        /// The error type returned when there is a failure from the underlying storage system.
-        type Error;
-
-        /// Durably persist the structure, guaranteeing the current state will survive a crash.
-        ///
-        /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-        fn commit(&self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-            self.sync()
-        }
-
-        /// Durably persist the structure, guaranteeing the current state will survive a crash, and that
-        /// no recovery will be needed on startup.
-        ///
-        /// This provides a stronger guarantee than [Self::commit] but may be slower.
-        fn sync(&self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
-
-        /// Destroy the structure, removing all associated storage.
-        ///
-        /// This method consumes the structure and deletes all persisted data, leaving behind no storage
-        /// artifacts. This can be used to clean up disk resources in tests.
-        ///
-        /// # Crash Safety
-        ///
-        /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-        /// reopening the same storage may observe partially removed state. Use a reset operation
-        /// provided by the concrete type when the structure must remain recoverable.
-        fn destroy(self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
     }
 });
 commonware_macros::stability_scope!(BETA {

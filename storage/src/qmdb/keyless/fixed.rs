@@ -61,8 +61,8 @@ impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strat
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
-        Self::init_from_merkle(merkle, ()).await
+        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
+        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, ()).await
     }
 }
 
@@ -74,7 +74,7 @@ mod test {
         qmdb::keyless::tests,
     };
     use commonware_cryptography::Sha256;
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
@@ -133,9 +133,14 @@ mod test {
         context: deterministic::Context,
     ) -> TestCompactDb<F> {
         let cfg = CompactConfig {
-            merkle: crate::merkle::compact::Config {
-                partition: "compact-keyless-fixed".into(),
-                strategy: Sequential,
+            strategy: Sequential,
+            witness: crate::journal::contiguous::variable::Config {
+                partition: "compact-keyless-fixed-witness".into(),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             },
             commit_codec_config: (),
         };
@@ -175,7 +180,7 @@ mod test {
                 "db_last_commit 2",
                 "db_get_calls_total 1",
                 "db_get_many_calls_total 1",
-                "db_locations_requested_total 2",
+                "db_lookups_requested_total 2",
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 2",
                 "db_commit_calls_total 1",
@@ -299,6 +304,7 @@ mod test {
         });
     }
 
+    #[boxed]
     async fn assert_compact_root_compatibility<F: crate::merkle::Family>(
         ctx: deterministic::Context,
     ) {
@@ -327,7 +333,7 @@ mod test {
         db.apply_batch(retained).await.unwrap();
         compact.apply_batch(compact_batch).unwrap();
         db.commit().await.unwrap();
-        compact.commit().await.unwrap();
+        compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata.clone()));
@@ -966,7 +972,7 @@ mod test {
             target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();
-            let bounds = target_db.bounds().await;
+            let bounds = target_db.bounds();
             let lower_bound = bounds.start;
             let upper_bound = bounds.end;
 
@@ -991,7 +997,7 @@ mod test {
             let synced_db: TestDb<mmr::Family> = sync::sync(config).await.unwrap();
 
             assert_eq!(synced_db.root(), target_root);
-            let bounds = synced_db.bounds().await;
+            let bounds = synced_db.bounds();
             assert_eq!(bounds.end, upper_bound);
             assert_eq!(bounds.start, lower_bound);
 

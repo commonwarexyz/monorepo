@@ -21,13 +21,13 @@ use commonware_runtime::{
     Clock, Metrics,
 };
 use commonware_utils::futures::Aborter;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     mem::{replace, take},
     time::{Duration, SystemTime},
 };
-use tracing::{debug, warn};
+use tracing::{debug, warn, Span};
 
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = View::zero();
@@ -90,7 +90,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest> {
+pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest> {
     context: E,
     scheme: S,
     elector: L::Elector,
@@ -113,7 +113,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     nullifications: CounterFamily<Leader<S::PublicKey>>,
 }
 
-impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
+impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
     State<E, S, L, D>
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
@@ -220,6 +220,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let certification_deadline = now + self.certification_timeout;
 
         let round = self.create_round(view);
+        round.open_span();
         round.set_deadlines(leader_deadline, certification_deadline);
         self.view = view;
 
@@ -247,6 +248,30 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 self.context.current(),
             )
         })
+    }
+
+    /// Returns the root span for `view`, or a disabled span if the view is not
+    /// tracked or already decided.
+    pub fn view_span(&self, view: View) -> Span {
+        self.views
+            .get(&view)
+            .map(|round| round.span())
+            .unwrap_or_else(Span::none)
+    }
+
+    /// Closes the root span of every decided view (at or below the finalized
+    /// view) so each view trace ends when the chain commits it rather than when
+    /// the round is later pruned.
+    pub fn close_decided_spans(&mut self) {
+        for (_, round) in self.views.range_mut(..=self.last_finalized) {
+            round.close_span();
+        }
+    }
+
+    /// Returns the root span for `view` and the finalized view, the two state
+    /// values a batcher update carries.
+    pub fn batcher_context(&self, view: View) -> (Span, View) {
+        (self.view_span(view), self.last_finalized)
     }
 
     /// Returns the deadline for the next timeout (leader, certification, or retry).
@@ -595,15 +620,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.outstanding_certifications.insert(view);
     }
 
-    /// Takes all certification candidates and returns proposals ready for
-    /// certification, along with whether the proposal was built locally.
-    ///
-    /// Certification may be inferred only when we have explicit evidence that we
-    /// proposed this exact payload for the round, either in the current process
-    /// or via replay of our durable local vote. In certain cases for Byzantine nodes,
-    /// it is possible that a certificate is received for a proposal that we did not propose (although
-    /// we are the leader).
-    pub fn certify_candidates(&mut self) -> Vec<(Proposal<D>, bool)> {
+    /// Takes all certification candidates and returns proposals ready for certification.
+    pub fn certify_candidates(&mut self) -> Vec<Proposal<D>> {
         let candidates = take(&mut self.certification_candidates);
         candidates
             .into_iter()
@@ -788,6 +806,7 @@ mod tests {
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::futures::AbortablePool;
@@ -795,6 +814,60 @@ mod tests {
 
     fn test_genesis() -> Sha256Digest {
         Sha256Digest::from([0u8; 32])
+    }
+
+    #[test_traced]
+    fn decided_views_close_their_view_span() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(7);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: verifier.clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            // Finalize view 2, advancing the finalized view and entering view 3.
+            let finalize_view = View::new(2);
+            let finalize_round = Rnd::new(epoch, finalize_view);
+            let proposal =
+                Proposal::new(finalize_round, GENESIS_VIEW, Sha256Digest::from([7u8; 32]));
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let finalization = Finalization::from_finalizes(&verifier, votes.iter(), &Sequential)
+                .expect("finalization");
+            state.add_finalization(finalization);
+            assert_eq!(state.last_finalized(), finalize_view);
+
+            // Finalizing does not close entered spans on its own; follow-up work
+            // for an entered view can still run under the span until notification
+            // completes. This finalization skips over view 2, so that prepared
+            // future view never opened a span.
+            assert!(!state.view_span(View::new(1)).is_none());
+            assert!(state.view_span(finalize_view).is_none());
+            assert!(!state.view_span(View::new(3)).is_none());
+
+            // Closing decided spans releases every view at or below the
+            // finalized view, while the active view keeps its span.
+            state.close_decided_spans();
+            assert!(state.view_span(View::new(1)).is_none());
+            assert!(state.view_span(finalize_view).is_none());
+            assert!(!state.view_span(View::new(3)).is_none());
+        });
     }
 
     #[test]
@@ -1844,8 +1917,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), view);
-            assert!(candidates[0].1);
+            assert_eq!(candidates[0].round.view(), view);
         });
     }
 
@@ -1896,12 +1968,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            let (candidate, is_local) = &candidates[0];
-            assert_eq!(*candidate, proposal);
-            assert!(
-                !*is_local,
-                "leader-owned recovered proposal must not inherit local certification"
-            );
+            assert_eq!(candidates[0], proposal);
         });
     }
 
@@ -2034,7 +2101,6 @@ mod tests {
             // All 6 views should be candidates
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 6);
-            assert!(candidates.iter().all(|(_, is_local)| !is_local));
 
             // Set certify handles for views 3, 4, 5, 7 (NOT 6 or 8)
             for i in [3u64, 4, 5, 7] {
@@ -2074,8 +2140,7 @@ mod tests {
             state.add_notarization(make_notarization(View::new(9)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), View::new(9));
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), View::new(9));
 
             // Set handle for view 9, add view 10
             let handle9 = pool.push(futures::future::pending());
@@ -2085,8 +2150,7 @@ mod tests {
             // View 10 returned (view 9 has handle)
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), View::new(10));
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), View::new(10));
 
             // Finalize view 9 - aborts view 9's handle
             state.add_finalization(make_finalization(View::new(9)));
@@ -2096,8 +2160,7 @@ mod tests {
             state.add_notarization(make_notarization(View::new(11)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), View::new(11));
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), View::new(11));
         });
     }
 
@@ -2169,8 +2232,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), live_view);
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), live_view);
         });
     }
 
@@ -2225,8 +2287,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), view);
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), view);
         });
     }
 
@@ -2270,8 +2331,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].0.round.view(), view);
-            assert!(!candidates[0].1);
+            assert_eq!(candidates[0].round.view(), view);
 
             let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());

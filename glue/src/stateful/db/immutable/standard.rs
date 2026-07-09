@@ -2,7 +2,7 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. The wrapper types here capture `Arc<AsyncRwLock<Immutable>>`
+//! deletions. The wrapper types here capture `Arc<TracedAsyncRwLock<Immutable>>`
 //! so the batch API can read through to committed state.
 
 use crate::stateful::db::{
@@ -14,11 +14,8 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
-    journal::{
-        contiguous::{
-            fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
-        },
-        Error as JournalError,
+    journal::contiguous::{
+        fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
     },
     merkle::{Family, Location},
     qmdb::{
@@ -32,13 +29,12 @@ use commonware_storage::{
         Error,
     },
     translator::Translator,
-    Persistable,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
 type ImmutableDbHandle<F, E, K, V, C, H, T, S> =
-    Arc<AsyncRwLock<Immutable<F, E, K, V, C, H, T, S>>>;
+    Arc<TracedAsyncRwLock<Immutable<F, E, K, V, C, H, T, S>>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
@@ -48,7 +44,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -66,7 +62,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -85,7 +81,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -135,7 +131,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -151,7 +147,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -170,7 +166,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -197,7 +193,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -226,7 +222,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -287,7 +283,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         ImmutableUnmerkleized {
             batch: inner.new_batch(),
@@ -305,12 +301,15 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
-        Ok(())
+        self.sync().await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
+    }
+
+    fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
@@ -321,7 +320,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -369,7 +368,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         ImmutableUnmerkleized {
             batch: inner.new_batch(),
@@ -387,12 +386,15 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
-        Ok(())
+        self.sync().await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds().await;
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
+    }
+
+    fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds();
         AnySyncTarget::new(
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
@@ -403,7 +405,7 @@ where
         self.rewind(target.range.end()).await?;
         self.sync().await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",

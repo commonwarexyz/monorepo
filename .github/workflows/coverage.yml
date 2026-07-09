@@ -15,16 +15,16 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  NIGHTLY_VERSION: nightly
+  NIGHTLY_VERSION: nightly-2026-06-21
 
 jobs:
   Coverage:
-    name: "Coverage (flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/8)"
+    name: "Coverage${{ matrix.flags && format(' (flags: \"{0}\")', matrix.flags) }} (partition: ${{ matrix.partition }}/20)"
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       matrix:
-        partition: [1, 2, 3, 4, 5, 6, 7, 8]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         flags:
           - "--features commonware-runtime/iouring-storage"
           - "--features commonware-runtime/iouring-network"
@@ -37,7 +37,13 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        additional-cache-key: ${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
+        additional-components: llvm-tools-preview
+        additional-cache-key: ${{ matrix.flags || 'default' }}
+        rust-cache-save: ${{ matrix.partition == 1 }}
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Remove fuzz
       run: |
         rm -rf broadcast/fuzz
@@ -66,7 +72,7 @@ jobs:
         name="${name//\//-}"
         echo "flags=${name:-default}" >> "$GITHUB_OUTPUT"
     - name: Generate coverage report
-      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest --branch --workspace ${{ matrix.flags }} --lcov --output-path lcov-${{ steps.path-normalization.outputs.flags }}-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/8 --profile all
+      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest --branch --workspace ${{ matrix.flags }} --lcov --output-path lcov-${{ steps.path-normalization.outputs.flags }}-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/20 --profile all
     - name: Store coverage report
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:
@@ -87,7 +93,7 @@ jobs:
         pattern: coverage-lcov-*
         merge-multiple: true
     - name: Upload to Codecov
-      uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
+      uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
       with:
         files: lcov-*.info
         fail_ci_if_error: true

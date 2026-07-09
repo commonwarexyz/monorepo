@@ -24,7 +24,7 @@ use commonware_utils::{
     ordered::{BiMap, Quorum, Set},
     Faults, Participant,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -153,7 +153,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     where
         S: Scheme<Signature = V::Signature>,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
         I::IntoIter: Send,
@@ -248,7 +248,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     where
         S: Scheme,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         M: Faults,
     {
@@ -291,7 +291,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     where
         S: Scheme,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: CryptoRngCore,
+        R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate<V>)>,
         M: Faults,
@@ -418,7 +418,7 @@ macro_rules! impl_certificate_bls12381_multisig {
         ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
         where
             V: $crate::bls12381::primitives::variant::Variant,
-            R: rand::RngCore + rand::CryptoRng,
+            R: rand::Rng + rand::CryptoRng,
         {
             $crate::bls12381::certificate::multisig::mocks::fixture::<_, V, _>(
                 rng,
@@ -487,7 +487,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 M: commonware_utils::Faults,
             {
@@ -502,7 +502,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 M: commonware_utils::Faults,
@@ -555,7 +555,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
                 self.generic
@@ -570,7 +570,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 I::IntoIter: Send
@@ -643,7 +643,7 @@ mod tests {
     impl_certificate_bls12381_multisig!(TestSubject, Vec<u8>);
 
     fn setup_signers<V: Variant>(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         n: u32,
     ) -> (
         Vec<Scheme<ed25519::PublicKey, V>>,

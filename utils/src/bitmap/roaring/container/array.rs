@@ -519,7 +519,7 @@ fn validate_values(values: &[u16]) -> Result<(), CodecError> {
     if values.len() > MAX_CARDINALITY {
         return Err(CodecError::InvalidLength(values.len()));
     }
-    if values.windows(2).any(|w| w[0] >= w[1]) {
+    if !values.is_sorted_by(|a, b| a < b) {
         return Err(CodecError::Invalid(
             "Array",
             "values must be sorted and unique",

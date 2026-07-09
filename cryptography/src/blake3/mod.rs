@@ -31,7 +31,7 @@ use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use zeroize::Zeroize;
 
 /// Re-export [blake3::Hasher] as `CoreBlake3` for external use if needed.
@@ -167,7 +167,7 @@ impl crate::Digest for Digest {
 }
 
 impl Random for Digest {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         let mut array = [0u8; DIGEST_LENGTH];
         rng.fill_bytes(&mut array);
         Self(array)

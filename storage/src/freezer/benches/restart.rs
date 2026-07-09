@@ -17,10 +17,10 @@ fn bench_restart(c: &mut Criterion) {
     for items in ITEMS {
         // Populate the freezer with random keys
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
-        builder.start(|ctx| async move {
-            let mut store = init(ctx).await;
+        let checkpoint = builder.start(|ctx| async move {
+            let mut store = init(ctx, None).await;
             append_random(&mut store, items).await;
-            store.close().await.unwrap();
+            store.close().await.unwrap()
         });
 
         // Run the benchmarks
@@ -32,7 +32,7 @@ fn bench_restart(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let start = Instant::now();
-                    let _store = init(ctx.child("storage")).await; // replay happens inside init
+                    let _store = init(ctx.child("storage"), Some(checkpoint)).await;
                     total += start.elapsed();
                 }
                 total
@@ -42,7 +42,7 @@ fn bench_restart(c: &mut Criterion) {
         // Tear down
         let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
         cleaner.start(|ctx| async move {
-            let store = init(ctx).await;
+            let store = init(ctx, None).await;
             store.destroy().await.unwrap();
         });
     }

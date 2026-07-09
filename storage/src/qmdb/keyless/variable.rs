@@ -73,8 +73,14 @@ where
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
-        Self::init_from_merkle(merkle, cfg.commit_codec_config).await
+        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
+        Self::init_from_merkle(
+            merkle,
+            context.child("witness"),
+            cfg.witness,
+            cfg.commit_codec_config,
+        )
+        .await
     }
 }
 
@@ -86,7 +92,7 @@ mod test {
         qmdb::keyless::tests,
     };
     use commonware_cryptography::Sha256;
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
@@ -150,9 +156,14 @@ mod test {
         context: deterministic::Context,
     ) -> TestCompactDb<F> {
         let cfg = CompactConfig {
-            merkle: crate::merkle::compact::Config {
-                partition: "compact-keyless-variable".into(),
-                strategy: Sequential,
+            strategy: Sequential,
+            witness: crate::journal::contiguous::variable::Config {
+                partition: "compact-keyless-variable-witness".into(),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((0..=10000usize).into(), ()),
         };
@@ -262,7 +273,7 @@ mod test {
             // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
             // commit is at 8.
             db.prune(Location::new(8)).await.unwrap();
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             assert_eq!(*bounds.start, 7);
 
             // op_count = first retained commit (= state just before that commit). Expected:
@@ -323,6 +334,7 @@ mod test {
         });
     }
 
+    #[boxed]
     async fn assert_compact_root_compatibility<F: crate::merkle::Family>(
         ctx: deterministic::Context,
     ) {
@@ -351,7 +363,7 @@ mod test {
         db.apply_batch(retained).await.unwrap();
         compact.apply_batch(compact_batch).unwrap();
         db.commit().await.unwrap();
-        compact.commit().await.unwrap();
+        compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata.clone()));

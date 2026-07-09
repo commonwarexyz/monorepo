@@ -1,13 +1,14 @@
 //! Helpers shared by the Archive benchmarks.
 
 use commonware_codec::config::RangeCfg;
+use commonware_macros::boxed;
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::num::{NonZeroU16, NonZeroUsize};
 
 /// Number of bytes that can be buffered in a section before being written to a
@@ -58,18 +59,19 @@ pub enum Archive {
 
 impl Archive {
     /// Initialize a new archive based on variant
+    #[boxed]
     pub async fn init(ctx: Context, variant: Variant, compression: Option<u8>) -> Self {
         match variant {
             Variant::Immutable => {
                 let cfg = immutable::Config {
                     metadata_partition: "archive-bench-metadata".into(),
-                    freezer_table_partition: "archive-bench-table".into(),
+                    freezer_table_partition: "archive-bench-freezer-table".into(),
                     freezer_table_initial_size: 131_072,
                     freezer_table_resize_frequency: 4,
                     freezer_table_resize_chunk_size: 1024,
-                    freezer_key_partition: "archive-bench-key".into(),
+                    freezer_key_partition: "archive-bench-freezer-key".into(),
                     freezer_key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    freezer_value_partition: "archive-bench-value".into(),
+                    freezer_value_partition: "archive-bench-freezer-value".into(),
                     freezer_value_target_size: 128 * 1024 * 1024,
                     freezer_value_compression: compression,
                     ordinal_partition: "archive-bench-ordinal".into(),

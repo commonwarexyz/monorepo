@@ -1,7 +1,7 @@
 //! Utilities for random number generation.
 
-use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
-use std::mem::size_of;
+use core::{convert::Infallible, mem::size_of};
+use rand::{rngs::StdRng, SeedableRng, TryCryptoRng, TryRng};
 
 /// Returns a seeded RNG for deterministic testing.
 ///
@@ -131,22 +131,8 @@ impl FuzzRng {
         self.ctr = self.ctr.wrapping_add(1);
         mix64(word ^ ctr ^ crate::GOLDEN_RATIO)
     }
-}
 
-impl RngCore for FuzzRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut buf = [0u8; 4];
-        self.fill_bytes(&mut buf);
-        u32::from_be_bytes(buf)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut buf = [0u8; BLOCK_BYTES];
-        self.fill_bytes(&mut buf);
-        u64::from_be_bytes(buf)
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn fill_bytes_stream(&mut self, dest: &mut [u8]) {
         let mut written = 0;
         while written < dest.len() {
             if self.cache_pos == self.cache.len() {
@@ -167,9 +153,25 @@ impl RngCore for FuzzRng {
             written += take;
         }
     }
+}
 
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.fill_bytes(dest);
+impl TryRng for FuzzRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut buf = [0u8; 4];
+        self.fill_bytes_stream(&mut buf);
+        Ok(u32::from_be_bytes(buf))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut buf = [0u8; BLOCK_BYTES];
+        self.fill_bytes_stream(&mut buf);
+        Ok(u64::from_be_bytes(buf))
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        self.fill_bytes_stream(dest);
         Ok(())
     }
 }
@@ -177,11 +179,12 @@ impl RngCore for FuzzRng {
 // SAFETY: FuzzRng is not cryptographically secure. It implements CryptoRng
 // only because the consensus fuzzer requires CryptoRng-bounded RNG. This type
 // must never be used outside of fuzz/test contexts.
-impl CryptoRng for FuzzRng {}
+impl TryCryptoRng for FuzzRng {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
 
     #[test]
     fn test_empty_bytes_not_constant() {
@@ -373,7 +376,7 @@ mod tests {
     mod conformance {
         use super::*;
         use commonware_conformance::Conformance;
-        use rand::Rng;
+        use rand::RngExt as _;
 
         /// Conformance wrapper for FuzzRng that tests output stability.
         ///
@@ -385,7 +388,7 @@ mod tests {
         impl Conformance for FuzzRngConformance {
             async fn commit(seed: u64) -> Vec<u8> {
                 let mut seed_rng = test_rng_seeded(seed);
-                let len = seed_rng.gen_range(1..=64);
+                let len = seed_rng.random_range(1..=64);
                 let mut input = vec![0u8; len];
                 seed_rng.fill_bytes(&mut input);
 

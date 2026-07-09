@@ -9,9 +9,6 @@
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     pub mod rng;
     pub use rng::{test_rng, test_rng_seeded, FuzzRng};
-
-    pub mod thread_local;
-    pub use thread_local::Cached;
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
@@ -31,6 +28,7 @@ commonware_macros::stability_scope!(BETA {
     pub use hostname::Hostname;
 
     pub mod bitmap;
+    pub mod cache;
     pub mod ordered;
     pub mod range;
 
@@ -222,6 +220,9 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod concurrency;
     pub mod futures;
     pub mod sync;
+
+    pub mod thread_local;
+    pub use thread_local::Cached;
 });
 #[cfg(not(any(
     commonware_stability_GAMMA,
@@ -335,7 +336,7 @@ mod tests {
     use super::*;
     use commonware_formatting::hex;
     use num_bigint::BigUint;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 
     #[test]
     fn test_union() {
@@ -414,7 +415,7 @@ mod tests {
         // Test case 3: check equivalence with BigUint
         for i in 0..100 {
             let mut rng = StdRng::seed_from_u64(i);
-            let bytes: [u8; 32] = rng.gen();
+            let bytes: [u8; 32] = rng.random();
 
             // 1-byte modulus
             let n = 11u64;

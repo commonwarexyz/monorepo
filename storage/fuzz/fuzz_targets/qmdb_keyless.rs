@@ -8,9 +8,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    merkle::{
-        self, full::Config as MerkleConfig, mmb, mmr, Bagging::BackwardFold, Family, Location,
-    },
+    merkle::{full::Config as MerkleConfig, mmb, mmr, Family, Location},
     qmdb::{
         keyless::variable::{Config, Db as Keyless},
         verify_proof, Error,
@@ -222,7 +220,6 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
         let cfg = test_config(suffix, &context, strategy.clone());
         let mut db: Db<F, S> = Db::init(context.child("storage"), cfg)
             .await
@@ -239,7 +236,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
 
                 Operation::Commit { metadata_bytes, floor_kind } => {
                     let pending_count = pending_appends.len() as u64;
-                    let end = db.bounds().await.end;
+                    let end = db.bounds().end;
                     let commit_loc = end.as_u64() + pending_count;
                     let current_floor = db.inactivity_floor_loc();
 
@@ -292,7 +289,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                 }
 
                 Operation::BadChainedCommit { ancestor_kind } => {
-                    let end = db.bounds().await.end;
+                    let end = db.bounds().end;
                     let current_floor = db.inactivity_floor_loc();
 
                     // Parent batch: base = end, 1 append lands at `end`, commit lands at `end + 1`.
@@ -342,7 +339,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                 }
 
                 Operation::Get { loc_offset } => {
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     if op_count > 0 {
                         let loc = (*loc_offset as u64) % op_count.as_u64();
                         let _ = db.get(loc.into()).await;
@@ -362,7 +359,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     // Advance the floor to the new commit location so the subsequent prune
                     // actually removes data. This exercises more of the code path than pruning
                     // at a stale floor would.
-                    let end = db.bounds().await.end;
+                    let end = db.bounds().end;
                     let floor = Location::<F>::new(end.as_u64() + pending_count);
                     let merkleized = batch.merkleize(&db, None, floor);
                     db.apply_batch(merkleized).await.expect("Commit should not fail");
@@ -383,7 +380,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().await.end;
+                    let _ = db.bounds().end;
                 }
 
                 Operation::LastCommitLoc => {
@@ -391,7 +388,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.bounds().await.start;
+                    let _ = db.bounds().start;
                 }
 
                 Operation::Root => {
@@ -409,7 +406,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     if op_count == 0 {
                         continue;
                     }
@@ -426,8 +423,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     let root = db.root();
                     if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
-                                verify_proof(
-                                    &hasher,
+                                verify_proof::<Sha256, _, _>(
                                     &proof,
                                     start_loc,
                                     &ops,
@@ -442,7 +438,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     if op_count == 0 {
                         continue;
                     }
@@ -454,7 +450,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     db.apply_batch(merkleized).await.expect("Commit should not fail");
                     db.commit().await.expect("Commit should not fail");
                     // Use post-commit op_count so it's consistent with the root.
-                    let op_count = db.bounds().await.end;
+                    let op_count = db.bounds().end;
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                     let size: Location<F> = Location::new(size);
                     let start_loc = (*start_offset as u64) % *size;
@@ -465,8 +461,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
-                                verify_proof(
-                                    &hasher,
+                                verify_proof::<Sha256, _, _>(
                                     &proof,
                                     start_loc,
                                     &ops,

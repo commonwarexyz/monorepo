@@ -24,7 +24,7 @@ commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
 rand.workspace = true
-reqwest = { workspace = true, features = ["json", "rustls-tls", "blocking"] }
+reqwest = { workspace = true, features = ["json", "rustls", "blocking"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tracing.workspace = true

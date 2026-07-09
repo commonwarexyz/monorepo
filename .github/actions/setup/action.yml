@@ -25,12 +25,44 @@ inputs:
     required: false
     default: ""
   additional-cache-key:
-    description: "An additional cache key that is added alongside the automatic `job`-based cache key."
+    description: "An additional cache key appended to the workflow-name prefix and automatic job-based cache key."
+    required: false
+    default: ""
+  rust-cache-enabled:
+    description: "Whether rust-cache should restore and save cache entries for this job."
+    required: false
+    default: "true"
+  rust-cache-save:
+    description: "Whether this job should save rust-cache entries when running on main."
+    required: false
+    default: "true"
+  sccache-r2-bucket:
+    description: "The Cloudflare R2 bucket to use for sccache."
+    required: false
+    default: ""
+  sccache-r2-endpoint:
+    description: "The Cloudflare R2 endpoint to use for sccache."
+    required: false
+    default: ""
+  sccache-r2-access-key-id:
+    description: "The R2 access key ID to use for sccache."
+    required: false
+    default: ""
+  sccache-r2-secret-access-key:
+    description: "The R2 secret access key to use for sccache."
     required: false
     default: ""
 runs:
   using: composite
   steps:
+    # Disabling HTTP/2 multiplexing avoids spurious connection resets fetching the sparse
+    # registry index, at the cost of slower index fetches when the cache is cold.
+    - name: Configure Cargo network
+      shell: bash
+      run: |
+        echo "CARGO_NET_RETRY=30" >> "$GITHUB_ENV"
+        echo "CARGO_HTTP_MULTIPLEXING=false" >> "$GITHUB_ENV"
+
     # Use /mnt for Cargo builds on Linux (has ~70GB vs ~14GB on /)
     - name: Relocate Cargo directories to /mnt on Linux
       if: runner.os == 'Linux'
@@ -41,6 +73,22 @@ runs:
         echo "CARGO_TARGET_DIR=/mnt/target" >> "$GITHUB_ENV"
         echo "CARGO_HOME=/mnt/.cargo" >> "$GITHUB_ENV"
         echo "/mnt/.cargo/bin" >> "$GITHUB_PATH"
+    - name: Remove preinstalled Rust toolchains
+      if: inputs.rust-cache-enabled == 'true'
+      shell: bash
+      run: |
+        # rust-cache hashes every rustup toolchain it can see. Hosted runners
+        # ship a rolling stable toolchain, so start from an empty toolchain set.
+        toolchains="$(rustup toolchain list --quiet)"
+        while IFS= read -r line; do
+          if [ "$line" = "no installed toolchains" ]; then
+            continue
+          fi
+          toolchain="${line%% *}"
+          if [ -n "$toolchain" ]; then
+            rustup toolchain uninstall "$toolchain"
+          fi
+        done <<< "$toolchains"
     - name: Install additional Rust toolchain
       if: inputs.additional-toolchain != ''
       uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
@@ -55,19 +103,84 @@ runs:
         components: ${{ inputs.components }}
         targets: ${{ inputs.targets }}
     - name: Normalize cache key
+      if: inputs.rust-cache-enabled == 'true'
       id: cache-key
       shell: bash
+      env:
+        WORKFLOW_NAME: ${{ github.workflow }}
+        ADDITIONAL_CACHE_KEY: ${{ inputs.additional-cache-key }}
       run: |
-        key="${{ inputs.additional-cache-key }}"
-        key="${key// /-}"
-        key="${key//\//-}"
+        key="${WORKFLOW_NAME}"
+        if [ -n "$ADDITIONAL_CACHE_KEY" ]; then
+          key="${key}-${ADDITIONAL_CACHE_KEY}"
+        fi
+        key="$(printf '%s' "$key" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')"
         echo "key=${key}" >> "$GITHUB_OUTPUT"
+    - name: Configure rust cache workspace
+      if: inputs.rust-cache-enabled == 'true'
+      id: rust-cache-workspace
+      shell: bash
+      run: |
+        target="${CARGO_TARGET_DIR:-target}"
+        # rust-cache's workspace mapping is written as `. -> target`. On linux,
+        # cargo uses /mnt/target for disk space, so convert it back to a path
+        # relative to GITHUB_WORKSPACE before passing it to rust-cache
+        if [ "${RUNNER_OS:-}" = "Linux" ] && [ "${target#/}" != "$target" ]; then
+          target="$(realpath --relative-to="$GITHUB_WORKSPACE" "$target")"
+        fi
+        echo "target=${target}" >> "$GITHUB_OUTPUT"
     - name: Setup rust cache
+      if: inputs.rust-cache-enabled == 'true'
       uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:
-        save-if: ${{ github.ref == 'refs/heads/main' }}
+        save-if: ${{ github.ref == 'refs/heads/main' && inputs.rust-cache-save == 'true' }}
         key: ${{ steps.cache-key.outputs.key }}
         cache-on-failure: false
-        cache-workspace-crates: true
-        cache-directories: ${{ env.CARGO_TARGET_DIR }}
+        cache-workspace-crates: false
+        workspaces: . -> ${{ steps.rust-cache-workspace.outputs.target }}
         cache-bin: true
+
+    # rust-cache and sccache cover different parts of the build. rust-cache
+    # restores Cargo state: downloaded crates, git dependencies, installed
+    # binaries, and dependency artifacts in target. It is keyed by the job,
+    # toolchain, Cargo files, and the matrix-specific cache key above, so it is
+    # a good coarse restore for a job's expected build graph.
+    #
+    # sccache sits underneath Cargo as RUSTC_WRAPPER and caches individual
+    # compiler outputs. That makes it useful when the target cache is missing,
+    # stale, cleaned, or split across many CI partitions. It can also hit for
+    # unchanged crates when rust-cache misses its coarser key after Cargo.lock
+    # or workflow matrix changes. It uses sccache's S3-compatible backend
+    # against a shared R2 bucket. Every job with credentials writes: entries
+    # are keyed by the full compile inputs, so concurrent writers store
+    # identical content and repeat pushes of a PR reuse the previous push's
+    # work.
+    - name: Setup sccache
+      if: inputs.rust-cache-enabled == 'true'
+      uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+    - name: Configure sccache
+      if: inputs.rust-cache-enabled == 'true'
+      shell: bash
+      env:
+        SCCACHE_BUCKET: ${{ inputs.sccache-r2-bucket }}
+        SCCACHE_ENDPOINT: ${{ inputs.sccache-r2-endpoint }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.sccache-r2-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.sccache-r2-secret-access-key }}
+      run: |
+        if [ -z "${SCCACHE_BUCKET:-}" ] \
+          || [ -z "${SCCACHE_ENDPOINT:-}" ] \
+          || [ -z "${AWS_ACCESS_KEY_ID:-}" ] \
+          || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+          echo "::warning::R2 sccache environment is incomplete, sccache disabled for this job."
+          exit 0
+        fi
+
+        SCCACHE_IDLE_TIMEOUT=0 \
+        SCCACHE_REGION=auto \
+        SCCACHE_S3_RW_MODE="READ_WRITE" \
+        SCCACHE_S3_USE_SSL=true \
+        sccache --start-server
+
+        echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "$GITHUB_ENV"

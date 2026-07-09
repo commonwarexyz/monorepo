@@ -47,6 +47,10 @@ where
         block.commitment()
     }
 
+    fn stored_commitment(block: &Self::StoredBlock) -> Self::Commitment {
+        block.commitment()
+    }
+
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
         // The inner digest is embedded in the coding commitment.
         commitment.block()
@@ -161,5 +165,125 @@ where
                 .ok()
                 .map(<Coding<B, C, H, P> as Variant>::into_inner)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        marshal::{coding::types::StoredCodedBlock, mocks::block::Block as MockBlock},
+        types::{Epoch, Height, View},
+    };
+    use bytes::{Buf, BufMut};
+    use commonware_codec::{EncodeSize, Error, Read, Write};
+    use commonware_coding::{Config as CodingConfig, ReedSolomon};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        sha256::{Digest as Sha256Digest, Sha256},
+        Digest as _, Digestible, Signer as _,
+    };
+    use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
+    use commonware_utils::{test_rng, NZU16};
+
+    type TestContext = Context<Commitment, PublicKey>;
+    type InnerBlock = MockBlock<Sha256Digest, TestContext>;
+
+    struct NoCloneBlock {
+        inner: InnerBlock,
+    }
+
+    impl Clone for NoCloneBlock {
+        fn clone(&self) -> Self {
+            panic!("stored commitment lookup must not clone the inner block");
+        }
+    }
+
+    impl Write for NoCloneBlock {
+        fn write(&self, writer: &mut impl BufMut) {
+            self.inner.write(writer);
+        }
+    }
+
+    impl Read for NoCloneBlock {
+        type Cfg = ();
+
+        fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+            Ok(Self {
+                inner: InnerBlock::read_cfg(reader, cfg)?,
+            })
+        }
+    }
+
+    impl EncodeSize for NoCloneBlock {
+        fn encode_size(&self) -> usize {
+            self.inner.encode_size()
+        }
+    }
+
+    impl Digestible for NoCloneBlock {
+        type Digest = Sha256Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.inner.digest()
+        }
+    }
+
+    impl crate::Heightable for NoCloneBlock {
+        fn height(&self) -> Height {
+            self.inner.height
+        }
+    }
+
+    impl crate::Block for NoCloneBlock {
+        fn parent(&self) -> Self::Digest {
+            self.inner.parent
+        }
+    }
+
+    impl CertifiableBlock for NoCloneBlock {
+        type Context = TestContext;
+
+        fn context(&self) -> Self::Context {
+            self.inner.context.clone()
+        }
+    }
+
+    fn no_clone_block(config: CodingConfig) -> NoCloneBlock {
+        let mut rng = test_rng();
+        let leader = PrivateKey::random(&mut rng).public_key();
+        let parent_commitment = Commitment::from((
+            Sha256Digest::EMPTY,
+            Sha256Digest::EMPTY,
+            Sha256Digest::EMPTY,
+            config,
+        ));
+        let context = Context {
+            round: Round::new(Epoch::new(1), View::new(2)),
+            leader,
+            parent: (View::new(1), parent_commitment),
+        };
+        let inner =
+            InnerBlock::new::<Sha256>(context, Sha256::hash(b"parent"), Height::new(7), 1_234_567);
+        NoCloneBlock { inner }
+    }
+
+    #[test]
+    fn stored_commitment_does_not_clone_coding_block() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
+
+        type TestScheme = ReedSolomon<Sha256>;
+        type TestVariant = Coding<NoCloneBlock, TestScheme, Sha256, PublicKey>;
+
+        let block = no_clone_block(CONFIG);
+        let coded = CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(block, CONFIG, &Sequential);
+        let expected = coded.commitment();
+        let stored = StoredCodedBlock::new(coded);
+
+        assert_eq!(TestVariant::stored_commitment(&stored), expected);
     }
 }

@@ -1,0 +1,67 @@
+error: span names must use `.` separators, not `::`
+  --> $DIR/main.rs:29:30
+   |
+LL | #[tracing::instrument(name = "qmdb::any::Db::sync", skip_all)]
+   |                              ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use a lowercase dot-separated path such as `component.module.operation`
+   = note: `#[deny(span_name_style)]` on by default
+
+error: span names must be fully descriptive, with at least two dot-separated segments
+  --> $DIR/main.rs:32:30
+   |
+LL | #[tracing::instrument(name = "sync", skip_all)]
+   |                              ^^^^^^
+   |
+   = help: use a lowercase dot-separated path such as `component.module.operation`
+
+error: span names must use `.` separators, not `::`
+  --> $DIR/main.rs:54:24
+   |
+LL |     let _ = info_span!("qmdb::any::batch::merkleize");
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use a lowercase dot-separated path such as `component.module.operation`
+
+error: span names must be fully descriptive, with at least two dot-separated segments
+  --> $DIR/main.rs:57:24
+   |
+LL |     let _ = info_span!("verify");
+   |                        ^^^^^^^^
+   |
+   = help: use a lowercase dot-separated path such as `component.module.operation`
+
+error: span names must be fully descriptive, with at least two dot-separated segments
+  --> $DIR/main.rs:58:37
+   |
+LL |     let _ = info_span!(parent: &(), "process", round = 1);
+   |                                     ^^^^^^^^^
+   |
+   = help: use a lowercase dot-separated path such as `component.module.operation`
+
+error: span names must be fully descriptive, with at least two dot-separated segments
+  --> $DIR/main.rs:59:26
+   |
+LL |     let _ = span!(LEVEL, "task");
+   |                          ^^^^^^
+   |
+   = help: use a lowercase dot-separated path such as `component.module.operation`
+
+error: span name segments must be non-empty and contain only `[a-z0-9_]`
+  --> $DIR/main.rs:62:24
+   |
+LL |     let _ = info_span!("stateful.Db.read_lock");
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use a lowercase dot-separated path such as `component.module.operation`
+
+error: span name segments must be non-empty and contain only `[a-z0-9_]`
+  --> $DIR/main.rs:63:24
+   |
+LL |     let _ = info_span!("stateful..read_lock");
+   |                        ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use a lowercase dot-separated path such as `component.module.operation`
+
+error: aborting due to 8 previous errors
+

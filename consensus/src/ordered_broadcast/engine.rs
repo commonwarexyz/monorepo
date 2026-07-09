@@ -42,7 +42,7 @@ use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
@@ -60,7 +60,7 @@ struct Verify<C: PublicKey, D: Digest> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: BufferPooler + Clock + Spawner + CryptoRngCore + Storage + Metrics,
+    E: BufferPooler + Clock + Spawner + CryptoRng + Storage + Metrics,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
@@ -198,7 +198,7 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + Spawner + CryptoRngCore + Storage + Metrics,
+        E: BufferPooler + Clock + Spawner + CryptoRng + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
@@ -496,7 +496,7 @@ impl<
 
         // Sync and drop all journals, regardless of how we exit the loop
         self.pending_verifies.cancel_all();
-        while let Some((_, journal)) = self.journals.pop_first() {
+        while let Some((_, mut journal)) = self.journals.pop_first() {
             journal.sync_all().await.expect("unable to sync journal");
         }
     }
@@ -1016,13 +1016,13 @@ impl<
 
         // Initialize journal
         let cfg = JournalConfig {
-            partition: format!("{}{}", &self.journal_name_prefix, sequencer),
+            partition: format!("{}{}", self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
             codec_config: P::Scheme::certificate_codec_config_unbounded(),
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
+        let mut journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
             self.context
                 .child("journal")
                 .with_attribute("sequencer", sequencer),

@@ -83,14 +83,19 @@
 use crate::merkle::{
     hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
 };
+use ahash::RandomState;
 use alloc::{
-    collections::BTreeMap,
     sync::{Arc, Weak},
     vec::Vec,
 };
+#[cfg(feature = "std")]
+use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
 use core::ops::Range;
+
+/// Overwritten node digests keyed by position.
+pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
 
 /// Push a dirty node position into its height bucket, growing the outer Vec as needed.
 fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
@@ -110,7 +115,7 @@ fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: 
 pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     parent: Arc<MerkleizedBatch<F, D, S>>,
     appended: Vec<D>,
-    overwrites: BTreeMap<Position<F>, D>,
+    overwrites: Overwrites<F, D>,
     /// Dirty internal node positions bucketed by height. Outer index is height; inner Vec
     /// holds positions at that height in push order (monotonically increasing for
     /// `add_leaf_digest`; may contain duplicates from interleaved `mark_dirty` walks, deduped
@@ -120,11 +125,11 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
 
 impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Create a new batch from `parent`.
-    pub const fn new(parent: Arc<MerkleizedBatch<F, D, S>>) -> Self {
+    pub fn new(parent: Arc<MerkleizedBatch<F, D, S>>) -> Self {
         Self {
             parent,
             appended: Vec::new(),
-            overwrites: BTreeMap::new(),
+            overwrites: Overwrites::default(),
             dirty_nodes: Vec::new(),
         }
     }
@@ -213,15 +218,48 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Add a pre-computed leaf digest.
     pub fn add_leaf_digest(mut self, digest: D) -> Self {
-        let heights = F::parent_heights(self.leaves());
-        self.appended.push(digest);
+        self.append_leaf_digest(digest, self.leaves(), self.size());
+        self
+    }
 
-        for height in heights {
-            let pos = self.size();
+    /// Append a leaf digest and any parent placeholders.
+    ///
+    /// `leaves` is the leaf index this digest occupies and `size` is the starting node count.
+    /// Returns the new size.
+    fn append_leaf_digest(
+        &mut self,
+        digest: D,
+        leaves: Location<F>,
+        mut size: Position<F>,
+    ) -> Position<F> {
+        self.appended.push(digest);
+        size += 1;
+
+        for height in F::parent_heights(leaves) {
             self.appended.push(D::EMPTY);
-            push_dirty(&mut self.dirty_nodes, height, pos);
+            push_dirty(&mut self.dirty_nodes, height, size);
+            size += 1;
         }
 
+        size
+    }
+
+    /// Add a run of pre-computed leaf digests, in order.
+    #[cfg(feature = "std")]
+    pub(crate) fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
+        // Each leaf also appends its parent placeholders, so reserve for the full node count.
+        let digests = digests.into_iter();
+        let n = digests.size_hint().0 as u64;
+        let leaves = self.leaves();
+        let mut size = self.size();
+        let end = leaves.checked_add(n).expect("leaf count overflow");
+        let additional = (*Position::try_from(end).expect("size overflow") - *size) as usize;
+        self.appended.reserve(additional);
+
+        // Maintain leaf position and location incrementally to avoid recomputation on every iteration.
+        for (i, digest) in (0u64..).zip(digests) {
+            size = self.append_leaf_digest(digest, leaves + i, size);
+        }
         self
     }
 
@@ -229,6 +267,27 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
         let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
+    }
+
+    /// Encode and hash `items` across the strategy, adding their leaf digests in order.
+    #[cfg(feature = "std")]
+    pub(crate) fn add_many<Item: Write + Send + Sync>(
+        self,
+        hasher: &impl Hasher<F, Digest = D>,
+        items: &[Item],
+    ) -> Self {
+        let first = self.leaves();
+        let digests = self.strategy().map_init_collect_vec(
+            items.iter().enumerate(),
+            Vec::new,
+            |buf, (i, item)| {
+                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
+                buf.clear();
+                item.write(buf);
+                hasher.leaf_digest(pos, buf.as_slice())
+            },
+        );
+        self.add_leaf_digests(digests)
     }
 
     /// Validate that `loc` refers to an in-bounds, non-pruned leaf and return its position.
@@ -360,7 +419,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 #[allow(clippy::type_complexity)]
 fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     parent: &Arc<MerkleizedBatch<F, D, S>>,
-) -> (Vec<Arc<Vec<D>>>, Vec<Arc<BTreeMap<Position<F>, D>>>) {
+) -> (Vec<Arc<Vec<D>>>, Vec<Arc<Overwrites<F, D>>>) {
     let mut appended = Vec::new();
     let mut overwrites = Vec::new();
 
@@ -400,7 +459,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     pub(crate) appended: Arc<Vec<D>>,
 
     /// This batch's overwrites only (not accumulated from ancestors).
-    pub(crate) overwrites: Arc<BTreeMap<Position<F>, D>>,
+    pub(crate) overwrites: Arc<Overwrites<F, D>>,
 
     /// Number of nodes in the parent batch.
     pub(crate) parent_size: Position<F>,
@@ -419,7 +478,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
 
     /// Arc refs to each ancestor's overwrites, collected during merkleize while
     /// ancestors are alive. Root-to-tip order.
-    pub(crate) ancestor_overwrites: Vec<Arc<BTreeMap<Position<F>, D>>>,
+    pub(crate) ancestor_overwrites: Vec<Arc<Overwrites<F, D>>>,
 
     pub(crate) strategy: S,
 }
@@ -439,7 +498,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         Arc::new(Self {
             parent: None,
             appended: Arc::new(Vec::new()),
-            overwrites: Arc::new(BTreeMap::new()),
+            overwrites: Arc::new(Overwrites::default()),
             parent_size: mem.size(),
             base_size: mem.size(),
             pruning_boundary: Readable::pruning_boundary(mem),

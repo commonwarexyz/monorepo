@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;
-use rand::{rngs::SmallRng, RngCore, SeedableRng};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -75,7 +75,7 @@ fn main() {
     // Start runtime
     executor.start(|context| async move {
         // Configure telemetry
-        let tracing = if config.instrument {
+        let traces = if config.instrument {
             Some(tokio::tracing::Config {
                 endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring.private),
                 name: public_key.to_string(),
@@ -86,7 +86,7 @@ fn main() {
         };
         tokio::telemetry::init(
             context.child("telemetry"),
-            tokio::telemetry::Logging {
+            tokio::telemetry::Logs {
                 level: Level::DEBUG,
                 json: true,
             },
@@ -94,7 +94,7 @@ fn main() {
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 METRICS_PORT,
             )),
-            tracing,
+            traces,
         );
 
         // Log configuration

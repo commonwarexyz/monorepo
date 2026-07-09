@@ -7,7 +7,7 @@ use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, N3f1, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{collections::BTreeMap, hint::black_box, num::NonZeroU32, sync::LazyLock};
 
 const BENCH_NAMESPACE: &[u8] = b"bench";
@@ -36,7 +36,7 @@ struct Bench {
 }
 
 impl Bench {
-    fn new(rng: &mut impl CryptoRngCore, n: u32) -> Self {
+    fn new(rng: &mut impl CryptoRng, n: u32) -> Self {
         let me = PrivateKey::random(&mut *rng);
         let dealers: Set<PublicKey> = std::iter::once(me.public()).try_collect().unwrap();
         let players: Set<PublicKey> = (0..n)
@@ -47,7 +47,7 @@ impl Bench {
         Self { info, me }
     }
 
-    fn deal(&self, rng: &mut impl CryptoRngCore) -> SignedDealerLog {
+    fn deal(&self, rng: &mut impl CryptoRng) -> SignedDealerLog {
         golden::deal(rng, &SETUP, &self.info, &self.me, None, &Sequential)
             .expect("honest deal should succeed")
     }

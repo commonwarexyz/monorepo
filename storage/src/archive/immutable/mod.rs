@@ -16,6 +16,15 @@
 //! can be changed between initializations of [Archive], however, it must remain populated if any
 //! data was written with compression enabled.
 //!
+//! # Durability and Recovery
+//!
+//! `put` updates the underlying [crate::freezer::Freezer] and [crate::ordinal::Ordinal]
+//! eagerly, but data is not committed until `sync` succeeds. Sync first makes the freezer
+//! and ordinal data durable, then commits metadata that names the freezer checkpoint and ordinal
+//! section bits. On restart, this metadata is the source of truth: lower-layer data not described by
+//! metadata is treated as uncommitted and may be removed during initialization. If no freezer
+//! checkpoint has been committed yet, initialization starts from an empty archive.
+//!
 //! # Querying for Gaps
 //!
 //! [Archive] tracks gaps in the index space to enable the caller to efficiently fetch unknown keys
@@ -39,13 +48,13 @@
 //!     // Create an archive
 //!     let cfg = Config {
 //!         metadata_partition: "metadata".into(),
-//!         freezer_table_partition: "table".into(),
+//!         freezer_table_partition: "freezer-table".into(),
 //!         freezer_table_initial_size: 65_536,
 //!         freezer_table_resize_frequency: 4,
 //!         freezer_table_resize_chunk_size: 16_384,
-//!         freezer_key_partition: "key".into(),
+//!         freezer_key_partition: "freezer-key".into(),
 //!         freezer_key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-//!         freezer_value_partition: "value".into(),
+//!         freezer_value_partition: "freezer-value".into(),
 //!         freezer_value_target_size: 1024,
 //!         freezer_value_compression: Some(3),
 //!         ordinal_partition: "ordinal".into(),
@@ -146,13 +155,13 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 metadata_partition: "test-metadata2".into(),
-                freezer_table_partition: "test-table2".into(),
+                freezer_table_partition: "test-freezer-table2".into(),
                 freezer_table_initial_size: 8192, // Must be power of 2
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,
-                freezer_key_partition: "test-key2".into(),
+                freezer_key_partition: "test-freezer-key2".into(),
                 freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                freezer_value_partition: "test-value2".into(),
+                freezer_value_partition: "test-freezer-value2".into(),
                 freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: Some(3),
                 ordinal_partition: "test-ordinal2".into(),
@@ -213,13 +222,13 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 metadata_partition: "empty-metadata".into(),
-                freezer_table_partition: "empty-table".into(),
+                freezer_table_partition: "empty-freezer-table".into(),
                 freezer_table_initial_size: 8192,
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,
-                freezer_key_partition: "empty-key".into(),
+                freezer_key_partition: "empty-freezer-key".into(),
                 freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                freezer_value_partition: "empty-value".into(),
+                freezer_value_partition: "empty-freezer-value".into(),
                 freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: Some(3),
                 ordinal_partition: "empty-ordinal".into(),

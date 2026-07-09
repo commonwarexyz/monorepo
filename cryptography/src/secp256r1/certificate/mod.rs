@@ -354,7 +354,7 @@ macro_rules! impl_certificate_secp256r1 {
             n: u32,
         ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey>>
         where
-            R: rand::RngCore + rand::CryptoRng,
+            R: rand::Rng + rand::CryptoRng,
         {
             $crate::secp256r1::certificate::mocks::fixture(
                 rng,
@@ -414,7 +414,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 M: commonware_utils::Faults,
             {
@@ -432,7 +432,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 M: commonware_utils::Faults,
@@ -486,7 +486,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
                 self.generic
@@ -501,7 +501,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
-                R: rand_core::CryptoRngCore,
+                R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
             {
@@ -543,7 +543,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::{ordered::BiMap, test_rng, Faults, N3f1, TryCollect};
-    use rand_core::CryptoRngCore;
+    use rand_core::CryptoRng;
 
     const NAMESPACE: &[u8] = b"test-secp256r1";
     const MESSAGE: &[u8] = b"test message";
@@ -570,7 +570,7 @@ mod tests {
     impl_certificate_secp256r1!(TestSubject, Vec<u8>);
 
     fn setup_signers(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         n: u32,
     ) -> (Vec<Scheme<PublicKey>>, Scheme<PublicKey>) {
         let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut *rng)).collect();

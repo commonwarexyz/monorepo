@@ -32,7 +32,7 @@ use commonware_utils::{
 };
 use either::Either;
 use futures::{future, Sink};
-use rand::Rng;
+use rand::{Rng, RngExt as _};
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
@@ -771,7 +771,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             let latency = Duration::from_millis(link.sampler.sample(self.context.as_mut()) as u64);
 
             // Determine if the message should be delivered
-            let should_deliver = self.context.gen_bool(link.success_rate);
+            let should_deliver = self.context.random_bool(link.success_rate);
 
             // Enqueue message for delivery
             let completions = self.transmitter.enqueue(

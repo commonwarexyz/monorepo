@@ -1,5 +1,5 @@
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::Rng;
+use rand::{rngs::StdRng, RngExt as _, SeedableRng};
 use std::collections::HashMap;
 
 #[cfg(not(full_bench))]
@@ -11,7 +11,6 @@ struct MockIndex {
     _section: u64,
     _offset: u32,
     _len: u32,
-    _next: Option<Box<Self>>,
 }
 
 fn bench_hashmap_insert_fixed(c: &mut Criterion) {
@@ -21,14 +20,14 @@ fn bench_hashmap_insert_fixed(c: &mut Criterion) {
                 || {
                     // Perform all random ops
                     let mut vec: Vec<([u8; 4], u64, u32, u32)> = Vec::with_capacity(n);
-                    let mut rng = rand::thread_rng();
+                    let mut rng = StdRng::seed_from_u64(n as u64);
 
                     // Populate vec with dummy data
                     for _ in 0..n {
-                        let key: [u8; 4] = rng.gen();
-                        let section = rng.gen();
-                        let offset = rng.gen();
-                        let len = rng.gen();
+                        let key: [u8; 4] = rng.random();
+                        let section = rng.random();
+                        let offset = rng.random();
+                        let len = rng.random();
                         vec.push((key, section, offset, len));
                     }
                     vec
@@ -42,7 +41,6 @@ fn bench_hashmap_insert_fixed(c: &mut Criterion) {
                             _section: section,
                             _offset: offset,
                             _len: len,
-                            _next: None,
                         };
                         map.insert(key, value);
                     }

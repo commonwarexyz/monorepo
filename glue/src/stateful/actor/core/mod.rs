@@ -7,13 +7,11 @@
 use crate::stateful::{
     actor::{
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
-        processor::{Processor, ProcessorMetrics},
+        metrics::Metrics as StatefulMetrics,
+        processor::Processor,
         syncer::{self, SyncPlan, SyncResult},
     },
-    db::{
-        assert_rewind_window_safety, AttachableResolverSet, DatabaseSet, StateSyncSet,
-        SyncEngineConfig,
-    },
+    db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
     Application,
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
@@ -25,7 +23,9 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    spawn_cell, telemetry::metrics::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+};
 use commonware_utils::{channel::oneshot, sync::AsyncMutex};
 use futures::join;
 use rand::Rng;
@@ -38,6 +38,47 @@ mod processing;
 mod syncing;
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
+
+/// Periodic pruning configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PruneConfig {
+    /// Marshal's ack window. Must match the marshal config used to construct the marshal
+    /// mailbox: pruning retains at least the last `max_pending_acks + 1` finalized blocks so
+    /// that any state a restart may need to rewind to is never pruned.
+    pub max_pending_acks: NonZeroUsize,
+
+    /// Prune databases and marshal every `maintenance_interval` finalized blocks.
+    ///
+    /// This controls only how often pruning runs, not how much history is retained. Each prune
+    /// always leaves at least the configured retention windows in place, so a small interval
+    /// prunes more frequently but never below those floors.
+    pub maintenance_interval: NonZeroUsize,
+
+    /// Finalized blocks to retain in marshal beyond `max_pending_acks + 1`.
+    ///
+    /// This should generally be set to a large enough number of blocks to facilitate downtime
+    /// on a validator that has completed state sync. If marshal retains too few blocks, a rebooted
+    /// node may fail to recover due to peers being unable to serve the blocks it needs to catch up.
+    pub retained_marshal_blocks: usize,
+
+    /// Finalized blocks' worth of operations to retain in QMDB beyond `max_pending_acks + 1`.
+    ///
+    /// This value is generally safe to set to 0, as QMDB operations below the active range are only
+    /// needed to serve state sync requests for lagging peers. Some network topologies may benefit from
+    /// a non-zero value here to provide a larger buffer for serving state sync requests during periods
+    /// of instability.
+    pub retained_qmdb_blocks: usize,
+}
+
+impl PruneConfig {
+    /// Ensure marshal is never pruned more aggressively than QMDB.
+    pub const fn assert_valid(self) {
+        assert!(
+            self.retained_marshal_blocks >= self.retained_qmdb_blocks,
+            "marshal must retain at least as many blocks as QMDB",
+        );
+    }
+}
 
 /// Configuration for constructing a [`Stateful`] application.
 pub struct Config<E, A, S, V, R>
@@ -59,11 +100,6 @@ where
     /// Marshal mailbox used for startup anchoring and lazy recovery.
     pub marshal: MarshalMailbox<S, V>,
 
-    /// Marshal ack window used by the provided marshal mailbox.
-    ///
-    /// This must match the marshal config used to construct [`Self::marshal`].
-    pub max_pending_acks: NonZeroUsize,
-
     /// Capacity of the stateful actor mailbox channel.
     pub mailbox_size: NonZeroUsize,
 
@@ -77,6 +113,13 @@ where
 
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
+
+    /// Periodic database and marshal pruning configuration.
+    ///
+    /// When enabled, glue retains `max_pending_acks + 1` finalized blocks plus
+    /// the configured retained block windows before pruning. Marshal must retain
+    /// at least as many blocks as QMDB.
+    pub prune_config: Option<PruneConfig>,
 }
 
 /// Stateful application that manages the pending-tip DAG of merkleized
@@ -115,6 +158,9 @@ where
 
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
+
+    /// Periodic prune configuration.
+    prune_config: Option<PruneConfig>,
 }
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
@@ -132,7 +178,9 @@ where
     /// This only wires dependencies and allocates the mailbox. The actor does
     /// not process messages until [`Stateful::start`] is called.
     pub fn init(context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
-        assert_rewind_window_safety::<E, A::Databases>(config.max_pending_acks);
+        if let Some(prune_config) = config.prune_config {
+            prune_config.assert_valid();
+        }
 
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
@@ -146,6 +194,7 @@ where
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
+                prune_config: config.prune_config,
             },
             Mailbox::new(sender),
         )
@@ -168,6 +217,7 @@ where
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
     async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
+        let metrics = StatefulMetrics::new(self.context.as_present());
         let sync_metadata = Arc::new(AsyncMutex::new(self.plan.into_sync_metadata()));
         let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
@@ -193,6 +243,8 @@ where
             artifact: None,
             resolvers: self.resolvers,
             sync_completed,
+            prune_config: self.prune_config,
+            metrics,
         };
         let _ = join!(syncer.start(), syncing.start());
     }
@@ -211,17 +263,25 @@ where
         .await;
 
         // Attach the resolvers to the initialized databases before starting the processor,
-        // so that this instance can serve peers database operations and proofs.
+        // so that this instance can serve peers database operations and proofs. The
+        // resolver handles can be dropped after this: serving runs on the resolver
+        // actors' own contexts.
         self.resolvers.attach_databases(databases.clone()).await;
 
-        let processor_metrics = ProcessorMetrics::new(self.context.child("processor"));
-        let processor = Processor::new(self.application, databases, anchor, processor_metrics);
+        let metrics = StatefulMetrics::new(self.context.as_present());
+        let _ = metrics.sync_done.try_set(1);
+        let processor = Processor::new(
+            self.application,
+            databases,
+            anchor,
+            metrics,
+            self.prune_config,
+        );
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             input_provider: self.input_provider,
             marshal: self.marshal,
-            resolvers: self.resolvers,
             processor,
             skip_finalized_until,
         }
@@ -257,14 +317,14 @@ mod tests {
         buffer::paged::CacheRef, deterministic, Clock as _, Runner as _, Supervisor as _,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{channel::mpsc, sync::AsyncRwLock, NZUsize, NZU16, NZU64};
+    use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
     use std::{convert::Infallible, sync::Arc, time::Duration};
 
     #[derive(Clone)]
     struct NoopResolver;
 
     impl AttachableResolver<TestDb> for NoopResolver {
-        async fn attach_database(&self, _db: Arc<AsyncRwLock<TestDb>>) {}
+        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<TestDb>>) {}
     }
 
     impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {
@@ -287,13 +347,13 @@ mod tests {
     fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
         immutable::Config {
             metadata_partition: format!("{partition}-metadata"),
-            freezer_table_partition: format!("{partition}-table"),
+            freezer_table_partition: format!("{partition}-freezer-table"),
             freezer_table_initial_size: 4,
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 2,
-            freezer_key_partition: format!("{partition}-key"),
+            freezer_key_partition: format!("{partition}-freezer-key"),
             freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition}-value"),
+            freezer_value_partition: format!("{partition}-freezer-value"),
             freezer_value_target_size: 128,
             freezer_value_compression: None,
             ordinal_partition: format!("{partition}-ordinal"),
@@ -380,7 +440,6 @@ mod tests {
                     db_config: (),
                     input_provider: (),
                     marshal,
-                    max_pending_acks: NZUsize!(1),
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
@@ -391,6 +450,7 @@ mod tests {
                         update_channel_size: NZUsize!(1),
                         max_retained_roots: 1,
                     },
+                    prune_config: None,
                 },
             );
             let handle = stateful.start();

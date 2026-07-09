@@ -12,8 +12,8 @@ use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, IoBuf, Spawner};
-use rand::Rng;
-use rand_core::CryptoRngCore;
+use rand::{Rng, RngExt as _};
+use rand_core::CryptoRng;
 use std::{collections::VecDeque, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_millis(100);
@@ -22,7 +22,7 @@ const LATEST_PROPOSALS_MAX_LEN: usize = 100;
 
 /// Byzantine actor that disrupts consensus by sending malformed/mutated messages.
 pub struct Disrupter<
-    E: Clock + Spawner + CryptoRngCore,
+    E: Clock + Spawner + CryptoRng,
     S: Scheme<Sha256Digest>,
     St: Strategy + 'static,
 > {
@@ -37,7 +37,7 @@ pub struct Disrupter<
     latest_proposals: VecDeque<Proposal<Sha256Digest>>,
 }
 
-impl<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>, St: Strategy + 'static>
+impl<E: Clock + Spawner + CryptoRng, S: Scheme<Sha256Digest>, St: Strategy + 'static>
     Disrupter<E, S, St>
 where
     <S::Certificate as Read>::Cfg: Default,
@@ -58,7 +58,7 @@ where
     }
 
     fn message(&mut self) -> Message {
-        match (self.context.gen::<u8>()) % 4 {
+        match (self.context.random::<u8>()) % 4 {
             0 => Message::Notarize,
             1 => Message::Finalize,
             2 => Message::Nullify,
@@ -146,7 +146,7 @@ where
     }
 
     fn bytes(&mut self) -> Vec<u8> {
-        let len = self.context.gen::<u8>();
+        let len = self.context.random::<u8>();
         let mut bytes = vec![0u8; len as usize];
         self.context.fill_bytes(&mut bytes);
         bytes
@@ -158,9 +158,9 @@ where
         }
 
         let mut result = input.to_vec();
-        let pos = self.context.gen_range(0..result.len());
+        let pos = self.context.random_range(0..result.len());
 
-        match (self.context.gen::<u8>()) % 5 {
+        match (self.context.random::<u8>()) % 5 {
             0 => result[pos] = result[pos].wrapping_add(1),
             1 => result[pos] = result[pos].wrapping_sub(1),
             2 => result[pos] ^= 0xFF,
@@ -213,7 +213,7 @@ where
 
         loop {
             // Send disruptive messages across all channels
-            match (self.context.gen::<u8>()) % 7 {
+            match (self.context.random::<u8>()) % 7 {
                 0 => self.send_random_vote(&mut vote_sender).await,
                 1 => self.send_proposal(&mut vote_sender).await,
                 2 => {
@@ -283,7 +283,7 @@ where
         }
 
         // Optionally send mutated vote
-        if self.context.gen_bool(0.5) {
+        if self.context.random_bool(0.5) {
             let mutated = self.mutate_bytes(&msg);
             let _ = sender.send(Recipients::All, mutated, true);
         }
@@ -362,7 +362,7 @@ where
         }
 
         // Optionally send mutated certificate
-        if self.context.gen_bool(0.5) {
+        if self.context.random_bool(0.5) {
             let cert = self
                 .strategy
                 .mutate_certificate_bytes(self.context.as_mut(), &msg);
@@ -375,7 +375,7 @@ where
             return;
         }
         // Optionally send malformed resolver data
-        if self.context.gen_bool(0.5) {
+        if self.context.random_bool(0.5) {
             let mutated = self
                 .strategy
                 .mutate_resolver_bytes(self.context.as_mut(), &msg);
@@ -404,7 +404,7 @@ where
             return;
         }
 
-        let idx = self.context.gen_range(0..participants.len());
+        let idx = self.context.random_range(0..participants.len());
         let victim = participants[idx].clone();
 
         // Send 10 messages to victim

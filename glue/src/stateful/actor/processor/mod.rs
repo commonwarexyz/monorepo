@@ -23,8 +23,9 @@
 //! [`await_or_cancel`].
 
 use crate::stateful::{
+    actor::metrics::Metrics as StatefulMetrics,
     db::{Anchor, DatabaseSet},
-    Application, Proposed,
+    Application, Proposed, PruneConfig,
 };
 use commonware_consensus::{
     marshal::{
@@ -37,22 +38,25 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
-use commonware_runtime::{telemetry::metrics::GaugeExt, Clock, Metrics, Spawner};
+use commonware_runtime::{
+    telemetry::{metrics::GaugeExt, traces::TracedExt as _},
+    Clock, Metrics, Spawner,
+};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::{stream, Stream, StreamExt};
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::Future,
+    num::NonZeroUsize,
 };
-use tracing::{debug, warn};
-
-mod metrics;
-pub(crate) use metrics::Metrics as ProcessorMetrics;
+use tracing::{debug, info_span, warn};
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
+type PendingSyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
+type DeferredPrune<T> = Option<Prune<T>>;
 
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
@@ -86,6 +90,106 @@ pub(super) enum FinalizeStatus {
     Persisted { height: Height },
 }
 
+/// Marshal and database prune targets selected from finalized history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct Prune<T> {
+    marshal_height: Height,
+    qmdb_target: T,
+}
+
+impl<T> Prune<T> {
+    /// Run database and marshal pruning.
+    pub(super) async fn run<E, DBs, S, V>(self, databases: &mut DBs, marshal: &MarshalMailbox<S, V>)
+    where
+        E: Rng + Spawner + Metrics + Clock,
+        DBs: DatabaseSet<E, SyncTargets = T>,
+        S: Scheme,
+        V: MarshalVariant,
+    {
+        databases.prune(&self.qmdb_target).await;
+        marshal.prune(self.marshal_height);
+    }
+}
+
+/// Tracks the configured prune cadence and finalized sync targets needed to
+/// make pruning safe.
+struct Pruning<T> {
+    maintenance_interval: NonZeroUsize,
+    marshal_retention_window: usize,
+    qmdb_retention_window: usize,
+    retained_targets: VecDeque<(Height, T)>,
+}
+
+impl<T: Clone> Pruning<T> {
+    const fn new(config: PruneConfig) -> Self {
+        config.assert_valid();
+        let base_retention_window = config
+            .max_pending_acks
+            .get()
+            .checked_add(1)
+            .expect("max_pending_acks retention window overflowed");
+        let marshal_retention_window = base_retention_window
+            .checked_add(config.retained_marshal_blocks)
+            .expect("marshal prune retention window overflowed");
+        let qmdb_retention_window = base_retention_window
+            .checked_add(config.retained_qmdb_blocks)
+            .expect("qmdb prune retention window overflowed");
+        Self {
+            maintenance_interval: config.maintenance_interval,
+            marshal_retention_window,
+            qmdb_retention_window,
+            retained_targets: VecDeque::new(),
+        }
+    }
+
+    /// Observe a newly finalized block and decide whether pruning should run.
+    ///
+    /// Pruning first retains the last `max_pending_acks + 1` finalized targets
+    /// plus the configured retained block windows. It then prunes only when the
+    /// largest required window is populated and the current finalized height
+    /// matches the configured maintenance interval.
+    fn observe_finalized(&mut self, height: Height, targets: T) -> DeferredPrune<T> {
+        self.retained_targets.push_back((height, targets));
+        if self.retained_targets.len() > self.marshal_retention_window {
+            self.retained_targets.pop_front();
+        }
+
+        let interval = u64::try_from(self.maintenance_interval.get())
+            .expect("prune interval should fit in u64");
+        if !height.get().is_multiple_of(interval) {
+            return None;
+        }
+
+        // Do not prune until we've observed the full rewind-safe marshal
+        // window after startup.
+        if self.retained_targets.len() < self.marshal_retention_window {
+            return None;
+        }
+
+        let marshal_height = self
+            .retained_targets
+            .front()
+            .expect("retained prune targets must exist")
+            .0;
+        let qmdb_index = self
+            .retained_targets
+            .len()
+            .checked_sub(self.qmdb_retention_window)
+            .expect("qmdb retention window must not exceed marshal window");
+        let qmdb_target = self
+            .retained_targets
+            .get(qmdb_index)
+            .expect("qmdb prune target must exist")
+            .1
+            .clone();
+
+        Some(Prune {
+            marshal_height,
+            qmdb_target,
+        })
+    }
+}
+
 /// Owns speculative execution and state persistence for a running stateful actor.
 pub(super) struct Processor<E, A>
 where
@@ -96,7 +200,8 @@ where
     databases: A::Databases,
     pending: PendingMap<A, E>,
     last_processed: Anchor<PendingDigest<A, E>>,
-    metrics: ProcessorMetrics,
+    metrics: StatefulMetrics,
+    pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
 }
 
 impl<E, A> Processor<E, A>
@@ -106,11 +211,12 @@ where
 {
     /// Create a new processor with the given application, databases, and
     /// the last finalized block's anchor.
-    pub(super) const fn new(
+    pub(super) fn new(
         app: A,
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
-        metrics: ProcessorMetrics,
+        metrics: StatefulMetrics,
+        prune_config: Option<PruneConfig>,
     ) -> Self {
         Self {
             app,
@@ -118,12 +224,18 @@ where
             pending: BTreeMap::new(),
             last_processed,
             metrics,
+            pruning: prune_config.map(Pruning::new),
         }
     }
 
     /// Returns a reference to the database set.
     pub(super) const fn databases(&self) -> &A::Databases {
         &self.databases
+    }
+
+    /// Returns a mutable reference to the database set.
+    pub(super) const fn databases_mut(&mut self) -> &mut A::Databases {
+        &mut self.databases
     }
 
     /// Prepare parent-relative batches and delegate to the application to
@@ -146,7 +258,7 @@ where
         let timer = self.metrics.propose_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let parent = match next_or_cancel(&mut response, &mut ancestry).await {
+        let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(parent)) => parent,
             Some(None) => {
                 response.send_lossy(None);
@@ -237,7 +349,7 @@ where
         let timer = self.metrics.verify_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let block = match next_or_cancel(&mut response, &mut ancestry).await {
+        let block = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(block)) => block,
             Some(None) => {
                 debug!("verification request waiting on incomplete block ancestry");
@@ -303,7 +415,7 @@ where
         }
 
         let round = consensus_context.round();
-        let parent = match next_or_cancel(&mut response, &mut ancestry).await {
+        let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(parent)) => parent,
             Some(None) => {
                 debug!(
@@ -383,6 +495,12 @@ where
             response.send_lossy(false);
             return;
         };
+        let tail = info_span!(
+            "stateful.processor.match_commitments",
+            block = %block_digest,
+            parent = %parent_digest,
+        )
+        .entered();
         if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
             warn!(
                 ?parent_digest,
@@ -394,11 +512,19 @@ where
         }
         self.cache_pending(block_digest, parent_digest, round, merkleized);
         let _ = self.metrics.pending_blocks.try_set(self.pending.len());
+        drop(block);
+        drop(tail);
         timer.observe(context);
         response.send_lossy(true);
     }
 
     /// Ensure parent state exists, then prepare unmerkleized batches for execution.
+    #[tracing::instrument(
+        name = "stateful.processor.prepare_batches",
+        level = "info",
+        skip_all,
+        fields(parent = %parent.digest())
+    )]
     pub(super) async fn prepare_batches<S, V, Response>(
         &mut self,
         context: &E,
@@ -565,7 +691,11 @@ where
     }
 
     /// Persist finalized state and prune dead in-memory forks.
-    pub(super) async fn finalize(&mut self, context: &E, block: A::Block) -> FinalizeStatus {
+    pub(super) async fn finalize(
+        &mut self,
+        context: &E,
+        block: A::Block,
+    ) -> (FinalizeStatus, DeferredPrune<PendingSyncTargets<A, E>>) {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
             panic!(
@@ -579,12 +709,13 @@ where
                 digest, self.last_processed.digest,
                 "received conflicting finalized block at processed height",
             );
-            return FinalizeStatus::Duplicate;
+            return (FinalizeStatus::Duplicate, None);
         }
 
         let timer = self.metrics.finalize_duration.timer(context);
         let block_context = block.context();
         let round = block_context.round();
+        let sync_targets = A::sync_targets(&block);
 
         // Marshal finalization is ordered. A pending miss means we can replay
         // this block on top of finalized state.
@@ -604,7 +735,7 @@ where
                     )
                     .await;
                 assert!(
-                    A::Databases::matches_sync_targets(&batch, &A::sync_targets(&block)),
+                    A::Databases::matches_sync_targets(&batch, &sync_targets),
                     "finalize replay state root must match block commitments",
                 );
                 batch
@@ -612,13 +743,11 @@ where
         };
 
         self.databases.finalize(batch).await;
-        self.app
-            .finalized(
-                (context.child("finalized"), block.context()),
-                &block,
-                &self.databases,
-            )
-            .await;
+        self.notify_finalized(context, &block).await;
+        let prune = self
+            .pruning
+            .as_mut()
+            .and_then(|pruning| pruning.observe_finalized(height, sync_targets));
         self.prune_pending_after_finalize(&digest, round);
         self.last_processed = Anchor {
             height,
@@ -627,7 +756,19 @@ where
         };
         timer.observe(context);
 
-        FinalizeStatus::Persisted { height }
+        (FinalizeStatus::Persisted { height }, prune)
+    }
+
+    /// Notify the application that marshal delivered a finalized block already
+    /// reflected in the database set.
+    pub(super) async fn notify_finalized(&mut self, context: &E, block: &A::Block) {
+        self.app
+            .finalized(
+                (context.child("finalized"), block.context()),
+                block,
+                &self.databases,
+            )
+            .await;
     }
 
     /// Remove pending state that is not compatible with the finalized winner.
@@ -699,6 +840,12 @@ where
 }
 
 /// Returns true when `block` is already covered by committed state.
+#[tracing::instrument(
+    name = "stateful.processor.is_already_processed",
+    level = "info",
+    skip_all,
+    fields(height = block.height().traced(), digest = %block.digest())
+)]
 async fn is_already_processed<S, V, Response>(
     last_processed: Anchor<<V::ApplicationBlock as Digestible>::Digest>,
     marshal: MarshalMailbox<S, V>,
@@ -739,7 +886,8 @@ where
 }
 
 /// Read the next ancestry item unless the response receiver is dropped.
-pub(super) async fn next_or_cancel<R, T, S>(
+#[tracing::instrument(name = "stateful.processor.fetch_ancestor", level = "info", skip_all)]
+pub(super) async fn fetch_ancestor<R, T, S>(
     response: &mut oneshot::Sender<R>,
     stream: &mut S,
 ) -> Option<Option<T>>
@@ -765,11 +913,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{await_or_cancel, next_or_cancel, FinalizeStatus, PrepareBatchesError, Processor};
+    use super::{
+        await_or_cancel, fetch_ancestor, FinalizeStatus, PrepareBatchesError, Processor, Prune,
+        Pruning,
+    };
     use crate::stateful::{
-        actor::processor::ProcessorMetrics,
+        actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
-        Application, Proposed,
+        Application, Proposed, PruneConfig,
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
@@ -795,7 +946,7 @@ mod tests {
         channel::oneshot,
         non_empty_range,
         range::NonEmptyRange,
-        sync::{AsyncRwLock, Mutex},
+        sync::{Mutex, TracedAsyncRwLock},
         NZUsize, NZU16, NZU64,
     };
     use futures::{Stream, StreamExt};
@@ -817,7 +968,7 @@ mod tests {
 
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
-    type DbSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
+    type DbSet<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -946,7 +1097,7 @@ mod tests {
     #[derive(Clone)]
     struct FinalizedObserver {
         db_config: any::FixedConfig<TwoCap, Sequential>,
-        reopened_counters: Arc<Mutex<Vec<u64>>>,
+        reopened_values: Arc<Mutex<Vec<u64>>>,
     }
 
     #[derive(Clone)]
@@ -966,17 +1117,17 @@ mod tests {
         fn with_finalized_observer(
             db_config: any::FixedConfig<TwoCap, Sequential>,
         ) -> (Self, Arc<Mutex<Vec<u64>>>) {
-            let reopened_counters = Arc::new(Mutex::new(Vec::new()));
+            let reopened_values = Arc::new(Mutex::new(Vec::new()));
             let observer = FinalizedObserver {
                 db_config,
-                reopened_counters: reopened_counters.clone(),
+                reopened_values: reopened_values.clone(),
             };
             (
                 Self {
                     genesis: Block::genesis(),
                     finalized_observer: Some(observer),
                 },
-                reopened_counters,
+                reopened_values,
             )
         }
 
@@ -1059,35 +1210,31 @@ mod tests {
             Self::execute(block.height(), block.context.round.view(), batches).await
         }
 
+        async fn finalized(
+            &mut self,
+            context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            _databases: &Self::Databases,
+        ) {
+            let Some(observer) = self.finalized_observer.clone() else {
+                return;
+            };
+            let reopened: Qmdb<deterministic::Context> =
+                Qmdb::init(context.0.child("reopen_finalized"), observer.db_config)
+                    .await
+                    .expect("database reopen should succeed");
+            let value = reopened
+                .get(&height_key(block.height()))
+                .await
+                .expect("reopened db read should succeed")
+                .expect("finalized height should be durable");
+            observer.reopened_values.lock().push(digest_to_u64(&value));
+        }
+
         fn sync_targets(
             block: &Self::Block,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
             Target::new(block.state_root, block.range.clone())
-        }
-
-        async fn finalized(
-            &mut self,
-            context: (deterministic::Context, Self::Context),
-            _block: &Self::Block,
-            _databases: &Self::Databases,
-        ) {
-            let Some(observer) = &self.finalized_observer else {
-                return;
-            };
-
-            let reopened = Qmdb::init(
-                context.0.child("finalized_observer_reopen"),
-                observer.db_config.clone(),
-            )
-            .await
-            .expect("database reopen inside finalized hook should succeed");
-            let counter = reopened
-                .get(&counter_key())
-                .await
-                .expect("reopened counter read should succeed")
-                .map(|value| digest_to_u64(&value))
-                .unwrap_or(0);
-            observer.reopened_counters.lock().push(counter);
         }
     }
 
@@ -1169,29 +1316,25 @@ mod tests {
         processor: Processor<deterministic::Context, ExecutionApp>,
         provider: MapProvider,
         db_config: any::FixedConfig<TwoCap, Sequential>,
-        finalized_reopened_counters: Option<Arc<Mutex<Vec<u64>>>>,
     }
 
     impl Harness {
         async fn new(context: deterministic::Context) -> Self {
             let provider = MapProvider::default();
             let config = qmdb_config(&next_partition_prefix(), &context);
-            Self::with_app(context, provider, config.clone(), ExecutionApp::new(), None).await
+            Self::with_app(context, provider, config.clone(), ExecutionApp::new()).await
         }
 
-        async fn new_with_finalized_observer(context: deterministic::Context) -> Self {
+        async fn new_with_finalized_observer(
+            context: deterministic::Context,
+        ) -> (Self, Arc<Mutex<Vec<u64>>>) {
             let provider = MapProvider::default();
             let config = qmdb_config(&next_partition_prefix(), &context);
-            let (app, finalized_reopened_counters) =
-                ExecutionApp::with_finalized_observer(config.clone());
-            Self::with_app(
-                context,
-                provider,
-                config,
-                app,
-                Some(finalized_reopened_counters),
+            let (app, reopened_values) = ExecutionApp::with_finalized_observer(config.clone());
+            (
+                Self::with_app(context, provider, config, app).await,
+                reopened_values,
             )
-            .await
         }
 
         async fn with_app(
@@ -1199,13 +1342,12 @@ mod tests {
             provider: MapProvider,
             config: any::FixedConfig<TwoCap, Sequential>,
             app: ExecutionApp,
-            finalized_reopened_counters: Option<Arc<Mutex<Vec<u64>>>>,
         ) -> Self {
             let databases = <DbSet<deterministic::Context> as DatabaseSet<
                 deterministic::Context,
             >>::init(context.child("db_set"), config.clone())
             .await;
-            let metrics = ProcessorMetrics::new(context.child("processor_metrics"));
+            let metrics = StatefulMetrics::new(&context);
             Self {
                 context_cell: ContextCell::new(context),
                 processor: Processor::new(
@@ -1217,10 +1359,10 @@ mod tests {
                         digest: Block::genesis().digest(),
                     },
                     metrics,
+                    None,
                 ),
                 provider,
                 db_config: config,
-                finalized_reopened_counters,
             }
         }
 
@@ -1344,6 +1486,25 @@ mod tests {
             self.processor
                 .finalize(self.context_cell.as_present(), block)
                 .await
+                .0
+        }
+
+        async fn finalize_with_prune(
+            &mut self,
+            block: Block,
+        ) -> (
+            FinalizeStatus,
+            Option<
+                Prune<
+                    <DbSet<deterministic::Context> as DatabaseSet<
+                        deterministic::Context,
+                    >>::SyncTargets,
+                >,
+            >,
+        ){
+            self.processor
+                .finalize(self.context_cell.as_present(), block)
+                .await
         }
 
         async fn height_value(&self, height: Height) -> Option<u64> {
@@ -1377,14 +1538,6 @@ mod tests {
                 .expect("reopened db read should succeed")
                 .map(|value| digest_to_u64(&value))
         }
-
-        fn finalized_reopened_counters(&self) -> Vec<u64> {
-            self.finalized_reopened_counters
-                .as_ref()
-                .expect("finalized observer should be configured")
-                .lock()
-                .clone()
-        }
     }
 
     fn next_partition_prefix() -> String {
@@ -1414,7 +1567,182 @@ mod tests {
                 write_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
+    }
+
+    #[test]
+    fn pruning_waits_for_full_retention_window() {
+        let mut pruning = Pruning::new(PruneConfig {
+            max_pending_acks: NZUsize!(2),
+            maintenance_interval: NZUsize!(1),
+            retained_marshal_blocks: 1,
+            retained_qmdb_blocks: 1,
+        });
+
+        assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
+        assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
+        assert_eq!(pruning.observe_finalized(Height::new(3), 30_u64), None,);
+        assert_eq!(
+            pruning.observe_finalized(Height::new(4), 40_u64),
+            Some(Prune {
+                marshal_height: Height::new(1),
+                qmdb_target: 10,
+            }),
+        );
+    }
+
+    #[test]
+    fn pruning_uses_oldest_retained_target() {
+        let mut pruning = Pruning::new(PruneConfig {
+            max_pending_acks: NZUsize!(1),
+            maintenance_interval: NZUsize!(1),
+            retained_marshal_blocks: 1,
+            retained_qmdb_blocks: 1,
+        });
+
+        assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
+        assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
+        assert_eq!(
+            pruning.observe_finalized(Height::new(3), 30_u64),
+            Some(Prune {
+                marshal_height: Height::new(1),
+                qmdb_target: 10,
+            }),
+        );
+        assert_eq!(
+            pruning.observe_finalized(Height::new(4), 40_u64),
+            Some(Prune {
+                marshal_height: Height::new(2),
+                qmdb_target: 20,
+            }),
+        );
+    }
+
+    #[test]
+    fn pruning_can_retain_more_marshal_history_than_qmdb() {
+        let mut pruning = Pruning::new(PruneConfig {
+            max_pending_acks: NZUsize!(1),
+            maintenance_interval: NZUsize!(3),
+            retained_marshal_blocks: 3,
+            retained_qmdb_blocks: 1,
+        });
+
+        assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None);
+        assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None);
+        assert_eq!(pruning.observe_finalized(Height::new(3), 30_u64), None);
+        assert_eq!(pruning.observe_finalized(Height::new(4), 40_u64), None);
+        assert_eq!(pruning.observe_finalized(Height::new(5), 50_u64), None);
+        assert_eq!(
+            pruning.observe_finalized(Height::new(6), 60_u64),
+            Some(Prune {
+                marshal_height: Height::new(2),
+                qmdb_target: 40,
+            }),
+        );
+    }
+
+    #[test]
+    fn pruning_only_runs_on_maintenance_interval() {
+        let mut pruning = Pruning::new(PruneConfig {
+            max_pending_acks: NZUsize!(1),
+            maintenance_interval: NZUsize!(5),
+            retained_marshal_blocks: 1,
+            retained_qmdb_blocks: 0,
+        });
+
+        // Window fills at height 3, but pruning only fires on multiples of the
+        // maintenance interval regardless of how small the retention window is.
+        for height in 1..=4 {
+            assert_eq!(
+                pruning.observe_finalized(Height::new(height), height * 10),
+                None,
+            );
+        }
+        assert_eq!(
+            pruning.observe_finalized(Height::new(5), 50),
+            Some(Prune {
+                marshal_height: Height::new(3),
+                qmdb_target: 40,
+            }),
+        );
+        for height in 6..=9 {
+            assert_eq!(
+                pruning.observe_finalized(Height::new(height), height * 10),
+                None,
+            );
+        }
+        assert_eq!(
+            pruning.observe_finalized(Height::new(10), 100),
+            Some(Prune {
+                marshal_height: Height::new(8),
+                qmdb_target: 90,
+            }),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "marshal must retain at least as many blocks as QMDB")]
+    fn prune_config_rejects_less_marshal_retention_than_qmdb() {
+        PruneConfig {
+            max_pending_acks: NZUsize!(1),
+            maintenance_interval: NZUsize!(1),
+            retained_marshal_blocks: 1,
+            retained_qmdb_blocks: 2,
+        }
+        .assert_valid();
+    }
+
+    #[test]
+    fn prune_config_accepts_zero_retention() {
+        PruneConfig {
+            max_pending_acks: NZUsize!(1),
+            maintenance_interval: NZUsize!(1),
+            retained_marshal_blocks: 0,
+            retained_qmdb_blocks: 0,
+        }
+        .assert_valid();
+    }
+
+    #[test]
+    fn execution_finalization_returns_deferred_prune() {
+        deterministic::Runner::default().start(|context| async move {
+            let provider = MapProvider::default();
+            let config = qmdb_config("db_config", &context);
+            let app = ExecutionApp::new();
+            let mut harness = Harness::with_app(context, provider, config, app).await;
+            harness.processor = Processor::new(
+                ExecutionApp::new(),
+                harness.processor.databases().clone(),
+                Anchor {
+                    height: Height::zero(),
+                    round: Block::genesis().context().round,
+                    digest: Block::genesis().digest(),
+                },
+                StatefulMetrics::new(harness.context_cell.as_present()),
+                Some(PruneConfig {
+                    max_pending_acks: NZUsize!(1),
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 1,
+                    retained_qmdb_blocks: 1,
+                }),
+            );
+
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            let (status, prune) = harness.finalize_with_prune(block1).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(1)
+                }
+            );
+            assert_eq!(
+                prune, None,
+                "pruning should wait for the full retention window",
+            );
+        });
     }
 
     #[test]
@@ -1732,6 +2060,66 @@ mod tests {
     }
 
     #[test]
+    fn execution_finalized_hook_runs_for_each_durable_block() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut harness, finalized_values) =
+                Harness::new_with_finalized_observer(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+
+            let status = harness.finalize(block1).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(1)
+                }
+            );
+            let status = harness.finalize(block2).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(2)
+                }
+            );
+            assert_eq!(
+                finalized_values.lock().clone(),
+                vec![1, 2],
+                "finalized hook should observe every durably committed block",
+            );
+        });
+    }
+
+    #[test]
+    fn execution_finalized_hook_runs_for_already_reflected_block() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut harness, finalized_values) =
+                Harness::new_with_finalized_observer(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            let status = harness.finalize(block1.clone()).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(1)
+                }
+            );
+
+            finalized_values.lock().clear();
+            harness
+                .processor
+                .notify_finalized(harness.context_cell.as_present(), &block1)
+                .await;
+            assert_eq!(
+                finalized_values.lock().clone(),
+                vec![1],
+                "finalized hook should run for blocks already reflected in the database set",
+            );
+        });
+    }
+
+    #[test]
     #[should_panic(expected = "finalize replay state root must match block commitments")]
     fn execution_finalize_replay_rejects_state_root_mismatch() {
         deterministic::Runner::default().start(|context| async move {
@@ -1746,35 +2134,13 @@ mod tests {
     }
 
     #[test]
-    fn execution_finalized_hook_runs_after_durable_finalize() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new_with_finalized_observer(context).await;
-            let genesis = Block::genesis();
-            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-
-            let status = harness.finalize(block1).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1)
-                }
-            );
-            assert_eq!(
-                harness.finalized_reopened_counters(),
-                vec![1],
-                "finalized hook should observe the durably committed state",
-            );
-        });
-    }
-
-    #[test]
     fn initial_ancestry_read_cancels_when_response_dropped() {
         deterministic::Runner::default().start(|_context| async move {
             let (mut response, receiver) = oneshot::channel::<bool>();
             let mut ancestry = Box::pin(futures::stream::pending::<Block>());
             drop(receiver);
 
-            assert_eq!(next_or_cancel(&mut response, &mut ancestry).await, None);
+            assert_eq!(fetch_ancestor(&mut response, &mut ancestry).await, None);
         });
     }
 

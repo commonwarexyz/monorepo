@@ -10,10 +10,12 @@
 //! ```rust
 //! use commonware_cryptography::{ed25519, PrivateKey, PublicKey, Signature, Verifier as _, Signer as _};
 //! use commonware_math::algebra::Random;
-//! use rand::rngs::OsRng;
+//! use rand::{rngs::StdRng, SeedableRng};
+//!
+//! let mut rng = StdRng::seed_from_u64(0);
 //!
 //! // Generate a new private key
-//! let mut signer = ed25519::PrivateKey::random(&mut OsRng);
+//! let mut signer = ed25519::PrivateKey::random(&mut rng);
 //!
 //! // Create a message to sign
 //! let namespace = b"demo";

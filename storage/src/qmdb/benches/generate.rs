@@ -7,6 +7,7 @@ use crate::common::{
     define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value, make_var_value,
     open_keyless_db, Digest,
 };
+use commonware_macros::boxed;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
@@ -17,7 +18,7 @@ use commonware_storage::{
     qmdb::any::traits::DbAny,
 };
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::{Duration, Instant};
 
 const NUM_ELEMENTS: u64 = 1_000;
@@ -27,6 +28,7 @@ const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
 
 /// Benchmark a populated database: generate data, prune, sync. Returns elapsed time (excluding
 /// destroy).
+#[boxed]
 async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
     mut db: C,
     elements: u64,
@@ -40,10 +42,14 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
         elements,
         operations,
         Some(commit_frequency),
+        None, // seed_batch
+        None, // prune_frequency
+        None, // key_zipf_exponent (uniform churn)
+        None, // keyspace (all keys seeded)
         make_value,
     )
     .await;
-    db.prune(db.sync_boundary().await).await.unwrap();
+    db.prune(db.sync_boundary()).await.unwrap();
     db.sync().await.unwrap();
     let elapsed = start.elapsed();
     db.destroy().await.unwrap();

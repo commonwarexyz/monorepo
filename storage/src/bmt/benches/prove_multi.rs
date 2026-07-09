@@ -2,7 +2,7 @@ use commonware_cryptography::{sha256, Hasher, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{rngs::StdRng, seq::IndexedRandom, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
 
@@ -26,10 +26,8 @@ fn bench_prove_multi(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        let samples: Vec<_> = queries
-                            .choose_multiple(&mut sampler, SAMPLE_SIZE)
-                            .cloned()
-                            .collect();
+                        let samples: Vec<_> =
+                            queries.sample(&mut sampler, SAMPLE_SIZE).cloned().collect();
                         let positions: Vec<u32> = samples.iter().map(|(pos, _)| *pos).collect();
                         let proof = tree.multi_proof(&positions).unwrap();
                         (samples, proof)

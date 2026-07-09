@@ -2,6 +2,7 @@ use super::{
     acks::{PendingAck, PendingAcks},
     cache,
     delivery::PendingVerification,
+    durability::Durable as _,
     floor::Floor,
     mailbox::{CommitmentFallback, Mailbox, Message},
     stream::Stream,
@@ -29,26 +30,32 @@ use commonware_cryptography::{
     certificate::{Provider, Verifier},
     Digestible,
 };
-use commonware_macros::select_loop;
+use commonware_macros::{boxed, select_loop};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::{Delivery, Resolver, TargetedResolver};
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
+    telemetry::{
+        metrics::{Gauge, GaugeExt, MetricsExt as _},
+        traces::TracedExt as _,
+    },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
-    futures::AbortablePool,
+    futures::{AbortablePool, Pool},
     Acknowledgement, BoxedError,
 };
-use futures::{future::join_all, try_join};
-use rand_core::CryptoRngCore;
+use futures::{
+    future::{join, join_all},
+    try_join,
+};
+use rand_core::CryptoRng;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
-use tracing::{debug, warn};
+use tracing::{debug, info_span, warn, Instrument as _, Span};
 
 // Resolver request keys are expressed in the variant commitment type, which
 // may differ from the block digest for coded variants.
@@ -76,7 +83,7 @@ struct ResolverDelivery<V: Variant> {
 /// behind.
 pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
-    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
+    E: BufferPooler + CryptoRng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -141,7 +148,7 @@ where
 
 impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
 where
-    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
+    E: BufferPooler + CryptoRng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -155,6 +162,7 @@ where
     A: Acknowledgement,
 {
     /// Create a new application actor.
+    #[boxed]
     pub async fn init(
         context: E,
         finalizations_by_height: FC,
@@ -347,41 +355,55 @@ where
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
 
-        // Get tip and send to application
-        let tip = self.get_latest().await;
-        if let Some((height, digest, round)) = tip {
-            application.report(Update::Tip(round, height, digest));
-            self.tip = height;
-            let _ = self.finalized_height.try_set(height.get());
+        // Observe durable syncs that no consensus caller awaits (the notarization
+        // path). A flush failure inside `start_sync` is reported only through the
+        // returned handle, so every handle must be observed to apply the fatal
+        // policy; this pool does so without blocking the actor on fsync.
+        let mut syncs = Pool::<bool>::default();
+
+        // Anchor all startup work under a single root span. Tip recovery, floor
+        // installation, gap repair, and the initial dispatch all run before any
+        // mailbox message arrives, so without this root their work would emit as
+        // orphan traces.
+        async {
+            // Get tip and send to application
+            let tip = self.get_latest().await;
+            if let Some((height, digest, round)) = tip {
+                application.report(Update::Tip(round, height, digest));
+                self.tip = height;
+                let _ = self.finalized_height.try_set(height.get());
+            }
+
+            // Load persisted cache epochs so find_block can discover blocks
+            // written before the last shutdown.
+            self.cache.load_persisted_epochs().await;
+
+            // A configured floor follows the same path as `SetFloor`: verify it,
+            // then apply a local anchor or fetch the anchor block.
+            if let Some(finalization) = self.floor.take_pending_anchor() {
+                self.install_floor(
+                    finalization,
+                    false,
+                    &mut resolver,
+                    &mut buffer,
+                    &mut application,
+                )
+                .await;
+            }
+
+            // Attempt to repair any gaps in the finalized blocks archive, if there are any.
+            if self
+                .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+                .await
+            {
+                self.sync_finalized().await;
+            }
+
+            // Attempt to dispatch the next finalized block to the application, if it is ready.
+            self.try_dispatch_blocks(&mut application).await;
         }
-
-        // Load persisted cache epochs so find_block can discover blocks
-        // written before the last shutdown.
-        self.cache.load_persisted_epochs().await;
-
-        // A configured floor follows the same path as `SetFloor`: verify it,
-        // then apply a local anchor or fetch the anchor block.
-        if let Some(finalization) = self.floor.take_pending_anchor() {
-            self.install_floor(
-                finalization,
-                false,
-                &mut resolver,
-                &mut buffer,
-                &mut application,
-            )
-            .await;
-        }
-
-        // Attempt to repair any gaps in the finalized blocks archive, if there are any.
-        if self
-            .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
-            .await
-        {
-            self.sync_finalized().await;
-        }
-
-        // Attempt to dispatch the next finalized block to the application, if it is ready.
-        self.try_dispatch_blocks(&mut application).await;
+        .instrument(info_span!("marshal.actor.start"))
+        .await;
 
         select_loop! {
             self.context,
@@ -392,9 +414,15 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
             },
+            // Drive durability syncs: a real sync failure panics inside the
+            // pooled future (the fatal policy), aborting the actor.
+            _ = syncs.next_completed() => {},
             // Handle waiter completions first
             Ok(completion) = waiters.next_completed() else continue => match completion {
-                Ok(block) => self.block_subscriptions.notify(&block),
+                Ok(block) => {
+                    self.ingest(&block, &mut buffer, &mut application, &mut resolver)
+                        .await;
+                }
                 Err(key) => {
                     match key {
                         SubscriptionKey::Digest(digest) => {
@@ -423,13 +451,20 @@ where
                 debug!("mailbox closed, shutting down");
                 break;
             } => {
+                let span = info_span!(
+                    parent: message.span(),
+                    "marshal.actor.process",
+                    operation = message.name(),
+                );
                 self.handle_mailbox_message(
                     message,
                     &mut resolver,
                     &mut waiters,
+                    &mut syncs,
                     &mut buffer,
                     &mut application,
                 )
+                .instrument(span)
                 .await;
             },
             // Handle resolver messages last (batched up to max_repair, sync once)
@@ -506,6 +541,7 @@ where
         message: Message<P::Scheme, V>,
         resolver: &mut R,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
+        syncs: &mut Pool<bool>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
@@ -524,6 +560,7 @@ where
             Message::GetInfo {
                 identifier,
                 response,
+                ..
             } => {
                 let info = match identifier {
                     // TODO: Instead of pulling out the entire block, determine the
@@ -541,7 +578,9 @@ where
                 };
                 response.send_lossy(info);
             }
-            Message::GetVerified { round, response } => {
+            Message::GetVerified {
+                round, response, ..
+            } => {
                 let block = self.cache.get_verified(round).await.map(Into::into);
                 response.send_lossy(block);
             }
@@ -549,6 +588,7 @@ where
                 round,
                 commitment,
                 recipients,
+                ..
             } => {
                 if matches!(&recipients, Recipients::Some(peers) if peers.is_empty()) {
                     return;
@@ -566,14 +606,20 @@ where
                 };
                 buffer.send(round, block, recipients);
             }
-            Message::Proposed { round, block, ack } => {
+            Message::Proposed {
+                round, block, ack, ..
+            } => {
+                self.ingest(&block, buffer, application, resolver).await;
+                let digest = block.digest();
+
                 // If the round has already been pruned by tip advancement,
-                // `cache_verified` is a no-op because the round is below
+                // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
-                // to make progress).
-                self.cache_verified(round, block.digest(), block.clone())
-                    .await;
-                self.apply_floor_anchor(&block, buffer, application, resolver)
+                // to make progress). A duplicate delivery is also a no-op, with
+                // the handle still covering the original write's durability.
+                let handle = self
+                    .cache
+                    .put_verified(round, digest, block.clone().into())
                     .await;
 
                 // Retain the block in memory so the subsequent `Forward` can
@@ -581,51 +627,85 @@ where
                 // proposal (if any) is overwritten.
                 let commitment = V::commitment(&block);
                 self.last_proposed_block = Some((round, commitment, block));
-                ack.expect("durable ack present").send_lossy(());
+                ack.expect("durable ack present").send_lossy(handle);
             }
-            Message::Verified { round, block, ack } => {
+            Message::Verified {
+                round, block, ack, ..
+            } => {
+                self.ingest(&block, buffer, application, resolver).await;
+                let digest = block.digest();
+
                 // If the round has already been pruned by tip advancement,
-                // `cache_verified` is a no-op because the round is below
+                // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
-                // to make progress).
-                self.cache_verified(round, block.digest(), block.clone())
-                    .await;
-                self.apply_floor_anchor(&block, buffer, application, resolver)
-                    .await;
-                ack.expect("durable ack present").send_lossy(());
+                // to make progress). A duplicate delivery is also a no-op, with
+                // the handle still covering the original write's durability.
+                let handle = self.cache.put_verified(round, digest, block.into()).await;
+                ack.expect("durable ack present").send_lossy(handle);
             }
-            Message::Certified { round, block, ack } => {
-                // If the round has already been pruned by tip advancement,
-                // `cache_block` is a no-op because the round is below
-                // the retention floor (and no longer is required by consensus
-                // to make progress).
-                self.cache_block(round, block.digest(), block.clone()).await;
-                self.apply_floor_anchor(&block, buffer, application, resolver)
-                    .await;
-                ack.expect("durable ack present").send_lossy(());
+            Message::Certified {
+                round, block, ack, ..
+            } => {
+                self.ingest(&block, buffer, application, resolver).await;
+                let digest = block.digest();
+
+                // A block the verified archive already holds needs no second copy:
+                // the verified archive's covering sync handle vouches for it. At
+                // most one notarization exists per round, so the notarized slot can
+                // never belong to a different payload: a duplicate put is a no-op
+                // whose handle still covers the original write. If the round has
+                // already been pruned by tip advancement, both writes are no-ops
+                // because the round is below the retention floor.
+                let block_sync = if self.cache.has_verified(round, &digest).await {
+                    debug!(?round, "certified block covered by verified write");
+                    self.cache.start_sync_verified(round).await
+                } else {
+                    self.cache.put_notarized(round, digest, block.into()).await
+                };
+
+                // Hold the certify barrier until the round's notarization
+                // certificate (when one was accepted before this message) is
+                // durable alongside the block.
+                let notarization_sync = self.cache.start_sync_notarizations(round).await;
+                let handle = Handle::from_future(async move {
+                    let (notarization, block) = join(notarization_sync, block_sync).await;
+                    notarization.and(block)
+                });
+                ack.expect("durable ack present").send_lossy(handle);
             }
-            Message::Notarization { notarization } => {
+            Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
                 let commitment = notarization.proposal.payload;
                 let digest = V::commitment_to_inner(commitment);
 
-                // Cache notarization by round.
-                self.cache
-                    .put_notarization(round, digest, notarization.clone())
+                // Persist the notarization; the certify barrier folds in its
+                // durability via `start_sync_notarizations`. The archive keeps a
+                // single notarization per round, so a re-delivery is a no-op whose
+                // handle still covers the original write. No consensus caller
+                // awaits this handle, so the pool observes it (applying the fatal
+                // policy) without blocking the actor.
+                let handle = self
+                    .cache
+                    .put_notarization(round, digest, notarization)
                     .await;
+                syncs.push(handle.durable(round, "notarization"));
 
                 // A notarization alone is not enough to fetch missing proposal
                 // data. If the block is not locally available, remember the
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-                    self.cache_block(round, digest, block.clone()).await;
-                    self.apply_floor_anchor(&block, buffer, application, resolver)
-                        .await;
+                    self.ingest(&block, buffer, application, resolver).await;
+                    if self.cache.has_verified(round, &digest).await {
+                        debug!(?round, "notarized block covered by verified write");
+                    } else {
+                        let handle = self.cache.put_notarized(round, digest, block.into()).await;
+                        syncs.push(handle.durable(round, "notarized"));
+                    }
                 } else {
                     debug!(?round, "notarized block unavailable locally");
                 }
             }
-            Message::Finalization { finalization } => {
+            Message::Finalization { finalization, .. } => {
                 let round = finalization.round();
                 let commitment = finalization.proposal.payload;
                 let digest = V::commitment_to_inner(commitment);
@@ -639,10 +719,7 @@ where
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     // The anchor path stores the floor block and finalization,
                     // advances floors, prunes below them, and resumes dispatch.
-                    if self
-                        .apply_floor_anchor(&block, buffer, application, resolver)
-                        .await
-                    {
+                    if self.ingest(&block, buffer, application, resolver).await {
                         return;
                     }
 
@@ -675,6 +752,7 @@ where
             Message::GetBlock {
                 identifier,
                 response,
+                ..
             } => match identifier {
                 BlockID::Digest(digest) => {
                     let result = self.find_block_by_digest(buffer, digest).await;
@@ -692,14 +770,18 @@ where
                     response.send_lossy(block);
                 }
             },
-            Message::GetFinalization { height, response } => {
+            Message::GetFinalization {
+                height, response, ..
+            } => {
                 let finalization = self.get_finalization_by_height(height).await;
                 response.send_lossy(finalization);
             }
-            Message::GetProcessedHeight { response } => {
+            Message::GetProcessedHeight { response, .. } => {
                 response.send_lossy(self.stream.processed_height());
             }
-            Message::HintFinalized { height, targets } => {
+            Message::HintFinalized {
+                height, targets, ..
+            } => {
                 // Skip if finalization is already available locally.
                 if self.get_finalization_by_height(height).await.is_some() {
                     return;
@@ -710,11 +792,13 @@ where
                     .ignore();
             }
             Message::SubscribeByDigest {
+                span,
                 digest,
                 fallback,
                 response,
             } => {
                 self.handle_subscribe(
+                    span,
                     fallback.into(),
                     SubscriptionKey::Digest(digest),
                     response,
@@ -725,11 +809,13 @@ where
                 .await;
             }
             Message::SubscribeByCommitment {
+                span,
                 commitment,
                 fallback,
                 response,
             } => {
                 self.handle_subscribe(
+                    span,
                     fallback,
                     SubscriptionKey::Commitment(commitment),
                     response,
@@ -739,7 +825,9 @@ where
                 )
                 .await;
             }
-            Message::HintNotarized { round, commitment } => {
+            Message::HintNotarized {
+                round, commitment, ..
+            } => {
                 if self
                     .find_block_by_commitment(buffer, commitment)
                     .await
@@ -750,11 +838,11 @@ where
                         .ignore();
                 }
             }
-            Message::SetFloor { finalization } => {
+            Message::SetFloor { finalization, .. } => {
                 self.install_floor(finalization, true, resolver, buffer, application)
                     .await;
             }
-            Message::Prune { height } => {
+            Message::Prune { height, .. } => {
                 // Only allow pruning at or below the current floor.
                 if height > self.floor.processed_height() {
                     warn!(%height, floor = %self.floor.processed_height(), "prune height above floor, ignoring");
@@ -811,6 +899,14 @@ where
                     value,
                     response,
                 } => {
+                    let span = info_span!(
+                        parent: &delivery.subscribers.first().1,
+                        "marshal.resolver.deliver",
+                        key = %delivery.key
+                    );
+                    for (_, subscriber_span) in delivery.subscribers.iter().skip(1) {
+                        span.follows_from(subscriber_span.id());
+                    }
                     needs_sync |= self
                         .handle_deliver(
                             ResolverDelivery {
@@ -823,6 +919,7 @@ where
                             application,
                             resolver,
                         )
+                        .instrument(span)
                         .await;
                 }
             }
@@ -851,12 +948,14 @@ where
         join_all(
             produces
                 .into_iter()
+                .filter(|(_, response)| !response.is_closed())
                 .map(|(key, response)| self.handle_produce(key, response, buffer)),
         )
         .await;
     }
 
     /// Handle a produce request from a remote peer.
+    #[tracing::instrument(name = "marshal.resolver.produce", level = "debug", skip_all, fields(key = %key))]
     async fn handle_produce<Buf: Buffer<V>>(
         &self,
         key: ResolverRequestFor<V>,
@@ -898,8 +997,10 @@ where
     }
 
     /// Handle a local subscription request for a block.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
+        span: Span,
         fallback: CommitmentFallback,
         key: SubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
@@ -983,7 +1084,7 @@ where
             }
         }
         self.block_subscriptions
-            .insert(key, response, waiters, buffer);
+            .insert(span, key, response, waiters, buffer);
     }
 
     /// Verifies and installs a floor, fetching the anchor block if needed.
@@ -1030,10 +1131,7 @@ where
 
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
             self.floor.await_anchor(finalization);
-            assert!(
-                self.apply_floor_anchor(&block, buffer, application, resolver)
-                    .await
-            );
+            assert!(self.ingest(&block, buffer, application, resolver).await);
             return;
         }
 
@@ -1051,25 +1149,37 @@ where
             .ignore();
     }
 
-    /// Applies a block if it satisfies the current floor transition.
-    async fn apply_floor_anchor<Buf: Buffer<V>>(
+    /// Notifies subscribers of a validated block and applies it to any
+    /// pending floor transition.
+    ///
+    /// Subscribers are notified before the block is persisted. This is not
+    /// observable while running because mailbox requests are only served
+    /// after the current `select_loop!` arm completes. After an unclean
+    /// shutdown, however, a subscriber may hold a block that marshal never
+    /// durably stored. Subscriptions make no durability promise. Durable
+    /// height-ordered delivery is provided by application dispatch, which
+    /// only sends blocks after [`Self::sync_finalized`].
+    ///
+    /// Returns true if the block was consumed as the floor anchor.
+    async fn ingest<Buf: Buffer<V>>(
         &mut self,
         block: &V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> bool {
+        self.block_subscriptions.notify(block);
+
         let commitment = V::commitment(block);
         if !self.floor.matches_pending_anchor(commitment) {
             return false;
         }
-        let block = (*block).clone();
 
         // Floor anchors can bypass the local proposal-verification path. Check
         // the parent relationship before using a non-genesis anchor for walkback.
         let height = block.height();
         if height > Height::zero() {
-            let parent_commitment = V::parent_commitment(&block);
+            let parent_commitment = V::parent_commitment(block);
             assert!(
                 block.parent() == V::commitment_to_inner(parent_commitment),
                 "floor block parent commitment mismatch"
@@ -1107,7 +1217,7 @@ where
         try_join!(
             async {
                 self.finalized_blocks
-                    .put(block.clone().into())
+                    .put((*block).clone().into())
                     .await
                     .map_err(Box::new)?;
                 Ok::<_, BoxedError>(())
@@ -1122,7 +1232,6 @@ where
         )
         .expect("failed to store floor anchor");
         self.sync_finalized().await;
-        self.block_subscriptions.notify(&block);
 
         if height > self.tip {
             application.report(Update::Tip(round, height, digest));
@@ -1179,7 +1288,9 @@ where
             mut value,
             response,
         } = message;
-        let Delivery { key, subscribers } = delivery;
+        let Delivery {
+            key, subscribers, ..
+        } = delivery;
         match key {
             Key::Block(commitment) => {
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
@@ -1195,25 +1306,19 @@ where
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
                 // process it as an ordinary block delivery.
-                if self
-                    .apply_floor_anchor(&block, buffer, application, resolver)
-                    .await
-                {
+                if self.ingest(&block, buffer, application, resolver).await {
                     response.send_lossy(true);
                     return false;
                 }
-
-                // The commitment validates the peer response. Annotations are
-                // local context attached to the request and do not affect peer
-                // validity.
-                self.block_subscriptions.notify(&block);
 
                 // The peer-visible request only says "give me this block".
                 // Local annotations explain why the block was requested and
                 // therefore where, if anywhere, it should be stored.
                 let height = block.height();
                 let digest = block.digest();
-                let annotations = subscribers.into_vec();
+                let annotations = subscribers
+                    .map_into(|(annotation, _)| annotation)
+                    .into_vec();
 
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
@@ -1238,7 +1343,7 @@ where
                     {
                         if let Some(bounds) = self.epocher.containing(height) {
                             self.cache
-                                .put_certified(bounds.epoch(), height, digest, block.clone().into())
+                                .put_certified(bounds.epoch(), height, digest, block.into())
                                 .await;
                         }
                     }
@@ -1360,6 +1465,7 @@ where
 
     /// Batch verify pending certificates and process valid items. Returns true
     /// if finalization archives were written and need syncing.
+    #[tracing::instrument(name = "marshal.actor.verify_delivered", level = "info", skip_all, fields(count = delivers.len().traced()))]
     async fn verify_delivered<Buf: Buffer<V>>(
         &mut self,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
@@ -1443,10 +1549,7 @@ where
 
                     // The floor-anchor path fully handles this finalization
                     // and moves the lower bound past it.
-                    if self
-                        .apply_floor_anchor(&block, buffer, application, resolver)
-                        .await
-                    {
+                    if self.ingest(&block, buffer, application, resolver).await {
                         continue;
                     }
 
@@ -1469,19 +1572,27 @@ where
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");
 
-                    // Cache the notarization and block.
+                    // Cache the notarization and block, blocking until both are
+                    // durable (or the runtime is shutting down) so the repair
+                    // bookkeeping below never runs ahead of storage.
                     let height = block.height();
-                    self.cache_block(round, digest, block.clone()).await;
-                    self.cache
+                    let block_sync = self
+                        .cache
+                        .put_notarized(round, digest, block.clone().into())
+                        .await;
+                    let notarization_sync = self
+                        .cache
                         .put_notarization(round, digest, notarization)
                         .await;
+                    join(
+                        block_sync.durable(round, "notarized"),
+                        notarization_sync.durable(round, "notarization"),
+                    )
+                    .await;
 
                     // A notarized delivery can carry the pending floor block
                     // after the finalization is cached.
-                    if self
-                        .apply_floor_anchor(&block, buffer, application, resolver)
-                        .await
-                    {
+                    if self.ingest(&block, buffer, application, resolver).await {
                         continue;
                     }
 
@@ -1499,7 +1610,7 @@ where
                             .store_finalization(
                                 height,
                                 digest,
-                                block.clone(),
+                                block,
                                 Some(finalization),
                                 application,
                             )
@@ -1603,17 +1714,6 @@ where
 
     // -------------------- Prunable Storage --------------------
 
-    /// Add a verified block to the prunable archive.
-    async fn cache_verified(
-        &mut self,
-        round: Round,
-        digest: <V::Block as Digestible>::Digest,
-        block: V::Block,
-    ) {
-        self.block_subscriptions.notify(&block);
-        self.cache.put_verified(round, digest, block.into()).await;
-    }
-
     /// If a block previously accepted via [`Message::Proposed`] matches the
     /// supplied `(round, commitment)`, remove and return it.
     fn take_proposed(&mut self, round: Round, commitment: V::Commitment) -> Option<V::Block> {
@@ -1624,17 +1724,6 @@ where
         self.last_proposed_block.take().map(|(_, _, block)| block)
     }
 
-    /// Add a notarized block to the prunable archive.
-    async fn cache_block(
-        &mut self,
-        round: Round,
-        digest: <V::Block as Digestible>::Digest,
-        block: V::Block,
-    ) {
-        self.block_subscriptions.notify(&block);
-        self.cache.put_block(round, digest, block.into()).await;
-    }
-
     /// Sync both finalization archives to durable storage.
     ///
     /// Must be called within the same `select_loop!` arm as any preceding
@@ -1643,6 +1732,7 @@ where
     /// [`Self::try_dispatch_blocks`] must run only after this sync completes.
     /// It also ensures archives are durable before the ack handler advances
     /// the processed floor height. See [`Self::try_dispatch_blocks`] for details.
+    #[tracing::instrument(name = "marshal.actor.sync_finalized", level = "info", skip_all)]
     async fn sync_finalized(&mut self) {
         if let Err(e) = try_join!(
             async {
@@ -1740,7 +1830,6 @@ where
             );
             return false;
         }
-        self.block_subscriptions.notify(&block);
 
         // Convert block to storage format
         let stored: V::StoredBlock = block.into();
@@ -1810,7 +1899,7 @@ where
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
         // Check verified / notarized blocks via cache manager.
-        if let Some(block) = self.cache.find_block(digest).await {
+        if let Some(block) = self.cache.find_block_matching(digest, |_| true).await {
             return Some(block.into());
         }
         // Check finalized blocks.
@@ -1820,19 +1909,15 @@ where
         }
     }
 
-    /// Looks for a block in cache and finalized storage by inner digest, returning
-    /// only blocks that match `predicate`.
-    async fn find_block_in_storage_matching(
+    /// Looks for a block in cache and finalized storage by full consensus commitment.
+    async fn find_block_in_storage_by_commitment(
         &self,
-        digest: <V::Block as Digestible>::Digest,
-        mut predicate: impl FnMut(&V::Block) -> bool,
+        commitment: V::Commitment,
     ) -> Option<V::Block> {
+        let digest = V::commitment_to_inner(commitment);
         if let Some(block) = self
             .cache
-            .find_block_matching(digest, |stored| {
-                let block = stored.clone().into();
-                predicate(&block)
-            })
+            .find_block_matching(digest, |stored| V::stored_commitment(stored) == commitment)
             .await
         {
             return Some(block.into());
@@ -1840,8 +1925,7 @@ where
 
         match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
             Ok(Some(stored)) => {
-                let block = stored.into();
-                predicate(&block).then_some(block)
+                (V::stored_commitment(&stored) == commitment).then(|| stored.into())
             }
             Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
@@ -1875,10 +1959,7 @@ where
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block);
         }
-        self.find_block_in_storage_matching(V::commitment_to_inner(commitment), |block| {
-            V::commitment(block) == commitment
-        })
-        .await
+        self.find_block_in_storage_by_commitment(commitment).await
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
@@ -1892,6 +1973,7 @@ where
     ///
     /// Writes are buffered. Returns `true` if this call wrote repaired blocks and
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
+    #[tracing::instrument(name = "marshal.actor.try_repair_gaps", level = "info", skip_all)]
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,
@@ -1953,10 +2035,16 @@ where
             };
 
             // Attempt to repair the gap backwards from the end of the gap, using
-            // blocks from our local storage.
-            let Some(mut cursor) = self.get_finalized_block(gap_end).await else {
+            // blocks from our local storage. The walkback only needs each
+            // block's height and parent linkage.
+            let Some(cursor) = self.get_finalized_block(gap_end).await else {
                 panic!("gapped block missing that should exist: {gap_end}");
             };
+            let (mut height, mut parent_digest, mut parent_commitment) = (
+                cursor.height(),
+                cursor.parent(),
+                V::parent_commitment(&cursor),
+            );
 
             // Compute the lower bound of the recursive repair. `gap_start` is `Some`
             // if `start` is not in a gap. We add one to it to ensure we don't
@@ -1964,33 +2052,25 @@ where
             let gap_start = gap_start.map(Height::next).unwrap_or(start);
 
             // Iterate backwards, repairing blocks as we go.
-            while cursor.height() > gap_start {
-                let parent_digest = cursor.parent();
-                let parent_commitment = V::parent_commitment(&cursor);
+            while height > gap_start {
                 if let Some(block) = self
                     .find_block_by_commitment(buffer, parent_commitment)
                     .await
                 {
                     let finalization = self.cache.get_finalization_for(parent_digest).await;
+                    let next = (block.height(), block.parent(), V::parent_commitment(&block));
                     wrote |= self
-                        .store_finalization(
-                            block.height(),
-                            parent_digest,
-                            block.clone(),
-                            finalization,
-                            application,
-                        )
+                        .store_finalization(next.0, parent_digest, block, finalization, application)
                         .await;
-                    debug!(height = %block.height(), "repaired block");
-                    cursor = block;
+                    debug!(height = %next.0, "repaired block");
+                    (height, parent_digest, parent_commitment) = next;
                 } else {
                     // Request the next missing commitment.
                     //
                     // SAFETY: Finalized blocks are archived only after the
                     // parent relationship needed for walkback has been
                     // validated by marshal.
-                    let parent_height = cursor
-                        .height()
+                    let parent_height = height
                         .previous()
                         .expect("cursor above gap start has a parent");
                     self.floor

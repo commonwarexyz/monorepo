@@ -155,20 +155,18 @@ where
             on_stopped => {
                 debug!("syncer received stop signal, shutting down");
             },
-            result = &mut state_sync_task => {
-                match result {
-                    Ok((databases, anchor)) => {
-                        Self::publish_artifact(
-                            &mut self.artifact,
-                            &mut self.sync_complete,
-                            databases,
-                            anchor,
-                        );
-                        state_sync_task = None.into();
-                    }
-                    Err(err) => {
-                        panic!("state sync task failed: {err:?}");
-                    }
+            result = &mut state_sync_task => match result {
+                Ok((databases, anchor)) => {
+                    Self::publish_artifact(
+                        &mut self.artifact,
+                        &mut self.sync_complete,
+                        databases,
+                        anchor,
+                    );
+                    state_sync_task = None.into();
+                }
+                Err(err) => {
+                    panic!("state sync task failed: {err:?}");
                 }
             },
             Some(message) = self.mailbox.recv() else {

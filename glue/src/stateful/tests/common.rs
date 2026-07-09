@@ -6,9 +6,22 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{ed25519, sha256, Digestible};
 use commonware_runtime::{buffer::paged::CacheRef, Quota};
-use commonware_storage::archive::immutable;
+use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use std::num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::{
+    future::Future,
+    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+    pin::Pin,
+    sync::Arc,
+};
+
+/// Type-erased accessor returning the oldest operation location still retained
+/// by a validator's database set (the minimum across all databases).
+///
+/// Used by pruning properties to observe that QMDB actually discarded
+/// historical operations through the live actor.
+pub(crate) type OldestRetained =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = u64> + Send>> + Send + Sync>;
 
 pub(super) const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
 pub(super) const NAMESPACE: &[u8] = b"stateful_e2e_test";
@@ -28,30 +41,28 @@ pub(super) fn digest_to_u64(d: &sha256::Digest) -> u64 {
     u64::from_be_bytes(bytes[..8].try_into().unwrap())
 }
 
+/// Prunable archive config so marshal can actually prune finalized history.
+///
+/// Production marshals back finalized blocks and certificates with prunable
+/// archives; immutable archives never prune, so the glue e2e tests use prunable
+/// archives to exercise marshal pruning.
 pub(super) fn archive_config<C>(
     prefix: &str,
     name: &str,
     page_cache: CacheRef,
     codec_config: C,
-) -> immutable::Config<C> {
-    immutable::Config {
-        metadata_partition: format!("{prefix}-{name}-metadata"),
-        freezer_table_partition: format!("{prefix}-{name}-freezer-table"),
-        freezer_table_initial_size: 64,
-        freezer_table_resize_frequency: 10,
-        freezer_table_resize_chunk_size: 10,
-        freezer_key_partition: format!("{prefix}-{name}-freezer-key"),
-        freezer_key_page_cache: page_cache,
-        freezer_value_partition: format!("{prefix}-{name}-freezer-value"),
-        freezer_value_target_size: 1024,
-        freezer_value_compression: None,
-        ordinal_partition: format!("{prefix}-{name}-ordinal"),
-        items_per_section: NZU64!(10),
+) -> prunable::Config<TwoCap, C> {
+    prunable::Config {
+        translator: TwoCap,
+        key_partition: format!("{prefix}-{name}-key"),
+        key_page_cache: page_cache,
+        value_partition: format!("{prefix}-{name}-value"),
+        compression: None,
         codec_config,
+        items_per_section: NZU64!(10),
+        key_write_buffer: IO_BUFFER_SIZE,
+        value_write_buffer: IO_BUFFER_SIZE,
         replay_buffer: IO_BUFFER_SIZE,
-        freezer_key_write_buffer: IO_BUFFER_SIZE,
-        freezer_value_write_buffer: IO_BUFFER_SIZE,
-        ordinal_write_buffer: IO_BUFFER_SIZE,
     }
 }
 
@@ -64,6 +75,7 @@ pub(crate) struct MockValidatorState<V: Variant> {
     pub(super) marshal: marshal::core::Mailbox<MockScheme<ed25519::PublicKey>, V>,
     pub(super) state_sync_entries: u64,
     pub(super) state_sync_height: Option<u64>,
+    pub(super) oldest_retained: OldestRetained,
 }
 
 impl<V: Variant> PartialEq for MockValidatorState<V> {
@@ -91,6 +103,10 @@ where
 
     pub(crate) const fn state_sync_entries(&self) -> u64 {
         self.state_sync_entries
+    }
+
+    pub(crate) async fn oldest_retained(&self) -> u64 {
+        (self.oldest_retained)().await
     }
 }
 

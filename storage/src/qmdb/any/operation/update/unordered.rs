@@ -34,6 +34,10 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type Key = K;
     type Value = V::Value;
     type ValueEncoding = V;
+    type Cached = ();
+
+    /// An unordered delete just emits a `Delete` at the resolved location.
+    const STAGES_DELETES: bool = true;
 
     fn key(&self) -> &K {
         &self.0
@@ -42,6 +46,8 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     fn value(&self) -> &V::Value {
         &self.1
     }
+
+    fn cached(&self) {}
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[key:{} value:{}]", hex(&self.0), hex(&self.1.encode()))

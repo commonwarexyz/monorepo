@@ -948,12 +948,12 @@ mod tests {
         // Property: incremental run_count tracking from `insert` must agree with the
         // bulk `count_runs` scan over the same word array.
         use crate::test_rng;
-        use rand::Rng;
+        use rand::RngExt as _;
 
         let mut rng = test_rng();
         let mut b = Bitmap::new();
         for _ in 0..2000 {
-            let v: u16 = rng.gen();
+            let v: u16 = rng.random();
             b.insert(v);
         }
         // The cached field is what callers see; the scan is the ground truth.

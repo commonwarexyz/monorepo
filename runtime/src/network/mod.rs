@@ -452,7 +452,7 @@ mod tests {
 
             // Sink should be poisoned after cancellation.
             assert!(matches!(
-                sink.send(b"after".as_slice()).await,
+                sink.send(IoBuf::from(b"after")).await,
                 Err(crate::Error::Closed)
             ));
             canceled_sender
@@ -521,7 +521,7 @@ mod tests {
                 .await
                 .expect("Failed to dial server");
 
-            sink.send([1; 50].as_slice())
+            sink.send(vec![1u8; 50])
                 .await
                 .expect("Failed to send partial payload");
             drop(sink);
@@ -592,7 +592,7 @@ mod tests {
             for _ in 0..10 {
                 // A peer close is not guaranteed to make the next send fail
                 // immediately, so retry briefly until the error becomes visible.
-                match sink.send([9u8].as_slice()).await {
+                match sink.send(vec![9u8]).await {
                     Ok(()) => tokio::time::sleep(Duration::from_millis(5)).await,
                     Err(send_err) => {
                         err = Some(send_err);
@@ -603,7 +603,7 @@ mod tests {
             let err = err.expect("send should fail after the peer closes");
             assert!(matches!(err, crate::Error::SendFailed));
             assert!(matches!(
-                sink.send([9u8].as_slice()).await,
+                sink.send(vec![9u8]).await,
                 Err(crate::Error::Closed)
             ));
 

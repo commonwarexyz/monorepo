@@ -2,22 +2,22 @@
 
 use super::{operation::Operation, Keyless};
 use crate::{
-    journal::{authenticated, contiguous::Mutable, Error as JournalError},
+    journal::{authenticated, contiguous::Mutable},
     merkle::{Family, Location},
     qmdb::{
         any::value::ValueEncoding,
         batch_chain::{self, Bounds},
         Error,
     },
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::Strategy;
 use std::sync::{Arc, Weak};
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] in the keyless-batch chain.
-type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest, V, S>>;
+type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, DigestOf<H>, V, S>>;
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
@@ -118,7 +118,7 @@ where
     pub(super) fn new<E, C>(keyless: &Keyless<F, E, V, C, H, S>, journal_size: u64) -> Self
     where
         E: Context,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
         Self {
             journal_batch: keyless.journal.new_batch(),
@@ -150,7 +150,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
         let loc_val = *loc;
 
@@ -189,13 +189,13 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
         if locs.is_empty() {
             return Ok(Vec::new());
         }
         assert!(
-            locs.windows(2).all(|w| w[0] < w[1]),
+            locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
         let mut results = Vec::with_capacity(locs.len());
@@ -248,6 +248,7 @@ where
     /// be monotonically non-decreasing across the chain (enforced on `apply_batch`) and must
     /// be at most this batch's own commit location (`total_size - 1`). A floor past the commit
     /// would let a later `prune(floor)` remove the last readable commit.
+    #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
     pub fn merkleize<E, C>(
         self,
         db: &Keyless<F, E, V, C, H, S>,
@@ -256,10 +257,8 @@ where
     ) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
-        let base = self.base_size;
-
         // Build operations: one Append per value, then Commit.
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
         for value in self.appends {
@@ -267,23 +266,23 @@ where
         }
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
-        let total_size = base + ops.len() as u64;
+        let total_size = self.base_size + ops.len() as u64;
 
-        // Add operations to the journal batch and merkleize.
-        let mut journal_batch = self.journal_batch;
-        for op in &ops {
-            journal_batch = journal_batch.add(op.clone());
-        }
+        // Hash before `with_mem` borrows committed Merkle state under its read lock.
+        let journal_batch = self.journal_batch.add_many(ops);
+        let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
+
+        // Compute the root.
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
         let root = db
             .journal
             .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
             .expect("inactive_peaks computed from batch size");
 
+        // Compute the batch chain bounds.
         let ancestors =
             batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors());
         let ancestors = batch_chain::collect_ancestor_bounds(
@@ -330,7 +329,7 @@ where
     where
         E: Context,
         H: Hasher<Digest = D>,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
         let loc_val = *loc;
 
@@ -358,13 +357,13 @@ where
     where
         E: Context,
         H: Hasher<Digest = D>,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
         if locs.is_empty() {
             return Ok(Vec::new());
         }
         assert!(
-            locs.windows(2).all(|w| w[0] < w[1]),
+            locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
         let mut results = Vec::with_capacity(locs.len());

@@ -18,7 +18,7 @@ use commonware_storage::{
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
-    sync::AsyncRwLock,
+    sync::TracedAsyncRwLock,
 };
 use futures::future;
 use rand::Rng;
@@ -30,8 +30,8 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Op<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Op;
-type DatabaseRoot<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Digest;
+type Op<DB> = <Arc<TracedAsyncRwLock<DB>> as SyncResolver>::Op;
+type DatabaseRoot<DB> = <Arc<TracedAsyncRwLock<DB>> as SyncResolver>::Digest;
 type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
 type Pending<F, Op, D> = oneshot::Sender<Result<FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
 type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
@@ -50,7 +50,7 @@ where
     pub blocker: B,
 
     /// Local database used to serve incoming requests when available.
-    pub database: Option<Arc<AsyncRwLock<DB>>>,
+    pub database: Option<Arc<TracedAsyncRwLock<DB>>>,
 
     /// Maximum size of resolver mailbox backlogs.
     pub mailbox_size: NonZeroUsize,
@@ -82,7 +82,7 @@ enum State<DB> {
     /// Database is not attached yet.
     NoDb,
     /// Database is attached and can serve incoming requests.
-    HasDb(Arc<AsyncRwLock<DB>>),
+    HasDb(Arc<TracedAsyncRwLock<DB>>),
 }
 
 /// An action dispatched by incoming mailbox messages.
@@ -100,7 +100,7 @@ where
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Arc<AsyncRwLock<DB>>: SyncResolver<Family = F>,
+    Arc<TracedAsyncRwLock<DB>>: SyncResolver<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
@@ -118,7 +118,7 @@ where
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Arc<AsyncRwLock<DB>>: SyncResolver<Family = F>,
+    Arc<TracedAsyncRwLock<DB>>: SyncResolver<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
@@ -402,7 +402,7 @@ mod tests {
         qmdb::any::{unordered::fixed, FixedConfig},
         translator::TwoCap,
     };
-    use commonware_utils::{channel::oneshot, sync::AsyncRwLock, NZUsize, NZU16, NZU64};
+    use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
     use std::{num::NonZeroU64, sync::Arc, time::Duration};
 
     #[derive(Clone, Debug)]
@@ -441,7 +441,7 @@ mod tests {
         TwoCap,
         Sequential,
     >;
-    type TestOp = <Arc<AsyncRwLock<TestDb>> as SyncResolver>::Op;
+    type TestOp = <Arc<TracedAsyncRwLock<TestDb>> as SyncResolver>::Op;
 
     type TestActor = Actor<
         deterministic::Context,
@@ -453,7 +453,7 @@ mod tests {
     >;
 
     fn test_config(
-        database: Option<Arc<AsyncRwLock<TestDb>>>,
+        database: Option<Arc<TracedAsyncRwLock<TestDb>>>,
     ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestDb> {
         Config {
             peer_provider: DummyProvider,
@@ -506,14 +506,18 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
         }
     }
 
-    async fn init_db(context: deterministic::Context, suffix: &str) -> Arc<AsyncRwLock<TestDb>> {
+    async fn init_db(
+        context: deterministic::Context,
+        suffix: &str,
+    ) -> Arc<TracedAsyncRwLock<TestDb>> {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context))
             .await
             .expect("db init should succeed");
-        Arc::new(AsyncRwLock::new(db))
+        Arc::new(TracedAsyncRwLock::new("test", db))
     }
 
     fn encoded_fetch_payload() -> Bytes {
@@ -547,7 +551,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-after-attach").await;
-            let op_count = db.read().await.bounds().await.end;
+            let op_count = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
             let (response_tx, response_rx) = oneshot::channel();
@@ -567,7 +571,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
-            let op_count = db.read().await.bounds().await.end;
+            let op_count = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
             let request = handler::Request {

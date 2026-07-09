@@ -1,0 +1,18 @@
+[package]
+name = "span_name_style"
+version = "0.0.1"
+description = "Verify tracing span names follow the repository style guide."
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dylint_linting = "6.0.0"
+
+[dev-dependencies]
+dylint_testing = "6.0.0"
+
+[package.metadata.rust-analyzer]
+rustc_private = true
