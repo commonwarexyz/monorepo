@@ -5,16 +5,18 @@
 # dependencies = []
 # ///
 """
-Partition stdin lines deterministically, balanced to within one entry.
+Partition stdin lines deterministically, with no partition exceeding its
+fair share.
 
 Reads lines from stdin and prints only those assigned to the requested
 partition. Assignment uses rendezvous hashing with bounded loads: every entry
 ranks the partitions by `sha256(entry || partition)` and takes the
-highest-ranked partition that still has capacity `ceil(n / M)`. This keeps
-partition sizes balanced to within one entry while preserving most of the
-stability of plain hashing: adding or removing an entry moves that entry plus
-at most a short chain of capacity overflows, rather than reshuffling the
-whole set.
+highest-ranked partition that still has capacity `ceil(n / M)`. The capacity
+bound caps the largest partition (and thus the job tail) at `ceil(n / M)`
+entries while preserving most of the stability of plain hashing: adding or
+removing an entry moves that entry plus at most a short chain of capacity
+overflows, rather than reshuffling the whole set. Only the maximum is
+bounded, so a partition can fall more than one entry below the others.
 
 Usage:
   - <command> | hash_partition.py N/M
@@ -24,7 +26,10 @@ M=1 is a pass-through. Blank input lines are skipped and duplicates are
 assigned once.
 
 Entries are processed in an order derived from their own hashes, so the
-outcome is independent of input order.
+outcome is independent of input order. Assignment does depend on the full
+input set, however. Parallel invocations selecting different partitions of
+the same set must be fed identical input, or an entry can be assigned to
+multiple partitions or to none.
 """
 
 import hashlib
