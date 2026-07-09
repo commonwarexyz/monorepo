@@ -1,6 +1,6 @@
 //! Storage conformance helpers.
 
-use crate::{deterministic, Runner, Supervisor as _};
+use crate::{Runner, Supervisor as _, deterministic};
 use commonware_conformance::Conformance;
 use core::{fmt::Debug, marker::PhantomData};
 use std::future::Future;

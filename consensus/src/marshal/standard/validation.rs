@@ -1,4 +1,5 @@
 use crate::{
+    Application, Block, Epochable,
     marshal::{
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
@@ -8,18 +9,17 @@ use crate::{
     },
     simplex::types::Context,
     types::Epocher,
-    Application, Block, Epochable,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{
-    telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
     Clock, Metrics, Spawner,
+    telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
 };
 use commonware_utils::channel::oneshot;
 use rand_core::Rng;
 use std::sync::Arc;
-use tracing::{debug, info_span, Instrument as _};
+use tracing::{Instrument as _, debug, info_span};
 
 /// Validation failures for standard verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,7 +237,7 @@ mod tests {
     use crate::types::Height;
     use bytes::{Buf, BufMut};
     use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Digestible, Hasher, Sha256};
+    use commonware_cryptography::{Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct TestBlock {

@@ -1,11 +1,11 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256, Digest, Sha256};
+use commonware_cryptography::{Digest, Sha256, sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{deterministic, Runner, Supervisor as _};
+use commonware_runtime::{Runner, Supervisor as _, deterministic};
 use commonware_storage::{
-    merkle::Bagging::ForwardFold, Context, MerkleizedBitMap, UnmerkleizedBitMap,
+    Context, MerkleizedBitMap, UnmerkleizedBitMap, merkle::Bagging::ForwardFold,
 };
 use commonware_utils::bitmap::BitMap;
 use libfuzzer_sys::fuzz_target;

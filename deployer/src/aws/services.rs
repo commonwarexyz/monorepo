@@ -1,8 +1,8 @@
 //! Service configuration for Prometheus, Loki, Grafana, Promtail, tracer, and a caller-provided binary
 
 use crate::aws::{
-    s3::{DEPLOYMENTS_PREFIX, TOOLS_BINARIES_PREFIX, TOOLS_CONFIGS_PREFIX, WGET},
     Architecture,
+    s3::{DEPLOYMENTS_PREFIX, TOOLS_BINARIES_PREFIX, TOOLS_CONFIGS_PREFIX, WGET},
 };
 
 // Binary artifacts and user SSH state live under this directory. NVMe-backed instances mount
@@ -355,7 +355,9 @@ pub(crate) fn samply_bin_s3_key(version: &str, architecture: Architecture) -> St
         Architecture::Arm64 => "aarch64",
         Architecture::X86_64 => "x86_64",
     };
-    format!("{TOOLS_BINARIES_PREFIX}/samply/{version}/linux-{arch}/samply-{arch}-unknown-linux-gnu.tar.xz")
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/samply/{version}/linux-{arch}/samply-{arch}-unknown-linux-gnu.tar.xz"
+    )
 }
 
 pub(crate) fn logrotate_bin_s3_key(version: &str, architecture: Architecture) -> String {
@@ -1386,7 +1388,9 @@ mod tests {
         );
         assert_eq!(
             grafana_node_exporter_dashboard_s3_key(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
-            format!("tools/configs/{version}/grafana/node-exporter-full-revision-{GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION}.json")
+            format!(
+                "tools/configs/{version}/grafana/node-exporter-full-revision-{GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION}.json"
+            )
         );
         assert_eq!(
             loki_config_s3_key(),

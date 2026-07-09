@@ -2,9 +2,9 @@
 
 use core::ops::{Deref, DerefMut};
 use futures::{
+    StreamExt,
     future::{self, AbortHandle, Abortable, Aborted},
     stream::{FuturesUnordered, SelectNextSome},
-    StreamExt,
 };
 use pin_project::pin_project;
 use std::{future::Future, pin::Pin, task::Poll};
@@ -199,13 +199,13 @@ mod tests {
     use crate::channel::oneshot;
     use futures::{
         executor::block_on,
-        future::{self, select, Either},
+        future::{self, Either, select},
         pin_mut,
     };
     use std::{
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc,
+            atomic::{AtomicBool, Ordering},
         },
         thread,
         time::Duration,

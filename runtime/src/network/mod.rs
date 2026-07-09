@@ -19,7 +19,7 @@ mod tests {
     use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
     use commonware_macros::select;
     use commonware_utils::sync::Barrier;
-    use futures::{join, FutureExt};
+    use futures::{FutureExt, join};
     use std::{net::SocketAddr, sync::Arc, time::Duration};
     use tokio::{sync::oneshot, task::JoinSet};
 

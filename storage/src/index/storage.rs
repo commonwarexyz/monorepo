@@ -161,11 +161,11 @@ impl<'a, K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: Buil
 }
 
 impl<
-        K: Hash + Eq + Copy + Send + Sync,
-        V: Send + Sync,
-        E: IndexEntry<V, Key = K>,
-        S: BuildHasher + Send + Sync,
-    > CursorTrait for Cursor<'_, K, V, E, S>
+    K: Hash + Eq + Copy + Send + Sync,
+    V: Send + Sync,
+    E: IndexEntry<V, Key = K>,
+    S: BuildHasher + Send + Sync,
+> CursorTrait for Cursor<'_, K, V, E, S>
 {
     type Value = V;
 

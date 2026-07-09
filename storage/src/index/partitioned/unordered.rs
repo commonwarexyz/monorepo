@@ -2,8 +2,8 @@
 
 use crate::{
     index::{
-        partitioned::partition_index_and_sub_key, unordered::Index as UnorderedIndex,
-        Unordered as UnorderedTrait,
+        Unordered as UnorderedTrait, partitioned::partition_index_and_sub_key,
+        unordered::Index as UnorderedIndex,
     },
     translator::Translator,
 };

@@ -78,9 +78,9 @@ commonware_macros::stability_scope!(BETA {
                 future::{self, Either},
             };
             use rayon::{
+                ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
                 iter::{IntoParallelIterator, ParallelIterator},
                 slice::ParallelSliceMut,
-                ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
             };
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
@@ -602,12 +602,7 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[track_caller]
-        fn run<R, SEQ, PAR>(
-            &self,
-            len: usize,
-            serial: SEQ,
-            parallel: PAR,
-        ) -> R
+        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
         where
             R: Send,
             SEQ: FnOnce() -> R + Send,
@@ -617,12 +612,7 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[track_caller]
-        fn try_run<R, E, SEQ, PAR>(
-            &self,
-            len: usize,
-            serial: SEQ,
-            parallel: PAR,
-        ) -> Result<R, E>
+        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
         where
             R: Send,
             E: Send,
@@ -870,7 +860,6 @@ commonware_macros::stability_scope!(BETA {
         {
             items.sort_by(compare);
         }
-
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
@@ -1049,12 +1038,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         #[track_caller]
-        fn run<R, SEQ, PAR>(
-            &self,
-            len: usize,
-            serial: SEQ,
-            parallel: PAR,
-        ) -> R
+        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
         where
             R: Send,
             SEQ: FnOnce() -> R + Send,
@@ -1067,12 +1051,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         #[track_caller]
-        fn try_run<R, E, SEQ, PAR>(
-            &self,
-            len: usize,
-            serial: SEQ,
-            parallel: PAR,
-        ) -> Result<R, E>
+        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
         where
             R: Send,
             E: Send,
@@ -1105,7 +1084,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.fold_init(items, init, identity, fold_op, reduce_op),
+                policy::Execution::Serial => {
+                    Sequential.fold_init(items, init, identity, fold_op, reduce_op)
+                }
                 policy::Execution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
@@ -1130,18 +1111,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(
-                items.len(),
-                1,
-                |execution| {
-                    match execution {
-                        policy::Execution::Serial => Sequential.map_collect_vec(items, map_op),
-                        policy::Execution::Parallel => self
-                            .thread_pool
-                            .install(|| items.into_par_iter().map(map_op).collect()),
-                    }
-                },
-            )
+            self.execute(items.len(), 1, |execution| match execution {
+                policy::Execution::Serial => Sequential.map_collect_vec(items, map_op),
+                policy::Execution::Parallel => self
+                    .thread_pool
+                    .install(|| items.into_par_iter().map(map_op).collect()),
+            })
         }
 
         #[track_caller]
@@ -1153,18 +1128,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             E: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.try_execute(
-                items.len(),
-                1,
-                |execution| {
-                    match execution {
-                        policy::Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
-                        policy::Execution::Parallel => self
-                            .thread_pool
-                            .install(|| items.into_par_iter().map(map_op).collect()),
-                    }
-                },
-            )
+            self.try_execute(items.len(), 1, |execution| match execution {
+                policy::Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
+                policy::Execution::Parallel => self
+                    .thread_pool
+                    .install(|| items.into_par_iter().map(map_op).collect()),
+            })
         }
 
         #[track_caller]
@@ -1177,18 +1146,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(
-                items.len(),
-                1,
-                |execution| {
-                    match execution {
-                        policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                        policy::Execution::Parallel => self
-                            .thread_pool
-                            .install(|| items.into_par_iter().map_init(init, map_op).collect()),
-                    }
-                },
-            )
+            self.execute(items.len(), 1, |execution| match execution {
+                policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                policy::Execution::Parallel => self
+                    .thread_pool
+                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+            })
         }
 
         #[track_caller]
@@ -1207,20 +1170,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(
-                items.len(),
-                multiplier,
-                |execution| {
-                    match execution {
-                        policy::Execution::Serial => {
-                            Sequential.map_init_collect_vec(items, init, map_op)
-                        }
-                        policy::Execution::Parallel => self
-                            .thread_pool
-                            .install(|| items.into_par_iter().map_init(init, map_op).collect()),
-                    }
-                },
-            )
+            self.execute(items.len(), multiplier, |execution| match execution {
+                policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                policy::Execution::Parallel => self
+                    .thread_pool
+                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+            })
         }
 
         #[track_caller]
@@ -1241,7 +1196,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.try_execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.try_fold(items, identity, fold_op, reduce_op),
+                policy::Execution::Serial => {
+                    Sequential.try_fold(items, identity, fold_op, reduce_op)
+                }
                 policy::Execution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
@@ -1267,16 +1224,13 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            self.execute(
-                items.len(),
-                1,
-                |execution| match execution {
-                    policy::Execution::Serial => Sequential.sort_by(items, compare),
-                    policy::Execution::Parallel => self.thread_pool.install(|| items.par_sort_by(compare)),
-                },
-            );
+            self.execute(items.len(), 1, |execution| match execution {
+                policy::Execution::Serial => Sequential.sort_by(items, compare),
+                policy::Execution::Parallel => {
+                    self.thread_pool.install(|| items.par_sort_by(compare))
+                }
+            });
         }
-
     }
 });
 
@@ -1288,8 +1242,8 @@ mod test {
     use proptest::prelude::*;
     use rayon::ThreadPoolBuilder;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     fn parallel_strategy() -> Rayon {
@@ -1319,11 +1273,7 @@ mod test {
 
     fn map_partition_from_same_callsite(strategy: &Rayon, len: usize) {
         let _: (Vec<_>, Vec<_>) = strategy.map_partition_collect_vec(0..len, |x| {
-            if x % 2 == 0 {
-                (x, Some(x))
-            } else {
-                (x, None)
-            }
+            if x % 2 == 0 { (x, Some(x)) } else { (x, None) }
         });
     }
 
@@ -1420,11 +1370,7 @@ mod test {
         );
         let _: usize = strategy.run(16, || 1, || 2);
         let _: (Vec<_>, Vec<_>) = strategy.map_partition_collect_vec(0..16, |x| {
-            if x % 2 == 0 {
-                (x, Some(x))
-            } else {
-                (x, None)
-            }
+            if x % 2 == 0 { (x, Some(x)) } else { (x, None) }
         });
         let _: (i32, i32) = strategy.join(|| 1, || 2);
         let mut sortable = vec![3, 2, 1];
@@ -1503,11 +1449,7 @@ mod test {
 
         map_partition_from_same_callsite(&strategy, 16);
         let _: (Vec<_>, Vec<_>) = strategy.map_partition_collect_vec(0..16, |x| {
-            if x % 2 == 0 {
-                (x, Some(x))
-            } else {
-                (x, None)
-            }
+            if x % 2 == 0 { (x, Some(x)) } else { (x, None) }
         });
 
         assert_eq!(policy_len(&strategy), 2);
@@ -1740,11 +1682,7 @@ mod test {
         let calls = AtomicUsize::new(0);
         let result: Result<Vec<usize>, usize> = Sequential.try_map_collect_vec(0..10, |i| {
             calls.fetch_add(1, Ordering::Relaxed);
-            if i == 3 {
-                Err(i)
-            } else {
-                Ok(i)
-            }
+            if i == 3 { Err(i) } else { Ok(i) }
         });
 
         assert_eq!(result, Err(3));
@@ -1753,14 +1691,8 @@ mod test {
 
     #[test]
     fn try_map_collect_vec_parallel_returns_an_error() {
-        let result: Result<Vec<usize>, usize> =
-            parallel_strategy().try_map_collect_vec(0..128, |i| {
-                if i == 17 || i == 42 {
-                    Err(i)
-                } else {
-                    Ok(i)
-                }
-            });
+        let result: Result<Vec<usize>, usize> = parallel_strategy()
+            .try_map_collect_vec(0..128, |i| if i == 17 || i == 42 { Err(i) } else { Ok(i) });
 
         assert!(matches!(result, Err(17 | 42)));
     }

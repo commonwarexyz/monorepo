@@ -1,24 +1,24 @@
 //! Simulate mechanism performance under realistic network conditions.
 
-use clap::{value_parser, Arg, Command as ClapCommand};
+use clap::{Arg, Command as ClapCommand, value_parser};
 use colored::Colorize;
-use commonware_cryptography::{ed25519, Signer};
+use commonware_cryptography::{Signer, ed25519};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     simulated::{Config, Link, Network, Receiver, Sender},
-    utils::codec::{wrap, WrappedReceiver, WrappedSender},
+    utils::codec::{WrappedReceiver, WrappedSender, wrap},
 };
 use commonware_runtime::{
-    deterministic, BufferPool, BufferPooler, Clock, Handle, Metrics, Network as RNetwork, Quota,
-    Runner, Spawner,
+    BufferPool, BufferPooler, Clock, Handle, Metrics, Network as RNetwork, Quota, Runner, Spawner,
+    deterministic,
 };
 use commonware_utils::{
-    channel::{mpsc, oneshot},
     NZUsize,
+    channel::{mpsc, oneshot},
 };
 use estimator::{
-    calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
-    mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
+    Command, Distribution, Latencies, RegionConfig, calculate_proposer_region, calculate_threshold,
+    count_peers, crate_version, get_latency_data, mean, median, parse_task, std_dev,
 };
 use futures::future::try_join_all;
 use rand_core::Rng;
@@ -913,8 +913,8 @@ fn print_aggregated_regional_statistics(observations: &Observations, line_num: u
         let overall_median = median(&mut all_lats_sorted);
         let overall_std = std_dev(&all_lats).unwrap_or(0.0);
         let stat_line = format!(
-                "    [all] mean: {overall_mean:.2}ms (stdv: {overall_std:.2}ms) | median: {overall_median:.2}ms"
-            );
+            "    [all] mean: {overall_mean:.2}ms (stdv: {overall_std:.2}ms) | median: {overall_median:.2}ms"
+        );
         println!("{}", stat_line.white());
     }
 }

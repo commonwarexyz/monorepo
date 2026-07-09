@@ -1,30 +1,30 @@
 use crate::stateful::{
+    Application,
     actor::{
         core::mailbox::Message,
         processor::{FinalizeStatus, Processor},
     },
-    Application,
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
+    Heightable,
     marshal::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
     },
     types::Height,
-    Heightable,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{channel::fallible::OneshotExt, Acknowledgement};
+use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt};
 use futures::{
-    future::{ready, Either},
     FutureExt,
+    future::{Either, ready},
 };
 use rand_core::Rng;
 use std::sync::mpsc::TryRecvError;
-use tracing::{debug, info_span, Instrument as _};
+use tracing::{Instrument as _, debug, info_span};
 
 /// A single unit of work for the processing loop: either a mailbox message to
 /// handle or a deferred prune to run while the mailbox is idle.
@@ -149,10 +149,8 @@ where
                             acknowledgement.acknowledge();
                             return None;
                         }
-                        let (status, prune) = self
-                            .processor
-                            .finalize(&self.context, block.as_ref())
-                            .await;
+                        let (status, prune) =
+                            self.processor.finalize(&self.context, block.as_ref()).await;
                         if let FinalizeStatus::Persisted { height } = status {
                             debug!(height = height.get(), "persisted finalized database batch");
                         }

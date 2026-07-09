@@ -78,18 +78,18 @@
 //! ```
 
 use crate::{
-    index::{unordered::Index, Unordered as _},
+    Context,
+    index::{Unordered as _, unordered::Index},
     journal::{
         authenticated,
         contiguous::{Contiguous, Mutable},
     },
-    merkle::{full::Config as MerkleConfig, Family, Location, Proof},
+    merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        any::ValueEncoding, build_snapshot_from_log, metrics::Metrics, operation::Key,
-        single_operation_root, Error,
+        Error, any::ValueEncoding, build_snapshot_from_log, metrics::Metrics, operation::Key,
+        single_operation_root,
     },
     translator::Translator,
-    Context,
 };
 use ahash::AHashSet;
 use commonware_codec::EncodeShared;
@@ -398,11 +398,7 @@ where
             return Err(Error::UnexpectedData(loc));
         };
 
-        if k != *key {
-            Ok(None)
-        } else {
-            Ok(Some(v))
-        }
+        if k != *key { Ok(None) } else { Ok(Some(v)) }
     }
 
     /// Get the metadata associated with the last commit.
@@ -762,8 +758,8 @@ pub(super) mod test {
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
-    use commonware_cryptography::{sha256, sha256::Digest, Sha256};
-    use commonware_runtime::{deterministic, Supervisor as _};
+    use commonware_cryptography::{Sha256, sha256, sha256::Digest};
+    use commonware_runtime::{Supervisor as _, deterministic};
     use commonware_utils::NZU64;
     use core::{future::Future, pin::Pin};
     use std::ops::Range;

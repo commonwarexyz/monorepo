@@ -82,15 +82,15 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::{
-    frame::{
-        decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at, FrameInfo,
-    },
     Error,
+    frame::{
+        FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
+    },
 };
-use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
+use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Replay, Writer},
     Blob, Buf, Handle, IoBuf, Metrics, Storage,
+    buffer::paged::{CacheRef, Replay, Writer},
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
@@ -628,11 +628,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{varint::UInt, EncodeSize, Write as _};
+    use commonware_codec::{EncodeSize, Write as _, varint::UInt};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, BufMut, Runner, Storage, Supervisor as _};
-    use commonware_utils::{NZUsize, NZU16};
-    use futures::{pin_mut, StreamExt};
+    use commonware_runtime::{Blob, BufMut, Runner, Storage, Supervisor as _, deterministic};
+    use commonware_utils::{NZU16, NZUsize};
+    use futures::{StreamExt, pin_mut};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -862,11 +862,13 @@ mod tests {
             //
             // Note: We don't remove the partition, so this does not error
             // and instead returns an empty list of blobs.
-            assert!(context
-                .scan(&cfg.partition)
-                .await
-                .expect("Failed to list blobs")
-                .is_empty());
+            assert!(
+                context
+                    .scan(&cfg.partition)
+                    .await
+                    .expect("Failed to list blobs")
+                    .is_empty()
+            );
         });
     }
 

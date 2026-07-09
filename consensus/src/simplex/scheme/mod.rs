@@ -42,11 +42,11 @@ use crate::simplex::types::Subject;
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{
+    Digest,
     certificate::{
         Namespace as CertificateNamespace, Scheme as CertificateScheme,
         Subject as CertificateSubject, Verifier,
     },
-    Digest,
 };
 use commonware_utils::union;
 

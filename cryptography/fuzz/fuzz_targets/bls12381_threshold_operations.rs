@@ -3,13 +3,13 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
-    group::{Share, G1, G2},
+    group::{G1, G2, Share},
     ops::threshold,
     sharing::Sharing,
     variant::{MinPk, MinSig, PartialSignature},
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{test_rng, N3f1, Participant};
+use commonware_utils::{N3f1, Participant, test_rng};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroUsize;
 

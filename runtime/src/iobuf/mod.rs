@@ -21,7 +21,7 @@ mod pool;
 pub(crate) use buffer::AlignedBuffer;
 use buffer::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
+use commonware_codec::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
 use crossbeam_utils::CachePadded;
 pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
 use std::{collections::VecDeque, io::IoSlice, mem::align_of, num::NonZeroUsize, ops::RangeBounds};
@@ -609,15 +609,18 @@ impl IoBufMut {
     /// Panics if `len > capacity()`.
     #[inline]
     pub unsafe fn set_len(&mut self, len: usize) {
-        assert!(
-            len <= self.capacity(),
-            "set_len({len}) exceeds capacity({})",
-            self.capacity()
-        );
-        match &mut self.inner {
-            IoBufMutInner::Bytes(b) => b.set_len(len),
-            IoBufMutInner::Aligned(b) => b.set_len(len),
-            IoBufMutInner::Pooled(b) => b.set_len(len),
+        // SAFETY: The caller guarantees that all bytes in `0..len` are initialized.
+        unsafe {
+            assert!(
+                len <= self.capacity(),
+                "set_len({len}) exceeds capacity({})",
+                self.capacity()
+            );
+            match &mut self.inner {
+                IoBufMutInner::Bytes(b) => b.set_len(len),
+                IoBufMutInner::Aligned(b) => b.set_len(len),
+                IoBufMutInner::Pooled(b) => b.set_len(len),
+            }
         }
     }
 
@@ -805,10 +808,13 @@ unsafe impl BufMut for IoBufMut {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        match &mut self.inner {
-            IoBufMutInner::Bytes(b) => b.advance_mut(cnt),
-            IoBufMutInner::Aligned(b) => b.advance_mut(cnt),
-            IoBufMutInner::Pooled(b) => b.advance_mut(cnt),
+        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunk.
+        unsafe {
+            match &mut self.inner {
+                IoBufMutInner::Bytes(b) => b.advance_mut(cnt),
+                IoBufMutInner::Aligned(b) => b.advance_mut(cnt),
+                IoBufMutInner::Pooled(b) => b.advance_mut(cnt),
+            }
         }
     }
 
@@ -1791,18 +1797,21 @@ impl IoBufsMut {
     ///
     /// Panics if `len` exceeds total capacity.
     pub(crate) unsafe fn set_len(&mut self, len: usize) {
-        let capacity = self.capacity();
-        assert!(
-            len <= capacity,
-            "set_len({len}) exceeds capacity({capacity})"
-        );
-        let mut remaining = len;
-        self.for_each_chunk_mut(|buf| {
-            let cap = buf.capacity();
-            let to_set = remaining.min(cap);
-            buf.set_len(to_set);
-            remaining -= to_set;
-        });
+        // SAFETY: The caller guarantees that all bytes in `0..len` are initialized.
+        unsafe {
+            let capacity = self.capacity();
+            assert!(
+                len <= capacity,
+                "set_len({len}) exceeds capacity({capacity})"
+            );
+            let mut remaining = len;
+            self.for_each_chunk_mut(|buf| {
+                let cap = buf.capacity();
+                let to_set = remaining.min(cap);
+                buf.set_len(to_set);
+                remaining -= to_set;
+            });
+        }
     }
 
     /// Copy data from a slice into the buffers.
@@ -1958,31 +1967,34 @@ unsafe impl BufMut for IoBufsMut {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        match &mut self.inner {
-            IoBufsMutInner::Single(buf) => buf.advance_mut(cnt),
-            IoBufsMutInner::Pair(pair) => {
-                let mut remaining = cnt;
-                if advance_mut_in_chunks(pair, &mut remaining) {
-                    return;
+        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunks.
+        unsafe {
+            match &mut self.inner {
+                IoBufsMutInner::Single(buf) => buf.advance_mut(cnt),
+                IoBufsMutInner::Pair(pair) => {
+                    let mut remaining = cnt;
+                    if advance_mut_in_chunks(pair, &mut remaining) {
+                        return;
+                    }
+                    panic!("cannot advance past end of buffer");
                 }
-                panic!("cannot advance past end of buffer");
-            }
-            IoBufsMutInner::Triple(triple) => {
-                let mut remaining = cnt;
-                if advance_mut_in_chunks(triple, &mut remaining) {
-                    return;
+                IoBufsMutInner::Triple(triple) => {
+                    let mut remaining = cnt;
+                    if advance_mut_in_chunks(triple, &mut remaining) {
+                        return;
+                    }
+                    panic!("cannot advance past end of buffer");
                 }
-                panic!("cannot advance past end of buffer");
-            }
-            IoBufsMutInner::Chunked(bufs) => {
-                let mut remaining = cnt;
-                let (first, second) = bufs.as_mut_slices();
-                if advance_mut_in_chunks(first, &mut remaining)
-                    || advance_mut_in_chunks(second, &mut remaining)
-                {
-                    return;
+                IoBufsMutInner::Chunked(bufs) => {
+                    let mut remaining = cnt;
+                    let (first, second) = bufs.as_mut_slices();
+                    if advance_mut_in_chunks(first, &mut remaining)
+                        || advance_mut_in_chunks(second, &mut remaining)
+                    {
+                        return;
+                    }
+                    panic!("cannot advance past end of buffer");
                 }
-                panic!("cannot advance past end of buffer");
             }
         }
     }
@@ -2335,7 +2347,10 @@ unsafe impl BufMut for Builder {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        self.buf.advance_mut(cnt);
+        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunk.
+        unsafe {
+            self.buf.advance_mut(cnt);
+        }
     }
 
     #[inline]
@@ -2406,7 +2421,7 @@ impl<T: EncodeSize + Write> EncodeExt for T {}
 mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
-    use commonware_codec::{types::lazy::Lazy, Decode, Encode, RangeCfg};
+    use commonware_codec::{Decode, Encode, RangeCfg, types::lazy::Lazy};
     use core::ops::{Range, RangeFrom, RangeInclusive, RangeToInclusive};
     use std::collections::{BTreeMap, HashMap};
 

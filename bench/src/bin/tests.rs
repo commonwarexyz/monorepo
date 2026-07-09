@@ -1,11 +1,11 @@
 use super::{
     config::{
-        callgrind_labels, load_config, tracked_labels, Benchmark, Direction, Gate,
-        CALLGRIND_METRICS,
+        Benchmark, CALLGRIND_METRICS, Direction, Gate, callgrind_labels, load_config,
+        tracked_labels,
     },
     render::render_report,
-    results::{compare, load_baseline, write_outputs, BenchResult},
-    runner::{custom_metrics, parse_lines, OutputLine},
+    results::{BenchResult, compare, load_baseline, write_outputs},
+    runner::{OutputLine, custom_metrics, parse_lines},
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -253,10 +253,12 @@ packages = [
   ] }
 ]
 "#;
-    assert!(load_config(empty_gate)
-        .unwrap_err()
-        .to_string()
-        .contains("must be a non-empty array"));
+    assert!(
+        load_config(empty_gate)
+            .unwrap_err()
+            .to_string()
+            .contains("must be a non-empty array")
+    );
 
     let negative_threshold = r#"
 [[packages]]
@@ -270,10 +272,12 @@ name = "qmdb::merkleize/variant=negative"
 filter = "*"
 gates = [{ metric = "EstimatedCycles", direction = "down", threshold_percent = -1 }]
 "#;
-    assert!(load_config(negative_threshold)
-        .unwrap_err()
-        .to_string()
-        .contains("must be non-negative"));
+    assert!(
+        load_config(negative_threshold)
+            .unwrap_err()
+            .to_string()
+            .contains("must be non-negative")
+    );
 }
 
 #[test]
@@ -329,10 +333,12 @@ filter = "*"
 extra = true
 "#,
     ] {
-        assert!(load_config(input)
-            .unwrap_err()
-            .to_string()
-            .contains("unknown field"));
+        assert!(
+            load_config(input)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field")
+        );
     }
 }
 

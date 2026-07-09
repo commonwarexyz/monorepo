@@ -10,8 +10,8 @@ use futures::task::AtomicWaker;
 use std::{
     future::Future,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -170,7 +170,7 @@ impl ExactState {
 #[cfg(test)]
 mod tests {
     use super::{Acknowledgement, Exact};
-    use futures::{future::FusedFuture, FutureExt};
+    use futures::{FutureExt, future::FusedFuture};
     use std::sync::atomic::Ordering;
 
     #[test]

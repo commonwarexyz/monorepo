@@ -2,12 +2,17 @@
 
 use super::{METRICS_PORT, SYSTEM_PORT};
 use crate::aws::{
-    utils::{exact_cidr, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL},
     PortConfig,
+    utils::{DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL, exact_cidr},
 };
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
+pub use aws_sdk_ec2::{
+    Client as Ec2Client,
+    types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType},
+};
 use aws_sdk_ec2::{
+    Error as Ec2Error,
     error::BuildError,
     primitives::Blob,
     types::{
@@ -15,11 +20,6 @@ use aws_sdk_ec2::{
         InstanceTypeInfo, ResourceType, SecurityGroup, SummaryStatus, Tag, TagSpecification,
         VpcPeeringConnectionStateReasonCode,
     },
-    Error as Ec2Error,
-};
-pub use aws_sdk_ec2::{
-    types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType},
-    Client as Ec2Client,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},

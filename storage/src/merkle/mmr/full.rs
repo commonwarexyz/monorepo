@@ -25,16 +25,16 @@ pub type Mmr<E, D, S> = crate::merkle::full::Merkle<Family, E, D, S>;
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mmr, Bagging::ForwardFold, Family as _},
-        mmr::{mem, Error, Location, Position, StandardHasher as Standard},
+        merkle::{Bagging::ForwardFold, Family as _, conformance::build_test_mmr},
+        mmr::{Error, Location, Position, StandardHasher as Standard, mem},
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+        BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     fn test_digest(v: usize) -> Digest {

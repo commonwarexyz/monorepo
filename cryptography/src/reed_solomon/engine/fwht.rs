@@ -1,4 +1,4 @@
-use crate::reed_solomon::engine::{utils, GfElement, GF_ORDER};
+use crate::reed_solomon::engine::{GF_ORDER, GfElement, utils};
 
 // ======================================================================
 // FWHT (fast Walsh-Hadamard transform) - CRATE

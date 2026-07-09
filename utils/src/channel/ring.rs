@@ -29,7 +29,7 @@
 
 use crate::sync::Mutex;
 use core::num::NonZeroUsize;
-use futures::{stream::FusedStream, Sink, Stream};
+use futures::{Sink, Stream, stream::FusedStream};
 use std::{
     collections::VecDeque,
     pin::Pin,
@@ -258,7 +258,7 @@ pub fn channel<T: Send + Sync>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T
 mod tests {
     use super::*;
     use crate::NZUsize;
-    use futures::{executor::block_on, SinkExt, StreamExt};
+    use futures::{SinkExt, StreamExt, executor::block_on};
 
     #[test]
     fn test_basic_send_recv() {

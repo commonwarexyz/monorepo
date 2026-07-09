@@ -61,13 +61,13 @@ stability_scope!(BETA {
         sync::Arc,
         time::{Duration, SystemTime},
     };
-    pub(crate) use telemetry::metrics::{child_label, prefixed_name, METRICS_PREFIX};
+    pub(crate) use telemetry::metrics::{METRICS_PREFIX, child_label, prefixed_name};
     use thiserror::Error;
 
     pub mod iobuf;
     pub use iobuf::{
-        cache_line_size, page_size, BufferPool, BufferPoolConfig, BufferPoolThreadCache,
-        Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+        BufferPool, BufferPoolConfig, BufferPoolThreadCache, Builder as IoBufsBuilder, IoBuf,
+        IoBufMut, IoBufs, IoBufsMut, cache_line_size, page_size,
     };
 
     pub mod utils;
@@ -103,7 +103,9 @@ stability_scope!(BETA {
         RecvFailed,
         #[error("dns resolution failed: {0}")]
         ResolveFailed(String),
-        #[error("partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}")]
+        #[error(
+            "partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}"
+        )]
         PartitionNameInvalid(String),
         #[error("partition creation failed: {0}")]
         PartitionCreationFailed(String),
@@ -670,7 +672,7 @@ stability_scope!(BETA {
 
         /// Return all blobs in a given partition.
         fn scan(&self, partition: &str)
-            -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+        -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
     /// Interface to read and write to a blob.
@@ -824,23 +826,23 @@ stability_scope!(BETA, cfg(feature = "external") {
 mod tests {
     use super::*;
     use crate::telemetry::metrics::{
-        count_running_tasks,
-        raw::{Counter, Family},
         EncodeLabelKey, EncodeLabelSetTrait as EncodeLabelSet,
-        EncodeLabelValueTrait as EncodeLabelValue, LabelSetEncoder,
+        EncodeLabelValueTrait as EncodeLabelValue, LabelSetEncoder, count_running_tasks,
+        raw::{Counter, Family},
     };
     use bytes::Bytes;
     use commonware_macros::select;
     use commonware_parallel::Strategy as _;
     use commonware_utils::{
+        NZU32, NZUsize, SystemTimeExt,
         channel::{mpsc, oneshot},
         futures::Pool as FuturesPool,
         sync::Mutex,
-        NZUsize, SystemTimeExt, NZU32,
     };
     use futures::{
+        FutureExt,
         future::{pending, ready},
-        join, pin_mut, FutureExt,
+        join, pin_mut,
     };
     use std::{
         collections::HashMap,
@@ -848,12 +850,12 @@ mod tests {
         pin::Pin,
         str::FromStr,
         sync::{
-            atomic::{AtomicU32, Ordering},
             Arc,
+            atomic::{AtomicU32, Ordering},
         },
         task::{Context as TContext, Poll, Waker},
     };
-    use tracing::{error, Level};
+    use tracing::{Level, error};
     use utils::reschedule;
 
     fn test_error_future<R: Runner>(runner: R) {

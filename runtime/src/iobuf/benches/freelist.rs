@@ -19,7 +19,7 @@
 //! [`PooledBuffer`]. That keeps the shape close to the real pooled freelist
 //! while avoiding unrelated `BufferPool` logic.
 
-use super::utils::{measure, Threading};
+use super::utils::{Threading, measure};
 use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer};
 use commonware_utils::sync::Mutex;
 use criterion::Criterion;

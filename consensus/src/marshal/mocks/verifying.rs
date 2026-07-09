@@ -4,7 +4,7 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{marshal::ancestry::Ancestry, CertifiableBlock, Epochable};
+use crate::{CertifiableBlock, Epochable, marshal::ancestry::Ancestry};
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},

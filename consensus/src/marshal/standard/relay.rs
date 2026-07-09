@@ -1,9 +1,9 @@
 //! Shared consensus-relay plumbing for the standard variant wrappers.
 
 use crate::{
+    Block,
     marshal::{application::gates::Gates, core::Mailbox, standard::Standard},
     simplex::Plan,
-    Block,
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;

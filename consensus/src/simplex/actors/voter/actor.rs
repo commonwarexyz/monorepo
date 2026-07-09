@@ -1,10 +1,12 @@
 use super::{
+    Config, Mailbox,
     ingress::Message,
     state::{Config as StateConfig, State},
-    Config, Mailbox,
 };
 use crate::{
+    CertifiableAutomaton, LATENCY, Relay, Reporter, Viewable,
     simplex::{
+        Floor, Plan,
         actors::{batcher, resolver},
         elector::Config as Elector,
         metrics::{self, Outbound, TimeoutReason},
@@ -13,36 +15,34 @@ use crate::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, Proposal, Vote,
         },
-        Floor, Plan,
     },
     types::{Round as Rnd, View},
-    CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_actor::mailbox;
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
+use commonware_p2p::{Blocker, Recipients, Sender, utils::codec::WrappedSender};
 use commonware_runtime::{
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::{
         metrics::{CounterFamily, Histogram, MetricsExt as _},
         traces::TracedExt as _,
     },
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{channel::oneshot, futures::AbortablePool};
 use core::{future::Future, panic};
-use futures::{pin_mut, StreamExt};
+use futures::{StreamExt, pin_mut};
 use rand_core::CryptoRng;
 use std::{
     num::NonZeroUsize,
     pin::Pin,
     task::{self, Poll},
 };
-use tracing::{debug, info, info_span, trace, warn, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug, info, info_span, trace, warn};
 
 /// Tracks which certificate type was received from the resolver in the current iteration.
 ///
@@ -96,7 +96,7 @@ impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         let Waiter(slot) = self.get_mut();
         let res = match slot.as_mut() {
-            Some(Request(_, _, ref mut receiver)) => match Pin::new(receiver).poll(cx) {
+            Some(Request(_, _, receiver)) => match Pin::new(receiver).poll(cx) {
                 Poll::Ready(res) => res,
                 Poll::Pending => return Poll::Pending,
             },
@@ -142,15 +142,15 @@ pub struct Actor<
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
-        S: Scheme<D>,
-        L: Elector<S>,
-        B: Blocker<PublicKey = S::PublicKey>,
-        D: Digest,
-        A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
-        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
-        F: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, S, L, B, D, A, R, F>
+    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    S: Scheme<D>,
+    L: Elector<S>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
+    F: Reporter<Activity = Activity<S, D>>,
+> Actor<E, S, L, B, D, A, R, F>
 {
     pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
@@ -1052,15 +1052,15 @@ impl<
                 // finalization. Nullification does not cancel certification work
                 // for the exited view, so the automaton must tolerate a dropped
                 // verify receiver while certify still wants the result.
-                if let Some(ref pp) = pending_propose {
-                    if pp.view() != self.state.current_view() {
-                        pending_propose = None;
-                    }
+                if let Some(ref pp) = pending_propose
+                    && pp.view() != self.state.current_view()
+                {
+                    pending_propose = None;
                 }
-                if let Some(ref pv) = pending_verify {
-                    if pv.view() != self.state.current_view() {
-                        pending_verify = None;
-                    }
+                if let Some(ref pv) = pending_verify
+                    && pv.view() != self.state.current_view()
+                {
+                    pending_verify = None;
                 }
 
                 // If needed, propose a container
@@ -1171,10 +1171,8 @@ impl<
                     epoch = self.state.epoch().traced(),
                     view = msg.view().traced()
                 );
-                let Some((processed_view, processed_resolved)) = self
-                    .process_message(msg)
-                    .instrument(span)
-                    .await
+                let Some((processed_view, processed_resolved)) =
+                    self.process_message(msg).instrument(span).await
                 else {
                     continue;
                 };

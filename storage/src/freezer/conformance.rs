@@ -3,11 +3,11 @@
 use crate::freezer::{Config, Error};
 use commonware_conformance::conformance_tests;
 use commonware_runtime::{
+    Supervisor as _,
     buffer::paged::CacheRef,
     conformance::{StorageConformance, StorageWorkload},
-    Supervisor as _,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
+use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
 use core::num::{NonZeroU16, NonZeroUsize};
 use rand::RngExt as _;
 

@@ -8,7 +8,7 @@
 //! leave its in-memory state inconsistent with the underlying storage.
 
 use super::Error;
-use futures::{stream, Stream, StreamExt as _};
+use futures::{Stream, StreamExt as _, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 

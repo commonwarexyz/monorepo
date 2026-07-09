@@ -1,7 +1,7 @@
 use commonware_runtime::tokio::Context;
 use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::{sequence::U64, test_rng};
-use rand::{seq::SliceRandom, RngExt as _};
+use rand::{RngExt as _, seq::SliceRandom};
 
 /// Partition used across all metadata benchmarks.
 pub const PARTITION: &str = "metadata-bench-partition";

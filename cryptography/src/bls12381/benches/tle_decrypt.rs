@@ -1,9 +1,9 @@
 use commonware_cryptography::bls12381::{
     primitives::{ops, variant::MinSig},
-    tle::{decrypt, encrypt, Block},
+    tle::{Block, decrypt, encrypt},
 };
 use commonware_utils::test_rng;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;
 
 fn bench_tle_decrypt(c: &mut Criterion) {

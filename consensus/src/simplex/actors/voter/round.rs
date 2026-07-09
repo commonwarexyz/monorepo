@@ -7,14 +7,14 @@ use crate::{
     },
     types::{Participant, Round as Rnd},
 };
-use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{futures::Aborter, ordered::Quorum};
 use std::{
     mem::replace,
     time::{Duration, SystemTime},
 };
-use tracing::{debug, info_span, Span};
+use tracing::{Span, debug, info_span};
 
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]

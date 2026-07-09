@@ -5,7 +5,7 @@ pub mod db;
 #[cfg(test)]
 pub(crate) mod tests {
     use commonware_codec::Codec;
-    use commonware_cryptography::{sha256, Hasher as _};
+    use commonware_cryptography::{Hasher as _, sha256};
     use commonware_utils::Array;
     use core::fmt::Debug;
 

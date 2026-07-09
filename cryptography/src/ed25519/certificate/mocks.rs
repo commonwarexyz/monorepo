@@ -1,14 +1,14 @@
 //! Test fixtures for Ed25519 certificate signing schemes.
 
 use crate::{
-    certificate::{mocks::Fixture, Scheme},
-    ed25519::{PrivateKey, PublicKey},
     Signer as _,
+    certificate::{Scheme, mocks::Fixture},
+    ed25519::{PrivateKey, PublicKey},
 };
 use commonware_math::algebra::Random;
 use commonware_utils::{
-    ordered::{Map, Set},
     TryCollect as _,
+    ordered::{Map, Set},
 };
 use rand_core::CryptoRng;
 

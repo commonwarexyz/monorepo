@@ -261,11 +261,11 @@ impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
 mod tests {
     use super::*;
     use crate::merkle::{
-        mmr::{Location, Position, StandardHasher as Standard},
         Bagging::{BackwardFold, ForwardFold},
+        mmr::{Location, Position, StandardHasher as Standard},
     };
     use alloc::vec::Vec;
-    use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{Hasher as CHasher, Sha256, sha256};
 
     #[test]
     fn test_leaf_digest_sha256() {

@@ -55,10 +55,10 @@ impl<P: PublicKey> ProgressTracker<P> {
         // Skip strictly stale replays after crash/restart. Same-view repeats
         // still go through agreement tracking so conflicting digests remain
         // detectable.
-        if let Some(prev) = self.status.get(&pk) {
-            if *prev > view {
-                return Ok(());
-            }
+        if let Some(prev) = self.status.get(&pk)
+            && *prev > view
+        {
+            return Ok(());
         }
 
         // Check agreement (fork detection)
@@ -103,7 +103,7 @@ impl<P: PublicKey> ProgressTracker<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ed25519, Signer as _};
+    use commonware_cryptography::{Signer as _, ed25519};
 
     #[test]
     fn conflicting_same_view_from_same_validator_is_rejected() {

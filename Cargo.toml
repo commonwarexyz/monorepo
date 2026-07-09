@@ -61,7 +61,7 @@ libraries = [{ path = ".github/dylints/*" }]
 
 [workspace.package]
 version = "2026.7.0"
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
 rust-version = "1.91.1"

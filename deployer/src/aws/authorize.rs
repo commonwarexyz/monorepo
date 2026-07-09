@@ -1,10 +1,9 @@
 //! `authorize` subcommand for `ec2`
 
 use crate::aws::{
-    deployer_directory,
+    CREATED_FILE_NAME, Config, DESTROYED_FILE_NAME, Error, MONITORING_REGION, deployer_directory,
     ec2::{self, *},
-    utils::{exact_cidr, get_public_ip, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL},
-    Config, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_REGION,
+    utils::{DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, exact_cidr, get_public_ip},
 };
 use std::{collections::HashSet, fs::File, path::PathBuf};
 use tracing::info;

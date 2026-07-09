@@ -2,19 +2,19 @@
 //!
 //! For variable-size values, use [super::variable] instead.
 
-use super::{operation::Operation as BaseOperation, Config as BaseConfig, Immutable};
+use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
     merkle::Family,
     qmdb::{
-        any::{value::FixedEncoding, FixedValue},
         Error, ROOT_BAGGING,
+        any::{FixedValue, value::FixedEncoding},
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -75,13 +75,13 @@ mod tests {
         qmdb::immutable::test,
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
+        BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::{future::Future, pin::Pin};
     use std::num::{NonZeroU16, NonZeroUsize};
 

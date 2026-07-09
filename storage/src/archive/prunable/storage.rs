@@ -1,7 +1,7 @@
 use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
-    index::{unordered::Index, Unordered},
+    index::{Unordered, unordered::Index},
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
@@ -10,12 +10,12 @@ use crate::{
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
+    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Array;
-use futures::{pin_mut, StreamExt};
-use std::collections::{btree_map, BTreeMap, BTreeSet};
+use futures::{StreamExt, pin_mut};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -411,12 +411,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let min = self.section(min);
 
         // Check if min is less than last pruned
-        if let Some(oldest_allowed) = self.oldest_allowed {
-            if min <= oldest_allowed {
-                // We don't return an error in this case because the caller
-                // shouldn't be burdened with converting `min` to some section.
-                return Ok(());
-            }
+        if let Some(oldest_allowed) = self.oldest_allowed
+            && min <= oldest_allowed
+        {
+            // We don't return an error in this case because the caller
+            // shouldn't be burdened with converting `min` to some section.
+            return Ok(());
         }
         debug!(min, "pruning archive");
 

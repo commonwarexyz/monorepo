@@ -1,19 +1,19 @@
 use crate::{
+    CertifiableBlock,
     marshal::{
         ancestry::BlockProvider,
         coding::{
             shards,
-            types::{coding_config_for_participants, CodedBlock, CodedBlockCfg, StoredCodedBlock},
+            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_participants},
         },
         core::{Buffer, CommitmentFallback, Mailbox, Variant},
     },
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
-    types::{coding::Commitment, Round},
-    CertifiableBlock,
+    types::{Round, coding::Commitment},
 };
 use commonware_codec::Read;
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::{certificate::Scheme, Committable, Digestible, Hasher, PublicKey};
+use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, sync::Arc};
@@ -181,13 +181,13 @@ mod tests {
     use commonware_codec::{EncodeSize, Error, Read, Write};
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
+        Digest as _, Digestible, Signer as _,
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Sha256},
-        Digest as _, Digestible, Signer as _,
     };
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, NZU16};
+    use commonware_utils::{NZU16, test_rng};
 
     type TestContext = Context<Commitment, PublicKey>;
     type InnerBlock = MockBlock<Sha256Digest, TestContext>;

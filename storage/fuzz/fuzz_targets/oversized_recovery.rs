@@ -8,14 +8,14 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler,
-    Error as RuntimeError, Runner, Storage as _, Supervisor as _,
+    Blob as _, Buf, BufMut, BufferPooler, Error as RuntimeError, Runner, Storage as _,
+    Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::journal::{
-    segmented::oversized::{Config, Oversized, Record},
     Error as JournalError,
+    segmented::oversized::{Config, Oversized, Record},
 };
-use commonware_utils::{NZUsize, NZU16};
+use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -247,17 +247,16 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     if let Ok((blob, size)) =
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
+                        && size > 0
                     {
-                        if size > 0 {
-                            let offset = (size * (*offset_factor as u64)) / 256;
-                            // Overwriting existing index bytes can invalidate the fixed-journal
-                            // page-integrity checks. Pure extensions/truncations are handled by
-                            // lower-level tail trimming and should not require this allowance.
-                            if overlaps_existing_blob(offset, data.len(), size) {
-                                index_page_integrity_may_be_invalidated = true;
-                            }
-                            let _ = blob.write_at_sync(offset, data.to_vec()).await;
+                        let offset = (size * (*offset_factor as u64)) / 256;
+                        // Overwriting existing index bytes can invalidate the fixed-journal
+                        // page-integrity checks. Pure extensions/truncations are handled by
+                        // lower-level tail trimming and should not require this allowance.
+                        if overlaps_existing_blob(offset, data.len(), size) {
+                            index_page_integrity_may_be_invalidated = true;
                         }
+                        let _ = blob.write_at_sync(offset, data.to_vec()).await;
                     }
                 }
                 CorruptionType::CorruptGlobBytes {
@@ -267,11 +266,10 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     if let Ok((blob, size)) =
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
+                        && size > 0
                     {
-                        if size > 0 {
-                            let offset = (size * (*offset_factor as u64)) / 256;
-                            let _ = blob.write_at_sync(offset, data.to_vec()).await;
-                        }
+                        let offset = (size * (*offset_factor as u64)) / 256;
+                        let _ = blob.write_at_sync(offset, data.to_vec()).await;
                     }
                 }
                 CorruptionType::DeleteIndex { section } => {

@@ -10,11 +10,11 @@ pub type Config<D> = crate::merkle::mem::Config<super::Family, D>;
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mmr, hasher::Hasher as _, Bagging::ForwardFold},
+        merkle::{Bagging::ForwardFold, conformance::build_test_mmr, hasher::Hasher as _},
         mmr::{Error, Location, Position, StandardHasher as Standard},
     };
-    use commonware_cryptography::{sha256, Hasher, Sha256};
-    use commonware_runtime::{deterministic, tokio, Runner, Strategizer};
+    use commonware_cryptography::{Hasher, Sha256, sha256};
+    use commonware_runtime::{Runner, Strategizer, deterministic, tokio};
     use commonware_utils::NZUsize;
 
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
@@ -90,12 +90,14 @@ mod tests {
             let root_after_prune = mmr.root(&hasher, 0).unwrap();
             assert_eq!(root, root_after_prune, "root changed after pruning");
 
-            assert!(mmr
-                .range_proof(&hasher, Location::new(5)..Location::new(9), 0)
-                .is_err(),);
-            assert!(mmr
-                .range_proof(&hasher, Location::new(8)..mmr.leaves(), 0)
-                .is_ok(),);
+            assert!(
+                mmr.range_proof(&hasher, Location::new(5)..Location::new(9), 0)
+                    .is_err(),
+            );
+            assert!(
+                mmr.range_proof(&hasher, Location::new(8)..mmr.leaves(), 0)
+                    .is_ok(),
+            );
 
             // Test that we can initialize a new MMR from another's elements.
             let oldest_loc = mmr.bounds().start;
@@ -189,12 +191,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-            assert!(Mmr::init(Config::<sha256::Digest> {
-                nodes: vec![],
-                pruning_boundary: Location::new(0),
-                pinned_nodes: vec![],
-            })
-            .is_ok());
+            assert!(
+                Mmr::init(Config::<sha256::Digest> {
+                    nodes: vec![],
+                    pruning_boundary: Location::new(0),
+                    pinned_nodes: vec![],
+                })
+                .is_ok()
+            );
 
             assert!(matches!(
                 Mmr::init(Config {
@@ -205,16 +209,18 @@ mod tests {
                 Err(Error::InvalidSize(_))
             ));
 
-            assert!(Mmr::init(Config {
-                nodes: vec![
-                    Sha256::hash(b"leaf1"),
-                    Sha256::hash(b"leaf2"),
-                    Sha256::hash(b"parent"),
-                ],
-                pruning_boundary: Location::new(0),
-                pinned_nodes: vec![],
-            })
-            .is_ok());
+            assert!(
+                Mmr::init(Config {
+                    nodes: vec![
+                        Sha256::hash(b"leaf1"),
+                        Sha256::hash(b"leaf2"),
+                        Sha256::hash(b"parent"),
+                    ],
+                    pruning_boundary: Location::new(0),
+                    pinned_nodes: vec![],
+                })
+                .is_ok()
+            );
 
             let mut mmr = Mmr::new();
             let batch = {
@@ -229,12 +235,14 @@ mod tests {
             let nodes: Vec<_> = (0..127)
                 .map(|i| mmr.get_node(Position::new(i)).unwrap())
                 .collect();
-            assert!(Mmr::init(Config {
-                nodes,
-                pruning_boundary: Location::new(0),
-                pinned_nodes: vec![],
-            })
-            .is_ok());
+            assert!(
+                Mmr::init(Config {
+                    nodes,
+                    pruning_boundary: Location::new(0),
+                    pinned_nodes: vec![],
+                })
+                .is_ok()
+            );
 
             let mut mmr = Mmr::new();
             let batch = {
@@ -250,12 +258,14 @@ mod tests {
                 .map(|i| mmr.get_node(Position::new(i)).unwrap())
                 .collect();
             let pinned_nodes = mmr.node_digests_to_pin(Location::new(4));
-            assert!(Mmr::init(Config {
-                nodes: nodes.clone(),
-                pruning_boundary: Location::new(4),
-                pinned_nodes: pinned_nodes.clone(),
-            })
-            .is_ok());
+            assert!(
+                Mmr::init(Config {
+                    nodes: nodes.clone(),
+                    pruning_boundary: Location::new(4),
+                    pinned_nodes: pinned_nodes.clone(),
+                })
+                .is_ok()
+            );
 
             assert!(matches!(
                 Mmr::init(Config {

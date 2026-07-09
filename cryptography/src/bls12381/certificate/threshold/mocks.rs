@@ -5,10 +5,10 @@ use crate::{
         dkg::feldman_desmedt::deal,
         primitives::{group::Share, sharing::Sharing, variant::Variant},
     },
-    certificate::{mocks::Fixture, Scheme},
+    certificate::{Scheme, mocks::Fixture},
     ed25519,
 };
-use commonware_utils::{ordered::Set, N3f1};
+use commonware_utils::{N3f1, ordered::Set};
 use rand_core::CryptoRng;
 
 /// Builds ed25519 identities and matching BLS12-381 threshold schemes.

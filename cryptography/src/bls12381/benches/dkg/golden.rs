@@ -4,8 +4,8 @@ use commonware_cryptography::bls12381::dkg::golden::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
-use commonware_utils::{ordered::Set, test_rng, N3f1, TryCollect};
-use criterion::{criterion_group, BatchSize, Criterion};
+use commonware_utils::{N3f1, TryCollect, ordered::Set, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, hint::black_box, num::NonZeroU32, sync::LazyLock};
 

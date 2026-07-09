@@ -1,5 +1,6 @@
 use super::Reservation;
 use crate::{
+    PeerSetSubscription, TrackedPeers,
     authenticated::{
         dialing::Dialable,
         discovery::{
@@ -7,11 +8,10 @@ use crate::{
             types,
         },
     },
-    PeerSetSubscription, TrackedPeers,
 };
 use commonware_actor::{
-    mailbox::{self, Policy},
     Feedback,
+    mailbox::{self, Policy},
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::channel::{mpsc, oneshot};

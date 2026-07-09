@@ -1,8 +1,8 @@
 //! Types for erasure coding.
 
 use crate::{
-    types::{coding::Commitment, Height},
     Block, CertifiableBlock, Heightable,
+    types::{Height, coding::Commitment},
 };
 use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
@@ -573,12 +573,12 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{marshal::mocks::block::Block as MockBlock, Block as _};
+    use crate::{Block as _, marshal::mocks::block::Block as MockBlock};
     use bytes::Buf;
     use commonware_codec::{Decode, Encode, Error};
     use commonware_coding::{CodecConfig, ReedSolomon};
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Digest, Sha256};
-    use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
+    use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
+    use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
 
     const MAX_SHARD_SIZE: CodecConfig = CodecConfig {
         maximum_shard_size: 1024 * 1024, // 1 MiB

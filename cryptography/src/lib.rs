@@ -56,9 +56,8 @@ commonware_macros::stability_scope!(BETA {
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
-    use rand_core::SeedableRng as _;
     use rand_chacha::ChaCha20Rng;
-    use rand_core::CryptoRng;
+    use rand_core::{CryptoRng, SeedableRng as _};
 
     pub mod secret;
     pub use crate::secret::Secret;

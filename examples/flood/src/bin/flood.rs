@@ -1,27 +1,28 @@
 use clap::{Arg, Command};
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey},
     Signer as _,
+    ed25519::{PrivateKey, PublicKey},
 };
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_formatting::from_hex;
-use commonware_p2p::{authenticated::discovery, Manager as _, Receiver, Recipients, Sender};
+use commonware_p2p::{Manager as _, Receiver, Recipients, Sender, authenticated::discovery};
 use commonware_runtime::{
+    Buf, Quota, Runner, Spawner, Supervisor as _,
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
-    tokio, Buf, Quota, Runner, Spawner, Supervisor as _,
+    tokio,
 };
-use commonware_utils::{ordered::Set, union, TryCollect, NZU32};
+use commonware_utils::{NZU32, TryCollect, ordered::Set, union};
 use futures::future::try_join_all;
-use rand::{rngs::SmallRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{error, info, Level};
+use tracing::{Level, error, info};
 
 /// Histogram buckets for latency measurement (in seconds).
 /// Range from 1ms to 1s for cross-machine network latency.

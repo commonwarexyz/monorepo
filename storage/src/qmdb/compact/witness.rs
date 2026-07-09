@@ -14,12 +14,12 @@
 //! entry is never pruned.
 
 use crate::{
-    journal::contiguous::{variable, Contiguous},
-    merkle::{
-        self, compact, Family, Location, Proof, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT,
-    },
-    qmdb::{self, sync::compact::Target, Error},
     Context,
+    journal::contiguous::{Contiguous, variable},
+    merkle::{
+        self, Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof, compact,
+    },
+    qmdb::{self, Error, sync::compact::Target},
 };
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};

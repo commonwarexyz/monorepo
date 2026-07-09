@@ -1,11 +1,11 @@
 //! Metrics for contiguous journals.
 
 use commonware_runtime::{
-    telemetry::metrics::{
-        histogram::{ScopedTimer, Timed},
-        Counter, Gauge, GaugeExt as _, MetricsExt as _,
-    },
     Clock, Metrics as RuntimeMetrics,
+    telemetry::metrics::{
+        Counter, Gauge, GaugeExt as _, MetricsExt as _,
+        histogram::{ScopedTimer, Timed},
+    },
 };
 use std::sync::Arc;
 

@@ -1,12 +1,12 @@
 use crate::{
+    Context,
     index::Unordered as Index,
     journal::contiguous::Contiguous,
     merkle::{Family, Location},
     qmdb::{
-        any::{db::Db, ValueEncoding},
+        any::{ValueEncoding, db::Db},
         operation::Key,
     },
-    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
@@ -15,19 +15,19 @@ use commonware_parallel::Strategy;
 pub mod fixed;
 pub mod variable;
 
-pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
+pub use crate::qmdb::any::operation::{Unordered as Operation, update::Unordered as Update};
 
 impl<
-        F: Family,
-        E: Context,
-        K: Key,
-        V: ValueEncoding,
-        C: Contiguous<Item = Operation<F, K, V>>,
-        I: Index<Value = Location<F>>,
-        H: Hasher,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, C, I, H, Update<K, V>, N, S>
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Contiguous<Item = Operation<F, K, V>>,
+    I: Index<Value = Location<F>>,
+    H: Hasher,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, C, I, H, Update<K, V>, N, S>
 where
     Operation<F, K, V>: Codec,
 {

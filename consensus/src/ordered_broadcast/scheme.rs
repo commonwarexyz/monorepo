@@ -16,7 +16,7 @@
 //!   certificates regardless of committee size.
 
 use super::types::AckSubject;
-use commonware_cryptography::{certificate, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey, certificate};
 
 /// Marker trait for signing schemes compatible with `ordered_broadcast`.
 ///

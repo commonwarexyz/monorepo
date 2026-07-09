@@ -71,38 +71,37 @@
 //!   than blocks they need AND can fetch).
 
 use crate::{
+    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
     marshal::{
+        Update,
         application::{
             gates::{self, Gates},
-            validation::{is_inferred_reproposal_at_certify, Stage},
+            validation::{Stage, is_inferred_reproposal_at_certify},
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
-            relay,
+            Standard, relay,
             validation::{
-                await_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
-                ParentCheck,
+                Decision, ParentCheck, await_and_validate_parent, precheck_epoch_and_reproposal,
+                run_app_verify,
             },
-            Standard,
         },
-        Update,
     },
-    simplex::{types::Context, Plan},
+    simplex::{Plan, types::Context},
     types::{Epocher, Round},
-    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::{
+    Clock, Metrics, Spawner,
     telemetry::{
         metrics::{
-            histogram::{Buckets, Timed},
             MetricsExt as _,
+            histogram::{Buckets, Timed},
         },
         traces::TracedExt as _,
     },
-    Clock, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -110,7 +109,7 @@ use commonware_utils::{
 };
 use rand_core::Rng;
 use std::sync::Arc;
-use tracing::{debug, info_span, Instrument as _};
+use tracing::{Instrument as _, debug, info_span};
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
 ///
@@ -884,26 +883,26 @@ where
 mod tests {
     use super::Deferred;
     use crate::{
+        Automaton, CertifiableAutomaton, Relay,
         marshal::mocks::{
             harness::{
-                default_leader, make_raw_block, setup_network_with_participants, Ctx,
-                StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+                B, BLOCKS_PER_EPOCH, Ctx, NAMESPACE, NUM_VALIDATORS, S, StandardHarness,
+                TestHarness, V, default_leader, make_raw_block, setup_network_with_participants,
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
-        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, Plan},
+        simplex::{Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf},
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton, Relay,
     };
     use commonware_broadcast::Broadcaster;
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider},
-        sha256::Sha256,
         Digestible, Hasher as _,
+        certificate::{ConstantProvider, mocks::Fixture},
+        sha256::Sha256,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
-    use commonware_utils::{channel::fallible::OneshotExt, NZUsize};
+    use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
+    use commonware_utils::{NZUsize, channel::fallible::OneshotExt};
     use std::time::Duration;
 
     #[test_traced("INFO")]

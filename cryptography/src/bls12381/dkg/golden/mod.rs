@@ -127,13 +127,13 @@
 mod evrf;
 
 use crate::{
+    Signer as _, Verifier as _,
     bls12381::primitives::{
-        group::{Private, Scalar, ScalarReadCfg, Share, SmallScalar, G1},
+        group::{G1, Private, Scalar, ScalarReadCfg, Share, SmallScalar},
         sharing::{Mode, ModeVersion, Sharing},
         variant::MinPk,
     },
     transcript::{Summary, Transcript},
-    Signer as _, Verifier as _,
 };
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
@@ -143,8 +143,8 @@ use commonware_math::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{
+    Faults, NZU32, Participant, TryCollect as _,
     ordered::{Map, Quorum as _, Set},
-    Faults, Participant, TryCollect as _, NZU32,
 };
 pub use evrf::{PrivateKey, PublicKey, Setup};
 use evrf::{Signature, VrfCommitments};
@@ -1563,7 +1563,7 @@ mod test_plan {
 }
 
 #[cfg(feature = "arbitrary")]
-pub use test_plan::{Plan as FuzzPlan, MAX_PARTICIPANTS as FUZZ_PLAN_MAX_PARTICIPANTS};
+pub use test_plan::{MAX_PARTICIPANTS as FUZZ_PLAN_MAX_PARTICIPANTS, Plan as FuzzPlan};
 
 #[cfg(test)]
 mod tests {

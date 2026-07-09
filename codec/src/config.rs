@@ -1,7 +1,7 @@
 //! Types for use as [crate::Read::Cfg].
 
 use core::{
-    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize},
+    num::{NonZeroU8, NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::{Bound, RangeBounds},
 };
 

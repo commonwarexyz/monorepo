@@ -1,12 +1,12 @@
 use commonware_cryptography::{
-    bls12381::primitives::group::{Scalar, G1},
+    bls12381::primitives::group::{G1, Scalar},
     transcript::Transcript,
     zk::bulletproofs::ipa::{self, Proof, Setup, Witness},
 };
 use commonware_math::algebra::{CryptoGroup, Random};
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::test_rng;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand_core::CryptoRng;
 use std::{hint::black_box, num::NonZeroUsize};
 

@@ -1,4 +1,5 @@
 use crate::stateful::{
+    Application, PruneConfig,
     actor::{
         core::{
             mailbox::{ErasedAncestorStream, Message},
@@ -9,29 +10,28 @@ use crate::stateful::{
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
-    Application, PruneConfig,
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
+    Epochable, Heightable, Viewable,
     marshal::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
     },
-    Epochable, Heightable, Viewable,
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::select_loop;
-use commonware_runtime::{telemetry::metrics::GaugeExt, ContextCell, Spawner};
+use commonware_runtime::{ContextCell, Spawner, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::{
+    Acknowledgement,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     sync::AsyncMutex,
-    Acknowledgement,
 };
 use rand_core::Rng;
 use std::sync::Arc;
-use tracing::{debug, error, info_span, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug, error, info_span};
 
 /// Verify request buffered while state sync is still in progress.
 pub(super) struct HeldVerify<C, B> {
@@ -332,28 +332,28 @@ mod tests {
             syncer::{self, StateSyncMetadata, SyncResult},
         },
         db::{Anchor, AttachableResolver},
-        tests::mocks::{anchor, test_databases, TestApp, TestBlock, TestScheme, TestVariant},
+        tests::mocks::{TestApp, TestBlock, TestScheme, TestVariant, anchor, test_databases},
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
+        Heightable,
         marshal::{self, core::Actor as MarshalActor},
         simplex::mocks::scheme as scheme_mocks,
         types::{FixedEpocher, Height, ViewDelta},
-        Heightable,
     };
     use commonware_cryptography::{certificate::ConstantProvider, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, ContextCell, Runner as _, Supervisor as _,
+        ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
+        Acknowledgement, NZU16, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::oneshot,
         sync::{AsyncMutex, TracedAsyncRwLock},
-        Acknowledgement, NZUsize, NZU16, NZU64,
     };
-    use futures::{pin_mut, poll, FutureExt};
+    use futures::{FutureExt, pin_mut, poll};
     use std::sync::Arc;
 
     #[derive(Clone)]

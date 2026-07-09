@@ -1,14 +1,14 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{deterministic::BoxDynRng, Error, Handle, IoBufs, IoBufsMut};
+use crate::{Error, Handle, IoBufs, IoBufsMut, deterministic::BoxDynRng};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::RngExt as _;
 use std::{
     io::Error as IoError,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -404,11 +404,11 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
+        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
-        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
     };
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();

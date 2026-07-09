@@ -479,10 +479,10 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler, Runner,
-        Supervisor as _,
+        Blob as _, Buf, BufMut, BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{NZU16, NZUsize};
 
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {

@@ -1,37 +1,36 @@
 use super::{Config, Mailbox, Message, Round};
 use crate::{
+    Epochable, Relay, Reporter, Viewable,
     simplex::{
+        Plan,
         actors::voter,
         config::ForwardingPolicy,
         interesting,
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Proposal, Vote},
-        Plan,
     },
     types::{Epoch, Participant, Round as Rnd, View, ViewDelta},
-    Epochable, Relay, Reporter, Viewable,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Recipients};
+use commonware_p2p::{Blocker, Receiver, Recipients, utils::codec::WrappedReceiver};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::{
         metrics::{
-            histogram::{self, Buckets},
             Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
+            histogram::{self, Buckets},
         },
         traces::TracedExt as _,
     },
-    Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::ordered::Quorum;
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, sync::Arc};
-use tracing::{debug, info_span, trace, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug, info_span, trace};
 
 /// Tracks the current view, its leader, and whether the voter has
 /// already been told to timeout this view.
@@ -565,12 +564,11 @@ where
                 );
 
                 // Forward leader's proposal to voter (if we're not the leader and haven't already)
-                if let Some(round) = work.get_mut(&current.view) {
-                    if let Some(me) = self.scheme.me() {
-                        if let Some(proposal) = round.forward_proposal(me) {
-                            round.span().in_scope(|| voter.proposal(proposal));
-                        }
-                    }
+                if let Some(round) = work.get_mut(&current.view)
+                    && let Some(me) = self.scheme.me()
+                    && let Some(proposal) = round.forward_proposal(me)
+                {
+                    round.span().in_scope(|| voter.proposal(proposal));
                 }
 
                 // Skip verification and construction for views at or below finalized.
@@ -591,11 +589,23 @@ where
                     // Batch verify votes if ready
                     let timer = self.verify_latency.timer(self.context.as_ref());
                     let verified = if round.ready_notarizes() {
-                        Some(round.verify_notarizes(self.context.as_mut(), &self.strategy).await)
+                        Some(
+                            round
+                                .verify_notarizes(self.context.as_mut(), &self.strategy)
+                                .await,
+                        )
                     } else if round.ready_nullifies() {
-                        Some(round.verify_nullifies(self.context.as_mut(), &self.strategy).await)
+                        Some(
+                            round
+                                .verify_nullifies(self.context.as_mut(), &self.strategy)
+                                .await,
+                        )
                     } else if round.ready_finalizes() {
-                        Some(round.verify_finalizes(self.context.as_mut(), &self.strategy).await)
+                        Some(
+                            round
+                                .verify_finalizes(self.context.as_mut(), &self.strategy)
+                                .await,
+                        )
                     } else {
                         None
                     };

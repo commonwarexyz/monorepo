@@ -143,30 +143,29 @@ use super::{
     metrics::ShardMetrics,
 };
 use crate::{
+    Block, CertifiableBlock, Heightable,
     marshal::coding::{
         types::{CodedBlock, Shard},
-        validation::{validate_reconstruction, ReconstructionError as InvariantError},
+        validation::{ReconstructionError as InvariantError, validate_reconstruction},
     },
-    types::{coding::Commitment, Epoch, Round},
-    Block, CertifiableBlock, Heightable,
+    types::{Epoch, Round, coding::Commitment},
 };
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
     Committable, Digestible, Hasher, PublicKey,
+    certificate::{Provider, Scheme as CertificateScheme},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{WrappedBackgroundReceiver, WrappedSender},
     Blocker, Provider as PeerProvider, Receiver, Recipients, Sender,
+    utils::codec::{WrappedBackgroundReceiver, WrappedSender},
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, HistogramExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     bitmap::BitMap,
@@ -573,19 +572,19 @@ where
             // Notarized recovery can create state before leader discovery. Until
             // the leader is known, only sender-indexed gossip shards are safe to
             // ingest: a participant may only gossip its own shard.
-            if existing.leader().is_none() {
-                if let Some(sender_index) = scheme.participants().index(&peer) {
-                    let expected_index: u16 = sender_index
-                        .get()
-                        .try_into()
-                        .expect("participant index impossibly out of bounds");
-                    if shard.index() != expected_index {
-                        // A mismatched shard is invalid for a non-leader, but it may be
-                        // the assigned shard if this peer later turns out to be the leader.
-                        // Keep it buffered until the sender's role is known.
-                        self.buffer_peer_shard(peer, shard);
-                        return;
-                    }
+            if existing.leader().is_none()
+                && let Some(sender_index) = scheme.participants().index(&peer)
+            {
+                let expected_index: u16 = sender_index
+                    .get()
+                    .try_into()
+                    .expect("participant index impossibly out of bounds");
+                if shard.index() != expected_index {
+                    // A mismatched shard is invalid for a non-leader, but it may be
+                    // the assigned shard if this peer later turns out to be the leader.
+                    // Keep it buffered until the sender's role is known.
+                    self.buffer_peer_shard(peer, shard);
+                    return;
                 }
             }
 
@@ -1631,17 +1630,12 @@ where
                 blocker,
             );
 
-            if progressed {
-                if let Self::AwaitingQuorum(state) = self {
-                    if let Some(ready) = state.try_transition(
-                        commitment,
-                        ctx.participants_len,
-                        ctx.strategy,
-                        blocker,
-                    ) {
-                        *self = Self::Ready(ready);
-                    }
-                }
+            if progressed
+                && let Self::AwaitingQuorum(state) = self
+                && let Some(ready) =
+                    state.try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
+            {
+                *self = Self::Ready(ready);
             }
             return progressed;
         }
@@ -1683,29 +1677,29 @@ mod tests {
         CodecConfig, Config as CodingConfig, PhasedAsScheme, ReedSolomon, Zoda,
     };
     use commonware_cryptography::{
+        Committable, Digest, Sha256, Signer,
         certificate::{Scoped, Subject},
         ed25519::{PrivateKey, PublicKey},
         impl_certificate_ed25519,
         sha256::Digest as Sha256Digest,
-        Committable, Digest, Sha256, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{self, Control, Link, Oracle},
         Manager as _, TrackedPeers,
+        simulated::{self, Control, Link, Oracle},
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Quota, Runner, Supervisor as _};
+    use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        channel::oneshot::error::TryRecvError, ordered::Set, NZUsize, Participant,
+        NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
     };
     use std::{
         future::Future,
         marker::PhantomData,
         num::NonZeroU32,
         sync::{
-            atomic::{AtomicIsize, Ordering},
             Arc,
+            atomic::{AtomicIsize, Ordering},
         },
         time::Duration,
     };

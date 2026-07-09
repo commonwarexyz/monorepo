@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, Error, IoBufs, SinkOf, StreamOf};
+use crate::{Error, IoBufs, SinkOf, StreamOf, deterministic::Auditor};
 use std::{net::SocketAddr, sync::Arc};
 
 /// A sink that audits network operations.
@@ -187,12 +187,12 @@ impl<N: crate::Network> crate::Network for Network<N> {
 #[cfg(test)]
 mod tests {
     use crate::{
+        Error, IoBuf, IoBufs, Listener as _, Network as _, Sink as _, Stream as _,
         deterministic::Auditor,
         network::{
             audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
             tests,
         },
-        Error, IoBuf, IoBufs, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use commonware_utils::sync::Mutex;

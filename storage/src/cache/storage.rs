@@ -3,12 +3,12 @@ use crate::{
     journal::segmented::variable::{Config as JConfig, Journal},
     rmap::RMap,
 };
-use commonware_codec::{varint::UInt, CodecShared, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{CodecShared, EncodeSize, Read, ReadExt, Write, varint::UInt};
 use commonware_runtime::{
-    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Buf, BufMut, Metrics, Storage,
+    telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use futures::{pin_mut, StreamExt};
+use futures::{StreamExt, pin_mut};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
@@ -194,12 +194,12 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         let min = self.section(min);
 
         // Check if min is less than last pruned
-        if let Some(oldest_allowed) = self.oldest_allowed {
-            if min <= oldest_allowed {
-                // We don't return an error in this case because the caller
-                // shouldn't be burdened with converting `min` to some section.
-                return Ok(());
-            }
+        if let Some(oldest_allowed) = self.oldest_allowed
+            && min <= oldest_allowed
+        {
+            // We don't return an error in this case because the caller
+            // shouldn't be burdened with converting `min` to some section.
+            return Ok(());
         }
         debug!(min, "pruning cache");
 
