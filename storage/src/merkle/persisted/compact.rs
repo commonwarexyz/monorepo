@@ -63,8 +63,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
 /// A Merkle structure that retains only the state required to continue appending.
 ///
-/// The [`Mem`] is held as an [`Arc`] behind the lock so [`Merkle::snapshot`] can hand a
-/// zero-copy, immutable view to jobs running off the calling task. Mutations go through
+/// The [`Mem`] is held as an [`Arc`] behind the lock so `snapshot` can hand a zero-copy,
+/// immutable view to jobs running off the calling task. Mutations go through
 /// [`Arc::make_mut`]: they are in-place while no snapshot is alive and copy-on-write
 /// otherwise, so a snapshot never observes later mutations.
 pub struct Merkle<F: Family, D: Digest, S: Strategy> {
