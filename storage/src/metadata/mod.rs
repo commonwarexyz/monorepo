@@ -32,8 +32,7 @@
 //! # Delta Writes
 //!
 //! If the set of keys and the length of values are stable, [Metadata] will only write an update's
-//! delta to disk (rather than rewriting the entire metadata). If both blobs already contain the
-//! latest state, [Metadata::sync] performs no writes at all. This makes [Metadata] a great choice
+//! delta to disk (rather than rewriting the entire metadata). This makes [Metadata] a great choice
 //! for maintaining even large collections of data (with the majority rarely modified).
 //!
 //! # Example
