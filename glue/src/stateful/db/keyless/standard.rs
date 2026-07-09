@@ -27,7 +27,7 @@ use commonware_storage::{
         sync::{self, resolver::Resolver, Target as AnySyncTarget},
         Error,
     },
-    Context as StorageContext,
+    Context,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock};
 use std::{ops::Deref, sync::Arc};
@@ -39,7 +39,7 @@ type KeylessDbHandle<F, E, V, C, H, S> = Arc<TracedAsyncRwLock<Keyless<F, E, V, 
 pub struct KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -55,7 +55,7 @@ where
 impl<F, E, V, C, H, S> Deref for KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -72,7 +72,7 @@ where
 impl<F, E, V, C, H, S> KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -124,7 +124,7 @@ where
 pub struct KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -138,7 +138,7 @@ where
 impl<F, E, V, C, H, S> Deref for KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -155,7 +155,7 @@ where
 impl<F, E, V, C, H, S> KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -184,7 +184,7 @@ where
 impl<F, E, V, C, H, S> UnmerkleizedTrait for KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -211,7 +211,7 @@ where
 impl<F, E, V, C, H, S> MerkleizedTrait for KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
@@ -238,7 +238,7 @@ where
 impl<F, E, V, H, S> ManagedDb<E> for fixed::Db<F, E, V, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: FixedValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
@@ -304,7 +304,7 @@ where
 impl<F, E, V, H, S> ManagedDb<E> for variable::Db<F, E, V, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: VariableValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
@@ -382,7 +382,7 @@ where
 impl<F, E, V, H, S, R> StateSyncDb<E, R> for fixed::Db<F, E, V, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: FixedValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
@@ -420,7 +420,7 @@ where
 impl<F, E, V, H, S, R> StateSyncDb<E, R> for variable::Db<F, E, V, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     V: VariableValue + 'static,
     H: Hasher + 'static,
     S: Strategy,

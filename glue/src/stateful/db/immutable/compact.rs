@@ -22,7 +22,7 @@ use commonware_storage::{
         sync::{self},
         Error,
     },
-    Context as StorageContext,
+    Context,
 };
 use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
@@ -34,7 +34,7 @@ type ImmutableUnjournaledDbHandle<F, E, K, V, H, C, S> =
 pub struct ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C = ()>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -52,7 +52,7 @@ where
 impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -71,7 +71,7 @@ where
 impl<F, E, K, V, H, S, C> ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -103,7 +103,7 @@ where
 pub struct ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C = ()>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -119,7 +119,7 @@ where
 impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -139,7 +139,7 @@ impl<F, E, K, V, H, S, C> UnmerkleizedTrait
     for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -168,7 +168,7 @@ where
 impl<F, E, K, V, H, S, C> MerkleizedTrait for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -197,7 +197,7 @@ where
 impl<F, E, K, V, H, S> ManagedDb<E> for fixed::CompactDb<F, E, K, V, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher + 'static,
@@ -256,7 +256,7 @@ where
 impl<F, E, K, V, H, C, S> ManagedDb<E> for variable::CompactDb<F, E, K, V, H, C, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,
@@ -316,7 +316,7 @@ where
 impl<F, E, K, V, H, R, S> StateSyncDb<E, R> for fixed::CompactDb<F, E, K, V, H, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher + 'static,
@@ -356,7 +356,7 @@ where
 impl<F, E, K, V, H, C, R, S> StateSyncDb<E, R> for variable::CompactDb<F, E, K, V, H, C, S>
 where
     F: Family,
-    E: StorageContext,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,

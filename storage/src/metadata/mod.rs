@@ -32,8 +32,11 @@
 //! # Delta Writes
 //!
 //! If the set of keys and the length of values are stable, [Metadata] will only write an update's
-//! delta to disk (rather than rewriting the entire metadata). This makes [Metadata] a great choice
-//! for maintaining even large collections of data (with the majority rarely modified).
+//! delta to disk (rather than rewriting the entire metadata). When modified values are adjacent
+//! in the blob, their deltas are merged into a single write that spans the unchanged key bytes
+//! between them. If both blobs already contain the latest state, [Metadata::sync] performs no
+//! writes at all. This makes [Metadata] a great choice for maintaining even large collections of
+//! data (with the majority rarely modified).
 //!
 //! # Example
 //!
@@ -728,6 +731,103 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_coalesced_overwrites() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Put initial keys and populate both blobs
+            for i in 0..100 {
+                metadata.put(U64::new(i), vec![i as u8; 100]);
+            }
+            metadata.sync().await.unwrap();
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 21824"),
+                "{buffer}",
+            );
+
+            // Modify an adjacent triple, an isolated key, and an adjacent pair
+            for i in [10u64, 11, 12, 50, 98, 99] {
+                metadata.put(U64::new(i), vec![0xAA; 100]);
+            }
+
+            // Sync writes three coalesced ranges instead of six per-value writes.
+            //
+            // Merged ranges rewrite the 8 key bytes between adjacent values:
+            // 3 * 101 + 2 * 8 = 319 bytes for keys 10..=12, 101 bytes for key 50,
+            // and 2 * 101 + 8 = 210 bytes for keys 98..=99, plus 8 bytes for the
+            // version and 4 bytes for the checksum.
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("first_sync_overwrites_total 1"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 22466"),
+                "{buffer}",
+            );
+
+            // Sync again - the same ranges propagate to the other blob
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_overwrites_total 2"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 23108"),
+                "{buffer}",
+            );
+
+            // Sync again - both blobs already contain the latest state
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("first_sync_overwrites_total 2"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 23108"),
+                "{buffer}",
+            );
+
+            // Mix a same-size update with a size-changing update. The overwrite
+            // scan updates the mirror for the smaller key before the size change
+            // forces a rewrite, which must discard that partial mutation.
+            metadata.put(U64::new(20), vec![0xBB; 100]);
+            metadata.put(U64::new(30), vec![0xCC; 150]);
+            metadata.sync().await.unwrap();
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 4"), "{buffer}");
+            assert!(buffer.contains("first_sync_overwrites_total 2"), "{buffer}");
+
+            // Restart the metadata store
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+
+            // Verify every value survived exactly
+            for i in 0..100u64 {
+                let expected = match i {
+                    10 | 11 | 12 | 50 | 98 | 99 => vec![0xAA; 100],
+                    20 => vec![0xBB; 100],
+                    30 => vec![0xCC; 150],
+                    _ => vec![i as u8; 100],
+                };
+                assert_eq!(metadata.get(&U64::new(i)).unwrap(), &expected, "key {i}");
+            }
+
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_sync_with_no_changes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -735,9 +835,10 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("storage"), cfg)
-                .await
-                .unwrap();
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
 
             // Put initial data
             metadata
@@ -763,6 +864,13 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 2"));
             assert!(buffer.contains("sync_overwrites_total 0"));
+
+            // Restart the metadata store and verify the no-op left durable state
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)).unwrap(), b"hello");
 
             metadata.destroy().await.unwrap();
         });

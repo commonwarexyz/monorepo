@@ -15,7 +15,7 @@ use commonware_storage::{
         immutable::{fixed, Config},
         sync::compact,
     },
-    Context as StorageContext,
+    Context,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -91,7 +91,7 @@ pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec
 
 impl<E> super::ExampleDatabase for Database<E>
 where
-    E: StorageContext,
+    E: Context,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -142,7 +142,7 @@ where
 
 impl<E> super::Syncable for Database<E>
 where
-    E: StorageContext,
+    E: Context,
 {
     fn size(&self) -> Location {
         self.bounds().end
@@ -172,7 +172,7 @@ where
 
 impl<E> super::CompactSyncable for Database<E>
 where
-    E: StorageContext,
+    E: Context,
 {
     fn target(&self) -> compact::Target<Self::Family, Key> {
         compact::Target::new(self.root(), self.bounds().end)

@@ -18,7 +18,7 @@ use commonware_storage::{
         },
         operation::Committable,
     },
-    Context as StorageContext,
+    Context,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -55,7 +55,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
 
 impl<E> crate::databases::ExampleDatabase for Database<E>
 where
-    E: StorageContext,
+    E: Context,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -135,7 +135,7 @@ where
 
 impl<E> crate::databases::Syncable for Database<E>
 where
-    E: StorageContext,
+    E: Context,
 {
     fn size(&self) -> Location {
         self.bounds().end

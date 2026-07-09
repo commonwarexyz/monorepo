@@ -3932,6 +3932,22 @@ mod tests {
         assert_eq!(copied.as_ref(), b"copy");
         assert_ne!(copied.as_mut_ptr() as *const u8, shared_ptr);
         assert!(copied.is_pooled());
+
+        // Recovery after transient slices are dropped is zero-copy and preserves
+        // the full readable length and capacity.
+        let mut mirror = pool.alloc(8);
+        mirror.put_slice(b"abcdefgh");
+        let mirror_cap = mirror.capacity();
+        let mirror_ptr = mirror.as_mut_ptr();
+        let frozen = mirror.freeze();
+        let head = frozen.slice(0..3);
+        let tail = frozen.slice(5..8);
+        drop(head);
+        drop(tail);
+        let mut recovered = frozen.into_mut_with_pool(&pool);
+        assert_eq!(recovered.as_ref(), b"abcdefgh");
+        assert_eq!(recovered.as_mut_ptr(), mirror_ptr);
+        assert_eq!(recovered.capacity(), mirror_cap);
     }
 
     #[test]

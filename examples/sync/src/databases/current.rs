@@ -28,7 +28,7 @@ use commonware_storage::{
         current::{self, FixedConfig as Config},
         operation::Committable,
     },
-    Context as StorageContext,
+    Context,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -78,7 +78,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
 
 impl<E> super::ExampleDatabase for Database<E>
 where
-    E: StorageContext,
+    E: Context,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -159,7 +159,7 @@ where
 
 impl<E> super::Syncable for Database<E>
 where
-    E: StorageContext,
+    E: Context,
 {
     fn size(&self) -> Location {
         self.bounds().end

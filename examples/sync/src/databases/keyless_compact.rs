@@ -11,7 +11,7 @@ use commonware_storage::{
         keyless::fixed::{self, CompactConfig},
         sync::compact,
     },
-    Context as StorageContext,
+    Context,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use tracing::error;
@@ -40,7 +40,7 @@ pub fn create_config(context: &impl BufferPooler) -> CompactConfig<Sequential> {
 
 impl<E> super::ExampleDatabase for Database<E>
 where
-    E: StorageContext,
+    E: Context,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -94,7 +94,7 @@ where
 
 impl<E> super::CompactSyncable for Database<E>
 where
-    E: StorageContext,
+    E: Context,
 {
     fn target(&self) -> compact::Target<Self::Family, Key> {
         Self::target(self)
