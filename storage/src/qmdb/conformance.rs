@@ -357,7 +357,7 @@ fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
 
 /// Deterministically select ~20% of keys for deletion. XOR with the seed ensures
 /// the set of deleted indices varies across seeds.
-fn is_deleted(seed: u64, i: u64) -> bool {
+const fn is_deleted(seed: u64, i: u64) -> bool {
     (seed ^ i).is_multiple_of(5)
 }
 
