@@ -447,7 +447,10 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic,
-        mocks::{fail_pending_syncs, release_pending_syncs, DelayedSyncContext},
+        mocks::{
+            fail_pending_syncs, release_pending_syncs, DelayedRemoveContext, DelayedSyncContext,
+            PendingRemoves,
+        },
         BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
     };
     use commonware_utils::{sync::Mutex, NZUsize, NZU16};
@@ -1701,6 +1704,69 @@ mod tests {
                 .await
                 .expect("sync handle should complete despite pruning");
             journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_dropped_rewind_untracks_removed_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingRemoves::default();
+            let context = DelayedRemoveContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Two synced sections.
+            journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            journal
+                .append(2, &test_digest(1))
+                .await
+                .expect("failed to append");
+            journal.sync_all().await.expect("failed to sync");
+            let keep = journal.size(1).expect("failed to size");
+
+            // Rewind to the end of section 1, which removes section 2. Poll until section
+            // 2's unlink has been applied and parked, then drop the rewind there: the file
+            // is gone but the caller never saw the removal complete.
+            {
+                let fut = journal.rewind(1, keep);
+                pin_mut!(fut);
+                while pending.lock().is_empty() {
+                    assert!(futures::poll!(&mut fut).is_pending());
+                }
+            }
+
+            // Section 2's file is gone, so the journal must no longer track the section.
+            let remaining = context
+                .scan(&cfg.partition)
+                .await
+                .expect("failed to scan partition");
+            assert_eq!(remaining, vec![1u64.to_be_bytes().to_vec()]);
+            assert_eq!(journal.newest_section(), Some(1));
+
+            // A new append to section 2 must land in a fresh blob. Writing through a stale
+            // handle to the unlinked file would be acknowledged and then vanish on restart.
+            journal
+                .append(2, &test_digest(2))
+                .await
+                .expect("failed to append");
+            journal.sync_all().await.expect("failed to sync");
+
+            // Restart and confirm both the survivor and the new item are present.
+            drop(journal);
+            let journal: Journal<_, Digest> = Journal::init(context.child("restart"), cfg)
+                .await
+                .expect("failed to re-init");
+            assert_eq!(journal.get(1, 0).await.expect("get failed"), test_digest(0));
+            assert_eq!(journal.get(2, 0).await.expect("get failed"), test_digest(2));
         });
     }
 

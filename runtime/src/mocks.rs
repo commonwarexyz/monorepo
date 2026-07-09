@@ -521,6 +521,97 @@ pub fn fail_pending_syncs(pending: &PendingSyncs) {
     }
 }
 
+/// Removes parked by a [DelayedRemoveContext], in the order applied. Sending on (or dropping)
+/// a sender unparks the corresponding remove.
+pub type PendingRemoves = Arc<Mutex<Vec<oneshot::Sender<()>>>>;
+
+/// Context wrapper that applies each [Storage::remove] and then parks it until released.
+///
+/// Dropping a parked remove models a removal that reached storage but whose future was
+/// dropped before returning to the caller.
+#[derive(Clone)]
+pub struct DelayedRemoveContext<E> {
+    pub inner: E,
+    pub pending: PendingRemoves,
+}
+
+impl<E: Supervisor> Supervisor for DelayedRemoveContext<E> {
+    fn name(&self) -> Name {
+        self.inner.name()
+    }
+
+    fn child(&self, label: &'static str) -> Self {
+        Self {
+            inner: self.inner.child(label),
+            pending: self.pending.clone(),
+        }
+    }
+
+    fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+        Self {
+            inner: self.inner.with_attribute(key, value),
+            pending: self.pending,
+        }
+    }
+}
+
+impl<E: Metrics> Metrics for DelayedRemoveContext<E> {
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
+        self.inner.register(name, help, metric)
+    }
+
+    fn encode(&self) -> String {
+        self.inner.encode()
+    }
+}
+
+impl<E: BufferPooler> BufferPooler for DelayedRemoveContext<E> {
+    fn network_buffer_pool(&self) -> &BufferPool {
+        self.inner.network_buffer_pool()
+    }
+
+    fn storage_buffer_pool(&self) -> &BufferPool {
+        self.inner.storage_buffer_pool()
+    }
+}
+
+impl<E: Storage> Storage for DelayedRemoveContext<E> {
+    type Blob = E::Blob;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        self.inner.open_versioned(partition, name, versions).await
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await?;
+        let (release, released) = oneshot::channel();
+        self.pending.lock().push(release);
+        let _ = released.await;
+        Ok(())
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+/// Unpark all parked removes.
+pub fn release_pending_removes(pending: &PendingRemoves) {
+    for release in mem::take(&mut *pending.lock()) {
+        let _ = release.send(());
+    }
+}
+
 /// Context wrapper whose blobs fail `sync` and `start_sync` for a single partition.
 #[derive(Clone)]
 pub struct SyncFaultContext<E> {

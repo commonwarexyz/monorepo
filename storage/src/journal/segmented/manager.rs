@@ -315,10 +315,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
-    /// Remove `section`'s blob from storage, then stop tracking it. Returns the blob's size.
+    /// Stop tracking `section`, then remove its blob from storage. Returns the blob's size.
     ///
-    /// Storage removal happens before the map update so a dropped future leaves the section
-    /// tracked; a missing blob is tolerated so retrying such a removal succeeds. The blob
+    /// The map update happens before the removal awaits: a dropped removal must never leave
+    /// a tracked handle to an unlinked blob, since later writes through it would be
+    /// acknowledged and then vanish on restart. A dropped removal may instead leave the
+    /// untracked blob on disk, the same state a crash before the unlink leaves. The blob
     /// handle stays open across the unlink, which every storage backend supports.
     async fn remove_blob(&mut self, section: u64) -> Result<u64, Error> {
         // Join any in-flight sync first so caller-held sync handles report the sync's true
@@ -329,22 +331,24 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             .expect("removed section must be tracked");
         blob.wait_for_sync().await.map_err(Error::Runtime)?;
 
-        match self
-            .context
-            .remove(&self.partition, Some(&section.to_be_bytes()))
-            .await
-        {
-            // A dropped removal may have unlinked the blob without untracking it.
-            Ok(()) | Err(RError::BlobMissing(..)) => {}
-            Err(err) => return Err(Error::Runtime(err)),
-        }
-
         let blob = self
             .blobs
             .remove(&section)
             .expect("removed section must be tracked");
         self.tracked.dec();
-        Ok(blob.size())
+        let size = blob.size();
+
+        match self
+            .context
+            .remove(&self.partition, Some(&section.to_be_bytes()))
+            .await
+        {
+            // A missing blob is tolerated so removal stays idempotent.
+            Ok(()) | Err(RError::BlobMissing(..)) => {}
+            Err(err) => return Err(Error::Runtime(err)),
+        }
+
+        Ok(size)
     }
 
     /// Prune all sections less than `min`. Returns true if any were pruned.
