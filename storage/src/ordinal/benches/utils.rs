@@ -31,16 +31,14 @@ pub async fn init(ctx: Context, bits: Option<BTreeMap<u64, &Option<BitMap>>>) ->
 }
 
 /// Append `count` sequential entries with random values to ordinal store and sync once.
-pub async fn append_random(store: &mut Ordinal, count: u64) -> Vec<u64> {
+pub async fn append_random(store: &mut Ordinal, count: u64) -> std::ops::Range<u64> {
     let mut rng = test_rng();
     let mut val_buf = [0u8; 128];
 
-    let mut indices = Vec::with_capacity(count as usize);
     for i in 0..count {
-        indices.push(i);
         rng.fill_bytes(&mut val_buf);
         store.put(i, FixedBytes::new(val_buf)).await.unwrap();
     }
     store.sync().await.unwrap();
-    indices
+    0..count
 }

@@ -7,7 +7,7 @@ use commonware_runtime::{
 use commonware_storage::utils::bits_for_indices;
 use commonware_utils::{TestRng, NZU64};
 use criterion::{criterion_group, Criterion};
-use futures::future::try_join_all;
+use futures::{stream::FuturesUnordered, StreamExt};
 use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
@@ -33,11 +33,13 @@ pub async fn read_serial_indices(store: &Ordinal, indices: &[u64]) {
 
 /// Read indices concurrently from an ordinal store.
 pub async fn read_concurrent_indices(store: &Ordinal, indices: &[u64]) {
-    let mut futures = Vec::with_capacity(indices.len());
+    let mut futures = FuturesUnordered::new();
     for idx in indices {
         futures.push(store.get(*idx));
     }
-    black_box(try_join_all(futures).await.unwrap());
+    while let Some(result) = futures.next().await {
+        black_box(result.unwrap().unwrap());
+    }
 }
 
 fn bench_get(c: &mut Criterion) {

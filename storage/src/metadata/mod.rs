@@ -676,15 +676,13 @@ mod tests {
                 "{buffer}",
             );
 
-            // Sync again - should write only diff from the second blob
-            //
-            // 8 byte for version + 4 bytes for checksum
+            // Sync again - both blobs already contain the latest state
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
-            assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 1"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 21949"),
+                buffer.contains("runtime_storage_write_bytes_total 21937"),
                 "{buffer}",
             );
 
@@ -695,9 +693,9 @@ mod tests {
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 3"), "{buffer}");
-            assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 1"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 32752"),
+                buffer.contains("runtime_storage_write_bytes_total 32740"),
                 "{buffer}"
             );
 
@@ -705,9 +703,9 @@ mod tests {
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 4"), "{buffer}");
-            assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 1"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 43555"),
+                buffer.contains("runtime_storage_write_bytes_total 43543"),
                 "{buffer}"
             );
 
@@ -718,13 +716,108 @@ mod tests {
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 4"), "{buffer}");
-            assert!(buffer.contains("sync_overwrites_total 3"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 43668"),
+                buffer.contains("runtime_storage_write_bytes_total 43656"),
                 "{buffer}"
             );
 
             // Clean up
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_multi_key_overwrites() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Put initial keys and populate both blobs
+            for i in 0..100 {
+                metadata.put(U64::new(i), vec![i as u8; 100]);
+            }
+            metadata.sync().await.unwrap();
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 21824"),
+                "{buffer}",
+            );
+
+            // Modify several keys with same-size values
+            for i in [10u64, 11, 12, 50, 98, 99] {
+                metadata.put(U64::new(i), vec![0xAA; 100]);
+            }
+
+            // Sync writes one delta per modified value.
+            //
+            // 6 * (1 byte for len + 100 bytes for value) + 8 bytes for version
+            // + 4 bytes for checksum.
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("first_sync_overwrites_total 1"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 22442"),
+                "{buffer}",
+            );
+
+            // Sync again - the same deltas propagate to the other blob
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_overwrites_total 2"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 23060"),
+                "{buffer}",
+            );
+
+            // Sync again - both blobs already contain the latest state
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("first_sync_overwrites_total 2"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 23060"),
+                "{buffer}",
+            );
+
+            // Mix a same-size update with a size-changing update. The overwrite
+            // scan updates the mirror for the smaller key before the size change
+            // forces a rewrite, which must discard that partial mutation.
+            metadata.put(U64::new(20), vec![0xBB; 100]);
+            metadata.put(U64::new(30), vec![0xCC; 150]);
+            metadata.sync().await.unwrap();
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 4"), "{buffer}");
+            assert!(buffer.contains("first_sync_overwrites_total 2"), "{buffer}");
+
+            // Restart the metadata store
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+
+            // Verify every value survived exactly
+            for i in 0..100u64 {
+                let expected = match i {
+                    10 | 11 | 12 | 50 | 98 | 99 => vec![0xAA; 100],
+                    20 => vec![0xBB; 100],
+                    30 => vec![0xCC; 150],
+                    _ => vec![i as u8; 100],
+                };
+                assert_eq!(metadata.get(&U64::new(i)).unwrap(), &expected, "key {i}");
+            }
+
             metadata.destroy().await.unwrap();
         });
     }
@@ -737,9 +830,10 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("storage"), cfg)
-                .await
-                .unwrap();
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
 
             // Put initial data
             metadata
@@ -747,24 +841,31 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Sync again with no changes - will rewrite because key_order_changed is recent
-            // (on startup, key_order_changed is set to next_version)
+            // Sync again with no changes. This still rewrites because only one blob
+            // has the new key order.
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 2"));
             assert!(buffer.contains("sync_overwrites_total 0"));
 
-            // Sync again - now key order is stable, should do overwrite
+            // Sync again - both blobs already contain the latest state
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 2"));
-            assert!(buffer.contains("sync_overwrites_total 1"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
 
-            // Sync again - should continue doing overwrites
+            // Sync again - should remain a no-op
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 2"));
-            assert!(buffer.contains("sync_overwrites_total 2"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
+
+            // Restart the metadata store and verify the no-op left durable state
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)).unwrap(), b"hello");
 
             metadata.destroy().await.unwrap();
         });

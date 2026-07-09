@@ -11,7 +11,6 @@ use crate::stateful::db::{
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
@@ -23,6 +22,7 @@ use commonware_storage::{
         sync::{self},
         Error,
     },
+    Context,
 };
 use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
@@ -34,7 +34,7 @@ type ImmutableUnjournaledDbHandle<F, E, K, V, H, C, S> =
 pub struct ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C = ()>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -52,7 +52,7 @@ where
 impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -71,7 +71,7 @@ where
 impl<F, E, K, V, H, S, C> ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -103,7 +103,7 @@ where
 pub struct ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C = ()>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -119,7 +119,7 @@ where
 impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -139,7 +139,7 @@ impl<F, E, K, V, H, S, C> UnmerkleizedTrait
     for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -171,7 +171,7 @@ where
 impl<F, E, K, V, H, S, C> MerkleizedTrait for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
@@ -200,7 +200,7 @@ where
 impl<F, E, K, V, H, S> ManagedDb<E> for fixed::CompactDb<F, E, K, V, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher + 'static,
@@ -259,7 +259,7 @@ where
 impl<F, E, K, V, H, C, S> ManagedDb<E> for variable::CompactDb<F, E, K, V, H, C, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,
@@ -319,7 +319,7 @@ where
 impl<F, E, K, V, H, R, S> StateSyncDb<E, R> for fixed::CompactDb<F, E, K, V, H, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher + 'static,
@@ -359,7 +359,7 @@ where
 impl<F, E, K, V, H, C, R, S> StateSyncDb<E, R> for variable::CompactDb<F, E, K, V, H, C, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,
@@ -404,8 +404,8 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Spawner as _,
-        Supervisor as _,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Clock as _, Metrics as _,
+        Runner as _, Spawner as _, Supervisor as _,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,

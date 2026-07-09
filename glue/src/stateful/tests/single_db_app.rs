@@ -42,8 +42,7 @@ use commonware_cryptography::{
 use commonware_formatting::hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, Clock, Handle, Metrics, Quota, Spawner, Storage,
-    Supervisor as _,
+    buffer::paged::CacheRef, Buf, BufMut, Handle, Quota, Spawner, Supervisor as _,
 };
 use commonware_storage::{
     archive::prunable,
@@ -54,6 +53,7 @@ use commonware_storage::{
         sync::Target,
     },
     translator::TwoCap,
+    Context as StorageContext,
 };
 use commonware_utils::{
     non_empty_range,
@@ -171,7 +171,7 @@ impl App {
     }
 
     /// Execute a block: increment "counter" and write `height -> height_val`.
-    async fn execute<E: Rng + Spawner + Metrics + Clock + Storage>(
+    async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
         mut batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
@@ -190,7 +190,7 @@ impl App {
     }
 }
 
-impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
+impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;

@@ -43,8 +43,7 @@ use commonware_formatting::hex;
 use commonware_p2p::utils::mux::Muxer;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, Clock, Handle, Metrics, Quota, Spawner, Storage,
-    Supervisor as _,
+    buffer::paged::CacheRef, Buf, BufMut, Handle, Quota, Spawner, Supervisor as _,
 };
 use commonware_storage::{
     archive::prunable,
@@ -56,6 +55,7 @@ use commonware_storage::{
         sync::{compact as compact_sync, Target},
     },
     translator::TwoCap,
+    Context as StorageContext,
 };
 use commonware_utils::{
     non_empty_range,
@@ -201,7 +201,7 @@ impl App {
     }
 
     /// Execute a block against two databases.
-    async fn execute<E: Rng + Spawner + Metrics + Clock + Storage>(
+    async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
         batches: (
             <DbA<E> as DatabaseSet<E>>::Unmerkleized,
@@ -239,7 +239,7 @@ impl App {
     }
 }
 
-impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
+impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
