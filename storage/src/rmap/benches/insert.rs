@@ -1,6 +1,7 @@
 use commonware_storage::rmap::RMap;
+use commonware_utils::test_rng;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::seq::SliceRandom;
 use std::time::{Duration, Instant};
 
 fn bench_insert(c: &mut Criterion) {
@@ -9,7 +10,7 @@ fn bench_insert(c: &mut Criterion) {
         c.bench_function(&label, |b| {
             b.iter_custom(move |iters| {
                 // Setup items
-                let mut rng = StdRng::seed_from_u64(0);
+                let mut rng = test_rng();
                 let mut indices = Vec::with_capacity(items);
                 for i in 0..items {
                     indices.push(i as u64);

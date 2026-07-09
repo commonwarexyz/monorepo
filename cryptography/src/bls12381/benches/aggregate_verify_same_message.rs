@@ -1,11 +1,13 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rng, RngExt as _};
+use rand::RngExt as _;
 
 fn bench_aggregate_verify_same_message(c: &mut Criterion) {
+    let mut rng = test_rng();
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
-    rng().fill(&mut msg);
+    rng.fill(&mut msg);
     for n in [10, 100, 1000, 10000].into_iter() {
         c.bench_function(&format!("{}/pks={}", module_path!(), n), |b| {
             b.iter_batched(
@@ -13,7 +15,7 @@ fn bench_aggregate_verify_same_message(c: &mut Criterion) {
                     let mut public_keys = Vec::with_capacity(n);
                     let mut signatures = Vec::with_capacity(n);
                     for _ in 0..n {
-                        let (private, public) = ops::keypair::<_, MinSig>(&mut rng());
+                        let (private, public) = ops::keypair::<_, MinSig>(&mut rng);
                         let signature = ops::sign_message::<MinSig>(&private, namespace, &msg);
                         public_keys.push(public);
                         signatures.push(signature);

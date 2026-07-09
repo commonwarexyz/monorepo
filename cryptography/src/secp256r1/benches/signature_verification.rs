@@ -1,12 +1,14 @@
 use commonware_cryptography::{secp256r1, PrivateKey, Verifier};
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rng, RngExt as _};
+use rand::RngExt as _;
 use std::hint::black_box;
 
 fn bench_signature_verify<S: PrivateKey>(variant: impl AsRef<str>, c: &mut Criterion) {
+    let mut rng = test_rng();
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
-    rng().fill(&mut msg);
+    rng.fill(&mut msg);
     c.bench_function(
         &format!(
             "{}/variant={} ns_len={} msg_len={}",
@@ -18,7 +20,7 @@ fn bench_signature_verify<S: PrivateKey>(variant: impl AsRef<str>, c: &mut Crite
         |b| {
             b.iter_batched(
                 || {
-                    let private_key = S::random(rng());
+                    let private_key = S::random(&mut rng);
                     let public_key = private_key.public_key();
                     let signature = private_key.sign(namespace, &msg);
                     (public_key, signature)

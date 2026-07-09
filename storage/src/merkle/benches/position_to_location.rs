@@ -1,6 +1,7 @@
 use commonware_storage::merkle::{Family, Location, Position};
+use commonware_utils::test_rng;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::hint::black_box;
 
 #[cfg(not(full_bench))]
@@ -16,7 +17,7 @@ const SAMPLES: usize = 4096;
 /// benchmark focuses on the common leaf/size (`Some`) path exercised by callers like `leaves()` and
 /// `Location::try_from`; it does not measure the non-leaf (`None`) path used for leaf detection.
 fn sample_positions<F: Family>(max_leaves: u64) -> Vec<Position<F>> {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     (0..SAMPLES)
         .map(|_| F::location_to_position(Location::new(rng.random_range(0..max_leaves))))
         .collect()

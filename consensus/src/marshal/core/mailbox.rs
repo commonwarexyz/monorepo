@@ -1021,7 +1021,7 @@ mod tests {
         certificate::mocks::Fixture, ed25519::PrivateKey, Digest as _, Signer as _,
     };
     use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::{channel::oneshot::error::TryRecvError, test_rng_seeded, NZUsize};
+    use commonware_utils::{channel::oneshot::error::TryRecvError, NZUsize, TestRng};
 
     type TestMessage = Message<harness::S, Standard<harness::B>>;
     type TestPending = Pending<harness::S, Standard<harness::B>>;
@@ -1043,7 +1043,7 @@ mod tests {
     }
 
     fn finalization(height: u64) -> Finalization<harness::S, harness::D> {
-        let mut rng = test_rng_seeded(height);
+        let mut rng = TestRng::new(height);
         let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<harness::V, _>(
             &mut rng,
             harness::NAMESPACE,

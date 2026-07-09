@@ -19,7 +19,7 @@ use commonware_utils::{
     ordered::{BiMap, Quorum, Set},
     Faults, Participant,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::{CryptoRng, Rng};
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -354,7 +354,7 @@ macro_rules! impl_certificate_secp256r1 {
             n: u32,
         ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey>>
         where
-            R: rand::Rng + rand::CryptoRng,
+            R: rand_core::CryptoRng,
         {
             $crate::secp256r1::certificate::mocks::fixture(
                 rng,

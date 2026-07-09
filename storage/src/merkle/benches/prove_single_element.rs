@@ -1,9 +1,10 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{self, mem::Mem, Bagging::ForwardFold, Family, Location};
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
 use futures::executor::block_on;
-use rand::{rngs::StdRng, seq::IndexedRandom, SeedableRng};
+use rand::seq::IndexedRandom;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
@@ -20,7 +21,7 @@ fn make_test_data<F: Family>(n: usize) -> (Mem<F, sha256::Digest>, sha256::Diges
     let hasher = StandardHasher::<Sha256>::new(ForwardFold);
     let mut mem = Mem::<F, _>::new();
     let mut elements = Vec::with_capacity(n);
-    let mut sampler = StdRng::seed_from_u64(0);
+    let mut sampler = test_rng();
     block_on(async {
         let batch = {
             let mut batch = mem.new_batch();

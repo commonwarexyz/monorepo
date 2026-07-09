@@ -8,7 +8,7 @@ use crate::{
 };
 use commonware_math::algebra::Random;
 use commonware_utils::{ordered::BiMap, TryCollect as _};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRng;
 
 /// Builds ed25519 identities and matching Secp256r1 signing schemes.
 pub fn fixture<S, R>(
@@ -19,7 +19,7 @@ pub fn fixture<S, R>(
     verifier: impl Fn(&[u8], BiMap<ed25519::PublicKey, PublicKey>) -> S,
 ) -> Fixture<S>
 where
-    R: Rng + CryptoRng,
+    R: CryptoRng,
     S: Scheme<PublicKey = ed25519::PublicKey>,
 {
     assert!(n > 0);

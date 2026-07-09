@@ -362,10 +362,10 @@ let key = PrivateKey::random(&mut rng);
 ```
 
 When you need multiple independent RNG streams in the same test (e.g., to generate
-non-overlapping keys), use `test_rng_seeded(seed)`:
+non-overlapping keys), use `TestRng::new(seed)`:
 ```rust
 let mut rng1 = test_rng();           // Stream 1: seed 0
-let mut rng2 = test_rng_seeded(1);   // Stream 2: seed 1
+let mut rng2 = TestRng::new(1);      // Stream 2: seed 1
 ```
 
 Avoid `OsRng`, `StdRng::from_entropy()`, or raw `StdRng::seed_from_u64()`.

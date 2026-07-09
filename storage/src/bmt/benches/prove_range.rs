@@ -1,8 +1,9 @@
 use commonware_cryptography::{sha256, Hasher, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
+use commonware_utils::test_rng;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 
 const SAMPLE_SIZE: usize = 100;
 
@@ -11,7 +12,7 @@ fn bench_prove_range(c: &mut Criterion) {
         // Populate Binary Merkle Tree
         let mut builder = Builder::<Sha256>::new(n);
         let mut elements = Vec::with_capacity(n);
-        let mut sampler = StdRng::seed_from_u64(0);
+        let mut sampler = test_rng();
         for _ in 0..n {
             let element = sha256::Digest::random(&mut sampler);
             builder.add(&element);

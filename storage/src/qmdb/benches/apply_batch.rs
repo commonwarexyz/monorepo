@@ -15,9 +15,9 @@ use commonware_storage::{
     merkle::mmb::Family as Mmb,
     qmdb::any::traits::{BatchableDb, UnmerkleizedBatch},
 };
-use commonware_utils::NZU64;
+use commonware_utils::{TestRng, NZU64};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::Rng;
 use std::{
     num::NonZeroU64,
     time::{Duration, Instant},
@@ -39,7 +39,7 @@ type ODb = AnyOFixP256Db<Mmb>;
 fn write_updates<D: BatchableDb<K = Digest, V = Digest>>(
     mut batch: D::Batch,
     updates: u64,
-    rng: &mut StdRng,
+    rng: &mut TestRng,
 ) -> D::Batch {
     for _ in 0..updates {
         let idx = rng.next_u64() % NUM_KEYS;
@@ -63,7 +63,7 @@ async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
 
-    let mut rng = StdRng::seed_from_u64(7);
+    let mut rng = TestRng::new(7);
     let batch = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let batch = batch.merkleize(&db, None).await.unwrap();
 
@@ -89,7 +89,7 @@ async fn bench_ord_direct_apply(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_ord_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
 
-    let mut rng = StdRng::seed_from_u64(7);
+    let mut rng = TestRng::new(7);
     let batch = write_updates::<ODb>(db.new_batch(), updates, &mut rng);
     let batch = batch.merkleize(&db, None).await.unwrap();
 
@@ -106,7 +106,7 @@ async fn bench_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> D
     let mut db = open_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
 
-    let mut rng = StdRng::seed_from_u64(7);
+    let mut rng = TestRng::new(7);
     let parent = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let parent = parent.merkleize(&db, None).await.unwrap();
 
@@ -126,7 +126,7 @@ async fn bench_apply_with_committed_ancestor(ctx: &Context, updates: u64) -> Dur
     let mut db = open_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
 
-    let mut rng = StdRng::seed_from_u64(7);
+    let mut rng = TestRng::new(7);
     let parent = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let parent = parent.merkleize(&db, None).await.unwrap();
 
@@ -149,7 +149,7 @@ async fn bench_apply_committed_uncommitted_chain(ctx: &Context, updates: u64) ->
     let mut db = open_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
 
-    let mut rng = StdRng::seed_from_u64(7);
+    let mut rng = TestRng::new(7);
     let a = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let a = a.merkleize(&db, None).await.unwrap();
 
@@ -175,7 +175,7 @@ async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration 
     let mut db = open_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
 
-    let mut rng = StdRng::seed_from_u64(7);
+    let mut rng = TestRng::new(7);
     let a = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let a = a.merkleize(&db, None).await.unwrap();
 
@@ -197,7 +197,7 @@ async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration 
 }
 
 // Immutable databases are insert-only, so every batch writes fresh keys drawn from `counter`.
-async fn seed_imm_db(db: &mut ImmDb, keys: u64, counter: &mut u64, rng: &mut StdRng) {
+async fn seed_imm_db(db: &mut ImmDb, keys: u64, counter: &mut u64, rng: &mut TestRng) {
     let mut batch = db.new_batch();
     for _ in 0..keys {
         let key = Sha256::hash(&counter.to_be_bytes());
@@ -219,7 +219,7 @@ async fn open_imm_db(ctx: &Context) -> ImmDb {
 #[boxed]
 async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_imm_db(ctx).await;
-    let mut rng = StdRng::seed_from_u64(7);
+    let mut rng = TestRng::new(7);
     let mut counter = 0u64;
     seed_imm_db(&mut db, NUM_KEYS, &mut counter, &mut rng).await;
 
@@ -243,7 +243,7 @@ async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
 #[boxed]
 async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_imm_db(ctx).await;
-    let mut rng = StdRng::seed_from_u64(7);
+    let mut rng = TestRng::new(7);
     let mut counter = 0u64;
     seed_imm_db(&mut db, NUM_KEYS, &mut counter, &mut rng).await;
     let floor = db.inactivity_floor_loc();

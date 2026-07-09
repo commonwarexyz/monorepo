@@ -18,9 +18,9 @@
 //!     primitives::{ops::{self, threshold}, variant::MinSig, sharing::Mode},
 //! };
 //! use commonware_utils::{NZU32, N3f1};
-//! use rand::{rngs::StdRng, SeedableRng};
+//! use commonware_utils::test_rng;
 //!
-//! let mut rng = StdRng::seed_from_u64(0);
+//! let mut rng = test_rng();
 //!
 //! // Configure number of players
 //! let n = NZU32!(5);

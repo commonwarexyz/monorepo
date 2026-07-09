@@ -17,8 +17,9 @@ use commonware_storage::{
     merkle::{mmb, mmr, Family},
     qmdb::any::traits::DbAny,
 };
+use commonware_utils::TestRng;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::Rng;
 use std::time::{Duration, Instant};
 
 const NUM_ELEMENTS: u64 = 1_000;
@@ -34,7 +35,7 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-    make_value: impl Fn(&mut StdRng) -> C::Value,
+    make_value: impl Fn(&mut TestRng) -> C::Value,
 ) -> Duration {
     let start = Instant::now();
     gen_random_kv::<F, _>(
@@ -205,12 +206,12 @@ fn bench_keyless_generate(c: &mut Criterion) {
                         for _ in 0..iters {
                             let start = Instant::now();
                             dispatch_keyless!(ctx.child("storage"), variant, |db| {
-                                let mut rng = StdRng::seed_from_u64(42);
+                                let mut rng = TestRng::new(42);
                                 let mut batch = db.new_batch();
                                 for _ in 0u64..operations {
                                     let v = make_var_value(&mut rng);
                                     batch = batch.append(v);
-                                    if rng.next_u32() % KEYLESS_COMMIT_FREQ == 0 {
+                                    if rng.next_u32().is_multiple_of(KEYLESS_COMMIT_FREQ) {
                                         let merkleized =
                                             batch.merkleize(&db, None, db.inactivity_floor_loc());
                                         db.apply_batch(merkleized).await.unwrap();

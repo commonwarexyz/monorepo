@@ -418,7 +418,7 @@ macro_rules! impl_certificate_bls12381_multisig {
         ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
         where
             V: $crate::bls12381::primitives::variant::Variant,
-            R: rand::Rng + rand::CryptoRng,
+            R: rand_core::CryptoRng,
         {
             $crate::bls12381::certificate::multisig::mocks::fixture::<_, V, _>(
                 rng,

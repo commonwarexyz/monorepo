@@ -16,8 +16,8 @@ use commonware_cryptography::bls12381::{
     },
     tle::{decrypt, encrypt, Block, Ciphertext},
 };
+use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 
 #[derive(Debug, Clone)]
 enum FuzzOperation {
@@ -157,7 +157,7 @@ fn fuzz(op: FuzzOperation) {
             let master_public = compute_public::<MinPk>(&master_secret);
             let message_block = Block::new(message);
 
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
             let ciphertext = encrypt::<_, MinPk>(
                 &mut rng,
                 master_public,
@@ -185,7 +185,7 @@ fn fuzz(op: FuzzOperation) {
             let master_public = compute_public::<MinSig>(&master_secret);
             let message_block = Block::new(message);
 
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
             let ciphertext = encrypt::<_, MinSig>(
                 &mut rng,
                 master_public,
@@ -214,7 +214,7 @@ fn fuzz(op: FuzzOperation) {
             let master_public1 = compute_public::<MinPk>(&master_secret1);
             let message_block = Block::new(message);
 
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
             let ciphertext = encrypt::<_, MinPk>(
                 &mut rng,
                 master_public1,
@@ -237,7 +237,7 @@ fn fuzz(op: FuzzOperation) {
             let master_public1 = compute_public::<MinSig>(&master_secret1);
             let message_block = Block::new(message);
 
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
             let ciphertext = encrypt::<_, MinSig>(
                 &mut rng,
                 master_public1,
@@ -261,7 +261,7 @@ fn fuzz(op: FuzzOperation) {
             let master_public = compute_public::<MinPk>(&master_secret);
             let message_block = Block::new(message);
 
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
             let ciphertext = encrypt::<_, MinPk>(
                 &mut rng,
                 master_public,
@@ -292,7 +292,7 @@ fn fuzz(op: FuzzOperation) {
         } => {
             let master_public = compute_public::<MinSig>(&master_secret);
             let message_block = Block::new(message);
-            let mut rng = StdRng::seed_from_u64(rng_seed);
+            let mut rng = TestRng::new(rng_seed);
 
             let ciphertext = encrypt::<_, MinSig>(
                 &mut rng,

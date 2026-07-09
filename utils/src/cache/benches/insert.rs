@@ -1,6 +1,6 @@
-use commonware_utils::cache::Clock;
+use commonware_utils::{cache::Clock, TestRng};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::{hint::black_box, num::NonZeroUsize};
 
 /// Benchmarks the steady-state insert path under churn: a full cache with a
@@ -13,7 +13,7 @@ fn bench_insert(c: &mut Criterion) {
         for i in 0..capacity as u64 {
             cache.put(i, i);
         }
-        let mut rng = StdRng::seed_from_u64(capacity as u64);
+        let mut rng = TestRng::new(capacity as u64);
         let keys: Vec<u64> = (0..1024).map(|_| rng.random_range(0..working)).collect();
         c.bench_function(&format!("{}/capacity={capacity}", module_path!()), |b| {
             b.iter(|| {

@@ -1,9 +1,8 @@
 use commonware_cryptography::bls12381::primitives::group::{Scalar, G1};
 use commonware_math::{algebra::Random, poly::Poly};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{Faults, N3f1, NZUsize};
+use commonware_utils::{test_rng, Faults, N3f1, NZUsize};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;
 
 fn bench_evaluate_point(c: &mut Criterion) {
@@ -16,7 +15,7 @@ fn bench_evaluate_point(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let mut rng = StdRng::seed_from_u64(0);
+                            let mut rng = test_rng();
                             let polynomial: Poly<G1> = Poly::commit(Poly::new(&mut rng, t - 1));
                             let scalar = Scalar::random(&mut rng);
                             (scalar, polynomial)

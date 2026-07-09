@@ -14,7 +14,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
 use commonware_utils::channel::{fallible::FallibleExt, mpsc};
-use rand::Rng;
+use rand_core::Rng;
 use std::collections::HashMap;
 use tracing::debug;
 

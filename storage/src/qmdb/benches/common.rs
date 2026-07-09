@@ -27,8 +27,8 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
-use rand::{distr::Distribution, rngs::StdRng, Rng, SeedableRng};
+use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+use rand::{distr::Distribution, Rng};
 use rand_distr::Zipf;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
@@ -590,12 +590,12 @@ pub async fn gen_random_kv<F, M>(
     prune_frequency: Option<u32>,
     key_zipf_exponent: Option<f64>,
     keyspace: Option<u64>,
-    make_value: impl Fn(&mut StdRng) -> M::Value,
+    make_value: impl Fn(&mut TestRng) -> M::Value,
 ) where
     F: Family,
     M: DbAny<F, Key = Digest>,
 {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
 
     // Count commits across both phases so `prune_frequency` can prune to the inactivity floor every
     // N commits, bounding on-disk growth instead of accumulating the whole (re-appended) log until
@@ -648,13 +648,13 @@ pub async fn gen_random_kv<F, M>(
                 None => rng.next_u64() % space,
             };
             let rand_key = Sha256::hash(&idx.to_be_bytes());
-            if rng.next_u32() % DELETE_FREQUENCY == 0 {
+            if rng.next_u32().is_multiple_of(DELETE_FREQUENCY) {
                 batch = batch.write(rand_key, None);
                 continue;
             }
             batch = batch.write(rand_key, Some(make_value(&mut rng)));
             if let Some(freq) = commit_frequency {
-                if rng.next_u32() % freq == 0 {
+                if rng.next_u32().is_multiple_of(freq) {
                     let merkleized = batch.merkleize(db, None).await.unwrap();
                     db.apply_batch(merkleized).await.unwrap();
                     db.commit().await.unwrap();
@@ -674,7 +674,7 @@ pub async fn gen_random_kv<F, M>(
 }
 
 /// Generate a fixed-size digest value.
-pub fn make_fixed_value(rng: &mut StdRng) -> Digest {
+pub fn make_fixed_value(rng: &mut TestRng) -> Digest {
     Sha256::hash(&rng.next_u32().to_be_bytes())
 }
 
@@ -683,7 +683,7 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
     db: &mut C,
     num_keys: u64,
 ) {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
     let mut batch = db.new_batch();
     for i in 0u64..num_keys {
         let k = Sha256::hash(&i.to_be_bytes());
@@ -699,7 +699,7 @@ pub fn write_random_updates<B, Db>(
     mut batch: B,
     num_updates: u64,
     num_keys: u64,
-    rng: &mut StdRng,
+    rng: &mut TestRng,
 ) -> B
 where
     B: UnmerkleizedBatch<Db, K = Digest, V = Digest>,
@@ -714,7 +714,7 @@ where
 }
 
 /// Generate a variable-size `Vec<u8>` value (1-256 bytes).
-pub fn make_var_value(rng: &mut StdRng) -> Vec<u8> {
+pub fn make_var_value(rng: &mut TestRng) -> Vec<u8> {
     let len = (rng.next_u32() as usize) % VARIABLE_VALUE_MAX_LEN + 1;
     vec![rng.next_u32() as u8; len]
 }

@@ -1042,8 +1042,7 @@ mod test_plan {
     use super::*;
     use commonware_math::{algebra::Random, poly::Poly};
     use commonware_parallel::Sequential;
-    use commonware_utils::N3f1;
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{N3f1, TestRng};
     use std::collections::{BTreeMap, BTreeSet};
 
     /// The largest dealer or player count the `Arbitrary` implementation for
@@ -1235,7 +1234,7 @@ mod test_plan {
 
         /// Run a fresh (honest) DKG round and return the output and per-player shares.
         pub fn run_fresh(
-            rng: &mut StdRng,
+            rng: &mut impl CryptoRng,
             setup: &Setup,
             dealer_keys: &[PrivateKey],
             player_keys: &[PrivateKey],
@@ -1272,7 +1271,7 @@ mod test_plan {
             self.validate()?;
             let expect_failure = self.expect_failure();
 
-            let mut rng = StdRng::seed_from_u64(seed);
+            let mut rng = TestRng::new(seed);
 
             let dealer_keys: Vec<PrivateKey> = (0..self.num_dealers)
                 .map(|_| PrivateKey::random(&mut rng))

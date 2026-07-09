@@ -1,9 +1,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_utils::{DurationExt, SystemTimeExt};
+use commonware_utils::{DurationExt, SystemTimeExt, TestRng};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 use std::time::{Duration, SystemTime};
 
 #[derive(Arbitrary, Debug)]
@@ -30,7 +29,7 @@ enum Operation {
 }
 
 fn fuzz(input: FuzzInput) {
-    let mut rng = StdRng::seed_from_u64(input.seed);
+    let mut rng = TestRng::new(input.seed);
 
     match input.operation {
         Operation::ParseDuration { input } => {

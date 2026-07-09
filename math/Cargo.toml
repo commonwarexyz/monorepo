@@ -46,8 +46,6 @@ arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 criterion.workspace = true
-rand.workspace = true
-rand_chacha.workspace = true
 
 [lib]
 bench = false

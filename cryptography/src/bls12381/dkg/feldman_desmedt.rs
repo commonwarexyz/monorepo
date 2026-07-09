@@ -1963,9 +1963,8 @@ mod test_plan {
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
-    use commonware_utils::{Faults, N3f1, TryCollect};
+    use commonware_utils::{Faults, N3f1, TestRng, TryCollect};
     use core::num::NonZeroI32;
-    use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
 
     /// Apply a mask to some bytes, returning whether or not a modification happened
@@ -2310,7 +2309,7 @@ mod test_plan {
         pub fn run<V: Variant>(self, seed: u64) -> anyhow::Result<()> {
             self.validate()?;
 
-            let mut rng = StdRng::seed_from_u64(seed);
+            let mut rng = TestRng::new(seed);
 
             // Generate keys for all participants (1-indexed to num_participants)
             let keys = (0..self.num_participants.get())
@@ -3021,7 +3020,7 @@ mod test {
     use anyhow::anyhow;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_invariants::minifuzz;
-    use commonware_utils::{test_rng, test_rng_seeded, Faults, N3f1};
+    use commonware_utils::{test_rng, Faults, N3f1, TestRng};
     use core::num::NonZeroI32;
 
     const PRE_VERIFY_DEALERS: usize = 8;
@@ -3102,7 +3101,7 @@ mod test {
 
                 let dealer_sk = keys[dealer_index].clone();
                 let dealer_pk = dealer_sk.public_key();
-                let mut rng = test_rng_seeded(seed);
+                let mut rng = TestRng::new(seed);
                 let (mut dealer, pub_msg, priv_msgs) =
                     Dealer::start::<QuorumTwo>(&mut rng, info.clone(), dealer_sk, None)
                         .expect("dealer initialization must succeed");

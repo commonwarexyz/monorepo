@@ -22,7 +22,7 @@ use futures::{
     future::{ready, Either},
     FutureExt,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::mpsc::TryRecvError;
 use tracing::{debug, info_span, Instrument as _};
 

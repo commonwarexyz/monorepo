@@ -22,7 +22,8 @@ ed25519-consensus.workspace = true
 libfuzzer-sys.workspace = true
 num-rational.workspace = true
 p256 = { workspace = true, features = ["ecdsa"] }
-rand.workspace = true
+rand = { workspace = true, features = ["std_rng"] }
+rand_core.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
 

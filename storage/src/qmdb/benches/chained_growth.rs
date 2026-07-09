@@ -24,9 +24,8 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
 use std::{
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -166,7 +165,7 @@ async fn run_chained_growth<
 ) -> Duration {
     seed_db(&mut db, NUM_KEYS).await;
     db.sync().await.unwrap();
-    let mut rng = StdRng::seed_from_u64(99);
+    let mut rng = TestRng::new(99);
 
     // Pre-build a deep chain (untimed).
     let initial = write_random_updates(db.new_batch(), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);

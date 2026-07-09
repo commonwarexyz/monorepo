@@ -121,10 +121,10 @@ mod tests {
     };
     use commonware_utils::{
         channel::{fallible::OneshotExt, oneshot},
-        test_rng, NZUsize, NonZeroDuration, NZU16,
+        test_rng, NZUsize, NonZeroDuration, TestRng, NZU16,
     };
     use futures::future::join_all;
-    use rand::{rngs::StdRng, RngExt as _};
+    use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -450,7 +450,7 @@ mod tests {
     fn unclean_byzantine_shutdown<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         // Test parameters
         let num_validators = 4;
@@ -603,7 +603,7 @@ mod tests {
     fn unclean_shutdown_with_unsigned_height<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         // Test parameters
         let num_validators = 4;

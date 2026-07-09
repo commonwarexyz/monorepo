@@ -17,7 +17,6 @@ commonware-stream.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
 libfuzzer-sys.workspace = true
-rand_core.workspace = true
 
 [target.'cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies.chacha20poly1305]
 workspace = true

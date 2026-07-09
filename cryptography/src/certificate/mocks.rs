@@ -438,7 +438,7 @@ macro_rules! impl_certificate_mock {
             n: u32,
         ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey>>
         where
-            R: rand::Rng + rand::CryptoRng,
+            R: rand_core::CryptoRng,
         {
             fixture_with::<true, true, true, R>(rng, namespace, n)
         }
@@ -459,7 +459,7 @@ macro_rules! impl_certificate_mock {
             Scheme<$crate::ed25519::PublicKey, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>,
         >
         where
-            R: rand::Rng + rand::CryptoRng,
+            R: rand_core::CryptoRng,
         {
             assert!(n > 0);
 

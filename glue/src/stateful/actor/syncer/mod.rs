@@ -19,7 +19,7 @@ use commonware_storage::{
     Context as StorageContext,
 };
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
-use rand::Rng;
+use rand_core::Rng;
 
 mod actor;
 pub(crate) use actor::{Config, Syncer};

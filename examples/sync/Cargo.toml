@@ -32,7 +32,7 @@ commonware-storage = { workspace = true, features = ["std"] }
 commonware-stream.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-rand = { workspace = true, features = ["thread_rng"] }
+rand_core.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

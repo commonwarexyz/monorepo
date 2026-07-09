@@ -1,21 +1,23 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rng, RngExt as _};
+use rand::RngExt as _;
 use std::hint::black_box;
 
 fn bench_combine_signatures(c: &mut Criterion) {
+    let mut rng = test_rng();
     let namespace = b"namespace";
     for n in [10, 100, 1000, 10000].into_iter() {
         let mut msgs = Vec::with_capacity(n);
         for _ in 0..n {
             let mut msg = [0u8; 32];
-            rng().fill(&mut msg);
+            rng.fill(&mut msg);
             msgs.push(msg);
         }
         c.bench_function(&format!("{}/sigs={}", module_path!(), n), |b| {
             b.iter_batched(
                 || {
-                    let private = ops::keypair::<_, MinSig>(&mut rng()).0;
+                    let private = ops::keypair::<_, MinSig>(&mut rng).0;
                     let mut signatures = Vec::with_capacity(n);
                     for msg in msgs.iter() {
                         let signature = ops::sign_message::<MinSig>(&private, namespace, msg);

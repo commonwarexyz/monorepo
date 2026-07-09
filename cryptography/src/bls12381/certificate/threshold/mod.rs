@@ -508,7 +508,7 @@ macro_rules! impl_certificate_bls12381_threshold {
         ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
         where
             V: $crate::bls12381::primitives::variant::Variant,
-            R: rand::Rng + rand::CryptoRng,
+            R: rand_core::CryptoRng,
         {
             $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
                 rng,
@@ -1375,10 +1375,7 @@ mod tests {
         signer_shares_must_match_participant_indices::<MinSig>();
     }
 
-    fn make_participants<R: rand::Rng + rand::CryptoRng>(
-        rng: &mut R,
-        n: u32,
-    ) -> Set<ed25519::PublicKey> {
+    fn make_participants<R: rand_core::CryptoRng>(rng: &mut R, n: u32) -> Set<ed25519::PublicKey> {
         (0..n)
             .map(|_| Ed25519PrivateKey::random(&mut *rng).public_key())
             .try_collect()

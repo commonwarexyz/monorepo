@@ -1,5 +1,5 @@
 use super::*;
-use crate::bitmap::Prunable;
+use crate::{bitmap::Prunable, TestRng};
 use commonware_formatting::hex;
 use rand::RngExt as _;
 
@@ -975,9 +975,8 @@ fn test_randomized_helper<R: rand::Rng>(rng: &mut R) {
 /// historical reconstruction works correctly across a wide variety of scenarios.
 #[test]
 fn test_randomized_with_multiple_seeds() {
-    use rand::{rngs::StdRng, SeedableRng};
     for seed in 0..=100 {
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = TestRng::new(seed);
         test_randomized_helper(&mut rng);
     }
 }

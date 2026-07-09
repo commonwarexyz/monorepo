@@ -689,14 +689,14 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_math::algebra::{Random, Ring};
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
-    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded, N3f1};
+    use commonware_utils::{ordered::Set, test_rng, N3f1, TestRng};
 
     const TEST_NAMESPACE: &[u8] = b"test_dkg";
 
     fn create_test_signers(n: usize) -> Vec<ed25519::PrivateKey> {
         (0..n)
             .map(|i| {
-                let mut rng = test_rng_seeded(i as u64);
+                let mut rng = TestRng::new(i as u64);
                 ed25519::PrivateKey::random(&mut rng)
             })
             .collect()
@@ -741,7 +741,7 @@ mod tests {
             let mut dealer = Dealer::new(Some(crypto_dealer), pub_msg, unsent);
 
             let unknown_player = {
-                let mut rng = test_rng_seeded(100);
+                let mut rng = TestRng::new(100);
                 ed25519::PrivateKey::random(&mut rng).public_key()
             };
             let fake_ack = PlayerAck::read(&mut signers[1].sign(b"ns", b"msg").encode().as_ref())

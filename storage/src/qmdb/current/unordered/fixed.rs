@@ -113,7 +113,7 @@ pub mod test {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics, Runner as _, Supervisor as _};
-    use commonware_utils::test_rng_seeded;
+    use commonware_utils::TestRng;
     use rand::Rng as _;
     use std::collections::HashMap;
 
@@ -194,7 +194,7 @@ pub mod test {
             db.commit().await.unwrap();
 
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
-                let mut rng = test_rng_seeded(salt);
+                let mut rng = TestRng::new(salt);
                 let mut out = Vec::new();
                 for _ in 0..600 {
                     let r = rng.next_u32() % 100;

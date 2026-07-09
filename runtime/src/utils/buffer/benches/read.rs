@@ -4,9 +4,9 @@ use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE, PAGE_SIZE_USIZ
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, tokio, BufferPooler, Runner, Storage,
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, TestRng};
 use criterion::Criterion;
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::time::Instant;
 
 // Use cache size pages so all data fits in cache (testing buffer performance, not disk).
@@ -39,7 +39,7 @@ where
                     let append = create_append(&ctx, &name, cache_ref).await;
                     let mut buf = vec![0u8; read_size];
                     let max_offset = TOTAL_SIZE - read_size;
-                    let mut rng = StdRng::seed_from_u64(42);
+                    let mut rng = TestRng::new(42);
 
                     let start = Instant::now();
                     for _ in 0..iters {

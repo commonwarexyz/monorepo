@@ -7,8 +7,7 @@
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
-    pub mod rng;
-    pub use rng::{test_rng, test_rng_seeded, FuzzRng};
+    pub use rng::{test_rng, FuzzRng, TestRng};
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
@@ -201,6 +200,9 @@ commonware_macros::stability_scope!(BETA {
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
+    pub mod rng;
+    pub use rng::sys_rng;
+
     pub mod acknowledgement;
     pub use acknowledgement::Acknowledgement;
 
@@ -334,9 +336,10 @@ macro_rules! NZDuration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TestRng;
     use commonware_formatting::hex;
     use num_bigint::BigUint;
-    use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+    use rand::RngExt as _;
 
     #[test]
     fn test_union() {
@@ -414,7 +417,7 @@ mod tests {
 
         // Test case 3: check equivalence with BigUint
         for i in 0..100 {
-            let mut rng = StdRng::seed_from_u64(i);
+            let mut rng = TestRng::new(i);
             let bytes: [u8; 32] = rng.random();
 
             // 1-byte modulus

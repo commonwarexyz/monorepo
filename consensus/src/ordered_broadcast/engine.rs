@@ -829,7 +829,7 @@ impl<
         Ok(())
     }
 
-    /// Send a  `Node` message to all validators in the given epoch.
+    /// Send a `Node` message to all validators in the given epoch.
     fn broadcast(
         &mut self,
         node: Node<C::PublicKey, P::Scheme, D>,
