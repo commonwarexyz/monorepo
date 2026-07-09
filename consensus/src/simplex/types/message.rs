@@ -25,7 +25,7 @@ pub trait Attributable {
     fn signer(&self) -> Participant;
 }
 
-/// A validator's vote over a [Phase]-specific payload.
+/// A validator's vote over a [Phase]-specific claim.
 #[derive(Clone, Debug)]
 pub struct Signed<P: Phase, S: Scheme, D: Digest> {
     /// Claim covered by the vote.

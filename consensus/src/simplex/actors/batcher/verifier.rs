@@ -56,7 +56,7 @@ enum Election<D: Digest> {
     Proposed(Participant, Proposal<D>),
 }
 
-/// Pending votes of one kind, alongside the count of votes already verified.
+/// Pending votes of one phase, alongside the count of votes already verified.
 pub(in crate::simplex) struct Pending<P: Phase, S: Scheme<D>, D: Digest> {
     /// Votes waiting to be verified.
     votes: Vec<Signed<P, S, D>>,

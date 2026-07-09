@@ -214,7 +214,7 @@ pub enum Activity<S: Scheme, D: Digest> {
     /// A notarization was locally certified.
     ///
     /// Reported only on success; the journal's [Artifact::CertificationOutcome] records the
-    /// outcome as a [Round] and flag.
+    /// [Round] and whether certification succeeded.
     Certification(Notarization<S, D>),
     /// A validator's nullify vote used to skip the current view.
     Nullify(Nullify<S, D>),

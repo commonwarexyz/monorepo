@@ -2280,7 +2280,7 @@ mod tests {
                     );
             }
 
-            // Give time for leader's vote to arrive and set leader_proposal
+            // Give time for the leader's vote to arrive and set their proposal
             context.sleep(Duration::from_millis(50)).await;
 
             // The batcher should receive the leader's proposal

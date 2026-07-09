@@ -32,7 +32,7 @@ pub enum Added<P: PublicKey> {
     /// The certificate was newly added; carries the leader's key if its proposal
     /// conflicts with the recorded one (equivocation).
     New { equivocator: Option<P> },
-    /// A certificate of this kind was already recorded.
+    /// A certificate of this phase was already recorded.
     Duplicate,
 }
 
@@ -48,7 +48,7 @@ enum CertifyState {
     Aborted,
 }
 
-/// A certificate of one kind plus whether it has been broadcast.
+/// A certificate of one phase plus whether it has been broadcast.
 ///
 /// A certificate is returned for broadcast at most once; replayed broadcasts are
 /// honored even when the certificate itself is not restored.
