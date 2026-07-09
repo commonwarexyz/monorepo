@@ -237,8 +237,8 @@ where
         &mut self,
         context: <Self as Automaton>::Context,
         block: B,
-        stage: Stage,
         parent_request: oneshot::Receiver<B>,
+        stage: Stage,
     ) -> oneshot::Receiver<bool> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -397,7 +397,7 @@ where
                 );
 
                 let verify_rx = marshaled
-                    .deferred_verify(embedded_context, block, Stage::Certified, parent_request)
+                    .deferred_verify(embedded_context, block, parent_request, Stage::Certified)
                     .await;
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
@@ -772,7 +772,7 @@ where
                 // work), so deferred verification must run to completion into
                 // the gate.
                 let deferred_rx = marshaled
-                    .deferred_verify(context, block, Stage::Verified, parent_request)
+                    .deferred_verify(context, block, parent_request, Stage::Verified)
                     .await;
                 tx.send_lossy(true);
                 if let Ok(result) = deferred_rx.await {
