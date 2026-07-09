@@ -58,6 +58,23 @@ enum Resolved {
     Finalization,
 }
 
+/// Messages built and recorded during an event loop iteration, staged for
+/// broadcast after the journal sync barrier (see [Actor::construct] and
+/// [Actor::notify]).
+#[allow(clippy::type_complexity)]
+struct Staged<S: Scheme<D>, D: Digest> {
+    /// A nullify vote constructed on timeout, with the best certificate from
+    /// the previous view (on retry) to help others enter the view.
+    nullify: Option<(Nullify<S>, Option<Certificate<S, D>>)>,
+    notarize: Option<Notarize<S, D>>,
+    notarization: Option<Notarization<S, D>>,
+    /// A nullification certificate, with the parent certificate of our proposal
+    /// (the "floor") if we were the leader of the nullified view.
+    nullification: Option<(Nullification<S>, Option<Certificate<S, D>>)>,
+    finalize: Option<Finalize<S, D>>,
+    finalization: Option<Finalization<S, D>>,
+}
+
 /// An outstanding request to the automaton.
 struct Request<V: Viewable, R>(
     /// Attached context for the pending item. Must yield a view.
@@ -253,12 +270,11 @@ impl<
 
     /// Syncs all journal sections with pending appends.
     ///
-    /// Invoked once per event loop iteration (by [Self::notify]) after the
-    /// construction phase and before the broadcast phase (regardless of whether
-    /// anything will be broadcast) so everything we tell the network is
-    /// recoverable after a restart. Deferring syncs to this boundary (rather
-    /// than syncing after each append) coalesces all appends in the same loop
-    /// iteration into a single sync.
+    /// Invoked once per event loop iteration, after [Self::construct] and before
+    /// [Self::notify] (regardless of whether anything will be broadcast), so
+    /// everything we tell the network is recoverable after a restart. Deferring
+    /// syncs to this boundary (rather than syncing after each append) coalesces
+    /// all appends in the same loop iteration into a single sync.
     async fn sync_journal(&mut self) {
         if self.dirty.is_empty() {
             return;
@@ -775,41 +791,53 @@ impl<
         }
     }
 
-    /// Emits any votes or certificates that became available for `view`.
+    /// Builds and records any votes or certificates that became available for `view`.
     ///
-    /// All outbound messages flow through here: everything is built and recorded
-    /// first (including the timeout's `nullify`, constructed by the caller), then
-    /// synced to the journal in a single batch, then broadcast.
+    /// Everything returned must be synced to the journal (via [Self::sync_journal])
+    /// before it is broadcast (via [Self::notify]).
     ///
     /// We don't need to iterate over all views to check for new actions because messages we receive
     /// only affect a single view.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    async fn notify<Sp: Sender, Sr: Sender>(
+    #[allow(clippy::type_complexity)]
+    async fn construct(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         resolver: &mut resolver::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
-        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
         nullify: Option<(Nullify<S>, Option<Certificate<S, D>>)>,
-    ) {
-        // Build and record everything that became available before broadcasting
-        // anything below.
+    ) -> Staged<S, D> {
         let notarize = self.prepare_notarize(batcher, view).await;
         let notarization = self.prepare_notarization(resolver, view, resolved).await;
         let nullification = self.prepare_nullification(resolver, view, resolved).await;
         let finalize = self.prepare_finalize(batcher, view).await;
         let finalization = self.prepare_finalization(resolver, view, resolved).await;
+        Staged {
+            nullify,
+            notarize,
+            notarization,
+            nullification,
+            finalize,
+            finalization,
+        }
+    }
 
-        // Sync everything appended this iteration (during message processing and
-        // the construction phase above) in a single coalesced sync. This runs even
-        // if there is nothing to broadcast below so every artifact is durable by
-        // the end of the iteration that appended it.
-        self.sync_journal().await;
+    /// Broadcasts everything constructed this iteration and reports it to the application.
+    ///
+    /// Callers must sync pending journal appends first (via [Self::sync_journal])
+    /// so nothing reaches the network before it is durable.
+    fn notify<Sp: Sender, Sr: Sender>(
+        &mut self,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
+        staged: Staged<S, D>,
+    ) {
+        assert!(
+            self.dirty.is_empty(),
+            "journal must be synced before broadcast"
+        );
 
-        // Broadcast everything we built (and report it to the application).
-        if let Some((nullify, entry)) = nullify {
+        if let Some((nullify, entry)) = staged.nullify {
             debug!(round=?nullify.round(), "broadcasting nullify");
             self.broadcast_vote(vote_sender, Vote::Nullify(nullify));
 
@@ -818,11 +846,11 @@ impl<
                 self.broadcast_certificate(certificate_sender, entry);
             }
         }
-        if let Some(notarize) = notarize {
+        if let Some(notarize) = staged.notarize {
             debug!(proposal=?notarize.proposal, "broadcasting notarize");
             self.broadcast_vote(vote_sender, Vote::Notarize(notarize));
         }
-        if let Some(notarization) = notarization {
+        if let Some(notarization) = staged.notarization {
             debug!(proposal=?notarization.proposal, "broadcasting notarization");
             self.broadcast_certificate(
                 certificate_sender,
@@ -830,7 +858,7 @@ impl<
             );
             self.reporter.report(Activity::Notarization(notarization));
         }
-        if let Some((nullification, floor)) = nullification {
+        if let Some((nullification, floor)) = staged.nullification {
             if let Some(floor) = floor {
                 warn!(?floor, "broadcasting nullification floor");
                 self.broadcast_certificate(certificate_sender, floor);
@@ -842,11 +870,11 @@ impl<
             );
             self.reporter.report(Activity::Nullification(nullification));
         }
-        if let Some(finalize) = finalize {
+        if let Some(finalize) = staged.finalize {
             debug!(proposal=?finalize.proposal, "broadcasting finalize");
             self.broadcast_vote(vote_sender, Vote::Finalize(finalize));
         }
-        if let Some(finalization) = finalization {
+        if let Some(finalization) = staged.finalization {
             debug!(proposal=?finalization.proposal, "broadcasting finalization");
             self.broadcast_certificate(
                 certificate_sender,
@@ -1081,7 +1109,7 @@ impl<
                 debug!("context shutdown, stopping voter");
             },
             _ = self.context.sleep_until(timeout) => {
-                // Process the timeout (the constructed nullify is broadcast by notify)
+                // Process the timeout (the constructed nullify is staged for the broadcast phase)
                 let current_view = self.state.current_view();
                 let span = info_span!(
                     parent: self.state.view_span(current_view),
@@ -1156,15 +1184,22 @@ impl<
                     epoch = self.state.epoch().traced(),
                     view = view.traced()
                 );
-                self.notify(
-                    &mut batcher,
-                    &mut resolver,
-                    &mut vote_sender,
-                    &mut certificate_sender,
-                    view,
-                    resolved,
-                    nullify,
-                )
+                async {
+                    // Build and record everything that became available for `view`.
+                    let staged = self
+                        .construct(&mut batcher, &mut resolver, view, resolved, nullify)
+                        .await;
+
+                    // Sync everything appended this iteration (during message
+                    // processing and construction) in a single coalesced sync.
+                    // This runs even if there is nothing to broadcast (e.g. a
+                    // certification result was recorded) so every artifact is
+                    // durable by the end of the iteration that appended it.
+                    self.sync_journal().await;
+
+                    // Broadcast everything we built (and report it to the application).
+                    self.notify(&mut vote_sender, &mut certificate_sender, staged);
+                }
                 .instrument(span)
                 .await;
 
