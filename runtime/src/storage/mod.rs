@@ -117,7 +117,6 @@ stability_scope!(BETA {
     #[derive(Debug)]
     pub(crate) enum HeaderError {
         InvalidMagic {
-            expected: [u8; 4],
             found: [u8; 4],
         },
         UnsupportedRuntimeVersion {
@@ -143,10 +142,10 @@ stability_scope!(BETA {
         /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
         pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
             match self {
-                Self::InvalidMagic { expected, found } => crate::Error::BlobCorrupt(
+                Self::InvalidMagic { found } => crate::Error::BlobCorrupt(
                     partition.into(),
                     hex(name),
-                    format!("invalid magic: expected {expected:?}, found {found:?}"),
+                    format!("invalid magic: found {found:?}"),
                 ),
                 Self::UnsupportedRuntimeVersion { expected, found } => crate::Error::BlobCorrupt(
                     partition.into(),
@@ -187,7 +186,7 @@ stability_scope!(BETA {
     ///
     /// | bytes    | field                        | owner       | question it answers                              |
     /// |----------|------------------------------|-------------|--------------------------------------------------|
-    /// | 0-3      | [Header::MAGIC]              | runtime     | is this file one of our blobs at all?            |
+    /// | 0-3      | magic (per layout)           | runtime     | is this file one of our blobs, and which layout? |
     /// | 4-5      | runtime version (u16)        | runtime     | can this build read this container layout?       |
     /// | 6-7      | blob version (u16)           | application | can this application interpret the contents?     |
     /// | 8-11     | data offset (u32, V1 only)   | runtime     | where do the contents begin?                     |
@@ -244,18 +243,12 @@ stability_scope!(BETA {
         /// it without a new layout version.
         const SUPPORTED_DATA_OFFSETS: RangeInclusive<u64> = 4096..=(1 << 20);
 
-        /// Runtime versions this build can read.
-        const SUPPORTED_RUNTIME_VERSIONS: RangeInclusive<u16> = 0..=1;
-
         /// Length of magic bytes.
         pub(crate) const MAGIC_LENGTH: usize = 4;
 
         /// Length of version fields.
         #[cfg(test)]
         pub(crate) const VERSION_LENGTH: usize = 2;
-
-        /// Magic bytes identifying a valid commonware blob.
-        pub(crate) const MAGIC: [u8; Self::MAGIC_LENGTH] = *b"CWIC"; // Commonware Is CWIC
 
         /// Returns true if a blob is missing a valid header (new or corrupted).
         pub(crate) const fn missing(raw_len: u64) -> bool {
@@ -270,7 +263,7 @@ stability_scope!(BETA {
         ) -> (Vec<u8>, u16, u64) {
             let blob_version = *versions.end();
             let header = Self {
-                magic: Self::MAGIC,
+                magic: layout.magic(),
                 runtime_version: layout.runtime_version(),
                 blob_version,
             };
@@ -297,15 +290,13 @@ stability_scope!(BETA {
         ) -> Result<ParsedHeader, HeaderError> {
             let header: Self = Self::decode(raw_bytes.as_slice())
                 .expect("header decode should never fail for correct size input");
-            header.validate(versions)?;
-            match BlobHeaderLayout::from_runtime_version(header.runtime_version) {
-                Some(BlobHeaderLayout::V0) => Ok(ParsedHeader::V0 {
+            match header.validate(versions)? {
+                BlobHeaderLayout::V0 => Ok(ParsedHeader::V0 {
                     blob_version: header.blob_version,
                 }),
-                Some(BlobHeaderLayout::V1) => Ok(ParsedHeader::NeedsExtension {
+                BlobHeaderLayout::V1 => Ok(ParsedHeader::NeedsExtension {
                     blob_version: header.blob_version,
                 }),
-                None => unreachable!("validate() rejects unknown runtime versions"),
             }
         }
 
@@ -344,20 +335,24 @@ stability_scope!(BETA {
             Ok(data_offset)
         }
 
-        /// Validates the magic bytes, runtime version, and blob version.
+        /// Validates the magic bytes, runtime version, and blob version, returning the layout
+        /// the magic identifies.
+        ///
+        /// The magic alone selects the layout; the runtime version must agree with it. Requiring
+        /// agreement (rather than deriving the layout from the runtime version) means a header
+        /// with any bytes zeroed by a torn write fails validation instead of parsing as a
+        /// different layout.
         pub(crate) fn validate(
             &self,
             blob_versions: &RangeInclusive<u16>,
-        ) -> Result<(), HeaderError> {
-            if self.magic != Self::MAGIC {
-                return Err(HeaderError::InvalidMagic {
-                    expected: Self::MAGIC,
-                    found: self.magic,
-                });
-            }
-            if !Self::SUPPORTED_RUNTIME_VERSIONS.contains(&self.runtime_version) {
+        ) -> Result<BlobHeaderLayout, HeaderError> {
+            let Some(layout) = BlobHeaderLayout::from_magic(&self.magic) else {
+                return Err(HeaderError::InvalidMagic { found: self.magic });
+            };
+            let runtime_version = layout.runtime_version();
+            if self.runtime_version != runtime_version {
                 return Err(HeaderError::UnsupportedRuntimeVersion {
-                    expected: Self::SUPPORTED_RUNTIME_VERSIONS,
+                    expected: runtime_version..=runtime_version,
                     found: self.runtime_version,
                 });
             }
@@ -367,7 +362,7 @@ stability_scope!(BETA {
                     found: self.blob_version,
                 });
             }
-            Ok(())
+            Ok(layout)
         }
     }
 
@@ -422,7 +417,7 @@ impl arbitrary::Arbitrary<'_> for Header {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let version: u16 = u.arbitrary()?;
         Ok(Self {
-            magic: Self::MAGIC,
+            magic: BlobHeaderLayout::V0.magic(),
             runtime_version: BlobHeaderLayout::V0.runtime_version(),
             blob_version: version,
         })
@@ -439,7 +434,7 @@ pub(crate) mod tests {
     /// A V0 header with the given blob version, for direct field manipulation in tests.
     fn v0_header(blob_version: u16) -> Header {
         Header {
-            magic: Header::MAGIC,
+            magic: BlobHeaderLayout::V0.magic(),
             runtime_version: BlobHeaderLayout::V0.runtime_version(),
             blob_version,
         }
@@ -449,7 +444,7 @@ pub(crate) mod tests {
     /// future writer choosing a larger creation offset would lay them out.
     pub(crate) fn v1_blob_bytes(data_offset: u64, blob_version: u16, payload: &[u8]) -> Vec<u8> {
         let header = Header {
-            magic: Header::MAGIC,
+            magic: BlobHeaderLayout::V1.magic(),
             runtime_version: BlobHeaderLayout::V1.runtime_version(),
             blob_version,
         };
@@ -470,7 +465,7 @@ pub(crate) mod tests {
         assert_eq!(data_offset, Header::PRELUDE_SIZE_U64);
         assert_eq!(region.len(), Header::PRELUDE_SIZE);
         let decoded: Header = Header::decode(region.as_slice()).unwrap();
-        assert_eq!(decoded.magic, Header::MAGIC);
+        assert_eq!(decoded.magic, BlobHeaderLayout::V0.magic());
         assert_eq!(
             decoded.runtime_version,
             BlobHeaderLayout::V0.runtime_version()
@@ -512,7 +507,7 @@ pub(crate) mod tests {
     fn test_header_v1_fixture_bytes() {
         let (region, _, _) = Header::create(&(3..=3), BlobHeaderLayout::V1);
         let expected = [
-            b'C', b'W', b'I', b'C', // magic
+            b'C', b'W', b'I', b'1', // V1 magic
             0x00, 0x01, // runtime version 1
             0x00, 0x03, // blob version 3
             0x00, 0x00, 0x10, 0x00, // data offset 4096
@@ -613,8 +608,8 @@ pub(crate) mod tests {
         let result = header.validate(&(3..=7));
         assert!(matches!(
             result,
-            Err(HeaderError::InvalidMagic { expected, found })
-            if expected == Header::MAGIC && found == *b"XXXX"
+            Err(HeaderError::InvalidMagic { found })
+            if found == *b"XXXX"
         ));
     }
 
@@ -626,7 +621,37 @@ pub(crate) mod tests {
         assert!(matches!(
             result,
             Err(HeaderError::UnsupportedRuntimeVersion { expected, found })
-            if expected == Header::SUPPORTED_RUNTIME_VERSIONS && found == 99
+            if expected == (0..=0) && found == 99
+        ));
+    }
+
+    /// A magic with any byte zeroed by a torn write must be invalid, never another layout's
+    /// magic: this is what lets an unparseable header safely identify a torn creation.
+    #[test]
+    fn test_header_magic_zero_subset_is_invalid() {
+        for layout in [BlobHeaderLayout::V0, BlobHeaderLayout::V1] {
+            for i in 0..Header::MAGIC_LENGTH {
+                let mut magic = layout.magic();
+                magic[i] = 0;
+                assert!(BlobHeaderLayout::from_magic(&magic).is_none());
+            }
+        }
+    }
+
+    /// A torn V1 header write that persists the magic but zeroes the runtime version must fail
+    /// validation rather than parse as V0 (which shares runtime version 0).
+    #[test]
+    fn test_header_torn_v1_does_not_parse_as_v0() {
+        let header = Header {
+            magic: BlobHeaderLayout::V1.magic(),
+            runtime_version: 0,
+            blob_version: 5,
+        };
+        let result = header.validate(&(3..=7));
+        assert!(matches!(
+            result,
+            Err(HeaderError::UnsupportedRuntimeVersion { expected, found })
+            if expected == (1..=1) && found == 0
         ));
     }
 
