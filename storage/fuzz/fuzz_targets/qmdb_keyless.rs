@@ -5,6 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    ThreadPooler as _,
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
@@ -216,10 +217,15 @@ fn test_config<S: Strategy>(
     }
 }
 
-fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy: S) {
+fn fuzz_family<F: Family, S: Strategy>(
+    input: &FuzzInput,
+    suffix: &str,
+    strategy: impl FnOnce(&deterministic::Context) -> S,
+) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
+        let strategy = strategy(&context);
         let cfg = test_config(suffix, &context, strategy.clone());
         let mut db: Db<F, S> = Db::init(context.child("storage"), cfg)
             .await
@@ -498,11 +504,12 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz_family::<mmr::Family, Sequential>(&input, "fuzz-mmr-sequential", Sequential);
-    fuzz_family::<mmb::Family, Sequential>(&input, "fuzz-mmb-sequential", Sequential);
-    // Single-threaded pools run `Strategy::spawn` jobs inline: merkleize awaits a spawned
-    // job, and the deterministic runtime cannot observe completions signaled from a
-    // standalone pool's external threads.
-    fuzz_family::<mmr::Family, Rayon>(&input, "fuzz-mmr-rayon", Rayon::new(NZUsize!(1)).unwrap());
-    fuzz_family::<mmb::Family, Rayon>(&input, "fuzz-mmb-rayon", Rayon::new(NZUsize!(1)).unwrap());
+    fuzz_family::<mmr::Family, Sequential>(&input, "fuzz-mmr-sequential", |_| Sequential);
+    fuzz_family::<mmb::Family, Sequential>(&input, "fuzz-mmb-sequential", |_| Sequential);
+    fuzz_family::<mmr::Family, Rayon>(&input, "fuzz-mmr-rayon", |context| {
+        context.create_strategy(NZUsize!(2)).unwrap()
+    });
+    fuzz_family::<mmb::Family, Rayon>(&input, "fuzz-mmb-rayon", |context| {
+        context.create_strategy(NZUsize!(2)).unwrap()
+    });
 });
