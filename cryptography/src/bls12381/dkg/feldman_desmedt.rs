@@ -2487,7 +2487,7 @@ mod test_plan {
 
                         let i_player = players
                             .index(&player_pk)
-                            .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
+                            .ok_or_else(|| anyhow!("unknown player: {:?}", player_pk))?;
                         let player_key_idx = pk_to_key_idx[&player_pk];
                         let player = &mut players.values_mut()[usize::from(i_player)];
                         let persisted = priv_msg.clone();
@@ -2562,7 +2562,7 @@ mod test_plan {
                                 let player_pk = keys[i_player as usize].public_key();
                                 *results
                                     .get_value_mut(&player_pk)
-                                    .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))? =
+                                    .ok_or_else(|| anyhow!("unknown player: {:?}", player_pk))? =
                                     AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::random(
                                         &mut rng,
                                     )));
@@ -2585,7 +2585,7 @@ mod test_plan {
                         let missing_pk = keys[missing_dealer as usize].public_key();
                         let missing_log = dealer_logs
                             .get(&missing_pk)
-                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", &missing_pk));
+                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", missing_pk));
                         for &i_player in &round.players {
                             let player_pk = keys[i_player as usize].public_key();
                             let was_acked = missing_log.get_ack(&player_pk).is_some();
@@ -2725,7 +2725,7 @@ mod test_plan {
                         let dealer_pk = keys[dealer_idx as usize].public_key();
                         let dealer_log = dealer_logs
                             .get(&dealer_pk)
-                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", &dealer_pk));
+                            .unwrap_or_else(|| panic!("missing dealer log for {:?}", dealer_pk));
                         if dealer_log.get_ack(&player_pk).is_none() {
                             continue;
                         }
