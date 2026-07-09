@@ -483,17 +483,13 @@ impl<D: Digest> Proof<D> {
         mut position: u32,
         root: &D,
     ) -> Result<(), Error> {
-        let mut hasher = H::default();
         // Validate position
         if position >= self.leaf_count {
             return Err(Error::InvalidPosition(position));
         }
 
         // Compute the position-hashed leaf
-        hasher.update(&position.to_be_bytes());
-        hasher.update(leaf);
-        let (next_hasher, mut computed) = hasher.finalize();
-        hasher = next_hasher;
+        let mut computed = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
 
         // Track level size to handle odd-sized levels
         let mut level_size = self.leaf_count as usize;
@@ -506,23 +502,19 @@ impl<D: Digest> Proof<D> {
 
             let (left_node, right_node) = if is_last_odd {
                 // Node is duplicated - no sibling consumed from proof
-                (&computed, &computed)
+                (computed, computed)
             } else if position.is_multiple_of(2) {
                 // Even position: sibling is to the right
-                let sibling = sibling_iter.next().ok_or(Error::UnalignedProof)?;
-                (&computed, sibling)
+                let sibling = *sibling_iter.next().ok_or(Error::UnalignedProof)?;
+                (computed, sibling)
             } else {
                 // Odd position: sibling is to the left
-                let sibling = sibling_iter.next().ok_or(Error::UnalignedProof)?;
-                (sibling, &computed)
+                let sibling = *sibling_iter.next().ok_or(Error::UnalignedProof)?;
+                (sibling, computed)
             };
 
             // Compute the parent digest
-            hasher.update(left_node);
-            hasher.update(right_node);
-            let (next_hasher, digest) = hasher.finalize();
-            hasher = next_hasher;
-            computed = digest;
+            computed = H::hash(&[left_node.as_ref(), right_node.as_ref()]);
 
             // Move up the tree
             position /= 2;
@@ -536,9 +528,7 @@ impl<D: Digest> Proof<D> {
 
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
-        hasher.update(&self.leaf_count.to_be_bytes());
-        hasher.update(&computed);
-        let (_, finalized) = hasher.finalize();
+        let finalized = H::hash(&[&self.leaf_count.to_be_bytes(), computed.as_ref()]);
 
         if finalized == *root {
             Ok(())
@@ -560,16 +550,12 @@ impl<D: Digest> Proof<D> {
         elements: &[(D, u32)],
         root: &D,
     ) -> Result<(), Error> {
-        let mut hasher = H::default();
         // Handle empty case
         if elements.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
-                let (next_hasher, empty_tree_root) = hasher.finalize();
-                hasher = next_hasher;
-                hasher.update(&0u32.to_be_bytes());
-                hasher.update(&empty_tree_root);
-                let (_, finalized) = hasher.finalize();
+                let empty_tree_root = H::hash(&[]);
+                let finalized = H::hash(&[&0u32.to_be_bytes(), empty_tree_root.as_ref()]);
                 if finalized == *root {
                     return Ok(());
                 } else {
@@ -580,15 +566,25 @@ impl<D: Digest> Proof<D> {
         }
 
         // 1. Sort elements by position and check for duplicates/bounds
-        let mut sorted: Vec<(u32, D)> = Vec::with_capacity(elements.len());
-        for (leaf, position) in elements {
+        for (_, position) in elements {
             if *position >= self.leaf_count {
                 return Err(Error::InvalidPosition(*position));
             }
-            hasher.update(&position.to_be_bytes());
-            hasher.update(leaf);
-            let (next_hasher, digest) = hasher.finalize();
-            hasher = next_hasher;
+        }
+        let mut sorted: Vec<(u32, D)> = Vec::with_capacity(elements.len());
+        let mut leaf_chunks = elements.chunks_exact(2);
+        for chunk in &mut leaf_chunks {
+            let (leaf_a, pos_a) = &chunk[0];
+            let (leaf_b, pos_b) = &chunk[1];
+            let (digest_a, digest_b) = H::hash_pair(
+                &[&pos_a.to_be_bytes(), leaf_a.as_ref()],
+                &[&pos_b.to_be_bytes(), leaf_b.as_ref()],
+            );
+            sorted.push((*pos_a, digest_a));
+            sorted.push((*pos_b, digest_b));
+        }
+        for (leaf, position) in leaf_chunks.remainder() {
+            let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
             sorted.push((*position, digest));
         }
         sorted.sort_unstable_by_key(|(pos, _)| *pos);
@@ -607,8 +603,11 @@ impl<D: Digest> Proof<D> {
         let mut sibling_iter = self.siblings.iter();
         let mut current = sorted;
         let mut next_level: Vec<(u32, D)> = Vec::with_capacity(current.len());
+        let mut parents: Vec<(u32, D, D)> = Vec::with_capacity(current.len());
 
         for _ in 0..levels - 1 {
+            // First pass: determine each parent's (left, right) children without hashing, so
+            // independent parent digests can be batched together in the second pass.
             let mut idx = 0;
             while idx < current.len() {
                 let (pos, digest) = current[idx];
@@ -639,15 +638,26 @@ impl<D: Digest> Proof<D> {
                     (left, right)
                 };
 
-                // Hash parent
-                hasher.update(&left);
-                hasher.update(&right);
-                let (next_hasher, digest) = hasher.finalize();
-                hasher = next_hasher;
-                next_level.push((parent_pos, digest));
-
+                parents.push((parent_pos, left, right));
                 idx += 1;
             }
+
+            // Second pass: hash independent parent digests two at a time via `hash_pair`.
+            let mut parent_chunks = parents.chunks_exact(2);
+            for chunk in &mut parent_chunks {
+                let (pos_a, left_a, right_a) = chunk[0];
+                let (pos_b, left_b, right_b) = chunk[1];
+                let (digest_a, digest_b) = H::hash_pair(
+                    &[left_a.as_ref(), right_a.as_ref()],
+                    &[left_b.as_ref(), right_b.as_ref()],
+                );
+                next_level.push((pos_a, digest_a));
+                next_level.push((pos_b, digest_b));
+            }
+            for &(pos, left, right) in parent_chunks.remainder() {
+                next_level.push((pos, H::hash(&[left.as_ref(), right.as_ref()])));
+            }
+            parents.clear();
 
             // Prepare for next level
             core::mem::swap(&mut current, &mut next_level);
@@ -667,9 +677,7 @@ impl<D: Digest> Proof<D> {
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
         let tree_root = current[0].1;
-        hasher.update(&self.leaf_count.to_be_bytes());
-        hasher.update(&tree_root);
-        let (_, finalized) = hasher.finalize();
+        let finalized = H::hash(&[&self.leaf_count.to_be_bytes(), tree_root.as_ref()]);
 
         if finalized == *root {
             Ok(())
