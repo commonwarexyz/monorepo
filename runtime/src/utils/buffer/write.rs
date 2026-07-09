@@ -23,7 +23,11 @@ use Durability::{Durable, NonDurable};
 ///
 /// # Cancellation
 ///
-/// Dropping an in-flight operation leaves the writer in a consistent, retryable state.
+/// Dropping an in-flight operation is safe. The writer stays usable and no other data is
+/// affected. The interrupted write may have reached the blob in full, in part, or not at all
+/// (just like a write interrupted by a crash), so the bytes it targeted are unknown until
+/// written again. Any bytes it left past [Self::size] are invisible to the writer; after a
+/// restart they look like ordinary crash leftovers, which recovery already handles.
 ///
 /// # Access
 ///
@@ -153,6 +157,9 @@ impl<B: Blob> Write<B> {
     ///
     /// Data is merged into the in-memory tip buffer when possible, otherwise buffered data may be
     /// flushed and chunks are written directly to the underlying blob.
+    ///
+    /// A dropped write may be applied in full, in part, or not at all; the bytes it targeted
+    /// are unknown until written again.
     ///
     /// Returns [Error::OffsetOverflow] when `offset + bufs.len()` overflows.
     pub async fn write_at(
