@@ -666,10 +666,9 @@ mod tests {
     #[test]
     fn state_sync_reports_compact_progress() {
         deterministic::Runner::default().start(|context| async move {
-            let mut source =
-                FixedDb::init(context.child("source"), fixed_config("source", &context))
-                    .await
-                    .unwrap();
+            let source_context = context.child("source");
+            let source_config = fixed_config("source", &source_context);
+            let mut source = FixedDb::init(source_context, source_config).await.unwrap();
             let floor = source.inactivity_floor_loc();
             let batch =
                 source
@@ -696,9 +695,11 @@ mod tests {
             let (update_tx, update_rx) = mpsc::channel(1);
             let (_finish_tx, finish_rx) = mpsc::channel(1);
             let (reached_tx, mut reached_rx) = mpsc::channel(1);
+            let client_context = context.child("client");
+            let client_config = fixed_config("client", &client_context);
             let sync = <FixedDb as StateSyncDb<_, _>>::sync_db(
-                context.child("client"),
-                fixed_config("client", &context),
+                client_context,
+                client_config,
                 resolver,
                 target.clone(),
                 update_rx,
