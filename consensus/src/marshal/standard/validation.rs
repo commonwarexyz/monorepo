@@ -179,7 +179,7 @@ where
 
 /// Runs application verification over the two-block ancestry prefix.
 ///
-/// The block must already have passed [`fetch_and_validate_parent`]. Returns `None` when
+/// The block must already have passed [`await_and_validate_parent`]. Returns `None` when
 /// work should stop early (receiver dropped). The store is intentionally separate so callers
 /// can run it concurrently with this verification (durability is independent of validity).
 #[inline]
