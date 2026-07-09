@@ -1323,6 +1323,27 @@ mod test {
         assert_eq!(policy_len(&other), 0);
     }
 
+    /// A spawn awaited from a thread inside the pool must complete even when no other
+    /// worker can run the job: the pool below registers this thread as a member and never
+    /// starts its remaining worker, so only the spawn future's yield loop can execute the
+    /// job (a single poll must suffice; there is no executor to re-poll a pending future).
+    #[test]
+    fn spawn_driven_inline_on_member_thread() {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(2)
+            .use_current_thread()
+            .spawn_handler(|_| Ok(()))
+            .build()
+            .unwrap();
+        let strategy = Rayon::with_pool(Arc::new(pool));
+
+        let result = strategy
+            .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+            .now_or_never()
+            .expect("spawn should complete on first poll via the yield loop");
+        assert_eq!(result, vec![1, 2]);
+    }
+
     #[test]
     fn adaptive_policy_is_shared_by_clones() {
         let strategy = parallel_strategy();

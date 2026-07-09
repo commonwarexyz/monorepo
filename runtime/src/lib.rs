@@ -3949,10 +3949,10 @@ mod tests {
         });
     }
 
-    /// An awaited `Strategy::spawn` on a multi-thread pool must complete under the
-    /// deterministic runtime: pool workers never run there (they are registered as
-    /// cooperative tasks that block if polled), so the spawn future drives pending pool
-    /// work inline on the executor thread (registered as a pool worker at creation).
+    /// A multi-thread pool request must behave as configured under the deterministic
+    /// runtime even though no worker threads exist: the strategy reports the requested
+    /// parallelism and awaited `Strategy::spawn` jobs are driven inline on the executor
+    /// thread (registered as a pool member at creation).
     #[test]
     fn test_deterministic_multithread_strategy_spawn_completes() {
         let executor = deterministic::Runner::default();
@@ -3962,12 +3962,81 @@ mod tests {
                 .create_strategy(NZUsize!(2))
                 .unwrap()
                 .manual();
+            assert_eq!(strategy.parallelism_hint(), 2);
 
             let output = strategy
                 .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
 
             assert_eq!(output, vec![1, 2]);
+        });
+    }
+
+    /// Later pools must reuse the pool the executor thread registered with: rayon permits
+    /// one registration per OS thread (and it is permanent), so work submitted to a fresh
+    /// pool could never execute. Covers a second pool within one runner and a pool created
+    /// by a later runner on the same thread.
+    #[test]
+    fn test_deterministic_thread_pool_reused_across_pools_and_runners() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let first = context
+                .child("pool_a")
+                .create_strategy(NZUsize!(2))
+                .unwrap()
+                .manual();
+            let output = first
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+            assert_eq!(output, vec![1, 2]);
+
+            let second = context
+                .child("pool_b")
+                .create_strategy(NZUsize!(3))
+                .unwrap()
+                .manual();
+            let output = second
+                .spawn(|strategy| strategy.map_collect_vec(0..3, |i| i + 1))
+                .await;
+            assert_eq!(output, vec![1, 2, 3]);
+        });
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let third = context
+                .child("pool_c")
+                .create_strategy(NZUsize!(2))
+                .unwrap()
+                .manual();
+            let output = third
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+            assert_eq!(output, vec![1, 2]);
+        });
+    }
+
+    /// Tasks may suspend while a pool exists: pools have no worker tasks for the executor
+    /// to poll (a polled rayon worker loop would block or abort the runtime), so suspension
+    /// must leave the pool usable.
+    #[test]
+    fn test_deterministic_pool_survives_suspension() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context
+                .child("pool")
+                .create_strategy(NZUsize!(2))
+                .unwrap()
+                .manual();
+            context.sleep(Duration::from_millis(10)).await;
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+            assert_eq!(output, vec![1, 2]);
+
+            context.sleep(Duration::from_millis(10)).await;
+            let sum = strategy.fold(0..100u64, || 0u64, |acc, i| acc + i, |a, b| a + b);
+            assert_eq!(sum, 4950);
         });
     }
 

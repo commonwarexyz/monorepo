@@ -64,7 +64,7 @@ use crate::{
         Panicker,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Name, Panicked,
-    Spawner as _, Supervisor as _, METRICS_PREFIX,
+    METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -75,7 +75,7 @@ use commonware_parallel::ThreadPool;
 use commonware_utils::{
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
-    SystemTimeExt,
+    Cached, SystemTimeExt,
 };
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
@@ -1164,36 +1164,46 @@ impl crate::Spawner for Context {
     }
 }
 
-/// Pool workers run as cooperative tasks that never actually execute rayon's worker loop.
-/// Parallel work is executed by the calling thread instead: the executor thread registers
-/// itself as a pool worker at creation, so `install` runs work inline and awaited
-/// `Strategy::spawn` jobs are driven by the spawn future's yield loop.
+// The pool the executor thread registered with, returned for every request on the thread.
+// Rayon permits one registry registration per OS thread and the registration is permanent,
+// so only the first pool can register the executor thread. Work submitted to any other pool
+// could never execute (spawning threads would be nondeterministic, so pools have no
+// workers).
+commonware_utils::thread_local_cache!(static THREAD_POOL: ThreadPool);
+
+/// Spawning threads would be nondeterministic, so pools have no running workers: their
+/// builders are dropped and the executor thread registers itself as a pool member at
+/// creation. The pool still reports the requested concurrency, so strategies partition
+/// work as configured (and must produce identical results at any concurrency), but all of
+/// it executes on the executor thread: `install` runs the work-stealing loop on the caller
+/// and awaited `Strategy::spawn` jobs are driven by the spawn future's yield loop.
 ///
-/// Because rayon's current-thread registration is permanent, only the FIRST pool created on
-/// the executor thread can register it. Awaited `Strategy::spawn` jobs on any later pool
-/// (or on a pool built outside [`crate::ThreadPooler`], whose external threads this runtime
-/// cannot observe) never complete. Deterministic tests should create at most one pool per
-/// runtime.
+/// Rayon's current-thread registration is permanent and per-OS-thread, so every call after
+/// the first on a thread (including calls from a later runner on the same thread) returns
+/// the pool the thread registered with, sized by the first request. Pools built outside
+/// [`crate::ThreadPooler`] have external threads whose completions this runtime cannot
+/// observe; do not await `Strategy::spawn` jobs on them.
 impl crate::ThreadPooler for Context {
     fn create_thread_pool(
         &self,
         concurrency: NonZeroUsize,
     ) -> Result<ThreadPool, ThreadPoolBuildError> {
-        let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
+        let pool = Cached::take(
+            &THREAD_POOL,
+            || {
+                let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
+                if rayon::current_thread_index().is_none() {
+                    builder = builder.use_current_thread()
+                }
 
-        if rayon::current_thread_index().is_none() {
-            builder = builder.use_current_thread()
-        }
-
-        builder
-            .spawn_handler(move |thread| {
-                self.child("rayon_thread")
-                    .dedicated()
-                    .spawn(move |_| async move { thread.run() });
-                Ok(())
-            })
-            .build()
-            .map(Arc::new)
+                // Dropping the builder leaves the worker permanently unstarted: no thread
+                // is spawned, and a worker loop hosted as a task the executor polls would
+                // block or abort the runtime.
+                builder.spawn_handler(|_| Ok(())).build().map(Arc::new)
+            },
+            |_| Ok(()),
+        )?;
+        Ok(Arc::clone(&pool))
     }
 }
 
@@ -1559,7 +1569,10 @@ mod tests {
     use super::*;
     #[cfg(feature = "external")]
     use crate::FutureExt;
-    use crate::{deterministic, reschedule, Blob, Metrics as _, Resolver, Runner as _, Storage};
+    use crate::{
+        deterministic, reschedule, Blob, Metrics as _, Resolver, Runner as _, Spawner as _,
+        Storage, Supervisor as _,
+    };
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
