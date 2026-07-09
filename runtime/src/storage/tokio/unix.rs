@@ -187,39 +187,26 @@ impl crate::Blob for Blob {
             return Ok(());
         }
 
-        cfg_if! {
-            if #[cfg(target_os = "linux")] {
-                // RWF_SYNC makes only the written range durable, never directory entries:
-                // until those are synced, take the full-sync path instead.
-                if self.dirs.synced() {
-                    task::spawn_blocking(move || {
-                        Self::write_vectored_at(&file, offset, bufs, Some(libc::RWF_SYNC))
-                    })
-                    .await
-                    .map_err(|_| Error::WriteFailed)?
-                } else {
-                    let partition = self.partition.clone();
-                    let name = self.name.clone();
-                    let dirs = self.dirs.clone();
-                    task::spawn_blocking(move || {
-                        Self::write_vectored_at(&file, offset, bufs, None)?;
-                        Self::sync_inner(&file, &partition, &name, &dirs)
-                    })
-                    .await
-                    .map_err(|_| Error::WriteFailed)?
-                }
-            } else {
-                let partition = self.partition.clone();
-                let name = self.name.clone();
-                let dirs = self.dirs.clone();
-                task::spawn_blocking(move || {
-                    Self::write_vectored_at(&file, offset, bufs, None)?;
-                    Self::sync_inner(&file, &partition, &name, &dirs)
-                })
-                .await
-                .map_err(|_| Error::WriteFailed)?
-            }
+        // RWF_SYNC makes only the written range durable, never directory entries:
+        // the fast path applies only once those are synced.
+        #[cfg(target_os = "linux")]
+        if self.dirs.synced() {
+            return task::spawn_blocking(move || {
+                Self::write_vectored_at(&file, offset, bufs, Some(libc::RWF_SYNC))
+            })
+            .await
+            .map_err(|_| Error::WriteFailed)?;
         }
+
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        let dirs = self.dirs.clone();
+        task::spawn_blocking(move || {
+            Self::write_vectored_at(&file, offset, bufs, None)?;
+            Self::sync_inner(&file, &partition, &name, &dirs)
+        })
+        .await
+        .map_err(|_| Error::WriteFailed)?
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

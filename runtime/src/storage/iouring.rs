@@ -439,8 +439,8 @@ impl crate::Blob for Blob {
                 Error::Io(e) => Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e),
                 err => err,
             })?;
-        // Once per handle; a blocking call, consistent with the blocking directory fs
-        // operations open_versioned performs inline.
+        // A blocking call, consistent with the blocking directory fs operations
+        // open_versioned performs inline.
         self.dirs.sync()
     }
 
@@ -1268,40 +1268,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    /// Creation performs no directory fsyncs; a handle's first durable operation does
-    /// (parent + root), exactly once. Relies on nextest's process-per-test isolation for
-    /// the global counter.
     #[tokio::test]
     async fn test_creation_defers_dir_syncs() {
-        use std::sync::atomic::Ordering;
-
-        let count = || super::DIR_SYNC_CALLS.load(Ordering::Relaxed);
         let (storage, storage_directory) = create_test_storage();
 
-        // Creation and plain writes leave the directory entries unsynced.
-        let before = count();
-        let (blob, _) = storage.open("partition", b"deferred").await.unwrap();
-        blob.write_at(0, b"data".to_vec()).await.unwrap();
-        assert_eq!(count() - before, 0);
-
-        // The first sync covers parent and root; later syncs skip them.
-        blob.sync().await.unwrap();
-        assert_eq!(count() - before, 2);
-        blob.sync().await.unwrap();
-        assert_eq!(count() - before, 2);
-
-        // write_at_sync as a fresh handle's first durable operation takes the full-sync
-        // path in front of the ring's sync write; a second one uses the fast path.
-        let (blob2, _) = storage.open("partition", b"deferred2").await.unwrap();
-        blob2.write_at_sync(0, b"x".to_vec()).await.unwrap();
-        assert_eq!(count() - before, 4);
-        blob2.write_at_sync(1, b"y".to_vec()).await.unwrap();
-        assert_eq!(count() - before, 4);
-
-        // start_sync as the first durable operation covers them once resolved.
-        let (blob3, _) = storage.open("partition", b"deferred3").await.unwrap();
-        blob3.start_sync().await.await.unwrap();
-        assert_eq!(count() - before, 6);
+        crate::storage::tests::assert_creation_defers_dir_syncs(&storage).await;
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

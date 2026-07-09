@@ -486,11 +486,11 @@ stability_scope!(BETA {
 
     /// Directory entries a blob's first durable operation must fsync.
     ///
-    /// Creation no longer syncs directories, so a new blob's existence becomes durable
-    /// together with its first synced contents. A blob that is never synced may not survive
-    /// a crash, which is within its contract: nothing was promised. Reopened blobs also
-    /// carry unsynced state, since the handle cannot know whether the entries were ever
-    /// fsynced (e.g. a creation or recovery that crashed first).
+    /// Creation defers these fsyncs, so a new blob's existence becomes durable together
+    /// with its first synced contents (see the durability contract on
+    /// [crate::Storage::open_versioned]). Reopened blobs also start unsynced: the handle
+    /// cannot know whether the entries were ever fsynced (e.g. a creation or recovery
+    /// that crashed first).
     #[cfg(unix)]
     pub(crate) struct DirSync {
         parent: std::path::PathBuf,
@@ -1066,6 +1066,51 @@ pub(crate) mod tests {
     }
 
     /// Runs the full suite of tests on the provided storage implementation.
+    /// Asserts the deferred-directory-fsync contract against a live backend: creation and
+    /// plain writes perform no directory fsyncs; a handle's first durable operation covers
+    /// parent and root exactly once. Relies on nextest's process-per-test isolation for the
+    /// global counter.
+    #[cfg(unix)]
+    pub(crate) async fn assert_creation_defers_dir_syncs<S: crate::Storage>(storage: &S) {
+        use std::sync::atomic::Ordering;
+
+        let count = || super::DIR_SYNC_CALLS.load(Ordering::Relaxed);
+
+        // Creation and plain writes leave the directory entries unsynced.
+        let before = count();
+        let (blob, _) = storage.open("partition", b"deferred").await.unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 0);
+
+        // The first sync covers parent and root; later syncs skip them.
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 2);
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 2);
+
+        // A fresh handle's first durable write_at_sync must route through the backend's
+        // full-sync path ahead of any range-scoped fast path (RWF_SYNC on tokio/Linux, the
+        // ring's sync write on iouring); afterward the once-flag (or the fast path) skips
+        // the directory work.
+        let (blob2, _) = storage.open("partition", b"deferred2").await.unwrap();
+        blob2.write_at_sync(0, b"x".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 4);
+        blob2.write_at_sync(1, b"y".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 4);
+
+        // start_sync as the first durable operation covers them once resolved.
+        let (blob3, _) = storage.open("partition", b"deferred3").await.unwrap();
+        blob3.start_sync().await.await.unwrap();
+        assert_eq!(count() - before, 6);
+
+        // A reopened handle cannot know its entries are durable and re-syncs once.
+        drop(blob);
+        let (blob, _) = storage.open("partition", b"deferred").await.unwrap();
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 8);
+        drop(blob);
+    }
+
     pub(crate) async fn run_storage_tests<S>(storage: S)
     where
         S: Storage + Send + Sync + 'static,

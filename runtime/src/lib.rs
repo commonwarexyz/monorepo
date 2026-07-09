@@ -829,8 +829,9 @@ stability_scope!(BETA {
         /// This is not a durability barrier for previous operations. When it completes,
         /// only the bytes submitted to this call are guaranteed durable. Earlier unsynced
         /// [`Blob::write_at`] or [`Blob::resize`] calls require [`Blob::sync`] to become
-        /// durable. A handle's first durability request additionally covers the blob's
-        /// directory entries, exactly as [`Blob::sync`] does.
+        /// durable. A handle's first non-empty call additionally covers the blob's
+        /// directory entries, as [`Blob::sync`] does (a call with no bytes returns early
+        /// and defers that coverage).
         fn write_at_sync(
             &self,
             offset: u64,
@@ -844,8 +845,8 @@ stability_scope!(BETA {
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Ensure all pending data is durably persisted, including (on a handle's first
-        /// durability request) the blob's directory entries: creation defers those, so a
-        /// blob's existence becomes durable together with its first synced contents.
+        /// durability request) the blob's directory entries (see
+        /// [`Storage::open_versioned`]).
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Request that all pending data is durably persisted.
