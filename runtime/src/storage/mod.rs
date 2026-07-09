@@ -484,6 +484,67 @@ stability_scope!(BETA {
         }
     }
 
+    /// Directory entries a blob's first durable operation must fsync.
+    ///
+    /// Creation no longer syncs directories, so a new blob's existence becomes durable
+    /// together with its first synced contents. A blob that is never synced may not survive
+    /// a crash, which is within its contract: nothing was promised. Reopened blobs also
+    /// carry unsynced state, since the handle cannot know whether the entries were ever
+    /// fsynced (e.g. a creation or recovery that crashed first).
+    #[cfg(unix)]
+    pub(crate) struct DirSync {
+        parent: std::path::PathBuf,
+        root: std::path::PathBuf,
+        synced: std::sync::atomic::AtomicBool,
+    }
+
+    /// Counts directory fsyncs so tests can assert when durability is established (sound
+    /// under nextest's process-per-test isolation).
+    #[cfg(all(test, unix))]
+    pub(crate) static DIR_SYNC_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    #[cfg(unix)]
+    impl DirSync {
+        pub(crate) const fn new(parent: std::path::PathBuf, root: std::path::PathBuf) -> Self {
+            Self {
+                parent,
+                root,
+                synced: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        /// Returns true once the directory entries are known durable, permitting
+        /// range-scoped durability fast paths that cannot cover them.
+        pub(crate) fn synced(&self) -> bool {
+            self.synced.load(std::sync::atomic::Ordering::Acquire)
+        }
+
+        /// Fsyncs the blob's parent directory and the storage root once per handle;
+        /// subsequent calls are no-ops. Racing first calls may both fsync, which is
+        /// harmless. Blocking: call from a blocking context.
+        pub(crate) fn sync(&self) -> Result<(), crate::Error> {
+            if self.synced() {
+                return Ok(());
+            }
+            for dir in [&self.parent, &self.root] {
+                #[cfg(test)]
+                DIR_SYNC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                std::fs::File::open(dir)
+                    .and_then(|d| d.sync_all())
+                    .map_err(|e| {
+                        crate::Error::BlobSyncFailed(
+                            dir.to_string_lossy().to_string(),
+                            "directory".to_string(),
+                            e.into(),
+                        )
+                    })?;
+            }
+            self.synced.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        }
+    }
+
     /// Resolves a header that failed to parse: `Ok(None)` if the blob's raw contents are those
     /// of a creation that was interrupted before its header became durable (the caller
     /// recreates the blob), and the loud corruption error otherwise.

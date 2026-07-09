@@ -162,9 +162,6 @@ impl crate::Storage for Storage {
             .parent()
             .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
 
-        // Check if partition exists before creating
-        let parent_existed = parent.exists();
-
         // Create the partition directory if it does not exist
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
@@ -197,18 +194,13 @@ impl crate::Storage for Storage {
                 file.sync_all()
                     .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
 
-                // Sync the directories to ensure the directory entry is durable. This must also
-                // run when recreating a torn blob: the creation it is recovering from may have
-                // crashed before its own directory syncs completed.
-                sync_dir(parent)?;
-                if !parent_existed {
-                    sync_dir(&self.storage_directory)?;
-                }
-
                 (info, data_offset)
             }
         };
 
+        // Creation deferred its directory fsyncs; the blob's first durable operation
+        // performs them (see [super::DirSync]).
+        let dirs = super::DirSync::new(parent.to_path_buf(), self.storage_directory.clone());
         let blob = Blob::new(
             partition.into(),
             name,
@@ -216,6 +208,7 @@ impl crate::Storage for Storage {
             self.io_handle.clone(),
             self.pool.clone(),
             data_offset,
+            dirs,
         );
         Ok((blob, info))
     }
@@ -293,6 +286,8 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// Directory entries made durable by the first durable operation (shared across clones).
+    dirs: Arc<super::DirSync>,
 }
 
 impl Clone for Blob {
@@ -304,6 +299,7 @@ impl Clone for Blob {
             io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
             data_offset: self.data_offset,
+            dirs: self.dirs.clone(),
         }
     }
 }
@@ -317,6 +313,7 @@ impl Blob {
         io_handle: iouring::Handle,
         pool: BufferPool,
         data_offset: u64,
+        dirs: super::DirSync,
     ) -> Self {
         Self {
             partition,
@@ -325,6 +322,7 @@ impl Blob {
             io_handle,
             pool,
             data_offset,
+            dirs: Arc::new(dirs),
         }
     }
 }
@@ -407,6 +405,14 @@ impl crate::Blob for Blob {
             return Ok(());
         }
 
+        // The ring's sync write makes only the written range durable, never directory
+        // entries: until those are synced, write plainly and take the full-sync path.
+        if !self.dirs.synced() {
+            self.io_handle
+                .write_at(self.file.clone(), offset, bufs)
+                .await?;
+            return self.sync().await;
+        }
         self.io_handle
             .write_at_sync(self.file.clone(), offset, bufs)
             .await
@@ -433,16 +439,20 @@ impl crate::Blob for Blob {
             .map_err(|err| match err {
                 Error::Io(e) => Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e),
                 err => err,
-            })
+            })?;
+        // Once per handle; a blocking call, consistent with the blocking directory fs
+        // operations open_versioned performs inline.
+        self.dirs.sync()
     }
 
     async fn start_sync(&self) -> Handle<()> {
         let partition = self.partition.clone();
         let name = self.name.clone();
         let receiver = self.io_handle.start_sync(self.file.clone()).await;
+        let dirs = self.dirs.clone();
         Handle::from_future(async move {
             match receiver.await {
-                Ok(Ok(())) => Ok(()),
+                Ok(Ok(())) => dirs.sync(),
                 Ok(Err(Error::Io(e))) => Err(Error::BlobSyncFailed(partition, hex(&name), e)),
                 Ok(Err(err)) => Err(err),
                 Err(_) => Err(Error::Closed),
@@ -1048,6 +1058,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
+            super::DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
 
         // Read and write should fail through their wrapper-specific error enums
@@ -1107,6 +1118,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
+            super::DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
         // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
         let err = blob
@@ -1146,6 +1158,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
+            super::DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
         let err = blob
             .start_sync()
@@ -1189,6 +1202,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
+            super::DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
         let err = blob
             .resize(0)
@@ -1227,6 +1241,7 @@ mod tests {
             submitter.clone(),
             pool,
             Header::PRELUDE_SIZE_U64,
+            super::DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
         // The request should reach the kernel and come back as a wrapped sync failure.
         let err = blob
@@ -1250,6 +1265,44 @@ mod tests {
         drop(submitter);
         // Joining the loop proves the live backend path shut down cleanly after the error.
         handle.join().unwrap();
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// Creation performs no directory fsyncs; a handle's first durable operation does
+    /// (parent + root), exactly once. Relies on nextest's process-per-test isolation for
+    /// the global counter.
+    #[tokio::test]
+    async fn test_creation_defers_dir_syncs() {
+        use std::sync::atomic::Ordering;
+
+        let count = || super::DIR_SYNC_CALLS.load(Ordering::Relaxed);
+        let (storage, storage_directory) = create_test_storage();
+
+        // Creation and plain writes leave the directory entries unsynced.
+        let before = count();
+        let (blob, _) = storage.open("partition", b"deferred").await.unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 0);
+
+        // The first sync covers parent and root; later syncs skip them.
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 2);
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 2);
+
+        // write_at_sync as a fresh handle's first durable operation takes the full-sync
+        // path in front of the ring's sync write; a second one uses the fast path.
+        let (blob2, _) = storage.open("partition", b"deferred2").await.unwrap();
+        blob2.write_at_sync(0, b"x".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 4);
+        blob2.write_at_sync(1, b"y".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 4);
+
+        // start_sync as the first durable operation covers them once resolved.
+        let (blob3, _) = storage.open("partition", b"deferred3").await.unwrap();
+        blob3.start_sync().await.await.unwrap();
+        assert_eq!(count() - before, 6);
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

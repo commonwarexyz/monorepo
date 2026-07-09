@@ -131,10 +131,6 @@ impl crate::Storage for Storage {
             None => return Err(Error::PartitionCreationFailed(partition.into())),
         };
 
-        // Check if partition exists before creating
-        #[cfg(unix)]
-        let parent_existed = parent.exists();
-
         // Create the partition directory, if it does not exist
         fs::create_dir_all(parent)
             .await
@@ -150,30 +146,7 @@ impl crate::Storage for Storage {
             .await
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
 
-        // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
-        let newly_created = len == 0;
-
-        // Only sync if we created a new file
-        if newly_created {
-            // Sync the file to ensure it is durable
-            file.sync_all()
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
-            #[cfg(unix)]
-            {
-                // Sync the parent directory to ensure the directory entry is durable.
-                sync_dir(parent).await?;
-
-                // Sync storage directory if parent directory did not exist
-                if !parent_existed {
-                    sync_dir(&self.cfg.storage_directory).await?;
-                }
-            }
-        }
 
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
@@ -206,9 +179,21 @@ impl crate::Storage for Storage {
             // Convert to a blocking std::fs::File
             let file = file.into_std().await;
 
+            // Creation deferred its directory fsyncs; the blob's first durable operation
+            // performs them (see [super::DirSync]).
+            let dirs =
+                super::DirSync::new(parent.to_path_buf(), self.cfg.storage_directory.clone());
+
             // Construct the blob
             Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset),
+                Self::Blob::new(
+                    partition.into(),
+                    name,
+                    file,
+                    self.pool.clone(),
+                    data_offset,
+                    dirs,
+                ),
                 info,
             ))
         }
@@ -499,6 +484,60 @@ mod tests {
                 "page {page} failed CRC validation at aligned boundary"
             );
         }
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// Creation performs no directory fsyncs; a handle's first durable operation does
+    /// (parent + root), exactly once. Relies on nextest's process-per-test isolation for
+    /// the global counter.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_creation_defers_dir_syncs() {
+        use std::sync::atomic::Ordering;
+
+        let count = || crate::storage::DIR_SYNC_CALLS.load(Ordering::Relaxed);
+        let storage_directory =
+            env::temp_dir().join(format!("test_dir_sync_defer_{}", random_suffix()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+
+        // Creation and plain writes leave the directory entries unsynced.
+        let before = count();
+        let (blob, _) = storage.open("partition", b"deferred").await.unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 0);
+
+        // The first sync covers parent and root; later syncs skip them.
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 2);
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 2);
+
+        // write_at_sync as a fresh handle's first durable operation also covers them
+        // (on Linux this exercises the gate in front of the RWF_SYNC fast path), and a
+        // second write_at_sync skips them.
+        let (blob2, _) = storage.open("partition", b"deferred2").await.unwrap();
+        blob2.write_at_sync(0, b"x".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 4);
+        blob2.write_at_sync(1, b"y".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 4);
+
+        // start_sync as the first durable operation covers them once resolved.
+        let (blob3, _) = storage.open("partition", b"deferred3").await.unwrap();
+        blob3.start_sync().await.await.unwrap();
+        assert_eq!(count() - before, 6);
+
+        // A reopened handle cannot know its entries are durable and re-syncs once.
+        drop(blob);
+        let (blob, _) = storage.open("partition", b"deferred").await.unwrap();
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 8);
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

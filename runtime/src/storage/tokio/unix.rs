@@ -1,3 +1,4 @@
+use super::super::DirSync;
 use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
@@ -22,15 +23,18 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// Directory entries made durable by the first durable operation (shared across clones).
+    dirs: Arc<DirSync>,
 }
 
 impl Blob {
-    pub fn new(
+    pub(crate) fn new(
         partition: String,
         name: &[u8],
         file: File,
         pool: BufferPool,
         data_offset: u64,
+        dirs: DirSync,
     ) -> Self {
         Self {
             partition,
@@ -38,12 +42,14 @@ impl Blob {
             file: Arc::new(file),
             pool,
             data_offset,
+            dirs: Arc::new(dirs),
         }
     }
 
-    fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
+    fn sync_inner(file: &File, partition: &str, name: &[u8], dirs: &DirSync) -> Result<(), Error> {
         file.sync_all()
-            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))
+            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))?;
+        dirs.sync()
     }
 
     fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -183,17 +189,32 @@ impl crate::Blob for Blob {
 
         cfg_if! {
             if #[cfg(target_os = "linux")] {
-                task::spawn_blocking(move || {
-                    Self::write_vectored_at(&file, offset, bufs, Some(libc::RWF_SYNC))
-                })
-                .await
-                .map_err(|_| Error::WriteFailed)?
+                // RWF_SYNC makes only the written range durable, never directory entries:
+                // until those are synced, take the full-sync path instead.
+                if self.dirs.synced() {
+                    task::spawn_blocking(move || {
+                        Self::write_vectored_at(&file, offset, bufs, Some(libc::RWF_SYNC))
+                    })
+                    .await
+                    .map_err(|_| Error::WriteFailed)?
+                } else {
+                    let partition = self.partition.clone();
+                    let name = self.name.clone();
+                    let dirs = self.dirs.clone();
+                    task::spawn_blocking(move || {
+                        Self::write_vectored_at(&file, offset, bufs, None)?;
+                        Self::sync_inner(&file, &partition, &name, &dirs)
+                    })
+                    .await
+                    .map_err(|_| Error::WriteFailed)?
+                }
             } else {
                 let partition = self.partition.clone();
                 let name = self.name.clone();
+                let dirs = self.dirs.clone();
                 task::spawn_blocking(move || {
                     Self::write_vectored_at(&file, offset, bufs, None)?;
-                    Self::sync_inner(&file, &partition, &name)
+                    Self::sync_inner(&file, &partition, &name, &dirs)
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?
@@ -220,7 +241,8 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
-        task::spawn_blocking(move || Self::sync_inner(&file, &partition, &name))
+        let dirs = self.dirs.clone();
+        task::spawn_blocking(move || Self::sync_inner(&file, &partition, &name, &dirs))
             .await
             .map_err(|e| {
                 let err: std::io::Error = e.into();
@@ -233,8 +255,9 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
+        let dirs = self.dirs.clone();
         task::spawn_blocking(move || {
-            let result = Self::sync_inner(&file, &partition, &name);
+            let result = Self::sync_inner(&file, &partition, &name, &dirs);
             let _ = tx.send(result);
         });
         Handle::from_receiver(rx)
