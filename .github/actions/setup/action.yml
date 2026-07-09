@@ -158,6 +158,9 @@ runs:
     - name: Setup sccache
       if: inputs.rust-cache-enabled == 'true'
       uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      # sccache is an optimization, not a requirement: if the binary download
+      # fails (e.g. transient GitHub release fetch errors), continue without it.
+      continue-on-error: true
     - name: Configure sccache
       if: inputs.rust-cache-enabled == 'true'
       shell: bash
@@ -167,6 +170,11 @@ runs:
         AWS_ACCESS_KEY_ID: ${{ inputs.sccache-r2-access-key-id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.sccache-r2-secret-access-key }}
       run: |
+        if ! command -v sccache >/dev/null 2>&1; then
+          echo "::warning::sccache binary is unavailable (install failed), sccache disabled for this job."
+          exit 0
+        fi
+
         if [ -z "${SCCACHE_BUCKET:-}" ] \
           || [ -z "${SCCACHE_ENDPOINT:-}" ] \
           || [ -z "${AWS_ACCESS_KEY_ID:-}" ] \
