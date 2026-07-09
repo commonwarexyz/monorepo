@@ -6,6 +6,68 @@ use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
+use tracing::warn;
+
+/// Parses an existing blob's header, returning `None` if the contents are those of a creation
+/// that was interrupted before its header became durable (the caller recreates the blob), and
+/// an error if the header is corrupt or unacceptable.
+fn resolve_header(
+    content: &[u8],
+    versions: &RangeInclusive<u16>,
+    partition: &str,
+    name: &[u8],
+) -> Result<Option<(BlobInfo, u64)>, crate::Error> {
+    let raw_len = content.len() as u64;
+    let mut prelude = [0u8; Header::PRELUDE_SIZE];
+    prelude.copy_from_slice(&content[..Header::PRELUDE_SIZE]);
+    let header_err = match Header::parse_prelude(prelude, versions) {
+        Ok(ParsedHeader::V0 { blob_version }) => {
+            let info = BlobInfo {
+                size: raw_len - Header::PRELUDE_SIZE_U64,
+                blob_version,
+                layout: BlobHeaderLayout::V0,
+            };
+            return Ok(Some((info, Header::PRELUDE_SIZE_U64)));
+        }
+        Ok(ParsedHeader::NeedsExtension { blob_version }) => {
+            let ext_end = Header::PRELUDE_SIZE + Header::EXTENSION_SIZE;
+            if content.len() < ext_end {
+                HeaderError::TruncatedHeader {
+                    data_offset: ext_end as u64,
+                    raw_len,
+                }
+            } else {
+                let mut extension = [0u8; Header::EXTENSION_SIZE];
+                extension.copy_from_slice(&content[Header::PRELUDE_SIZE..ext_end]);
+                match Header::parse_extension(prelude, extension, raw_len, versions) {
+                    Ok(data_offset) => {
+                        let info = BlobInfo {
+                            size: raw_len - data_offset,
+                            blob_version,
+                            layout: BlobHeaderLayout::V1,
+                        };
+                        return Ok(Some((info, data_offset)));
+                    }
+                    Err(e) => e,
+                }
+            }
+        }
+        Err(e) => e,
+    };
+
+    // The header failed to parse: distinguish a creation interrupted before its header became
+    // durable (recreate) from corruption of a blob that may hold synced data (fail loud).
+    if header_err.may_be_torn_creation() && Header::interrupted_creation(content) {
+        warn!(
+            partition,
+            name = %hex(name),
+            "recreating blob left torn by an interrupted creation"
+        );
+        Ok(None)
+    } else {
+        Err(header_err.into_error(partition, name))
+    }
+}
 
 /// In-memory storage implementation for the commonware runtime.
 #[derive(Clone)]
@@ -57,9 +119,15 @@ impl crate::Storage for Storage {
         let partition_entry = partitions.entry(partition.into()).or_default();
         let content = partition_entry.entry(name.into()).or_default();
 
+        // Handle header: existing blobs have their header read; new blobs and blobs left torn
+        // by an interrupted creation get a fresh header written.
         let raw_len = content.len() as u64;
-        let (info, data_offset) = if Header::missing(raw_len) {
-            // New or corrupted blob - truncate and write the header region with latest version
+        let existing = if Header::missing(raw_len) {
+            None
+        } else {
+            resolve_header(content, &versions, partition, name)?
+        };
+        let (info, data_offset) = existing.unwrap_or_else(|| {
             let (region, blob_version, data_offset) = Header::create(&versions, layout);
             content.clear();
             content.extend_from_slice(&region);
@@ -69,43 +137,7 @@ impl crate::Storage for Storage {
                 layout,
             };
             (info, data_offset)
-        } else {
-            // Existing blob - read and validate the header, honoring the layout it records
-            let mut prelude = [0u8; Header::PRELUDE_SIZE];
-            prelude.copy_from_slice(&content[..Header::PRELUDE_SIZE]);
-            let parsed = Header::parse_prelude(prelude, &versions)
-                .map_err(|e| e.into_error(partition, name))?;
-            match parsed {
-                ParsedHeader::V0 { blob_version } => {
-                    let info = BlobInfo {
-                        size: raw_len - Header::PRELUDE_SIZE_U64,
-                        blob_version,
-                        layout: BlobHeaderLayout::V0,
-                    };
-                    (info, Header::PRELUDE_SIZE_U64)
-                }
-                ParsedHeader::NeedsExtension { blob_version } => {
-                    let ext_end = Header::PRELUDE_SIZE + Header::EXTENSION_SIZE;
-                    if content.len() < ext_end {
-                        return Err(HeaderError::TruncatedHeader {
-                            data_offset: ext_end as u64,
-                            raw_len,
-                        }
-                        .into_error(partition, name));
-                    }
-                    let mut extension = [0u8; Header::EXTENSION_SIZE];
-                    extension.copy_from_slice(&content[Header::PRELUDE_SIZE..ext_end]);
-                    let data_offset = Header::parse_extension(prelude, extension, raw_len)
-                        .map_err(|e| e.into_error(partition, name))?;
-                    let info = BlobInfo {
-                        size: raw_len - data_offset,
-                        blob_version,
-                        layout: BlobHeaderLayout::V1,
-                    };
-                    (info, data_offset)
-                }
-            }
-        };
+        });
 
         Ok((
             Blob::new(
@@ -439,11 +471,12 @@ mod tests {
     async fn test_blob_magic_mismatch() {
         let storage = Storage::new(test_pool());
 
-        // Manually insert a blob with invalid magic bytes
+        // Manually insert a blob whose magic bytes are foreign (not a zero-subset of any
+        // canonical header, so not a torn creation)
         {
             let mut partitions = storage.partitions.lock();
             let partition = partitions.entry("partition".into()).or_default();
-            partition.insert(b"bad_magic".to_vec(), vec![0u8; Header::PRELUDE_SIZE]);
+            partition.insert(b"bad_magic".to_vec(), b"XXXXXXXX".to_vec());
         }
 
         // Opening should fail with corrupt error
@@ -451,5 +484,46 @@ mod tests {
         assert!(
             matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_blob_torn_creation_recovers() {
+        let storage = Storage::new(test_pool());
+
+        // Manually insert torn-creation leftovers: writeback-subsets of a canonical V1 header
+        // region (only the size flushed; a bare prefix; a lost runtime version byte)
+        let (region, _, _) = Header::create(&(0..=0), BlobHeaderLayout::V1);
+        let mut torn_version = region.clone();
+        torn_version[5] = 0;
+        let states = [vec![0u8; region.len()], region[..12].to_vec(), torn_version];
+        for (i, state) in states.into_iter().enumerate() {
+            let name = format!("torn_{i}").into_bytes();
+            {
+                let mut partitions = storage.partitions.lock();
+                let partition = partitions.entry("partition".into()).or_default();
+                partition.insert(name.clone(), state);
+            }
+
+            // Opening recreates the blob as new
+            let (blob, info) = storage
+                .open_versioned("partition", &name, 0..=0, BlobHeaderLayout::V1)
+                .await
+                .unwrap();
+            assert_eq!(info.size, 0);
+            assert_eq!(info.layout, BlobHeaderLayout::V1);
+            blob.write_at(0, b"data".to_vec()).await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            // The healed blob round-trips through a reopen with its data intact.
+            let (blob, info) = storage
+                .open_versioned("partition", &name, 0..=0, BlobHeaderLayout::V1)
+                .await
+                .unwrap();
+            assert_eq!(info.size, 4);
+            let read = blob.read_at(0, 4).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
+            drop(blob);
+        }
     }
 }

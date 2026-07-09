@@ -723,6 +723,13 @@ stability_scope!(BETA {
         ///
         /// `layout` selects the header layout when the blob is created; reopening an
         /// existing blob honors the layout recorded in its header (see [`BlobHeaderLayout`]).
+        ///
+        /// # Recovery
+        ///
+        /// A blob whose creation was interrupted before its header became durable (a crash
+        /// can tear the header write at any point) is detected on reopen and recreated as
+        /// new; such a blob never held synced data. Contents that are not those of an
+        /// interrupted creation fail with [Error::BlobCorrupt] instead.
         fn open_versioned(
             &self,
             partition: &str,

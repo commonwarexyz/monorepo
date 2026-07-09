@@ -139,6 +139,24 @@ stability_scope!(BETA {
     }
 
     impl HeaderError {
+        /// Returns true if this parse failure could be the signature of a creation interrupted
+        /// before the header became durable, making the blob a candidate for
+        /// [Header::interrupted_creation] classification.
+        ///
+        /// [HeaderError::VersionMismatch] and [HeaderError::InvalidDataOffset] are excluded:
+        /// for V1 both fire only after the CRC has validated, so the header was completely
+        /// written and the failure is a genuine version or format disagreement. (A V0
+        /// version mismatch is checked without a CRC, but V0 recovery is out of scope.)
+        pub(crate) const fn may_be_torn_creation(&self) -> bool {
+            matches!(
+                self,
+                Self::InvalidMagic { .. }
+                    | Self::UnsupportedRuntimeVersion { .. }
+                    | Self::InvalidHeaderChecksum
+                    | Self::TruncatedHeader { .. }
+            )
+        }
+
         /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
         pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
             match self {
@@ -255,6 +273,61 @@ stability_scope!(BETA {
             raw_len < Self::PRELUDE_SIZE_U64
         }
 
+        /// Returns true if a blob's raw contents are consistent with the creation of a
+        /// [BlobHeaderLayout::V1] blob that was interrupted before its header became durable.
+        ///
+        /// A torn creation can only leave a subset of the canonical header-region bytes a
+        /// writer produces (writes tear at any point, and unsynced pages flush in any order),
+        /// with every unflushed byte zero. Each byte is therefore required to be zero or its
+        /// canonical value: the magic and runtime version are fixed; the data offset, if any of
+        /// its bytes persisted, must be a supported power of two whose region covers the file;
+        /// and everything past the 16-byte header must be zero. The blob version bytes are
+        /// unconstrained (the version is application-chosen, so any value is canonical for some
+        /// writer), and so are the CRC bytes (a CRC over an unknown version is unknown).
+        ///
+        /// Only meaningful for contents whose header failed to parse. Accepting a file implies
+        /// it holds no synced data: a synced V1 blob has a durable, parseable header and its
+        /// data lies past the data offset, while this requires the header region to be
+        /// incomplete and nothing but the header region to be present.
+        pub(crate) fn interrupted_creation(raw: &[u8]) -> bool {
+            // Longer than the largest header region a writer can produce: the tail is data,
+            // so this cannot be a torn creation.
+            if raw.len() as u64 > *Self::SUPPORTED_DATA_OFFSETS.end() {
+                return false;
+            }
+
+            // Magic and runtime version (bytes 0-5).
+            let mut canonical = [0u8; 6];
+            canonical[..4].copy_from_slice(&BlobHeaderLayout::V1.magic());
+            canonical[4..6]
+                .copy_from_slice(&BlobHeaderLayout::V1.runtime_version().to_be_bytes());
+            for (byte, expected) in raw.iter().zip(canonical) {
+                if *byte != 0 && *byte != expected {
+                    return false;
+                }
+            }
+
+            // Data offset (bytes 8-11): a power of two has a single nonzero byte, so a
+            // nonzero persisted value must equal a supported offset exactly, and the file
+            // cannot extend past the region that offset defines.
+            let mut offset_bytes = [0u8; 4];
+            if raw.len() > 8 {
+                let persisted_len = raw.len().min(12) - 8;
+                offset_bytes[..persisted_len].copy_from_slice(&raw[8..8 + persisted_len]);
+            }
+            let offset = u32::from_be_bytes(offset_bytes) as u64;
+            if offset != 0
+                && (!offset.is_power_of_two()
+                    || !Self::SUPPORTED_DATA_OFFSETS.contains(&offset)
+                    || raw.len() as u64 > offset)
+            {
+                return false;
+            }
+
+            // Zero padding (bytes 16 to the data offset).
+            raw.len() <= 16 || raw[16..].iter().all(|&byte| byte == 0)
+        }
+
         /// Creates the header region for a new blob using the latest version from the range and
         /// the given layout. Returns (encoded header region, blob_version, data_offset).
         pub(crate) fn create(
@@ -284,16 +357,28 @@ stability_scope!(BETA {
 
         /// Parses and validates a header prelude. Returns the blob version and whether the layout
         /// requires reading the extension to resolve the data offset.
+        ///
+        /// For V1 the blob version is checked in [Self::parse_extension] instead, after the CRC
+        /// has validated: a [HeaderError::VersionMismatch] then always describes a completely
+        /// written header, never bytes a torn write left behind.
         pub(crate) fn parse_prelude(
             raw_bytes: [u8; Self::PRELUDE_SIZE],
             versions: &RangeInclusive<u16>,
         ) -> Result<ParsedHeader, HeaderError> {
             let header: Self = Self::decode(raw_bytes.as_slice())
                 .expect("header decode should never fail for correct size input");
-            match header.validate(versions)? {
-                BlobHeaderLayout::V0 => Ok(ParsedHeader::V0 {
-                    blob_version: header.blob_version,
-                }),
+            match header.validate()? {
+                BlobHeaderLayout::V0 => {
+                    if !versions.contains(&header.blob_version) {
+                        return Err(HeaderError::VersionMismatch {
+                            expected: versions.clone(),
+                            found: header.blob_version,
+                        });
+                    }
+                    Ok(ParsedHeader::V0 {
+                        blob_version: header.blob_version,
+                    })
+                }
                 BlobHeaderLayout::V1 => Ok(ParsedHeader::NeedsExtension {
                     blob_version: header.blob_version,
                 }),
@@ -305,10 +390,13 @@ stability_scope!(BETA {
         /// storage-page aligned.
         ///
         /// `raw_len` is the blob's raw on-disk length, which must cover the full header region.
+        /// The blob version is checked last, once the CRC and region are intact, so every
+        /// earlier error still describes a header that may merely be incompletely written.
         pub(crate) fn parse_extension(
             prelude: [u8; Self::PRELUDE_SIZE],
             extension: [u8; Self::EXTENSION_SIZE],
             raw_len: u64,
+            versions: &RangeInclusive<u16>,
         ) -> Result<u64, HeaderError> {
             let mut checked = [0u8; Self::PRELUDE_SIZE + 4];
             checked[..Self::PRELUDE_SIZE].copy_from_slice(&prelude);
@@ -332,20 +420,24 @@ stability_scope!(BETA {
                     raw_len,
                 });
             }
+            let blob_version = u16::from_be_bytes(prelude[6..8].try_into().unwrap());
+            if !versions.contains(&blob_version) {
+                return Err(HeaderError::VersionMismatch {
+                    expected: versions.clone(),
+                    found: blob_version,
+                });
+            }
             Ok(data_offset)
         }
 
-        /// Validates the magic bytes, runtime version, and blob version, returning the layout
-        /// the magic identifies.
+        /// Validates the magic bytes and runtime version, returning the layout the magic
+        /// identifies.
         ///
         /// The magic alone selects the layout; the runtime version must agree with it. Requiring
         /// agreement (rather than deriving the layout from the runtime version) means a header
         /// with any bytes zeroed by a torn write fails validation instead of parsing as a
         /// different layout.
-        pub(crate) fn validate(
-            &self,
-            blob_versions: &RangeInclusive<u16>,
-        ) -> Result<BlobHeaderLayout, HeaderError> {
+        pub(crate) const fn validate(&self) -> Result<BlobHeaderLayout, HeaderError> {
             let Some(layout) = BlobHeaderLayout::from_magic(&self.magic) else {
                 return Err(HeaderError::InvalidMagic { found: self.magic });
             };
@@ -354,12 +446,6 @@ stability_scope!(BETA {
                 return Err(HeaderError::UnsupportedRuntimeVersion {
                     expected: runtime_version..=runtime_version,
                     found: self.runtime_version,
-                });
-            }
-            if !blob_versions.contains(&self.blob_version) {
-                return Err(HeaderError::VersionMismatch {
-                    expected: blob_versions.clone(),
-                    found: self.blob_version,
                 });
             }
             Ok(layout)
@@ -497,7 +583,8 @@ pub(crate) mod tests {
             [Header::PRELUDE_SIZE..Header::PRELUDE_SIZE + Header::EXTENSION_SIZE]
             .try_into()
             .unwrap();
-        let resolved = Header::parse_extension(prelude, extension, Header::V1_DATA_OFFSET).unwrap();
+        let resolved =
+            Header::parse_extension(prelude, extension, Header::V1_DATA_OFFSET, &(0..=7)).unwrap();
         assert_eq!(resolved, Header::V1_DATA_OFFSET);
     }
 
@@ -536,7 +623,8 @@ pub(crate) mod tests {
                 [Header::PRELUDE_SIZE..Header::PRELUDE_SIZE + Header::EXTENSION_SIZE]
                 .try_into()
                 .unwrap();
-            let resolved = Header::parse_extension(prelude, extension, raw.len() as u64).unwrap();
+            let resolved =
+                Header::parse_extension(prelude, extension, raw.len() as u64, &(0..=0)).unwrap();
             assert_eq!(resolved, offset, "offset {offset} should be accepted");
         }
     }
@@ -551,7 +639,7 @@ pub(crate) mod tests {
             .try_into()
             .unwrap();
         extension[7] ^= 0x01;
-        let result = Header::parse_extension(prelude, extension, Header::V1_DATA_OFFSET);
+        let result = Header::parse_extension(prelude, extension, Header::V1_DATA_OFFSET, &(0..=0));
         assert!(matches!(result, Err(HeaderError::InvalidHeaderChecksum)));
     }
 
@@ -569,7 +657,7 @@ pub(crate) mod tests {
             extension[4..].copy_from_slice(&crc.to_be_bytes());
             let prelude: [u8; Header::PRELUDE_SIZE] =
                 region[..Header::PRELUDE_SIZE].try_into().unwrap();
-            let result = Header::parse_extension(prelude, extension, u64::MAX);
+            let result = Header::parse_extension(prelude, extension, u64::MAX, &(0..=0));
             assert!(
                 matches!(result, Err(HeaderError::InvalidDataOffset { found, .. }) if found == bad_offset as u64),
                 "offset {bad_offset} should be rejected"
@@ -586,7 +674,8 @@ pub(crate) mod tests {
             [Header::PRELUDE_SIZE..Header::PRELUDE_SIZE + Header::EXTENSION_SIZE]
             .try_into()
             .unwrap();
-        let result = Header::parse_extension(prelude, extension, Header::V1_DATA_OFFSET - 1);
+        let result =
+            Header::parse_extension(prelude, extension, Header::V1_DATA_OFFSET - 1, &(0..=0));
         assert!(matches!(
             result,
             Err(HeaderError::TruncatedHeader { data_offset, raw_len })
@@ -597,15 +686,16 @@ pub(crate) mod tests {
     #[test]
     fn test_header_validate_success() {
         let header = v0_header(5);
-        assert!(header.validate(&(3..=7)).is_ok());
-        assert!(header.validate(&(5..=5)).is_ok());
+        assert!(header.validate().is_ok());
+        assert!(Header::parse_prelude(header.encode()[..].try_into().unwrap(), &(3..=7)).is_ok());
+        assert!(Header::parse_prelude(header.encode()[..].try_into().unwrap(), &(5..=5)).is_ok());
     }
 
     #[test]
     fn test_header_validate_magic_mismatch() {
         let mut header = v0_header(5);
         header.magic = *b"XXXX";
-        let result = header.validate(&(3..=7));
+        let result = header.validate();
         assert!(matches!(
             result,
             Err(HeaderError::InvalidMagic { found })
@@ -617,12 +707,40 @@ pub(crate) mod tests {
     fn test_header_validate_runtime_version_mismatch() {
         let mut header = v0_header(5);
         header.runtime_version = 99;
-        let result = header.validate(&(3..=7));
+        let result = header.validate();
         assert!(matches!(
             result,
             Err(HeaderError::UnsupportedRuntimeVersion { expected, found })
             if expected == (0..=0) && found == 99
         ));
+    }
+
+    /// Classification only triggers for parse failures a torn write can produce; failures
+    /// that require a validated CRC describe completely written headers and stay loud.
+    #[test]
+    fn test_header_error_torn_creation_candidates() {
+        assert!(HeaderError::InvalidMagic { found: [0; 4] }.may_be_torn_creation());
+        assert!(HeaderError::UnsupportedRuntimeVersion {
+            expected: 1..=1,
+            found: 0
+        }
+        .may_be_torn_creation());
+        assert!(HeaderError::InvalidHeaderChecksum.may_be_torn_creation());
+        assert!(HeaderError::TruncatedHeader {
+            data_offset: Header::V1_DATA_OFFSET,
+            raw_len: 100
+        }
+        .may_be_torn_creation());
+        assert!(!HeaderError::VersionMismatch {
+            expected: 0..=0,
+            found: 1
+        }
+        .may_be_torn_creation());
+        assert!(!HeaderError::InvalidDataOffset {
+            expected: Header::SUPPORTED_DATA_OFFSETS,
+            found: 4097
+        }
+        .may_be_torn_creation());
     }
 
     /// A magic with any byte zeroed by a torn write must be invalid, never another layout's
@@ -647,7 +765,7 @@ pub(crate) mod tests {
             runtime_version: 0,
             blob_version: 5,
         };
-        let result = header.validate(&(3..=7));
+        let result = header.validate();
         assert!(matches!(
             result,
             Err(HeaderError::UnsupportedRuntimeVersion { expected, found })
@@ -656,14 +774,130 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_header_validate_blob_version_out_of_range() {
+    fn test_header_v0_blob_version_out_of_range() {
         let header = v0_header(10);
-        let result = header.validate(&(3..=7));
+        let prelude: [u8; Header::PRELUDE_SIZE] = header.encode()[..].try_into().unwrap();
+        let result = Header::parse_prelude(prelude, &(3..=7));
         assert!(matches!(
             result,
             Err(HeaderError::VersionMismatch { expected, found })
             if expected == (3..=7) && found == 10
         ));
+    }
+
+    /// A V1 blob version outside the accepted range is only reported once the CRC has
+    /// validated: a torn version byte breaks the CRC first, so [HeaderError::VersionMismatch]
+    /// always describes a completely written header.
+    #[test]
+    fn test_header_v1_blob_version_checked_after_crc() {
+        let raw = v1_blob_bytes(Header::V1_DATA_OFFSET, 10, b"");
+        let prelude: [u8; Header::PRELUDE_SIZE] = raw[..Header::PRELUDE_SIZE].try_into().unwrap();
+        let extension: [u8; Header::EXTENSION_SIZE] = raw
+            [Header::PRELUDE_SIZE..Header::PRELUDE_SIZE + Header::EXTENSION_SIZE]
+            .try_into()
+            .unwrap();
+
+        // Intact header, version out of range: mismatch (the prelude parse itself accepts it).
+        assert!(Header::parse_prelude(prelude, &(3..=7)).is_ok());
+        let result = Header::parse_extension(prelude, extension, raw.len() as u64, &(3..=7));
+        assert!(matches!(
+            result,
+            Err(HeaderError::VersionMismatch { expected, found })
+            if expected == (3..=7) && found == 10
+        ));
+
+        // Torn version byte: the CRC fails before any version verdict.
+        let mut torn = prelude;
+        torn[7] = 0;
+        let result = Header::parse_extension(torn, extension, raw.len() as u64, &(3..=7));
+        assert!(matches!(result, Err(HeaderError::InvalidHeaderChecksum)));
+    }
+
+    #[test]
+    fn test_header_interrupted_creation_accepts_torn_states() {
+        let region = v1_blob_bytes(Header::V1_DATA_OFFSET, 5, b"");
+        let cases: &[(&str, Vec<u8>)] = &[
+            ("only sizes flushed", vec![0u8; region.len()]),
+            ("sub-prelude fragment", vec![0u8; 3]),
+            ("prefix of the header", region[..10].to_vec()),
+            ("full region", region.clone()),
+            ("magic lost, extension flushed", {
+                let mut raw = region.clone();
+                raw[..4].fill(0);
+                raw
+            }),
+            ("runtime version byte lost", {
+                let mut raw = region.clone();
+                raw[5] = 0;
+                raw
+            }),
+            ("offset and CRC lost", {
+                let mut raw = region.clone();
+                raw[8..16].fill(0);
+                raw
+            }),
+            ("short region, header intact", region[..100].to_vec()),
+            (
+                "larger creation offset",
+                v1_blob_bytes(8192, 5, b"")[..6000].to_vec(),
+            ),
+        ];
+        for (label, raw) in cases {
+            assert!(
+                Header::interrupted_creation(raw),
+                "{label} should classify as an interrupted creation"
+            );
+        }
+    }
+
+    #[test]
+    fn test_header_interrupted_creation_rejects_foreign_bytes() {
+        let region = v1_blob_bytes(Header::V1_DATA_OFFSET, 5, b"");
+        let cases: &[(&str, Vec<u8>)] = &[
+            ("non-canonical magic byte", {
+                let mut raw = region.clone();
+                raw[0] = b'X';
+                raw
+            }),
+            ("non-canonical runtime version", {
+                let mut raw = region.clone();
+                raw[4] = 0x02;
+                raw
+            }),
+            ("nonzero padding", {
+                let mut raw = region.clone();
+                raw[100] = 0xFF;
+                raw
+            }),
+            ("data past the recorded offset", {
+                let mut raw = region.clone();
+                raw.push(1);
+                raw
+            }),
+            ("non-power-of-two offset bytes", {
+                let mut raw = region;
+                raw[8..12].copy_from_slice(&4097u32.to_be_bytes());
+                raw
+            }),
+            ("corrupt V0 blob with payload", {
+                // The magic stays a zero-subset (byte 3 lost), so rejection must come from
+                // the payload bytes themselves: real data is never canonical header bytes.
+                let mut raw = v0_header(5).encode().to_vec();
+                raw[3] = 0;
+                raw.extend_from_slice(b"payload");
+                raw
+            }),
+            (
+                "longer than any header region",
+                vec![0u8; (*Header::SUPPORTED_DATA_OFFSETS.end() + 1) as usize],
+            ),
+        ];
+        for (label, raw) in cases {
+            assert!(
+                !Header::interrupted_creation(raw),
+                "{label} must stay a loud corruption error"
+            );
+        }
     }
 
     #[test]

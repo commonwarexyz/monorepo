@@ -8,9 +8,10 @@ use std::path::Path;
 use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex,
 };
+use tracing::warn;
 
 #[cfg(not(unix))]
 mod fallback;
@@ -66,6 +67,81 @@ impl Storage {
             lock: Arc::new(Mutex::new(())),
             cfg,
             pool,
+        }
+    }
+
+    /// Parses an existing blob's header, returning `None` if the contents are those of a
+    /// creation that was interrupted before its header became durable (the caller recreates
+    /// the blob), and an error if the header is corrupt or unacceptable.
+    async fn resolve_header(
+        file: &mut fs::File,
+        len: u64,
+        versions: &RangeInclusive<u16>,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<(BlobInfo, u64)>, Error> {
+        let mut prelude = [0u8; Header::PRELUDE_SIZE];
+        file.read_exact(&mut prelude)
+            .await
+            .map_err(|_| Error::ReadFailed)?;
+        let header_err = match Header::parse_prelude(prelude, versions) {
+            Ok(ParsedHeader::V0 { blob_version }) => {
+                let info = BlobInfo {
+                    size: len - Header::PRELUDE_SIZE_U64,
+                    blob_version,
+                    layout: BlobHeaderLayout::V0,
+                };
+                return Ok(Some((info, Header::PRELUDE_SIZE_U64)));
+            }
+            Ok(ParsedHeader::NeedsExtension { blob_version }) => {
+                let ext_end = Header::PRELUDE_SIZE_U64 + Header::EXTENSION_SIZE as u64;
+                if len < ext_end {
+                    HeaderError::TruncatedHeader {
+                        data_offset: ext_end,
+                        raw_len: len,
+                    }
+                } else {
+                    let mut extension = [0u8; Header::EXTENSION_SIZE];
+                    file.read_exact(&mut extension)
+                        .await
+                        .map_err(|_| Error::ReadFailed)?;
+                    match Header::parse_extension(prelude, extension, len, versions) {
+                        Ok(data_offset) => {
+                            let info = BlobInfo {
+                                size: len - data_offset,
+                                blob_version,
+                                layout: BlobHeaderLayout::V1,
+                            };
+                            return Ok(Some((info, data_offset)));
+                        }
+                        Err(e) => e,
+                    }
+                }
+            }
+            Err(e) => e,
+        };
+
+        // The header failed to parse: distinguish a creation interrupted before its header
+        // became durable (recreate) from corruption of a blob that may hold synced data
+        // (fail loud). Files longer than any header region hold data and are never torn
+        // creations, so the full read below is bounded.
+        if !header_err.may_be_torn_creation() || len > *Header::SUPPORTED_DATA_OFFSETS.end() {
+            return Err(header_err.into_error(partition, name));
+        }
+        let mut raw = vec![0u8; len as usize];
+        file.rewind().await.map_err(|_| Error::ReadFailed)?;
+        file.read_exact(&mut raw)
+            .await
+            .map_err(|_| Error::ReadFailed)?;
+        if Header::interrupted_creation(&raw) {
+            warn!(
+                partition,
+                name = %hex(name),
+                "recreating blob left torn by an interrupted creation"
+            );
+            Ok(None)
+        } else {
+            Err(header_err.into_error(partition, name))
         }
     }
 }
@@ -142,68 +218,36 @@ impl crate::Storage for Storage {
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
 
-        // Handle header: new/corrupted blobs get a fresh header written,
-        // existing blobs have their header read.
-        let (info, data_offset) = if Header::missing(len) {
-            // New or corrupted blob - truncate and write the header region with latest version
-            // Truncate to zero before writing so a torn header write cannot splice old
-            // bytes into a fully valid header with a wrong version: every partial state
-            // stays shorter than the prelude and is recreated on the next open.
-            let (region, blob_version, data_offset) = Header::create(&versions, layout);
-            file.set_len(0)
-                .await
-                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
-            file.write_all(&region)
-                .await
-                .map_err(|_| Error::WriteFailed)?;
-            file.sync_all()
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-            let info = BlobInfo {
-                size: 0,
-                blob_version,
-                layout,
-            };
-            (info, data_offset)
+        // Handle header: existing blobs have their header read; new blobs and blobs left torn
+        // by an interrupted creation get a fresh header written.
+        let existing = if Header::missing(len) {
+            None
         } else {
-            // Existing blob - read and validate the header, honoring the layout it records
-            let mut prelude = [0u8; Header::PRELUDE_SIZE];
-            file.read_exact(&mut prelude)
-                .await
-                .map_err(|_| Error::ReadFailed)?;
-            let parsed = Header::parse_prelude(prelude, &versions)
-                .map_err(|e| e.into_error(partition, name))?;
-            match parsed {
-                ParsedHeader::V0 { blob_version } => {
-                    let info = BlobInfo {
-                        size: len - Header::PRELUDE_SIZE_U64,
-                        blob_version,
-                        layout: BlobHeaderLayout::V0,
-                    };
-                    (info, Header::PRELUDE_SIZE_U64)
-                }
-                ParsedHeader::NeedsExtension { blob_version } => {
-                    let ext_end = Header::PRELUDE_SIZE_U64 + Header::EXTENSION_SIZE as u64;
-                    if len < ext_end {
-                        return Err(HeaderError::TruncatedHeader {
-                            data_offset: ext_end,
-                            raw_len: len,
-                        }
-                        .into_error(partition, name));
-                    }
-                    let mut extension = [0u8; Header::EXTENSION_SIZE];
-                    file.read_exact(&mut extension)
-                        .await
-                        .map_err(|_| Error::ReadFailed)?;
-                    let data_offset = Header::parse_extension(prelude, extension, len)
-                        .map_err(|e| e.into_error(partition, name))?;
-                    let info = BlobInfo {
-                        size: len - data_offset,
-                        blob_version,
-                        layout: BlobHeaderLayout::V1,
-                    };
-                    (info, data_offset)
-                }
+            Self::resolve_header(&mut file, len, &versions, partition, name).await?
+        };
+        let (info, data_offset) = match existing {
+            Some(resolved) => resolved,
+            None => {
+                // Truncate to zero before writing so a torn header write cannot splice old
+                // bytes into a fully valid header with a wrong version: every partial state
+                // remains classifiable as an interrupted creation on the next open.
+                let (region, blob_version, data_offset) = Header::create(&versions, layout);
+                file.set_len(0)
+                    .await
+                    .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
+                file.rewind().await.map_err(|_| Error::WriteFailed)?;
+                file.write_all(&region)
+                    .await
+                    .map_err(|_| Error::WriteFailed)?;
+                file.sync_all()
+                    .await
+                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
+                let info = BlobInfo {
+                    size: 0,
+                    blob_version,
+                    layout,
+                };
+                (info, data_offset)
             }
         };
 
@@ -510,7 +554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_blob_truncated_extension_is_corrupt() {
+    async fn test_blob_truncated_extension_recovers() {
         let storage_directory =
             env::temp_dir().join(format!("test_truncated_extension_{}", random_suffix()));
         let storage = Storage::new(
@@ -531,11 +575,68 @@ mod tests {
         file.set_len(Header::PRELUDE_SIZE_U64 + 4).unwrap();
         drop(file);
 
-        // Opening must report corruption, not a transient read failure.
-        let result = storage.open("partition", b"truncated").await;
-        assert!(
-            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("truncated"))
+        // Opening classifies the leftovers as an interrupted creation and recreates the blob.
+        let (blob, size) = storage.open("partition", b"truncated").await.unwrap();
+        assert_eq!(size, 0);
+        drop(blob);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_torn_creation_recovers() {
+        let storage_directory =
+            env::temp_dir().join(format!("test_torn_creation_{}", random_suffix()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
         );
+
+        // Create a durable V1 blob to obtain the canonical header region bytes.
+        let (blob, _) = storage.open("partition", b"torn").await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+        let path = storage_directory.join("partition").join(hex(b"torn"));
+        let region = std::fs::read(&path).unwrap();
+
+        // Simulate torn creations: writeback-subsets of the canonical header region.
+        let mut torn_version = region.clone();
+        torn_version[5] = 0;
+        let mut torn_extension = region.clone();
+        torn_extension[8..16].fill(0);
+        let states = [
+            vec![0u8; region.len()],
+            region[..12].to_vec(),
+            torn_version,
+            torn_extension,
+        ];
+        for state in states {
+            std::fs::write(&path, &state).unwrap();
+            let (blob, size) = storage.open("partition", b"torn").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, b"data".to_vec()).await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            // The healed blob round-trips through a reopen with its data intact.
+            let (blob, size) = storage.open("partition", b"torn").await.unwrap();
+            assert_eq!(size, 4);
+            let read = blob.read_at(0, 4).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
+            drop(blob);
+        }
+
+        // Foreign bytes are corruption, not a torn creation: a zeroed version byte alone is
+        // classifiable, but nonzero padding proves the file was never only a header region.
+        let mut corrupt = region.clone();
+        corrupt[5] = 0;
+        corrupt[100] = 0xFF;
+        std::fs::write(&path, &corrupt).unwrap();
+        let result = storage.open("partition", b"torn").await;
+        assert!(matches!(result, Err(crate::Error::BlobCorrupt(_, _, _))));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -599,11 +700,12 @@ mod tests {
             test_pool(),
         );
 
-        // Create the partition directory and a file with invalid magic bytes
+        // Create the partition directory and a file whose magic bytes are foreign (not a
+        // zero-subset of any canonical header, so not a torn creation)
         let partition_path = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_path).unwrap();
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
-        std::fs::write(&bad_magic_path, vec![0u8; Header::PRELUDE_SIZE]).unwrap();
+        std::fs::write(&bad_magic_path, b"XXXXXXXX").unwrap();
 
         // Opening should fail with corrupt error
         let result = storage.open("partition", b"bad_magic").await;
