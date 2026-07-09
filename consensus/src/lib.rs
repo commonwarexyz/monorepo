@@ -128,7 +128,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// This request is single-shot for the given `(context, payload)`. Once the returned
         /// channel resolves or closes, consensus treats verification as concluded and will not
-        /// retry the same request.
+        /// retry the same request. After a restart, however, consensus may request verification
+        /// for the same `(context, payload)` again if the result was not durably recorded before
+        /// shutdown.
         ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently invalid for this context.

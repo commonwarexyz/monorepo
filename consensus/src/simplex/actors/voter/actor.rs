@@ -253,11 +253,12 @@ impl<
 
     /// Syncs all journal sections with pending appends.
     ///
-    /// Invoked after each construction phase and before the corresponding
-    /// broadcast phase (regardless of whether anything will be broadcast) so
-    /// everything we tell the network is recoverable after a restart. Deferring
-    /// syncs to this boundary (rather than syncing after each append) coalesces
-    /// all appends in the same loop iteration into a single sync.
+    /// Invoked once per event loop iteration (by [Self::notify]) after the
+    /// construction phase and before the broadcast phase (regardless of whether
+    /// anything will be broadcast) so everything we tell the network is
+    /// recoverable after a restart. Deferring syncs to this boundary (rather
+    /// than syncing after each append) coalesces all appends in the same loop
+    /// iteration into a single sync.
     async fn sync_journal(&mut self) {
         if self.dirty.is_empty() {
             return;
@@ -382,80 +383,48 @@ impl<
             .await;
     }
 
-    /// Emits a nullify vote (and persists it if it is a first attempt).
-    async fn broadcast_nullify<Sp: Sender>(
+    /// Handle a timeout.
+    ///
+    /// Builds and records a nullify vote for the current view (as many times as
+    /// required until we exit the view). Returns the vote for broadcast by
+    /// [Self::notify], along with the best certificate from the previous view
+    /// (on retry) to help others enter the view.
+    #[allow(clippy::type_complexity)]
+    async fn timeout(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
-        retry: bool,
-        nullify: Nullify<S>,
-    ) {
+    ) -> Option<(Nullify<S>, Option<Certificate<S, D>>)> {
+        // Construct a nullify vote for the current view
+        let view = self.state.current_view();
+        let (retry, nullify) = self.state.construct_nullify(view)?;
+
         // Process nullify (and persist it if it is a first attempt)
         if !retry {
             batcher.constructed(Vote::Nullify(nullify.clone()));
             self.handle_nullify(nullify.clone()).await;
+            return Some((nullify, None));
         }
 
-        // Make the vote durable before it reaches the network
-        self.sync_journal().await;
-
-        // Broadcast nullify vote (regardless)
-        debug!(round=?nullify.round(), "broadcasting nullify");
-        self.broadcast_vote(vote_sender, Vote::Nullify(nullify));
-    }
-
-    /// Handle a timeout.
-    async fn timeout<Sp: Sender, Sr: Sender>(
-        &mut self,
-        batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
-        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
-    ) {
-        // Attempt to broadcast a nullify vote for the current view (as many times as required
-        // until we exit the view)
-        let view = self.state.current_view();
-        let Some(retry) = self.try_broadcast_nullify(batcher, vote_sender, view).await else {
-            return;
-        };
-
-        // Broadcast entry to help others enter the view (if on retry).
+        // Include entry to help others enter the view (if on retry).
         //
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
-        if !retry {
-            return;
-        }
         let past_view = view
             .previous()
             .expect("we should never be in the genesis view");
-        if let Some(certificate) = self.state.get_best_certificate(past_view) {
-            self.broadcast_certificate(certificate_sender, certificate);
-        }
+        Some((nullify, self.state.get_best_certificate(past_view)))
     }
 
     /// Tracks a verified nullification certificate if it is new.
-    ///
-    /// Returns the best notarization or finalization we know of (i.e. the "floor") if we were the leader
-    /// in the provided view (regardless of whether we built a proposal).
-    async fn handle_nullification(
-        &mut self,
-        nullification: Nullification<S>,
-    ) -> Option<Certificate<S, D>> {
+    async fn handle_nullification(&mut self, nullification: Nullification<S>) {
         let view = nullification.view();
         let artifact = Artifact::Nullification(nullification.clone());
 
         // Add verified nullification to journal
         if !self.state.add_nullification(nullification) {
-            return None;
+            return;
         }
         self.append_journal(view, artifact).await;
-
-        // If we were the leader and proposed, we should emit the parent certificate (a notarization or finalization)
-        // of our proposal
-        self.state
-            .leader_index(view)
-            .filter(|&leader| self.state.is_me(leader))
-            .and_then(|_| self.state.parent_certificate(view))
     }
 
     /// Persists our notarize vote to the journal for crash recovery.
@@ -554,23 +523,10 @@ impl<
         Some(notarization)
     }
 
-    /// Broadcast a nullify vote for `view` if the state machine allows it.
-    async fn try_broadcast_nullify<Sp: Sender>(
-        &mut self,
-        batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
-        view: View,
-    ) -> Option<bool> {
-        let (was_retry, nullify) = self.state.construct_nullify(view)?;
-        self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)
-            .await;
-        Some(was_retry)
-    }
-
     /// Builds and records a nullification certificate if the round provides a candidate.
     ///
     /// Also returns the best notarization or finalization we know of (i.e. the "floor")
-    /// if we were the leader in the provided view.
+    /// if we were the leader in the provided view (regardless of whether we built a proposal).
     async fn prepare_nullification(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
@@ -586,7 +542,14 @@ impl<
             resolver.updated(Certificate::Nullification(nullification.clone()));
         }
         // Track the certificate locally to avoid rebuilding it.
-        let floor = self.handle_nullification(nullification.clone()).await;
+        self.handle_nullification(nullification.clone()).await;
+        // If we were the leader, emit the parent certificate (a notarization or
+        // finalization) of our proposal so peers can catch up.
+        let floor = self
+            .state
+            .leader_index(view)
+            .filter(|&leader| self.state.is_me(leader))
+            .and_then(|_| self.state.parent_certificate(view));
         Some((nullification, floor))
     }
 
@@ -750,11 +713,7 @@ impl<
     ///
     /// Returns the view to notify and whether the message was a certificate
     /// from the resolver.
-    async fn process_message<Sr: Sender>(
-        &mut self,
-        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
-        msg: Message<S, D>,
-    ) -> Option<(View, Resolved)> {
+    async fn process_message(&mut self, msg: Message<S, D>) -> Option<(View, Resolved)> {
         match msg {
             Message::Proposal { proposal, .. } => {
                 let view = proposal.view();
@@ -792,12 +751,7 @@ impl<
                     }
                     Certificate::Nullification(nullification) => {
                         trace!(%view, from_resolver, "received nullification");
-                        if let Some(floor) = self.handle_nullification(nullification).await {
-                            // Make the nullification durable before advertising the floor
-                            self.sync_journal().await;
-                            warn!(?floor, "broadcasting nullification floor");
-                            self.broadcast_certificate(certificate_sender, floor);
-                        }
+                        self.handle_nullification(nullification).await;
                         if from_resolver {
                             resolved = Resolved::Nullification;
                         }
@@ -823,8 +777,13 @@ impl<
 
     /// Emits any votes or certificates that became available for `view`.
     ///
+    /// All outbound messages flow through here: everything is built and recorded
+    /// first (including the timeout's `nullify`, constructed by the caller), then
+    /// synced to the journal in a single batch, then broadcast.
+    ///
     /// We don't need to iterate over all views to check for new actions because messages we receive
     /// only affect a single view.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
@@ -833,12 +792,12 @@ impl<
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
+        nullify: Option<(Nullify<S>, Option<Certificate<S, D>>)>,
     ) {
         // Build and record everything that became available before broadcasting
         // anything below.
         let notarize = self.prepare_notarize(batcher, view).await;
         let notarization = self.prepare_notarization(resolver, view, resolved).await;
-        // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
         let nullification = self.prepare_nullification(resolver, view, resolved).await;
         let finalize = self.prepare_finalize(batcher, view).await;
         let finalization = self.prepare_finalization(resolver, view, resolved).await;
@@ -850,6 +809,15 @@ impl<
         self.sync_journal().await;
 
         // Broadcast everything we built (and report it to the application).
+        if let Some((nullify, entry)) = nullify {
+            debug!(round=?nullify.round(), "broadcasting nullify");
+            self.broadcast_vote(vote_sender, Vote::Nullify(nullify));
+
+            // Broadcast entry to help others enter the view (if on retry).
+            if let Some(entry) = entry {
+                self.broadcast_certificate(certificate_sender, entry);
+            }
+        }
         if let Some(notarize) = notarize {
             debug!(proposal=?notarize.proposal, "broadcasting notarize");
             self.broadcast_vote(vote_sender, Vote::Notarize(notarize));
@@ -1106,13 +1074,14 @@ impl<
                 let timeout = self.state.next_timeout_deadline();
                 let start = self.state.current_view();
                 let mut resolved = Resolved::None;
+                let mut nullify = None;
                 let view;
             },
             on_stopped => {
                 debug!("context shutdown, stopping voter");
             },
             _ = self.context.sleep_until(timeout) => {
-                // Process the timeout
+                // Process the timeout (the constructed nullify is broadcast by notify)
                 let current_view = self.state.current_view();
                 let span = info_span!(
                     parent: self.state.view_span(current_view),
@@ -1120,9 +1089,7 @@ impl<
                     epoch = self.state.epoch().traced(),
                     view = current_view.traced()
                 );
-                self.timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
-                    .instrument(span)
-                    .await;
+                nullify = self.timeout(&mut batcher).instrument(span).await;
                 view = self.state.current_view();
             },
             (context, span, proposed) = propose_wait => {
@@ -1166,7 +1133,7 @@ impl<
                     view = msg.view().traced()
                 );
                 let Some((processed_view, processed_resolved)) = self
-                    .process_message(&mut certificate_sender, msg)
+                    .process_message(msg)
                     .instrument(span)
                     .await
                 else {
@@ -1196,6 +1163,7 @@ impl<
                     &mut certificate_sender,
                     view,
                     resolved,
+                    nullify,
                 )
                 .instrument(span)
                 .await;
