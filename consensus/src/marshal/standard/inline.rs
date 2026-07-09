@@ -48,7 +48,7 @@ use crate::{
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             validation::{
-                fetch_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
+                await_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
                 ParentCheck,
             },
             Standard,
@@ -445,13 +445,18 @@ where
                 // Start the parent fetch immediately: its commitment and certified
                 // round are known from the consensus context, so it can proceed in
                 // parallel with broadcast delivery of the candidate block.
-                let (parent_view, parent_commitment) = context.parent;
-                let parent_request = marshal.subscribe_by_commitment(
-                    parent_commitment,
-                    CommitmentFallback::FetchByRound {
-                        round: Round::new(context.epoch(), parent_view),
-                    },
-                );
+                // Reproposals (digest == context.parent.1) skip parent validation
+                // entirely, so they must not fetch: the "parent" is the candidate
+                // itself, and candidate acquisition is deliberately local-only.
+                let parent_request = (digest != context.parent.1).then(|| {
+                    let (parent_view, parent_commitment) = context.parent;
+                    marshal.subscribe_by_commitment(
+                        parent_commitment,
+                        CommitmentFallback::FetchByRound {
+                            round: Round::new(context.epoch(), parent_view),
+                        },
+                    )
+                });
 
                 let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
                 let Some(block) =
@@ -484,6 +489,11 @@ where
                     Decision::Continue(block) => block,
                 };
 
+                // `Continue` implies a non-reproposal, so the parent subscription
+                // was started above.
+                let parent_request =
+                    parent_request.expect("non-reproposal has a parent subscription");
+
                 // Start the candidate store immediately: it depends on neither the
                 // parent fetch (which may hit the network) nor the verdict below.
                 // Storing before validation is intentional: these caches provide
@@ -503,17 +513,21 @@ where
                 let verify_then_vote = async {
                     // Non-reproposal path: validate the parent we already started
                     // fetching.
-                    let parent =
-                        match fetch_and_validate_parent(&context, &block, parent_request, &mut tx)
-                            .await
-                        {
-                            Some(ParentCheck::Valid(parent)) => parent,
-                            Some(ParentCheck::Invalid) => {
-                                tx.send_lossy(false);
-                                return Some(false);
-                            }
-                            None => return None,
-                        };
+                    let parent = match await_and_validate_parent(
+                        context.parent.1,
+                        &block,
+                        parent_request,
+                        &mut tx,
+                    )
+                    .await
+                    {
+                        Some(ParentCheck::Valid(parent)) => parent,
+                        Some(ParentCheck::Invalid) => {
+                            tx.send_lossy(false);
+                            return Some(false);
+                        }
+                        None => return None,
+                    };
                     let valid = run_app_verify(
                         runtime_context,
                         context,

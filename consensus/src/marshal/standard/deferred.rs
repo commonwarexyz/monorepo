@@ -79,7 +79,7 @@ use crate::{
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             validation::{
-                fetch_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
+                await_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
                 ParentCheck,
             },
             Standard,
@@ -230,6 +230,9 @@ where
     /// 2. The block's height is exactly one greater than the parent's height
     /// 3. The underlying application's verification logic passes
     ///
+    /// The `parent_request` must be a subscription to the parent named by `context.parent`,
+    /// started by the caller so the parent fetch can overlap work that precedes this call.
+    ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
     #[inline]
@@ -267,14 +270,18 @@ where
                 let store = stage.store(&marshal, round, block.clone());
                 let verify = async {
                     // Validate the parent we already started fetching.
-                    let parent =
-                        match fetch_and_validate_parent(&context, &block, parent_request, &mut tx)
-                            .await
-                        {
-                            Some(ParentCheck::Valid(parent)) => parent,
-                            Some(ParentCheck::Invalid) => return Some(false),
-                            None => return None,
-                        };
+                    let parent = match await_and_validate_parent(
+                        context.parent.1,
+                        &block,
+                        parent_request,
+                        &mut tx,
+                    )
+                    .await
+                    {
+                        Some(ParentCheck::Valid(parent)) => parent,
+                        Some(ParentCheck::Invalid) => return Some(false),
+                        None => return None,
+                    };
                     run_app_verify(
                         runtime_context,
                         context,
@@ -385,9 +392,13 @@ where
                     return;
                 }
 
-                // Start the parent fetch immediately: its commitment and certified
-                // round are known from the block's embedded context, so it can
-                // proceed in parallel with the store/application work below.
+                // Start the parent fetch for the deferred verification below,
+                // which expects a caller-started subscription. Certify does not
+                // carry the consensus context, so the parent round comes from
+                // the block's embedded context. That context is trustworthy
+                // because the digest is notarized and the notarizing quorum's
+                // f+1 honest validators verified it against the consensus
+                // context before voting.
                 let (parent_view, parent_commitment) = embedded_context.parent;
                 let parent_request = marshaled.marshal.subscribe_by_commitment(
                     parent_commitment,
@@ -682,13 +693,18 @@ where
                 // Start the parent fetch immediately: its commitment and certified
                 // round are known from the consensus context, so it can proceed in
                 // parallel with broadcast delivery of the candidate block.
-                let (parent_view, parent_commitment) = context.parent;
-                let parent_request = marshal.subscribe_by_commitment(
-                    parent_commitment,
-                    CommitmentFallback::FetchByRound {
-                        round: Round::new(context.epoch(), parent_view),
-                    },
-                );
+                // Reproposals (digest == context.parent.1) skip parent validation
+                // entirely, so they must not fetch: the "parent" is the candidate
+                // itself, and candidate acquisition is deliberately local-only.
+                let parent_request = (digest != context.parent.1).then(|| {
+                    let (parent_view, parent_commitment) = context.parent;
+                    marshal.subscribe_by_commitment(
+                        parent_commitment,
+                        CommitmentFallback::FetchByRound {
+                            round: Round::new(context.epoch(), parent_view),
+                        },
+                    )
+                });
 
                 let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
                 let block = select! {
@@ -740,6 +756,11 @@ where
                     }
                     Decision::Continue(block) => block,
                 };
+
+                // `Continue` implies a non-reproposal, so the parent subscription
+                // was started above.
+                let parent_request =
+                    parent_request.expect("non-reproposal has a parent subscription");
 
                 // Before casting a notarize vote, ensure the block's embedded context matches
                 // the consensus context.

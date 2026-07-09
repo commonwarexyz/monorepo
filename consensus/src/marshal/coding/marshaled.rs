@@ -343,9 +343,11 @@ where
                 let round = consensus_context.round;
                 let (parent_view, parent_commitment) = consensus_context.parent;
 
-                // Start the parent fetch immediately: its commitment and certified
-                // round are known from the consensus context, so it can proceed in
-                // parallel with candidate reconstruction.
+                // Start the parent fetch immediately so it can proceed in parallel
+                // with candidate reconstruction. The parent round comes from the
+                // caller's context (the certified consensus context in verify, the
+                // quorum-defended embedded context in certify), never from the
+                // unverified child block.
                 let parent_request = marshal.subscribe_by_commitment(
                     parent_commitment,
                     core::CommitmentFallback::FetchByRound {

@@ -10,7 +10,7 @@ use crate::{
     types::Epocher,
     Application, Block, Epochable,
 };
-use commonware_cryptography::{certificate::Scheme, PublicKey};
+use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{
     telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
@@ -111,35 +111,34 @@ where
     Some(Decision::Continue(block))
 }
 
-/// Outcome of fetching the parent and validating structural ancestry invariants.
+/// Outcome of awaiting the parent and validating structural ancestry invariants.
 pub(super) enum ParentCheck<B> {
-    /// Structurally valid; carries the fetched parent for application verification.
+    /// Structurally valid. Carries the parent for application verification.
     Valid(B),
     /// Structurally invalid (bad parent linkage or non-contiguous height); the verdict is
     /// `false` and the block must not be stored.
     Invalid,
 }
 
-/// Validates the fetched parent against standard ancestry invariants (parent linkage and
-/// contiguous height).
+/// Awaits the parent subscription and validates standard ancestry invariants (parent linkage
+/// and contiguous height) against `parent_commitment`, the expected parent commitment from
+/// the context the block is verified under.
 ///
-/// The `parent_request` must have been started by the caller so the parent fetch can overlap
-/// earlier work (e.g., waiting for the candidate block to become available).
+/// The `parent_request` must be a subscription to `parent_commitment` started by the caller,
+/// so the parent fetch can overlap earlier work (e.g., waiting for the candidate block to
+/// become available).
 ///
 /// Returns `None` when work should stop early (receiver dropped or parent unavailable).
 #[inline]
-pub(super) async fn fetch_and_validate_parent<B, P>(
-    context: &Context<B::Digest, P>,
+pub(super) async fn await_and_validate_parent<B>(
+    parent_commitment: B::Digest,
     block: &B,
     parent_request: oneshot::Receiver<B>,
     tx: &mut oneshot::Sender<bool>,
 ) -> Option<ParentCheck<B>>
 where
-    B: Block + Clone,
-    P: PublicKey,
+    B: Block,
 {
-    let (_parent_view, parent_commitment) = context.parent;
-
     // If consensus drops the receiver, we can stop work early.
     let parent = select! {
         _ = tx.closed() => {
