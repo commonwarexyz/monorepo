@@ -20,13 +20,13 @@ workload. This is separate from codec conformance and from logical-root conforma
 
 ## Missing Storage-Audit Coverage
 
-- [ ] `metadata::Metadata`
-- [ ] `cache::Cache`
-- [ ] `ordinal::Ordinal`
-- [ ] `merkle::full::Merkle<mmr::Family, ...>`
-- [ ] `merkle::full::Merkle<mmb::Family, ...>`
-- [ ] `journal::authenticated::Journal<mmr::Family, ...>`
-- [ ] `journal::authenticated::Journal<mmb::Family, ...>`
+- [x] `metadata::Metadata`
+- [x] `cache::Cache`
+- [x] `ordinal::Ordinal`
+- [x] `merkle::full::Merkle<mmr::Family, ...>`
+- [x] `merkle::full::Merkle<mmb::Family, ...>`
+- [x] `journal::authenticated::Journal<mmr::Family, ...>`
+- [x] `journal::authenticated::Journal<mmb::Family, ...>`
 
 ## QMDB Storage-Audit Coverage
 

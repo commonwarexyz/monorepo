@@ -63,6 +63,8 @@
 //! });
 //! ```
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
 mod storage;
 pub use storage::Metadata;
 use thiserror::Error;

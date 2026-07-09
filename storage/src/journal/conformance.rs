@@ -1,15 +1,18 @@
 //! Journal conformance tests
 
 use crate::journal::{
+    authenticated,
     contiguous::{fixed, variable},
     segmented::{fixed as segmented_fixed, glob, oversized, variable as segmented_variable},
 };
 use commonware_codec::{FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_conformance::conformance_tests;
+use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     conformance::{StorageConformance, StorageWorkload},
-    Buf, BufMut, Supervisor as _,
+    Buf, BufMut, BufferPooler, Supervisor as _,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
@@ -20,6 +23,65 @@ const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(4096);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+fn authenticated_merkle_config(
+    prefix: &str,
+    pooler: &impl BufferPooler,
+) -> crate::merkle::full::Config<Sequential> {
+    crate::merkle::full::Config {
+        journal_partition: format!("{prefix}-merkle-journal"),
+        metadata_partition: format!("{prefix}-merkle-metadata"),
+        items_per_blob: NZU64!(11),
+        write_buffer: WRITE_BUFFER,
+        strategy: Sequential,
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+    }
+}
+
+fn authenticated_journal_config(prefix: &str, pooler: &impl BufferPooler) -> fixed::Config {
+    fixed::Config {
+        partition: format!("{prefix}-journal"),
+        items_per_blob: NZU64!(11),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        write_buffer: WRITE_BUFFER,
+    }
+}
+
+async fn run_authenticated_journal<F>(
+    mut context: commonware_runtime::deterministic::Context,
+    seed: u64,
+    prefix: &'static str,
+) -> Result<(), authenticated::Error<F>>
+where
+    F: crate::merkle::Family,
+{
+    let prefix = format!("{prefix}-{seed}");
+    let mut journal =
+        authenticated::Journal::<F, _, fixed::Journal<_, u64>, Sha256, Sequential>::new(
+            context.child("authenticated"),
+            authenticated_merkle_config(&prefix, &context),
+            authenticated_journal_config(&prefix, &context),
+            |_| true,
+            crate::merkle::Bagging::ForwardFold,
+        )
+        .await?;
+
+    let items = context.random_range(16..96);
+    for i in 0..items {
+        let item = seed.wrapping_add(i as u64);
+        journal.append(&item).await?;
+    }
+    journal.sync().await?;
+
+    if items > 32 {
+        journal
+            .prune(crate::merkle::Location::new(items as u64 / 3))
+            .await?;
+        journal.sync().await?;
+    }
+
+    Ok(())
+}
 
 struct ContiguousFixedWorkload;
 
@@ -276,6 +338,42 @@ impl StorageWorkload for SegmentedOversizedWorkload {
     }
 }
 
+struct AuthenticatedMmrWorkload;
+
+impl StorageWorkload for AuthenticatedMmrWorkload {
+    type Error = authenticated::Error<crate::mmr::Family>;
+
+    async fn run(
+        context: commonware_runtime::deterministic::Context,
+        seed: u64,
+    ) -> Result<(), Self::Error> {
+        run_authenticated_journal::<crate::mmr::Family>(
+            context,
+            seed,
+            "authenticated-mmr-conformance",
+        )
+        .await
+    }
+}
+
+struct AuthenticatedMmbWorkload;
+
+impl StorageWorkload for AuthenticatedMmbWorkload {
+    type Error = authenticated::Error<crate::mmb::Family>;
+
+    async fn run(
+        context: commonware_runtime::deterministic::Context,
+        seed: u64,
+    ) -> Result<(), Self::Error> {
+        run_authenticated_journal::<crate::mmb::Family>(
+            context,
+            seed,
+            "authenticated-mmb-conformance",
+        )
+        .await
+    }
+}
+
 conformance_tests! {
     StorageConformance<ContiguousFixedWorkload> => 512,
     StorageConformance<ContiguousVariableWorkload> => 512,
@@ -283,4 +381,6 @@ conformance_tests! {
     StorageConformance<SegmentedGlobWorkload> => 512,
     StorageConformance<SegmentedVariableWorkload> => 512,
     StorageConformance<SegmentedOversizedWorkload> => 512,
+    StorageConformance<AuthenticatedMmrWorkload> => 256,
+    StorageConformance<AuthenticatedMmbWorkload> => 256,
 }
