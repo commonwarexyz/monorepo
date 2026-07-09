@@ -408,26 +408,17 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
             // mutable mirror after all writes complete.
             let data = std::mem::take(&mut target.data).freeze();
 
-            // Modified keys are ordered by key, which is also their order in the
-            // blob. Adjacent values are separated by the next encoded key, so a
-            // merged range may rewrite those unchanged key bytes to avoid issuing
-            // one storage write per modified value.
-            let mut ranges = Vec::with_capacity(target.modified.len());
-            for key in target.modified.iter() {
-                let info = target.lengths.get(key).expect("key must exist");
-                let start = info.start;
-                let end = info.start + info.length;
-                if let Some((_, range_end)) = ranges.last_mut() {
-                    if start >= *range_end && start - *range_end == key.encode_size() {
-                        *range_end = end;
-                        continue;
-                    }
-                }
-                ranges.push((start, end));
-            }
-            let writes = ranges
-                .into_iter()
-                .map(|(start, end)| target.blob.write_at(start as u64, data.slice(start..end)))
+            // Write each modified value from the frozen mirror, followed by the
+            // version and checksum.
+            let writes = target
+                .modified
+                .iter()
+                .map(|key| {
+                    let info = target.lengths.get(key).expect("key must exist");
+                    let start = info.start;
+                    let end = start + info.length;
+                    target.blob.write_at(start as u64, data.slice(start..end))
+                })
                 .chain([
                     target.blob.write_at(0, data.slice(0..u64::SIZE)),
                     target.blob.write_at(

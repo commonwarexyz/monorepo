@@ -32,11 +32,9 @@
 //! # Delta Writes
 //!
 //! If the set of keys and the length of values are stable, [Metadata] will only write an update's
-//! delta to disk (rather than rewriting the entire metadata). When modified values are adjacent
-//! in the blob, their deltas are merged into a single write that spans the unchanged key bytes
-//! between them. If both blobs already contain the latest state, [Metadata::sync] performs no
-//! writes at all. This makes [Metadata] a great choice for maintaining even large collections of
-//! data (with the majority rarely modified).
+//! delta to disk (rather than rewriting the entire metadata). If both blobs already contain the
+//! latest state, [Metadata::sync] performs no writes at all. This makes [Metadata] a great choice
+//! for maintaining even large collections of data (with the majority rarely modified).
 //!
 //! # Example
 //!
@@ -731,7 +729,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_coalesced_overwrites() {
+    fn test_multi_key_overwrites() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -756,32 +754,30 @@ mod tests {
                 "{buffer}",
             );
 
-            // Modify an adjacent triple, an isolated key, and an adjacent pair
+            // Modify several keys with same-size values
             for i in [10u64, 11, 12, 50, 98, 99] {
                 metadata.put(U64::new(i), vec![0xAA; 100]);
             }
 
-            // Sync writes three coalesced ranges instead of six per-value writes.
+            // Sync writes one delta per modified value.
             //
-            // Merged ranges rewrite the 8 key bytes between adjacent values:
-            // 3 * 101 + 2 * 8 = 319 bytes for keys 10..=12, 101 bytes for key 50,
-            // and 2 * 101 + 8 = 210 bytes for keys 98..=99, plus 8 bytes for the
-            // version and 4 bytes for the checksum.
+            // 6 * (1 byte for len + 100 bytes for value) + 8 bytes for version
+            // + 4 bytes for checksum.
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("first_sync_rewrites_total 2"), "{buffer}");
             assert!(buffer.contains("first_sync_overwrites_total 1"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 22466"),
+                buffer.contains("runtime_storage_write_bytes_total 22442"),
                 "{buffer}",
             );
 
-            // Sync again - the same ranges propagate to the other blob
+            // Sync again - the same deltas propagate to the other blob
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("first_sync_overwrites_total 2"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 23108"),
+                buffer.contains("runtime_storage_write_bytes_total 23060"),
                 "{buffer}",
             );
 
@@ -791,7 +787,7 @@ mod tests {
             assert!(buffer.contains("first_sync_rewrites_total 2"), "{buffer}");
             assert!(buffer.contains("first_sync_overwrites_total 2"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 23108"),
+                buffer.contains("runtime_storage_write_bytes_total 23060"),
                 "{buffer}",
             );
 
