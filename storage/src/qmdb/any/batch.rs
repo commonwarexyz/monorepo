@@ -38,6 +38,11 @@ use tracing::debug;
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 
+/// User mutation recorded before `ops` and `diff` materialization.
+///
+/// `(key, superseded committed location, new value)` where `None` means delete.
+type EmitEvent<K, F, V> = (K, Option<Location<F>>, Option<V>);
+
 /// One contiguous chunk of floor-raise candidates paired with their resolved operations.
 type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 
@@ -114,6 +119,39 @@ pub(crate) fn lookup_sorted<'a, K: Ord, V>(entries: &'a [(K, V)], key: &K) -> Op
         .binary_search_by(|(candidate, _)| candidate.cmp(key))
         .ok()
         .map(|idx| &entries[idx].1)
+}
+
+/// Returns whether sorted, deduplicated `locs` contains `target`, advancing `cursor` past
+/// entries below it. Successive calls must use non-decreasing `target`s.
+fn sorted_contains<F: Family>(
+    locs: &[Location<F>],
+    cursor: &mut usize,
+    target: Location<F>,
+) -> bool {
+    while locs.get(*cursor).is_some_and(|&loc| loc < target) {
+        *cursor += 1;
+    }
+    locs.get(*cursor) == Some(&target)
+}
+
+/// Merge two key-sorted diffs with disjoint keys into one sorted diff.
+fn merge_sorted_diffs<K: Ord, F: Family, V>(
+    a: DiffVec<K, F, V>,
+    b: DiffVec<K, F, V>,
+) -> DiffVec<K, F, V> {
+    let mut merged = Vec::with_capacity(a.len() + b.len());
+    let mut a = a.into_iter().peekable();
+    let mut b = b.into_iter().peekable();
+    while let (Some(x), Some(y)) = (a.peek(), b.peek()) {
+        if x.0 < y.0 {
+            merged.push(a.next().expect("peeked"));
+        } else {
+            merged.push(b.next().expect("peeked"));
+        }
+    }
+    merged.extend(a);
+    merged.extend(b);
+    merged
 }
 
 /// Where this batch's inherited state comes from.
@@ -851,6 +889,16 @@ where
             strategy.sort_by(&mut superseded_locs, |a, b| a.cmp(b));
             superseded_locs.dedup();
 
+            // The raise appends at most `total_steps` moved ops plus the CommitFloor; reserve
+            // once instead of growing mid-loop.
+            ops.reserve(total_steps as usize + 1);
+
+            // `fill_candidates` yields ascending locations, so superseded checks advance a
+            // monotonic cursor.
+            let mut filter_cursor = 0;
+            let mut apply_cursor = 0;
+
+            // Scan active operations in `[floor, fixed_tip)` and move them to the tip.
             while moved < total_steps {
                 // Collect candidates, capped by the number of active ops still needed.
                 // `scan_from` tracks prefetch progress separately from `floor`, so
@@ -868,7 +916,9 @@ where
                 let read_candidates: Vec<_> = candidates
                     .iter()
                     .copied()
-                    .filter(|candidate| superseded_locs.binary_search(candidate).is_err())
+                    .filter(|&candidate| {
+                        !sorted_contains(&superseded_locs, &mut filter_cursor, candidate)
+                    })
                     .collect();
                 let (resolved, outcomes): (_, Vec<Vec<FloorOutcome<F>>>) =
                     if read_candidates.is_empty() {
@@ -945,7 +995,7 @@ where
                 let mut reads = read_candidates.into_iter().zip(resolved);
                 for candidate in candidates {
                     floor = Location::new(*candidate + 1);
-                    if superseded_locs.binary_search(&candidate).is_ok() {
+                    if sorted_contains(&superseded_locs, &mut apply_cursor, candidate) {
                         continue;
                     }
                     let (read_candidate, op) = reads.next().expect("one read per candidate");
@@ -988,8 +1038,8 @@ where
                 // `floor_diff` only accumulates keys that were not already present in `diff`.
                 // A key can only be moved once during this floor raise because, after it is
                 // moved, its new location lies above `fixed_tip` and the scan never revisits it.
-                diff.extend(floor_diff);
-                strategy.sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
+                strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
+                diff = merge_sorted_diffs(diff, floor_diff);
                 assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
             }
         } else {
@@ -1564,40 +1614,19 @@ where
         let locations = m.gather_existing_locations(&mutations, db, false);
         let results = m.read_ops(&locations, &[], &db.log).await?;
 
-        // Generate user mutation operations.
-        let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
-            Vec::with_capacity(mutations.len() + staged_updates.len() + 1);
-        let mut diff: DiffVec<K, F, V::Value> =
+        // Record user mutations as events in op order; `ops` and `diff` are materialized from
+        // them across the strategy below.
+        let mut events: Vec<EmitEvent<K, F, V::Value>> =
             Vec::with_capacity(mutations.len() + staged_updates.len());
         let mut active_keys_delta: isize = 0;
-        let mut user_steps: u64 = 0;
 
         // Write a user mutation at the next batch location, preserving the previous committed
         // location of the key it supersedes.
         let mut emit = |key: K, base_old_loc: Option<Location<F>>, mutation: Option<V::Value>| {
-            let new_loc = Location::new(m.base_size + ops.len() as u64);
-            match mutation {
-                Some(value) => {
-                    ops.push(Operation::Update(update::Unordered(
-                        key.clone(),
-                        value.clone(),
-                    )));
-                    diff.push((
-                        key,
-                        DiffEntry::Active {
-                            value,
-                            loc: new_loc,
-                            base_old_loc,
-                        },
-                    ));
-                }
-                None => {
-                    ops.push(Operation::Delete(key.clone()));
-                    diff.push((key, DiffEntry::Deleted { base_old_loc }));
-                    active_keys_delta -= 1;
-                }
+            if mutation.is_none() {
+                active_keys_delta -= 1;
             }
-            user_steps += 1;
+            events.push((key, base_old_loc, mutation));
         };
 
         // Process updates/deletes of existing keys in location order, merging staged entries
@@ -1640,6 +1669,10 @@ where
             emit(key, Some(loc), mutation);
         }
 
+        // Floor-raise steps cover the user mutations recorded so far; creates below add
+        // active keys without stepping the floor.
+        let user_steps = events.len() as u64;
+
         // Handle parent-deleted keys that the child wants to re-create.
         let parent_deleted_creates = m.extract_parent_deleted_creates(&mut mutations);
 
@@ -1658,23 +1691,37 @@ where
         db.strategy()
             .sort_by(&mut creates, |(a, _, _), (b, _, _)| a.cmp(b));
         for (key, value, base_old_loc) in creates {
-            let new_loc = Location::new(m.base_size + ops.len() as u64);
-            ops.push(Operation::Update(update::Unordered(
-                key.clone(),
-                value.clone(),
-            )));
-            diff.push((
-                key,
-                DiffEntry::Active {
-                    value,
-                    loc: new_loc,
-                    base_old_loc,
-                },
-            ));
             active_keys_delta += 1;
+            events.push((key, base_old_loc, Some(value)));
         }
 
-        db.strategy().sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
+        // Materialize `ops` and `diff` from the recorded events.
+        let strategy = db.strategy();
+        let ops: Vec<Operation<F, update::Unordered<K, V>>> =
+            strategy.map_collect_vec(&events, |(key, _, mutation)| {
+                mutation.as_ref().map_or_else(
+                    || Operation::Delete(key.clone()),
+                    |value| Operation::Update(update::Unordered(key.clone(), value.clone())),
+                )
+            });
+        let mut diff: DiffVec<K, F, V::Value> = strategy.map_collect_vec(
+            events.into_iter().enumerate(),
+            |(i, (key, base_old_loc, mutation))| {
+                let loc = Location::new(m.base_size + i as u64);
+                match mutation {
+                    Some(value) => (
+                        key,
+                        DiffEntry::Active {
+                            value,
+                            loc,
+                            base_old_loc,
+                        },
+                    ),
+                    None => (key, DiffEntry::Deleted { base_old_loc }),
+                }
+            },
+        );
+        strategy.sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish(
@@ -2676,6 +2723,65 @@ mod tests {
         let mut cursors = DiffCursors::new([diff.as_slice()]);
         assert!(cursors.resolve(&5).is_some());
         cursors.resolve(&1);
+    }
+
+    /// `sorted_contains` matches `binary_search` for ascending queries over sorted, deduped
+    /// locations.
+    #[test]
+    fn sorted_contains_matches_binary_search() {
+        let mut rng = test_rng();
+        for _ in 0..50 {
+            let mut locs: Vec<Location<mmr::Family>> = (0..rng.random_range(0..40))
+                .map(|_| loc(rng.random_range(0..100u64)))
+                .collect();
+            locs.sort_unstable();
+            locs.dedup();
+
+            let mut queries: Vec<u64> = (0..rng.random_range(1..80))
+                .map(|_| rng.random_range(0..110u64))
+                .collect();
+            queries.sort_unstable();
+
+            let mut cursor = 0;
+            for q in queries.into_iter().map(loc) {
+                assert_eq!(
+                    sorted_contains(&locs, &mut cursor, q),
+                    locs.binary_search(&q).is_ok(),
+                    "query {q} diverged"
+                );
+            }
+        }
+    }
+
+    /// `merge_sorted_diffs` matches `extend` + `sort_by_key` for disjoint, sorted diffs.
+    #[test]
+    fn merge_sorted_diffs_matches_sort() {
+        let mut rng = test_rng();
+        for _ in 0..50 {
+            // Disjoint key sets: evens on one side, odds on the other.
+            let mut build = |offset: u64| -> DiffVec<u64, mmr::Family, u64> {
+                let mut keys: Vec<u64> = (0..rng.random_range(0..30))
+                    .map(|_| rng.random_range(0..50u64) * 2 + offset)
+                    .collect();
+                keys.sort_unstable();
+                keys.dedup();
+                keys.into_iter().map(|k| (k, active(k, k))).collect()
+            };
+            let a = build(0);
+            let b = build(1);
+
+            let mut reference = a.clone();
+            reference.extend(b.clone());
+            reference.sort_by_key(|x| x.0);
+
+            let merged = merge_sorted_diffs(a, b);
+            assert_eq!(merged.len(), reference.len());
+            for ((mk, me), (rk, re)) in merged.iter().zip(&reference) {
+                assert_eq!(mk, rk);
+                assert_eq!(me.loc(), re.loc());
+                assert_eq!(me.value(), re.value());
+            }
+        }
     }
 
     /// Single-step oracle for [`fill_candidates`]: return the next floor-raise candidate in
