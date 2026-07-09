@@ -178,7 +178,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         positions: &[u64],
         buf: &mut [u8],
     ) -> Result<(Vec<A>, usize), Error> {
-        crate::journal::assert_positions_increasing(positions);
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
         if positions.is_empty() {
             return Ok((Vec::new(), 0));
         }

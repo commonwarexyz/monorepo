@@ -685,7 +685,10 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         if last_position >= self.bounds.end {
             return Err(Error::ItemOutOfRange(last_position));
         }
-        crate::journal::assert_positions_increasing(positions);
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
         Ok(())
     }
 
@@ -1036,7 +1039,10 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
     }
 
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
-        crate::journal::assert_positions_increasing(positions);
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
         let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
         self.read_many_sync_pass(positions, &mut items);
         items

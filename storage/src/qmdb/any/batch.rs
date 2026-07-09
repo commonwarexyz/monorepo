@@ -116,17 +116,13 @@ pub(crate) fn lookup_sorted<'a, K: Ord, V>(entries: &'a [(K, V)], key: &K) -> Op
         .map(|idx| &entries[idx].1)
 }
 
-/// Returns whether sorted, deduplicated `locs` contains `target`, advancing `cursor` past
+/// Returns whether sorted, deduplicated `items` contains `target`, advancing `cursor` past
 /// entries below it. Successive calls must use non-decreasing `target`s.
-fn sorted_contains<F: Family>(
-    locs: &[Location<F>],
-    cursor: &mut usize,
-    target: Location<F>,
-) -> bool {
-    while locs.get(*cursor).is_some_and(|&loc| loc < target) {
+fn sorted_contains<T: Ord>(items: &[T], cursor: &mut usize, target: &T) -> bool {
+    while items.get(*cursor).is_some_and(|item| item < target) {
         *cursor += 1;
     }
-    locs.get(*cursor) == Some(&target)
+    items.get(*cursor) == Some(target)
 }
 
 /// Merge two key-sorted diffs with disjoint keys into one sorted diff.
@@ -890,8 +886,7 @@ where
 
             // `fill_candidates` yields ascending locations, so superseded checks advance a
             // monotonic cursor.
-            let mut filter_cursor = 0;
-            let mut apply_cursor = 0;
+            let mut superseded_cursor = 0;
 
             // Scan active operations in `[floor, fixed_tip)` and move them to the tip.
             while moved < total_steps {
@@ -905,7 +900,7 @@ where
                     break;
                 }
 
-                // Both `sorted_contains` cursors rely on the candidate sequence ascending
+                // The `sorted_contains` cursor relies on the candidate sequence ascending
                 // across the whole raise. `floor` is one past the last processed candidate.
                 assert!(candidates[0] >= floor);
                 assert!(candidates.is_sorted_by(|a, b| a < b));
@@ -916,8 +911,8 @@ where
                 let read_candidates: Vec<_> = candidates
                     .iter()
                     .copied()
-                    .filter(|&candidate| {
-                        !sorted_contains(&superseded_locs, &mut filter_cursor, candidate)
+                    .filter(|candidate| {
+                        !sorted_contains(&superseded_locs, &mut superseded_cursor, candidate)
                     })
                     .collect();
                 let (resolved, outcomes): (_, Vec<Vec<FloorOutcome<F>>>) =
@@ -990,16 +985,18 @@ where
                         (resolved, outcomes)
                     };
 
-                // Apply in candidate order, moving active ops to the tip.
+                // Apply in candidate order, moving active ops to the tip. `read_candidates`
+                // preserves candidate order, so a candidate that does not match the next
+                // pending read was superseded and only advances the floor.
                 let mut outcomes = outcomes.into_iter().flatten();
-                let mut reads = read_candidates.into_iter().zip(resolved);
+                let mut reads = resolved.into_iter();
+                let mut pending = read_candidates.iter().peekable();
                 for candidate in candidates {
                     floor = Location::new(*candidate + 1);
-                    if sorted_contains(&superseded_locs, &mut apply_cursor, candidate) {
+                    if pending.next_if(|&&pending| pending == candidate).is_none() {
                         continue;
                     }
-                    let (read_candidate, op) = reads.next().expect("one read per candidate");
-                    assert_eq!(candidate, read_candidate);
+                    let op = reads.next().expect("one read per candidate");
                     let outcome = outcomes.next().expect("one outcome per read candidate");
                     match outcome {
                         FloorOutcome::Inactive => continue,
@@ -2733,16 +2730,16 @@ mod tests {
     }
 
     /// `sorted_contains` matches `binary_search` for ascending queries over sorted, deduped
-    /// locations.
+    /// items.
     #[test]
     fn sorted_contains_matches_binary_search() {
         let mut rng = test_rng();
         for _ in 0..50 {
-            let mut locs: Vec<Location<mmr::Family>> = (0..rng.random_range(0..40))
-                .map(|_| loc(rng.random_range(0..100u64)))
+            let mut items: Vec<u64> = (0..rng.random_range(0..40))
+                .map(|_| rng.random_range(0..100u64))
                 .collect();
-            locs.sort_unstable();
-            locs.dedup();
+            items.sort_unstable();
+            items.dedup();
 
             let mut queries: Vec<u64> = (0..rng.random_range(1..80))
                 .map(|_| rng.random_range(0..110u64))
@@ -2750,10 +2747,10 @@ mod tests {
             queries.sort_unstable();
 
             let mut cursor = 0;
-            for q in queries.into_iter().map(loc) {
+            for q in queries {
                 assert_eq!(
-                    sorted_contains(&locs, &mut cursor, q),
-                    locs.binary_search(&q).is_ok(),
+                    sorted_contains(&items, &mut cursor, &q),
+                    items.binary_search(&q).is_ok(),
                     "query {q} diverged"
                 );
             }

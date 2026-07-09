@@ -12,14 +12,6 @@ pub mod contiguous;
 mod frame;
 pub mod segmented;
 
-/// Assert the batched-read caller contract that positions are strictly increasing.
-pub(crate) fn assert_positions_increasing(positions: &[u64]) {
-    assert!(
-        positions.is_sorted_by(|a, b| a < b),
-        "positions must be strictly increasing"
-    );
-}
-
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 
