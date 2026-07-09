@@ -161,7 +161,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
         /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
-        /// certification as concluded and will not retry the same request.
+        /// certification as concluded and will not retry the same request. After a restart,
+        /// however, consensus may request certification for the same `(round, payload)` again
+        /// if the result was not durably recorded before shutdown.
         ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently uncertifiable for that
