@@ -4,14 +4,23 @@
             movdqa xmm3, xmm14
             movdqa xmm4, xmm15
 
-            movdqu xmm5, xmmword ptr [{left}]
-            movdqu xmm6, xmmword ptr [{left} + 16]
-            movdqu xmm7, xmmword ptr [{left} + 32]
-            movdqu xmm8, xmmword ptr [{left} + 48]
-            movdqu xmm9, xmmword ptr [{right}]
-            movdqu xmm10, xmmword ptr [{right} + 16]
-            movdqu xmm11, xmmword ptr [{right} + 32]
-            movdqu xmm12, xmmword ptr [{right} + 48]
+            movq xmm5, qword ptr [{left_pos}]
+            movq xmm13, qword ptr [{left_left}]
+            punpcklqdq xmm5, xmm13
+            movdqu xmm6, xmmword ptr [{left_left} + 8]
+            movq xmm7, qword ptr [{left_left} + 24]
+            movq xmm13, qword ptr [{left_right}]
+            punpcklqdq xmm7, xmm13
+            movdqu xmm8, xmmword ptr [{left_right} + 8]
+
+            movq xmm9, qword ptr [{right_pos}]
+            movq xmm13, qword ptr [{right_left}]
+            punpcklqdq xmm9, xmm13
+            movdqu xmm10, xmmword ptr [{right_left} + 8]
+            movq xmm11, qword ptr [{right_left} + 24]
+            movq xmm13, qword ptr [{right_right}]
+            punpcklqdq xmm11, xmm13
+            movdqu xmm12, xmmword ptr [{right_right} + 8]
 
             pshufb xmm5, xmmword ptr [{mask}]
             pshufb xmm6, xmmword ptr [{mask}]

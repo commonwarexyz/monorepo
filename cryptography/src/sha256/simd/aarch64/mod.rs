@@ -1,6 +1,6 @@
 use super::{
-    super::{Digest, DIGEST_LENGTH, IV},
-    BMT_NODE_LEN, MMR_NODE_LEN,
+    super::{DIGEST_LENGTH, Digest, IV},
+    POSITION_LEN,
 };
 
 /// Wrapper that aligns the round-constant table for aligned vector loads.
@@ -23,14 +23,22 @@ static K: Align16<[u32; 64]> = Align16([
 /// with interleaved SHA2 instructions: one full block plus a compile-time
 /// constant padding block each.
 ///
+/// Each message is given as its constituent parts (position, left digest,
+/// right digest) and loaded directly into vector registers, without first
+/// concatenating them into a scratch buffer.
+///
 /// # Safety
 ///
 /// The `sha2` target feature must be available.
 #[allow(asm_sub_register)]
 #[target_feature(enable = "sha2")]
 pub unsafe fn hash_pair_72(
-    left: &[u8; MMR_NODE_LEN],
-    right: &[u8; MMR_NODE_LEN],
+    left_pos: &[u8; POSITION_LEN],
+    left_left: &[u8; DIGEST_LENGTH],
+    left_right: &[u8; DIGEST_LENGTH],
+    right_pos: &[u8; POSITION_LEN],
+    right_left: &[u8; DIGEST_LENGTH],
+    right_right: &[u8; DIGEST_LENGTH],
 ) -> (Digest, Digest) {
     let mut left_digest = [0u8; DIGEST_LENGTH];
     let mut right_digest = [0u8; DIGEST_LENGTH];
@@ -39,14 +47,18 @@ pub unsafe fn hash_pair_72(
     // written by the asm are listed as outputs.
     unsafe {
         core::arch::asm!(
-            include_str!("sha256_pair_block1.asm"),
+            include_str!("sha256_pair_block1_72.asm"),
             include_str!("sha256_rounds_2x.asm"),
             include_str!("sha256_pair_chain.asm"),
             include_str!("sha256_pair_tail8.asm"),
             include_str!("sha256_rounds_2x.asm"),
             include_str!("sha256_pair_finish.asm"),
-            left = inout(reg) left.as_ptr() => _,
-            right = inout(reg) right.as_ptr() => _,
+            left_pos = in(reg) left_pos.as_ptr(),
+            left_left = inout(reg) left_left.as_ptr() => _,
+            left_right = inout(reg) left_right.as_ptr() => _,
+            right_pos = in(reg) right_pos.as_ptr(),
+            right_left = inout(reg) right_left.as_ptr() => _,
+            right_right = inout(reg) right_right.as_ptr() => _,
             left_output = in(reg) left_digest.as_mut_ptr(),
             right_output = in(reg) right_digest.as_mut_ptr(),
             tmp = out(reg) _,
@@ -69,14 +81,20 @@ pub unsafe fn hash_pair_72(
 /// interleaved SHA2 instructions: one full block plus a compile-time
 /// constant padding block each.
 ///
+/// Each message is given as its two constituent digests and loaded directly
+/// into vector registers, without first concatenating them into a scratch
+/// buffer.
+///
 /// # Safety
 ///
 /// The `sha2` target feature must be available.
 #[allow(asm_sub_register)]
 #[target_feature(enable = "sha2")]
 pub unsafe fn hash_pair_64(
-    left: &[u8; BMT_NODE_LEN],
-    right: &[u8; BMT_NODE_LEN],
+    left_a: &[u8; DIGEST_LENGTH],
+    left_b: &[u8; DIGEST_LENGTH],
+    right_a: &[u8; DIGEST_LENGTH],
+    right_b: &[u8; DIGEST_LENGTH],
 ) -> (Digest, Digest) {
     let mut left_digest = [0u8; DIGEST_LENGTH];
     let mut right_digest = [0u8; DIGEST_LENGTH];
@@ -85,14 +103,16 @@ pub unsafe fn hash_pair_64(
     // written by the asm are listed as outputs.
     unsafe {
         core::arch::asm!(
-            include_str!("sha256_pair_block1.asm"),
+            include_str!("sha256_pair_block1_64.asm"),
             include_str!("sha256_rounds_2x.asm"),
             include_str!("sha256_pair_chain.asm"),
             include_str!("sha256_pair_tail0.asm"),
             include_str!("sha256_rounds_2x.asm"),
             include_str!("sha256_pair_finish.asm"),
-            left = inout(reg) left.as_ptr() => _,
-            right = inout(reg) right.as_ptr() => _,
+            left_a = in(reg) left_a.as_ptr(),
+            left_b = in(reg) left_b.as_ptr(),
+            right_a = in(reg) right_a.as_ptr(),
+            right_b = in(reg) right_b.as_ptr(),
             left_output = in(reg) left_digest.as_mut_ptr(),
             right_output = in(reg) right_digest.as_mut_ptr(),
             tmp = out(reg) _,

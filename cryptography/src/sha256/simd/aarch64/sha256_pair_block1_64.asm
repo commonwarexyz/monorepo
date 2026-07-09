@@ -6,8 +6,10 @@
             mov.16b v22, v2
             mov.16b v23, v3
 
-            ld1.16b {{v4, v5, v6, v7}}, [{left}], #64
-            ld1.16b {{v8, v9, v10, v11}}, [{right}], #64
+            ld1.16b {{v4, v5}}, [{left_a}]
+            ld1.16b {{v6, v7}}, [{left_b}]
+            ld1.16b {{v8, v9}}, [{right_a}]
+            ld1.16b {{v10, v11}}, [{right_b}]
             rev32.16b v4, v4
             rev32.16b v5, v5
             rev32.16b v6, v6

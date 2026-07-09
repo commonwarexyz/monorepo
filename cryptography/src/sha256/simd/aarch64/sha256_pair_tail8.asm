@@ -1,5 +1,5 @@
-            ld1.8b {{v4}}, [{left}]
-            ld1.8b {{v8}}, [{right}]
+            ld1.8b {{v4}}, [{left_right}]
+            ld1.8b {{v8}}, [{right_right}]
             mov {tmp:w}, #0x80
             ins v4.b[8], {tmp:w}
             ins v8.b[8], {tmp:w}

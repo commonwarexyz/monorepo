@@ -1,6 +1,6 @@
 use super::{
-    super::{Digest, DIGEST_LENGTH, IV},
-    BMT_NODE_LEN, MMR_NODE_LEN,
+    super::{DIGEST_LENGTH, Digest, IV},
+    BMT_NODE_LEN, MMR_NODE_LEN, POSITION_LEN,
 };
 
 /// Wrapper that aligns constant tables for aligned vector loads.
@@ -41,13 +41,21 @@ static FINAL_64_LENGTH: Align16<[u32; 4]> = Align16([0, 0, 0, (BMT_NODE_LEN * 8)
 /// with interleaved SHA-NI instructions: one full block plus a compile-time
 /// constant padding block each.
 ///
+/// Each message is given as its constituent parts (position, left digest,
+/// right digest) and loaded directly into vector registers, without first
+/// concatenating them into a scratch buffer.
+///
 /// # Safety
 ///
 /// The `sha`, `avx2`, `ssse3`, and `sse4.1` target features must be available.
 #[target_feature(enable = "sha,avx2,ssse3,sse4.1")]
 pub unsafe fn hash_pair_72(
-    left: &[u8; MMR_NODE_LEN],
-    right: &[u8; MMR_NODE_LEN],
+    left_pos: &[u8; POSITION_LEN],
+    left_left: &[u8; DIGEST_LENGTH],
+    left_right: &[u8; DIGEST_LENGTH],
+    right_pos: &[u8; POSITION_LEN],
+    right_left: &[u8; DIGEST_LENGTH],
+    right_right: &[u8; DIGEST_LENGTH],
 ) -> (Digest, Digest) {
     let mut left_digest = [0u8; DIGEST_LENGTH];
     let mut right_digest = [0u8; DIGEST_LENGTH];
@@ -57,11 +65,15 @@ pub unsafe fn hash_pair_72(
     unsafe {
         core::arch::asm!(
             include_str!("sha256_pair_macros.asm"),
-            include_str!("sha256_pair_block1.asm"),
+            include_str!("sha256_pair_block1_72.asm"),
             include_str!("sha256_pair_tail8.asm"),
             include_str!("sha256_pair_finish.asm"),
-            left = in(reg) left.as_ptr(),
-            right = in(reg) right.as_ptr(),
+            left_pos = in(reg) left_pos.as_ptr(),
+            left_left = in(reg) left_left.as_ptr(),
+            left_right = in(reg) left_right.as_ptr(),
+            right_pos = in(reg) right_pos.as_ptr(),
+            right_left = in(reg) right_left.as_ptr(),
+            right_right = in(reg) right_right.as_ptr(),
             left_output = in(reg) left_digest.as_mut_ptr(),
             right_output = in(reg) right_digest.as_mut_ptr(),
             state = in(reg) IV.as_ptr(),
@@ -82,13 +94,19 @@ pub unsafe fn hash_pair_72(
 /// interleaved SHA-NI instructions: one full block plus a compile-time
 /// constant padding block each.
 ///
+/// Each message is given as its two constituent digests and loaded directly
+/// into vector registers, without first concatenating them into a scratch
+/// buffer.
+///
 /// # Safety
 ///
 /// The `sha`, `avx2`, `ssse3`, and `sse4.1` target features must be available.
 #[target_feature(enable = "sha,avx2,ssse3,sse4.1")]
 pub unsafe fn hash_pair_64(
-    left: &[u8; BMT_NODE_LEN],
-    right: &[u8; BMT_NODE_LEN],
+    left_a: &[u8; DIGEST_LENGTH],
+    left_b: &[u8; DIGEST_LENGTH],
+    right_a: &[u8; DIGEST_LENGTH],
+    right_b: &[u8; DIGEST_LENGTH],
 ) -> (Digest, Digest) {
     let mut left_digest = [0u8; DIGEST_LENGTH];
     let mut right_digest = [0u8; DIGEST_LENGTH];
@@ -98,11 +116,13 @@ pub unsafe fn hash_pair_64(
     unsafe {
         core::arch::asm!(
             include_str!("sha256_pair_macros.asm"),
-            include_str!("sha256_pair_block1.asm"),
+            include_str!("sha256_pair_block1_64.asm"),
             include_str!("sha256_pair_tail0.asm"),
             include_str!("sha256_pair_finish.asm"),
-            left = in(reg) left.as_ptr(),
-            right = in(reg) right.as_ptr(),
+            left_a = in(reg) left_a.as_ptr(),
+            left_b = in(reg) left_b.as_ptr(),
+            right_a = in(reg) right_a.as_ptr(),
+            right_b = in(reg) right_b.as_ptr(),
             left_output = in(reg) left_digest.as_mut_ptr(),
             right_output = in(reg) right_digest.as_mut_ptr(),
             state = in(reg) IV.as_ptr(),

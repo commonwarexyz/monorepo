@@ -10,9 +10,13 @@
 //! Merkle-family primitives in this workspace: `position || left || right`
 //! (72 bytes, used by the MMR family) and `left || right` (64 bytes, used by
 //! the BMT). Both need one full block plus a compile-time constant padding
-//! block each. Other shapes fall back to serial hashing.
+//! block each. Callers passing one of these shapes as its exact constituent
+//! parts (a position and two digests, or two digests) load directly from
+//! those parts into vector registers, with no intermediate buffer. Any other
+//! shape, or the same shape split into a different part decomposition, falls
+//! back to serial hashing.
 
-use super::Digest;
+use super::{DIGEST_LENGTH, Digest};
 
 #[cfg(all(target_arch = "aarch64", any(target_feature = "sha2", feature = "std")))]
 mod aarch64;
@@ -30,75 +34,67 @@ mod aarch64;
 ))]
 mod x86_64;
 
+/// The MMR node's position prefix length (an 8-byte big-endian position).
+const POSITION_LEN: usize = 8;
+
 /// The MMR node message length: an 8-byte position and two 32-byte digests.
-const MMR_NODE_LEN: usize = 72;
+const MMR_NODE_LEN: usize = POSITION_LEN + 2 * DIGEST_LENGTH;
+const _: () = assert!(MMR_NODE_LEN == 72);
 
 /// The BMT node message length: two 32-byte digests (no position).
-const BMT_NODE_LEN: usize = 64;
+const BMT_NODE_LEN: usize = 2 * DIGEST_LENGTH;
+const _: () = assert!(BMT_NODE_LEN == 64);
 
-/// Hash two node-length messages, each given as a concatenation of parts,
-/// with the pair-hashing kernel for the current CPU.
+/// Hash two node-length messages, each given as parts, with the pair-hashing
+/// kernel for the current CPU.
 ///
 /// Returns `None` when the kernel cannot be used: the required CPU features
-/// are unavailable, or the messages don't match, or don't match one of the
-/// known node shapes.
+/// are unavailable, or the messages don't match one of the known node shapes
+/// (a position and two digests, or two digests) as their exact constituent
+/// parts.
 ///
-/// Inlined aggressively so the length matching constant-folds at call sites
+/// Inlined aggressively so the shape matching constant-folds at call sites
 /// with fixed-shape inputs (e.g. merkle nodes), leaving only the out-of-line
 /// kernel call.
 #[inline(always)]
 pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Digest)> {
-    let len: usize = left.iter().map(|part| part.len()).sum();
-    if right.iter().map(|part| part.len()).sum::<usize>() != len {
-        return None;
-    }
-    match len {
-        MMR_NODE_LEN => {
-            let left = assemble::<MMR_NODE_LEN>(left)?;
-            let right = assemble::<MMR_NODE_LEN>(right)?;
-            dispatch_mmr(&left, &right)
-        }
-        BMT_NODE_LEN => {
-            let left = assemble::<BMT_NODE_LEN>(left)?;
-            let right = assemble::<BMT_NODE_LEN>(right)?;
-            dispatch_bmt(&left, &right)
-        }
+    match (left, right) {
+        ([left_pos, left_left, left_right], [right_pos, right_left, right_right]) => dispatch_mmr(
+            (*left_pos).try_into().ok()?,
+            (*left_left).try_into().ok()?,
+            (*left_right).try_into().ok()?,
+            (*right_pos).try_into().ok()?,
+            (*right_left).try_into().ok()?,
+            (*right_right).try_into().ok()?,
+        ),
+        ([left_a, left_b], [right_a, right_b]) => dispatch_bmt(
+            (*left_a).try_into().ok()?,
+            (*left_b).try_into().ok()?,
+            (*right_a).try_into().ok()?,
+            (*right_b).try_into().ok()?,
+        ),
         _ => None,
     }
 }
 
-/// Concatenate `parts` into an `N`-byte buffer, or `None` if the total length
-/// differs.
-#[inline(always)]
-fn assemble<const N: usize>(parts: &[&[u8]]) -> Option<[u8; N]> {
-    if parts.iter().map(|part| part.len()).sum::<usize>() != N {
-        return None;
-    }
-    let mut scratch = [0u8; N];
-    let mut len = 0;
-    for part in parts {
-        scratch[len..len + part.len()].copy_from_slice(part);
-        len += part.len();
-    }
-    Some(scratch)
-}
-
-/// Dispatch two node-length messages to the available kernel.
+/// Dispatch two node-length messages, given as their constituent parts, to
+/// the available kernel.
 ///
-/// `N` is the concrete node message length; `aarch64_kernel`/`x86_64_kernel` name the
-/// arch-specific kernel functions to invoke once the required CPU features are confirmed.
+/// `aarch64_kernel`/`x86_64_kernel` name the arch-specific kernel functions
+/// to invoke once the required CPU features are confirmed; `args` lists the
+/// parts each kernel takes.
 macro_rules! define_dispatch {
-    ($name:ident, $len:expr, $aarch64_kernel:ident, $x86_64_kernel:ident) => {
+    ($name:ident, $aarch64_kernel:ident, $x86_64_kernel:ident, ($($arg:ident: $ty:ty),+ $(,)?)) => {
         #[inline(always)]
-        fn $name(left: &[u8; $len], right: &[u8; $len]) -> Option<(Digest, Digest)> {
+        fn $name($($arg: $ty),+) -> Option<(Digest, Digest)> {
             cfg_if::cfg_if! {
                 if #[cfg(all(target_arch = "aarch64", target_feature = "sha2"))] {
                     // SAFETY: The sha2 target feature is statically enabled.
-                    Some(unsafe { aarch64::$aarch64_kernel(left, right) })
+                    Some(unsafe { aarch64::$aarch64_kernel($($arg),+) })
                 } else if #[cfg(all(target_arch = "aarch64", feature = "std"))] {
                     if std::arch::is_aarch64_feature_detected!("sha2") {
                         // SAFETY: The sha2 target feature was just detected.
-                        return Some(unsafe { aarch64::$aarch64_kernel(left, right) });
+                        return Some(unsafe { aarch64::$aarch64_kernel($($arg),+) });
                     }
                     None
                 } else if #[cfg(all(
@@ -109,7 +105,7 @@ macro_rules! define_dispatch {
                     target_feature = "sse4.1",
                 ))] {
                     // SAFETY: The required target features are statically enabled.
-                    Some(unsafe { x86_64::$x86_64_kernel(left, right) })
+                    Some(unsafe { x86_64::$x86_64_kernel($($arg),+) })
                 } else if #[cfg(all(target_arch = "x86_64", feature = "std"))] {
                     if std::arch::is_x86_feature_detected!("sha")
                         && std::arch::is_x86_feature_detected!("avx2")
@@ -117,11 +113,11 @@ macro_rules! define_dispatch {
                         && std::arch::is_x86_feature_detected!("sse4.1")
                     {
                         // SAFETY: The required target features were just detected.
-                        return Some(unsafe { x86_64::$x86_64_kernel(left, right) });
+                        return Some(unsafe { x86_64::$x86_64_kernel($($arg),+) });
                     }
                     None
                 } else {
-                    let _ = (left, right);
+                    let _ = ($($arg),+);
                     None
                 }
             }
@@ -129,5 +125,27 @@ macro_rules! define_dispatch {
     };
 }
 
-define_dispatch!(dispatch_mmr, MMR_NODE_LEN, hash_pair_72, hash_pair_72);
-define_dispatch!(dispatch_bmt, BMT_NODE_LEN, hash_pair_64, hash_pair_64);
+define_dispatch!(
+    dispatch_mmr,
+    hash_pair_72,
+    hash_pair_72,
+    (
+        left_pos: &[u8; POSITION_LEN],
+        left_left: &[u8; DIGEST_LENGTH],
+        left_right: &[u8; DIGEST_LENGTH],
+        right_pos: &[u8; POSITION_LEN],
+        right_left: &[u8; DIGEST_LENGTH],
+        right_right: &[u8; DIGEST_LENGTH],
+    )
+);
+define_dispatch!(
+    dispatch_bmt,
+    hash_pair_64,
+    hash_pair_64,
+    (
+        left_a: &[u8; DIGEST_LENGTH],
+        left_b: &[u8; DIGEST_LENGTH],
+        right_a: &[u8; DIGEST_LENGTH],
+        right_b: &[u8; DIGEST_LENGTH],
+    )
+);
