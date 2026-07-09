@@ -22,7 +22,6 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
 struct ContiguousFixedWorkload;
-type ContiguousFixed = StorageConformance<ContiguousFixedWorkload>;
 
 impl StorageWorkload for ContiguousFixedWorkload {
     type Error = crate::journal::Error;
@@ -51,7 +50,6 @@ impl StorageWorkload for ContiguousFixedWorkload {
 }
 
 struct ContiguousVariableWorkload;
-type ContiguousVariable = StorageConformance<ContiguousVariableWorkload>;
 
 impl StorageWorkload for ContiguousVariableWorkload {
     type Error = crate::journal::Error;
@@ -87,7 +85,6 @@ impl StorageWorkload for ContiguousVariableWorkload {
 }
 
 struct SegmentedFixedWorkload;
-type SegmentedFixed = StorageConformance<SegmentedFixedWorkload>;
 
 impl StorageWorkload for SegmentedFixedWorkload {
     type Error = crate::journal::Error;
@@ -118,7 +115,6 @@ impl StorageWorkload for SegmentedFixedWorkload {
 }
 
 struct SegmentedGlobWorkload;
-type SegmentedGlob = StorageConformance<SegmentedGlobWorkload>;
 
 impl StorageWorkload for SegmentedGlobWorkload {
     type Error = crate::journal::Error;
@@ -153,7 +149,6 @@ impl StorageWorkload for SegmentedGlobWorkload {
 }
 
 struct SegmentedVariableWorkload;
-type SegmentedVariable = StorageConformance<SegmentedVariableWorkload>;
 
 impl StorageWorkload for SegmentedVariableWorkload {
     type Error = crate::journal::Error;
@@ -238,7 +233,6 @@ impl Record for TestEntry {
 }
 
 struct SegmentedOversizedWorkload;
-type SegmentedOversized = StorageConformance<SegmentedOversizedWorkload>;
 
 impl StorageWorkload for SegmentedOversizedWorkload {
     type Error = crate::journal::Error;
@@ -283,10 +277,10 @@ impl StorageWorkload for SegmentedOversizedWorkload {
 }
 
 conformance_tests! {
-    ContiguousFixed => 512,
-    ContiguousVariable => 512,
-    SegmentedFixed => 512,
-    SegmentedGlob => 512,
-    SegmentedVariable => 512,
-    SegmentedOversized => 512,
+    StorageConformance<ContiguousFixedWorkload> => 512,
+    StorageConformance<ContiguousVariableWorkload> => 512,
+    StorageConformance<SegmentedFixedWorkload> => 512,
+    StorageConformance<SegmentedGlobWorkload> => 512,
+    StorageConformance<SegmentedVariableWorkload> => 512,
+    StorageConformance<SegmentedOversizedWorkload> => 512,
 }

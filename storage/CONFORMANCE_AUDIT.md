@@ -7,10 +7,10 @@ workload. This is separate from codec conformance and from logical-root conforma
 
 ## Existing Storage-Audit Tests To Port
 
-- [ ] `archive::prunable::Archive`
-- [ ] `archive::immutable::Archive`
-- [ ] `freezer::Freezer`
-- [ ] `queue::Queue`
+- [x] `archive::prunable::Archive`
+- [x] `archive::immutable::Archive`
+- [x] `freezer::Freezer`
+- [x] `queue::Queue`
 - [x] `journal::contiguous::fixed::Journal`
 - [x] `journal::contiguous::variable::Journal`
 - [x] `journal::segmented::fixed::Journal`
