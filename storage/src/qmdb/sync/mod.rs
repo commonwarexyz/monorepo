@@ -12,7 +12,9 @@ pub use error::{EngineError, Error};
 mod gaps;
 mod journal;
 
+mod metrics;
 pub(crate) use journal::Journal;
+pub use metrics::Metrics;
 
 mod database;
 pub(crate) use database::{Config as DatabaseConfig, Database};
