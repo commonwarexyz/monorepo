@@ -397,9 +397,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_macros::select;
-    use futures::pin_mut;
     use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Spawner as _,
@@ -411,6 +410,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
+    use futures::pin_mut;
     use std::time::Duration;
 
     type FixedDb =
@@ -592,7 +592,6 @@ mod tests {
             assert_eq!(synced.get_metadata(), Some(metadata));
         });
     }
-
 
     #[test]
     fn state_sync_reports_compact_progress() {
