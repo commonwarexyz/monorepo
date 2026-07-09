@@ -609,7 +609,8 @@ mod tests {
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[1]), Sha256::hash(&[2]))
-                .merkleize(&source, Some(Sha256::hash(&[3])), floor);
+                .merkleize(&source, Some(Sha256::hash(&[3])), floor)
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.sync().await.unwrap();
             let target = sync::compact::Target {

@@ -673,11 +673,11 @@ mod tests {
             let source_config = fixed_config(&source_context, "source");
             let mut source = FixedDb::init(source_context, source_config).await.unwrap();
             let floor = source.inactivity_floor_loc();
-            let batch =
-                source
-                    .new_batch()
-                    .append(U64::new(7))
-                    .merkleize(&source, Some(U64::new(9)), floor);
+            let batch = source
+                .new_batch()
+                .append(U64::new(7))
+                .merkleize(&source, Some(U64::new(9)), floor)
+                .await;
             source.apply_batch(batch).unwrap();
             source.sync().await.unwrap();
             let target = source.target();

@@ -245,7 +245,7 @@ pub(crate) mod test {
             let mut db = ParTest::init(context.child("db"), cfg).await.unwrap();
 
             // Populate and commit so later snapshots carry committed nodes.
-            let mut rng = test_rng_seeded(11);
+            let mut rng = TestRng::new(11);
             let mut keys = Vec::with_capacity(1024);
             let mut batch = db.new_batch();
             for _ in 0..1024 {
