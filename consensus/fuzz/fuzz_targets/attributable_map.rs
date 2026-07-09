@@ -28,7 +28,6 @@ struct VoteData {
 enum Operation {
     Insert(VoteData),
     Get(Participant),
-    Clear,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -84,12 +83,6 @@ fn fuzz(input: FuzzInput) {
                 let result = map.get(signer);
                 let should_exist = inserted_signers.contains(&signer);
                 assert_eq!(result.is_some(), should_exist);
-            }
-            Operation::Clear => {
-                map.clear();
-                inserted_signers.clear();
-                assert!(map.is_empty());
-                assert_eq!(map.len(), 0);
             }
         }
     }

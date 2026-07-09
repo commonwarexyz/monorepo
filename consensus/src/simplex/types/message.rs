@@ -540,12 +540,6 @@ impl<T: Attributable> AttributableMap<T> {
         Self { data, added: 0 }
     }
 
-    /// Clears all existing items from the [AttributableMap].
-    pub fn clear(&mut self) {
-        self.data.fill_with(|| None);
-        self.added = 0;
-    }
-
     /// Inserts an item into the map, using [Attributable::signer()] as the key,
     /// if it has not been added yet.
     ///
@@ -603,8 +597,7 @@ impl<'a, T: Attributable> IntoIterator for &'a AttributableMap<T> {
 /// Tracks notarize/nullify/finalize votes for a view.
 ///
 /// Each vote type is stored in its own [`AttributableMap`] so a validator can only
-/// contribute one vote per phase. The tracker is reused across rounds/views to keep
-/// allocations stable.
+/// contribute one vote per phase.
 pub struct VoteTracker<S: Scheme, D: Digest> {
     /// Per-signer notarize votes keyed by validator index.
     pub notarizes: AttributableMap<Notarize<S, D>>,

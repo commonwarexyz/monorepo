@@ -1,4 +1,4 @@
-use super::round::Round;
+use super::round::{Added, Round};
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
@@ -339,18 +339,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Diges
     ///
     /// Does not advance into the next view until certification passes.
     /// Adds to certification candidates if successful.
-    pub fn add_notarization(
-        &mut self,
-        notarization: Notarization<S, D>,
-    ) -> (bool, Option<S::PublicKey>) {
+    pub fn add_notarization(&mut self, notarization: Notarization<S, D>) -> Added<S::PublicKey> {
         let view = notarization.view();
         // Do not advance to the next view until the certification passes
         self.set_leader(view.next(), Some(&notarization.certificate));
-        let result = self.create_round(view).add_notarization(notarization);
-        if result.0 && view > self.last_finalized {
+        let added = self.create_round(view).add_notarization(notarization);
+        if matches!(added, Added::New { .. }) && view > self.last_finalized {
             self.certification_candidates.insert(view);
         }
-        result
+        added
     }
 
     /// Inserts a nullification certificate and advances into the next view.
@@ -377,10 +374,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Diges
     }
 
     /// Inserts a finalization certificate, updates the finalized height, and advances the view.
-    pub fn add_finalization(
-        &mut self,
-        finalization: Finalization<S, D>,
-    ) -> (bool, Option<S::PublicKey>) {
+    pub fn add_finalization(&mut self, finalization: Finalization<S, D>) -> Added<S::PublicKey> {
         let view = finalization.view();
         if view > self.last_finalized {
             self.last_finalized = view;
@@ -1154,8 +1148,9 @@ mod tests {
                 .collect();
             let notarization = Notarization::from_votes(&verifier, votes.iter(), &Sequential)
                 .expect("notarization");
-            let (added, equivocator) = state.add_notarization(notarization);
-            assert!(added);
+            let Added::New { equivocator } = state.add_notarization(notarization) else {
+                panic!("expected newly added certificate");
+            };
             assert!(equivocator.is_none());
             assert_eq!(
                 state.next_timeout_deadline(),
@@ -1911,8 +1906,10 @@ mod tests {
             let notarization =
                 Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential)
                     .expect("notarization");
-            let (added, _) = state.add_notarization(notarization);
-            assert!(added);
+            assert!(matches!(
+                state.add_notarization(notarization),
+                Added::New { .. }
+            ));
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
@@ -1961,8 +1958,9 @@ mod tests {
             let notarization =
                 Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
-            let (added, equivocator) = state.add_notarization(notarization);
-            assert!(added);
+            let Added::New { equivocator } = state.add_notarization(notarization) else {
+                panic!("expected newly added certificate");
+            };
             assert!(equivocator.is_none());
 
             let candidates = state.certify_candidates();
@@ -2270,8 +2268,10 @@ mod tests {
             let notarization =
                 Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
-            let (added, _) = state.add_notarization(notarization);
-            assert!(added);
+            assert!(matches!(
+                state.add_notarization(notarization),
+                Added::New { .. }
+            ));
 
             let nullify_votes: Vec<_> = schemes
                 .iter()
@@ -2324,8 +2324,10 @@ mod tests {
             let notarization =
                 Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
-            let (added, _) = state.add_notarization(notarization);
-            assert!(added);
+            assert!(matches!(
+                state.add_notarization(notarization),
+                Added::New { .. }
+            ));
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
@@ -2387,8 +2389,10 @@ mod tests {
             let notarization =
                 Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
-            let (added, _) = state.add_notarization(notarization);
-            assert!(added);
+            assert!(matches!(
+                state.add_notarization(notarization),
+                Added::New { .. }
+            ));
 
             let nullify_votes: Vec<_> = schemes
                 .iter()
@@ -2459,8 +2463,10 @@ mod tests {
             let notarization =
                 Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
-            let (added, _) = state.add_notarization(notarization);
-            assert!(added);
+            assert!(matches!(
+                state.add_notarization(notarization),
+                Added::New { .. }
+            ));
 
             let nullify_votes: Vec<_> = schemes
                 .iter()
@@ -2538,8 +2544,10 @@ mod tests {
             let notarization =
                 Notarization::from_votes(&verifier, notarize_votes.iter(), &Sequential)
                     .expect("notarization");
-            let (added, _) = state.add_notarization(notarization);
-            assert!(added);
+            assert!(matches!(
+                state.add_notarization(notarization),
+                Added::New { .. }
+            ));
             assert!(state.certified(parent_view, true).is_some());
 
             // Move into the child view as a follower and inject a proposal that depends on view 1.

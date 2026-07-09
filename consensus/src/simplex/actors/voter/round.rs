@@ -26,6 +26,16 @@ pub struct Leader<P: PublicKey> {
     pub key: P,
 }
 
+/// Outcome of adding a certificate to a round.
+#[derive(Debug)]
+pub enum Added<P: PublicKey> {
+    /// The certificate was newly added; carries the leader's key if its proposal
+    /// conflicts with the recorded one (equivocation).
+    New { equivocator: Option<P> },
+    /// A certificate of this kind was already recorded.
+    Duplicate,
+}
+
 /// Tracks the certification state for a round.
 enum CertifyState {
     /// Ready to attempt certification.
@@ -33,7 +43,7 @@ enum CertifyState {
     /// Certification request in progress (dropped to abort).
     Outstanding(#[allow(dead_code)] Aborter),
     /// Certification completed: true if succeeded, false if automaton declined.
-    Certified(bool),
+    Certified { success: bool },
     /// Certification was cancelled due to finalization.
     Aborted,
 }
@@ -109,11 +119,11 @@ pub struct Round<S: Scheme, D: Digest> {
 
     // Certificates received from batcher (constructed or from network).
     notarization: CertSlot<phase::Notarize, S, D>,
-    broadcast_notarize: bool,
+    voted_notarize: bool,
     nullification: CertSlot<phase::Nullify, S, D>,
-    broadcast_nullify: bool,
+    voted_nullify: bool,
     finalization: CertSlot<phase::Finalize, S, D>,
-    broadcast_finalize: bool,
+    voted_finalize: bool,
     certify: CertifyState,
 }
 
@@ -131,11 +141,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             timeout_retry: None,
             timeout_reason: None,
             notarization: CertSlot::new(),
-            broadcast_notarize: false,
+            voted_notarize: false,
             nullification: CertSlot::new(),
-            broadcast_nullify: false,
+            voted_nullify: false,
             finalization: CertSlot::new(),
-            broadcast_finalize: false,
+            voted_finalize: false,
             certify: CertifyState::Ready,
         }
     }
@@ -143,7 +153,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the leader info if we should propose.
     fn propose_ready(&self) -> Option<Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;
-        if !self.is_signer(leader.idx) || self.broadcast_nullify || !self.proposal.should_build() {
+        if !self.is_signer(leader.idx) || self.voted_nullify || !self.proposal.should_build() {
             return None;
         }
         Some(leader.clone())
@@ -164,7 +174,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the leader info if we should verify a proposal.
     fn verify_ready(&self) -> Option<&Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;
-        if self.is_signer(leader.idx) || self.broadcast_nullify {
+        if self.is_signer(leader.idx) || self.voted_nullify {
             return None;
         }
         Some(leader)
@@ -193,7 +203,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let notarization = self.notarization.get()?;
         match self.certify {
             CertifyState::Ready => {}
-            CertifyState::Outstanding(_) | CertifyState::Certified(_) | CertifyState::Aborted => {
+            CertifyState::Outstanding(_)
+            | CertifyState::Certified { .. }
+            | CertifyState::Aborted => {
                 return None;
             }
         }
@@ -220,7 +232,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Aborts the in-flight certification request.
     pub fn abort_certify(&mut self) {
-        if matches!(self.certify, CertifyState::Certified(_)) {
+        if matches!(self.certify, CertifyState::Certified { .. }) {
             return;
         }
         self.certify = CertifyState::Aborted;
@@ -299,7 +311,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Returns true if we have explicitly certified the proposal.
     pub const fn is_certified(&self) -> bool {
-        matches!(self.certify, CertifyState::Certified(true))
+        matches!(self.certify, CertifyState::Certified { success: true })
     }
 
     /// Returns true if certification was aborted due to finalization.
@@ -315,7 +327,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Completes the local proposal flow after the automaton returns a payload.
     pub fn proposed(&mut self, proposal: Proposal<D>) -> bool {
-        if self.broadcast_nullify {
+        if self.voted_nullify {
             return false;
         }
         self.proposal.built(proposal);
@@ -329,7 +341,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// or the slot was in an invalid state (e.g., we received a certificate for a
     /// conflicting proposal).
     pub fn verified(&mut self) -> bool {
-        if self.broadcast_nullify {
+        if self.voted_nullify {
             return false;
         }
         if !self.proposal.mark_verified() {
@@ -344,7 +356,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ///
     /// Returns true if the proposal should trigger verification, false otherwise.
     pub fn set_proposal(&mut self, proposal: Proposal<D>) -> bool {
-        if self.broadcast_nullify {
+        if self.voted_nullify {
             return false;
         }
         match self.proposal.update(&proposal, false) {
@@ -361,13 +373,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Marks proposal certification as complete.
     pub fn certified(&mut self, is_success: bool) {
         match &self.certify {
-            CertifyState::Certified(v) => {
-                assert_eq!(*v, is_success, "certification should not conflict");
+            CertifyState::Certified { success } => {
+                assert_eq!(*success, is_success, "certification should not conflict");
                 return;
             }
             CertifyState::Ready | CertifyState::Outstanding(_) | CertifyState::Aborted => {}
         }
-        self.certify = CertifyState::Certified(is_success);
+        self.certify = CertifyState::Certified {
+            success: is_success,
+        };
     }
 
     pub const fn proposal(&self) -> Option<&Proposal<D>> {
@@ -409,10 +423,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// should not timeout (e.g. because we have already finalized).
     pub const fn construct_nullify(&mut self) -> Option<bool> {
         // Ensure we haven't already broadcast a finalize vote.
-        if self.broadcast_finalize {
+        if self.voted_finalize {
             return None;
         }
-        let retry = replace(&mut self.broadcast_nullify, true);
+        let retry = replace(&mut self.voted_nullify, true);
         self.clear_deadlines();
         self.set_timeout_retry(None);
         Some(retry)
@@ -463,17 +477,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Adds a verified notarization certificate to the round.
-    ///
-    /// Returns `(true, equivocator)` if newly added, `(false, None)` if already existed.
-    /// Returns the leader's public key if equivocation is detected.
-    pub fn add_notarization(
-        &mut self,
-        notarization: Notarization<S, D>,
-    ) -> (bool, Option<S::PublicKey>) {
+    pub fn add_notarization(&mut self, notarization: Notarization<S, D>) -> Added<S::PublicKey> {
         // Conflicting notarization certificates cannot exist unless safety already failed.
         // Once we've accepted one we simply ignore subsequent duplicates.
         if self.notarization.is_set() {
-            return (false, None);
+            return Added::Duplicate;
         }
 
         // Unlike nullification and finalization, we do not clear deadlines when adding a notarization (and
@@ -481,7 +489,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
         let equivocator = self.add_recovered_proposal(notarization.claim.clone());
         self.notarization.set(notarization);
-        (true, equivocator)
+        Added::New { equivocator }
     }
 
     /// Adds a verified nullification certificate to the round.
@@ -498,23 +506,17 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Adds a verified finalization certificate to the round.
-    ///
-    /// Returns `(true, equivocator)` if newly added, `(false, None)` if already existed.
-    /// Returns the leader's public key if equivocation is detected.
-    pub fn add_finalization(
-        &mut self,
-        finalization: Finalization<S, D>,
-    ) -> (bool, Option<S::PublicKey>) {
+    pub fn add_finalization(&mut self, finalization: Finalization<S, D>) -> Added<S::PublicKey> {
         // Only one finalization certificate can exist unless safety already failed, so we ignore
         // later duplicates.
         if self.finalization.is_set() {
-            return (false, None);
+            return Added::Duplicate;
         }
         self.clear_deadlines();
 
         let equivocator = self.add_recovered_proposal(finalization.claim.clone());
         self.finalization.set(finalization);
-        (true, equivocator)
+        Added::New { equivocator }
     }
 
     /// Returns a notarization certificate for broadcast if we have one and haven't broadcast it yet.
@@ -537,7 +539,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Marks that we've broadcast our notarize vote to prevent duplicates.
     pub const fn construct_notarize(&mut self) -> Option<&Proposal<D>> {
         // Ensure we haven't already broadcast a notarize vote or nullify vote.
-        if self.broadcast_notarize || self.broadcast_nullify {
+        if self.voted_notarize || self.voted_nullify {
             return None;
         }
         // Even if we've already seen a notarization, we are still willing to broadcast
@@ -552,7 +554,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
 
-        self.broadcast_notarize = true;
+        self.voted_notarize = true;
         self.proposal.proposal()
     }
 
@@ -561,7 +563,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Marks that we've broadcast our finalize vote to prevent duplicates.
     pub fn construct_finalize(&mut self) -> Option<&Proposal<D>> {
         // Ensure we haven't already broadcast a finalize vote or nullify vote.
-        if self.broadcast_finalize || self.broadcast_nullify {
+        if self.voted_finalize || self.voted_nullify {
             return None;
         }
         // Even if we've already seen a finalization, we are still willing to broadcast
@@ -583,7 +585,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
 
-        self.broadcast_finalize = true;
+        self.voted_finalize = true;
         self.proposal.proposal()
     }
 
@@ -613,21 +615,21 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 } else {
                     self.proposal.notarized(notarize.claim.clone());
                 }
-                self.broadcast_notarize = true;
+                self.voted_notarize = true;
             }
             Artifact::Nullify(nullify) => {
                 assert!(
                     self.is_signer(nullify.signer()),
                     "replaying nullify from another signer"
                 );
-                self.broadcast_nullify = true;
+                self.voted_nullify = true;
             }
             Artifact::Finalize(finalize) => {
                 assert!(
                     self.is_signer(finalize.signer()),
                     "replaying finalize from another signer"
                 );
-                self.broadcast_finalize = true;
+                self.voted_finalize = true;
             }
             Artifact::Notarization(_) => {
                 self.notarization.mark_broadcast();
@@ -638,7 +640,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             Artifact::Finalization(_) => {
                 self.finalization.mark_broadcast();
             }
-            Artifact::CertificationOutcome(_, success) => {
+            Artifact::CertificationOutcome { success, .. } => {
                 self.certified(*success);
             }
         }
@@ -701,8 +703,9 @@ mod tests {
             .collect();
         let certificate =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (accepted, equivocator) = round.add_notarization(certificate.clone());
-        assert!(accepted);
+        let Added::New { equivocator } = round.add_notarization(certificate.clone()) else {
+            panic!("expected newly added certificate");
+        };
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[0]);
         assert_eq!(round.broadcast_notarization(), Some(certificate));
@@ -754,8 +757,9 @@ mod tests {
             .collect();
         let certificate =
             Finalization::from_votes(&verifier, finalization_votes.iter(), &Sequential).unwrap();
-        let (accepted, equivocator) = round.add_finalization(certificate.clone());
-        assert!(accepted);
+        let Added::New { equivocator } = round.add_finalization(certificate.clone()) else {
+            panic!("expected newly added certificate");
+        };
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[0]);
         assert_eq!(round.broadcast_finalization(), Some(certificate));
@@ -768,8 +772,9 @@ mod tests {
             .collect();
         let certificate =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (accepted, equivocator) = round.add_notarization(certificate.clone());
-        assert!(accepted);
+        let Added::New { equivocator } = round.add_notarization(certificate.clone()) else {
+            panic!("expected newly added certificate");
+        };
         assert_eq!(equivocator, None); // already detected
         assert_eq!(round.broadcast_notarization(), Some(certificate));
 
@@ -806,8 +811,9 @@ mod tests {
             .collect();
         let certificate =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (accepted, equivocator) = round.add_notarization(certificate);
-        assert!(accepted);
+        let Added::New { equivocator } = round.add_notarization(certificate) else {
+            panic!("expected newly added certificate");
+        };
         assert!(equivocator.is_none());
     }
 
@@ -832,17 +838,18 @@ mod tests {
             .collect();
         let certificate =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (accepted, equivocator) = round.add_notarization(certificate.clone());
-        assert!(accepted);
+        let Added::New { equivocator } = round.add_notarization(certificate.clone()) else {
+            panic!("expected newly added certificate");
+        };
         assert!(equivocator.is_none());
 
         // Recovered certificates must not imply that we cast a local notarize vote.
-        assert!(!round.broadcast_notarize);
+        assert!(!round.voted_notarize);
         assert_eq!(round.construct_notarize(), None);
 
         // But we should still broadcast the recovered certificate.
         assert_eq!(round.broadcast_notarization(), Some(certificate));
-        assert!(!round.broadcast_notarize);
+        assert!(!round.voted_notarize);
         assert_eq!(round.broadcast_notarization(), None);
     }
 
@@ -867,17 +874,18 @@ mod tests {
             .collect();
         let certificate =
             Finalization::from_votes(&verifier, finalization_votes.iter(), &Sequential).unwrap();
-        let (accepted, equivocator) = round.add_finalization(certificate.clone());
-        assert!(accepted);
+        let Added::New { equivocator } = round.add_finalization(certificate.clone()) else {
+            panic!("expected newly added certificate");
+        };
         assert!(equivocator.is_none());
 
         // Recovered certificates must not imply that we cast a local finalize vote.
-        assert!(!round.broadcast_finalize);
+        assert!(!round.voted_finalize);
         assert_eq!(round.construct_finalize(), None);
 
         // But we should still broadcast the recovered certificate.
         assert_eq!(round.broadcast_finalization(), Some(certificate));
-        assert!(!round.broadcast_finalize);
+        assert!(!round.voted_finalize);
         assert_eq!(round.broadcast_finalization(), None);
     }
 
@@ -928,11 +936,11 @@ mod tests {
         let mut round = Round::new(local_scheme, round, now);
         round.set_leader(Participant::new(0));
         round.replay(&Artifact::Notarize(notarize_local));
-        assert!(round.broadcast_notarize);
+        assert!(round.voted_notarize);
         round.replay(&Artifact::Nullify(nullify_local));
-        assert!(round.broadcast_nullify);
+        assert!(round.voted_nullify);
         round.replay(&Artifact::Finalize(finalize_local));
-        assert!(round.broadcast_finalize);
+        assert!(round.voted_finalize);
         round.replay(&Artifact::Notarization(notarization.clone()));
         assert!(round.notarization.broadcast);
         round.replay(&Artifact::Nullification(nullification.clone()));
@@ -974,7 +982,7 @@ mod tests {
         // Proposal should be restored as verified (we are the leader).
         assert_eq!(round.proposal.proposal(), Some(&proposal));
         assert_eq!(round.proposal.status(), ProposalStatus::Verified);
-        assert!(round.broadcast_notarize);
+        assert!(round.voted_notarize);
 
         // No verification request should be emitted.
         assert!(
@@ -988,8 +996,9 @@ mod tests {
             .collect();
         let notarization =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (added, equivocator) = round.add_notarization(notarization);
-        assert!(added);
+        let Added::New { equivocator } = round.add_notarization(notarization) else {
+            panic!("expected newly added certificate");
+        };
         assert!(equivocator.is_none());
 
         let candidate = round.try_certify().expect("certify candidate");
@@ -1066,8 +1075,10 @@ mod tests {
             .collect();
         let notarization =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (added, _) = round.add_notarization(notarization);
-        assert!(added);
+        assert!(matches!(
+            round.add_notarization(notarization),
+            Added::New { .. }
+        ));
 
         // First try_certify should succeed.
         let candidate = round.try_certify().expect("certify candidate");
@@ -1106,8 +1117,9 @@ mod tests {
             .collect();
         let notarization =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (added, equivocator) = round.add_notarization(notarization);
-        assert!(added);
+        let Added::New { equivocator } = round.add_notarization(notarization) else {
+            panic!("expected newly added certificate");
+        };
         assert!(equivocator.is_none());
 
         let candidate = round.try_certify().expect("certify candidate");
@@ -1139,8 +1151,10 @@ mod tests {
             .collect();
         let notarization =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (added, _) = round.add_notarization(notarization);
-        assert!(added);
+        assert!(matches!(
+            round.add_notarization(notarization),
+            Added::New { .. }
+        ));
 
         // First try_certify should succeed.
         let candidate = round.try_certify().expect("certify candidate");
@@ -1180,8 +1194,10 @@ mod tests {
             .collect();
         let notarization =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (added, _) = round.add_notarization(notarization);
-        assert!(added);
+        assert!(matches!(
+            round.add_notarization(notarization),
+            Added::New { .. }
+        ));
 
         // Set a certify handle
         let mut pool = AbortablePool::<()>::default();
@@ -1222,8 +1238,10 @@ mod tests {
             .collect();
         let notarization =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (added, _) = round.add_notarization(notarization);
-        assert!(added);
+        assert!(matches!(
+            round.add_notarization(notarization),
+            Added::New { .. }
+        ));
 
         // Has notarization and proposal came from certificate.
         let candidate = round.try_certify().expect("certify candidate");
@@ -1254,8 +1272,10 @@ mod tests {
             .collect();
         let notarization =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (added, _) = round.add_notarization(notarization);
-        assert!(added);
+        assert!(matches!(
+            round.add_notarization(notarization),
+            Added::New { .. }
+        ));
 
         // Set a certify handle (simulating in-flight certification)
         let mut pool = AbortablePool::<()>::default();
@@ -1306,8 +1326,10 @@ mod tests {
             .collect();
         let notarization =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (added, _) = round.add_notarization(notarization);
-        assert!(added);
+        assert!(matches!(
+            round.add_notarization(notarization),
+            Added::New { .. }
+        ));
 
         // Now construct finalize succeeds
         assert!(round.construct_finalize().is_some());
@@ -1336,8 +1358,9 @@ mod tests {
             .collect();
         let notarization =
             Notarization::from_votes(&verifier, notarization_votes.iter(), &Sequential).unwrap();
-        let (added, equivocator) = round.add_notarization(notarization);
-        assert!(added);
+        let Added::New { equivocator } = round.add_notarization(notarization) else {
+            panic!("expected newly added certificate");
+        };
         assert!(equivocator.is_none());
 
         // Recovered proposals should not emit a late notarize vote.

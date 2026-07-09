@@ -972,19 +972,6 @@ mod tests {
         assert!(!map.insert(MockAttributable(Participant::new(5))));
         assert!(!map.insert(MockAttributable(Participant::new(100))));
         assert_eq!(map.len(), 2);
-
-        // Test clear
-        map.clear();
-        assert_eq!(map.len(), 0);
-        assert!(map.is_empty());
-        assert!(map.iter().next().is_none());
-
-        // Verify can insert after clear
-        assert!(map.insert(MockAttributable(Participant::new(2))));
-        assert_eq!(map.len(), 1);
-        let mut iter = map.iter();
-        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(2)));
-        assert!(iter.next().is_none());
     }
 
     #[test]

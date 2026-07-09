@@ -135,6 +135,21 @@ where
     }
 }
 
+impl<P, S, D> Conflicting<Signed<P, S, D>>
+where
+    P: Phase<Claim<D> = Proposal<D>>,
+    S: Scheme,
+    D: Digest,
+{
+    /// Creates canonical conflicting evidence from two votes if they conflict: the votes
+    /// are ordered by claim so one equivocation has one encoding regardless of arrival
+    /// order.
+    pub fn try_new_canonical(a: &Signed<P, S, D>, b: &Signed<P, S, D>) -> Option<Self> {
+        let (first, second) = if a.claim <= b.claim { (a, b) } else { (b, a) };
+        Self::try_new(first, second)
+    }
+}
+
 impl<A: Attributable, B> Attributable for Conflicting<A, B> {
     fn signer(&self) -> Participant {
         self.first.signer()

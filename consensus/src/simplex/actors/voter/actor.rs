@@ -1,5 +1,6 @@
 use super::{
     ingress::Message,
+    round::Added,
     state::{Config as StateConfig, State},
     Config, Mailbox,
 };
@@ -426,11 +427,10 @@ impl<
     async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
         let view = notarization.view();
         let artifact = Artifact::Notarization(notarization.clone());
-        let (added, equivocator) = self.state.add_notarization(notarization);
-        if added {
+        if let Added::New { equivocator } = self.state.add_notarization(notarization) {
             self.append_journal(view, artifact).await;
+            self.block_equivocator(equivocator);
         }
-        self.block_equivocator(equivocator);
     }
 
     /// Handles the certification of a proposal.
@@ -446,7 +446,10 @@ impl<
         let notarization = self.state.certified(view, success)?;
 
         // Persist certification result for recovery
-        let artifact = Artifact::CertificationOutcome(Rnd::new(self.state.epoch(), view), success);
+        let artifact = Artifact::CertificationOutcome {
+            round: Rnd::new(self.state.epoch(), view),
+            success,
+        };
         self.append_journal(view, artifact.clone()).await;
         self.sync_journal(view).await;
 
@@ -463,11 +466,10 @@ impl<
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         let view = finalization.view();
         let artifact = Artifact::Finalization(finalization.clone());
-        let (added, equivocator) = self.state.add_finalization(finalization);
-        if added {
+        if let Added::New { equivocator } = self.state.add_finalization(finalization) {
             self.append_journal(view, artifact).await;
+            self.block_equivocator(equivocator);
         }
-        self.block_equivocator(equivocator);
     }
 
     /// Build, persist, and broadcast a notarize vote when this view is ready.
@@ -949,7 +951,7 @@ impl<
                         resolver.updated(Certificate::Notarization(notarization.clone()));
                         self.reporter.report(Activity::Notarization(notarization));
                     }
-                    Artifact::CertificationOutcome(round, success) => {
+                    Artifact::CertificationOutcome { round, success } => {
                         let Some(notarization) =
                             self.handle_certification(round.view(), success).await
                         else {

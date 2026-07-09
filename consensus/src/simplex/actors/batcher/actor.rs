@@ -6,7 +6,7 @@ use crate::{
         interesting,
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
-        types::{Activity, Certificate, Proposal, Vote},
+        types::{phase, Activity, Certificate, Proposal, Vote},
         Plan,
     },
     types::{Epoch, Participant, Round as Rnd, View, ViewDelta},
@@ -543,12 +543,12 @@ where
 
                     // Batch verify votes if ready
                     let timer = self.verify_latency.timer(self.context.as_ref());
-                    let verified = if round.ready_notarizes() {
-                        Some(round.verify_notarizes(self.context.as_mut(), &self.strategy))
-                    } else if round.ready_nullifies() {
-                        Some(round.verify_nullifies(self.context.as_mut(), &self.strategy))
-                    } else if round.ready_finalizes() {
-                        Some(round.verify_finalizes(self.context.as_mut(), &self.strategy))
+                    let verified = if round.ready::<phase::Notarize>() {
+                        Some(round.verify::<phase::Notarize>(self.context.as_mut(), &self.strategy))
+                    } else if round.ready::<phase::Nullify>() {
+                        Some(round.verify::<phase::Nullify>(self.context.as_mut(), &self.strategy))
+                    } else if round.ready::<phase::Finalize>() {
+                        Some(round.verify::<phase::Finalize>(self.context.as_mut(), &self.strategy))
                     } else {
                         None
                     };
@@ -589,7 +589,7 @@ where
                     // Try to construct and forward certificates
                     if let Some(notarization) =
                         self.recover_latency.time_some(self.context.as_ref(), || {
-                            round.try_construct_notarization(&self.scheme, &self.strategy)
+                            round.try_construct::<phase::Notarize>(&self.strategy)
                         })
                     {
                         debug!(%updated_view, "constructed notarization, forwarding to voter");
@@ -599,7 +599,7 @@ where
                     }
                     if let Some(nullification) =
                         self.recover_latency.time_some(self.context.as_ref(), || {
-                            round.try_construct_nullification(&self.scheme, &self.strategy)
+                            round.try_construct::<phase::Nullify>(&self.strategy)
                         })
                     {
                         debug!(%updated_view, "constructed nullification, forwarding to voter");
@@ -607,7 +607,7 @@ where
                     }
                     if let Some(finalization) =
                         self.recover_latency.time_some(self.context.as_ref(), || {
-                            round.try_construct_finalization(&self.scheme, &self.strategy)
+                            round.try_construct::<phase::Finalize>(&self.strategy)
                         })
                     {
                         debug!(%updated_view, "constructed finalization, forwarding to voter");

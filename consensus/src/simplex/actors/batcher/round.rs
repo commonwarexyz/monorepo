@@ -1,4 +1,4 @@
-use super::Verifier;
+use super::{verifier::Queue, Verifier};
 use crate::{
     simplex::{
         actors::span::ViewSpan,
@@ -6,7 +6,7 @@ use crate::{
         types::{
             phase, Activity, Attributable, AttributableMap, Certificate, Certified,
             ConflictingFinalize, ConflictingNotarize, Finalization, Notarization, Nullification,
-            NullifyFinalize, Phase, Proposal, Signed, Vote, VoteTracker,
+            NullifyFinalize, Proposal, Signed, Vote, VoteTracker,
         },
     },
     types::{Participant, Round as Rnd},
@@ -50,10 +50,8 @@ pub struct Round<
     proposal_sent: bool,
 
     /// Cached certificates for this view.
-    /// Once a certificate exists, we stop verifying votes of that type.
-    notarization: Option<Notarization<S, D>>,
-    nullification: Option<Nullification<S, D>>,
-    finalization: Option<Finalization<S, D>>,
+    /// Once a certificate exists, we stop verifying votes of its phase.
+    certificates: Certificates<S, D>,
 
     /// Root span of the view, shared with the voter's round.
     ///
@@ -61,12 +59,29 @@ pub struct Round<
     span: ViewSpan,
 }
 
-/// Per-phase glue used by [Round::add_network] to ingest votes generically: which
-/// pending map tracks votes of this phase, how they embed into [Vote] and [Activity],
-/// and what evidence two contradictory votes constitute.
-trait Ingest<S: Scheme<D>, D: Digest>: Phase {
+/// The certificates recovered or received for a view, one slot per phase.
+pub(in crate::simplex) struct Certificates<S: Scheme<D>, D: Digest> {
+    notarization: Option<Notarization<S, D>>,
+    nullification: Option<Nullification<S, D>>,
+    finalization: Option<Finalization<S, D>>,
+}
+
+/// Per-phase glue used by [Round] to drive the vote pipeline generically: which
+/// pending map and certificate slot belong to this phase, how its votes embed into
+/// [Vote] and [Activity], what evidence contradictory votes constitute, and the
+/// phase's telemetry spans (span names must be string literals, so each phase
+/// carries its own).
+pub(in crate::simplex) trait Ingest<S: Scheme<D>, D: Digest>:
+    Queue<S, D>
+{
     /// Returns the map tracking votes of this phase.
     fn tracker(votes: &mut VoteTracker<S, D>) -> &mut AttributableMap<Signed<Self, S, D>>;
+
+    /// Returns the certificate slot of this phase.
+    fn slot(certificates: &Certificates<S, D>) -> &Option<Certified<Self, S, D>>;
+
+    /// Returns the certificate slot of this phase.
+    fn slot_mut(certificates: &mut Certificates<S, D>) -> &mut Option<Certified<Self, S, D>>;
 
     /// Embeds a vote of this phase into [Vote].
     fn vote(vote: Signed<Self, S, D>) -> Vote<S, D>;
@@ -79,11 +94,32 @@ trait Ingest<S: Scheme<D>, D: Digest>: Phase {
         previous: &Signed<Self, S, D>,
         incoming: &Signed<Self, S, D>,
     ) -> Option<Activity<S, D>>;
+
+    /// Returns cross-phase evidence if the signer's earlier vote of another phase
+    /// contradicts `incoming` by rule.
+    fn contradicted_by(
+        votes: &VoteTracker<S, D>,
+        incoming: &Signed<Self, S, D>,
+    ) -> Option<Activity<S, D>>;
+
+    /// Opens the span covering batch verification of this phase's votes.
+    fn verify_span(round: Rnd) -> EnteredSpan;
+
+    /// Opens the span covering certificate construction for this phase.
+    fn construct_span(round: Rnd) -> EnteredSpan;
 }
 
 impl<S: Scheme<D>, D: Digest> Ingest<S, D> for phase::Notarize {
     fn tracker(votes: &mut VoteTracker<S, D>) -> &mut AttributableMap<Signed<Self, S, D>> {
         &mut votes.notarizes
+    }
+
+    fn slot(certificates: &Certificates<S, D>) -> &Option<Certified<Self, S, D>> {
+        &certificates.notarization
+    }
+
+    fn slot_mut(certificates: &mut Certificates<S, D>) -> &mut Option<Certified<Self, S, D>> {
+        &mut certificates.notarization
     }
 
     fn vote(vote: Signed<Self, S, D>) -> Vote<S, D> {
@@ -98,19 +134,45 @@ impl<S: Scheme<D>, D: Digest> Ingest<S, D> for phase::Notarize {
         previous: &Signed<Self, S, D>,
         incoming: &Signed<Self, S, D>,
     ) -> Option<Activity<S, D>> {
-        // Order by claim so one equivocation has one encoding.
-        let (first, second) = if previous.claim <= incoming.claim {
-            (previous, incoming)
-        } else {
-            (incoming, previous)
-        };
-        ConflictingNotarize::try_new(first, second).map(Activity::ConflictingNotarize)
+        ConflictingNotarize::try_new_canonical(previous, incoming)
+            .map(Activity::ConflictingNotarize)
+    }
+
+    /// No other phase contradicts a notarize by rule.
+    fn contradicted_by(_: &VoteTracker<S, D>, _: &Signed<Self, S, D>) -> Option<Activity<S, D>> {
+        None
+    }
+
+    fn verify_span(round: Rnd) -> EnteredSpan {
+        info_span!(
+            "simplex.batcher.verify_notarizes",
+            epoch = round.epoch().traced(),
+            view = round.view().traced()
+        )
+        .entered()
+    }
+
+    fn construct_span(round: Rnd) -> EnteredSpan {
+        info_span!(
+            "simplex.batcher.try_construct_notarization",
+            epoch = round.epoch().traced(),
+            view = round.view().traced()
+        )
+        .entered()
     }
 }
 
 impl<S: Scheme<D>, D: Digest> Ingest<S, D> for phase::Nullify {
     fn tracker(votes: &mut VoteTracker<S, D>) -> &mut AttributableMap<Signed<Self, S, D>> {
         &mut votes.nullifies
+    }
+
+    fn slot(certificates: &Certificates<S, D>) -> &Option<Certified<Self, S, D>> {
+        &certificates.nullification
+    }
+
+    fn slot_mut(certificates: &mut Certificates<S, D>) -> &mut Option<Certified<Self, S, D>> {
+        &mut certificates.nullification
     }
 
     fn vote(vote: Signed<Self, S, D>) -> Vote<S, D> {
@@ -121,15 +183,56 @@ impl<S: Scheme<D>, D: Digest> Ingest<S, D> for phase::Nullify {
         Activity::Nullify(vote)
     }
 
-    /// Nullifies cannot equivocate: their claim is the round itself.
+    /// Nullifies cannot equivocate: their claim is the round itself, so `Signed<Nullify>`
+    /// does not implement the `Contradicts` relation and evidence is unconstructible.
+    /// Returning [None] here is what lets a single [Round::reserve] engine serve all
+    /// three phases.
     fn equivocation(_: &Signed<Self, S, D>, _: &Signed<Self, S, D>) -> Option<Activity<S, D>> {
         None
+    }
+
+    /// A finalize from the same signer contradicts the nullify by rule.
+    fn contradicted_by(
+        votes: &VoteTracker<S, D>,
+        incoming: &Signed<Self, S, D>,
+    ) -> Option<Activity<S, D>> {
+        let previous = votes.finalizes.get(incoming.signer())?;
+        Some(Activity::NullifyFinalize(NullifyFinalize::new(
+            incoming.clone(),
+            previous.clone(),
+        )))
+    }
+
+    fn verify_span(round: Rnd) -> EnteredSpan {
+        info_span!(
+            "simplex.batcher.verify_nullifies",
+            epoch = round.epoch().traced(),
+            view = round.view().traced()
+        )
+        .entered()
+    }
+
+    fn construct_span(round: Rnd) -> EnteredSpan {
+        info_span!(
+            "simplex.batcher.try_construct_nullification",
+            epoch = round.epoch().traced(),
+            view = round.view().traced()
+        )
+        .entered()
     }
 }
 
 impl<S: Scheme<D>, D: Digest> Ingest<S, D> for phase::Finalize {
     fn tracker(votes: &mut VoteTracker<S, D>) -> &mut AttributableMap<Signed<Self, S, D>> {
         &mut votes.finalizes
+    }
+
+    fn slot(certificates: &Certificates<S, D>) -> &Option<Certified<Self, S, D>> {
+        &certificates.finalization
+    }
+
+    fn slot_mut(certificates: &mut Certificates<S, D>) -> &mut Option<Certified<Self, S, D>> {
+        &mut certificates.finalization
     }
 
     fn vote(vote: Signed<Self, S, D>) -> Vote<S, D> {
@@ -144,13 +247,38 @@ impl<S: Scheme<D>, D: Digest> Ingest<S, D> for phase::Finalize {
         previous: &Signed<Self, S, D>,
         incoming: &Signed<Self, S, D>,
     ) -> Option<Activity<S, D>> {
-        // Order by claim so one equivocation has one encoding.
-        let (first, second) = if previous.claim <= incoming.claim {
-            (previous, incoming)
-        } else {
-            (incoming, previous)
-        };
-        ConflictingFinalize::try_new(first, second).map(Activity::ConflictingFinalize)
+        ConflictingFinalize::try_new_canonical(previous, incoming)
+            .map(Activity::ConflictingFinalize)
+    }
+
+    /// A nullify from the same signer contradicts the finalize by rule.
+    fn contradicted_by(
+        votes: &VoteTracker<S, D>,
+        incoming: &Signed<Self, S, D>,
+    ) -> Option<Activity<S, D>> {
+        let previous = votes.nullifies.get(incoming.signer())?;
+        Some(Activity::NullifyFinalize(NullifyFinalize::new(
+            previous.clone(),
+            incoming.clone(),
+        )))
+    }
+
+    fn verify_span(round: Rnd) -> EnteredSpan {
+        info_span!(
+            "simplex.batcher.verify_finalizes",
+            epoch = round.epoch().traced(),
+            view = round.view().traced()
+        )
+        .entered()
+    }
+
+    fn construct_span(round: Rnd) -> EnteredSpan {
+        info_span!(
+            "simplex.batcher.try_construct_finalization",
+            epoch = round.epoch().traced(),
+            view = round.view().traced()
+        )
+        .entered()
     }
 }
 
@@ -183,9 +311,11 @@ impl<
 
             proposal_sent: false,
 
-            notarization: None,
-            nullification: None,
-            finalization: None,
+            certificates: Certificates {
+                notarization: None,
+                nullification: None,
+                finalization: None,
+            },
 
             span: ViewSpan::new(),
         }
@@ -211,25 +341,31 @@ impl<
 
     /// Returns true if we already have a notarization certificate for this view.
     pub const fn has_notarization(&self) -> bool {
-        self.notarization.is_some()
+        self.certificates.notarization.is_some()
     }
 
     /// Returns true if we already have a nullification certificate for this view.
     pub const fn has_nullification(&self) -> bool {
-        self.nullification.is_some()
+        self.certificates.nullification.is_some()
     }
 
     /// Returns true if we already have a finalization certificate for this view.
     pub const fn has_finalization(&self) -> bool {
-        self.finalization.is_some()
+        self.certificates.finalization.is_some()
     }
 
     /// Stores a verified certificate.
     pub fn set_certificate(&mut self, certificate: Certificate<S, D>) {
         match certificate {
-            Certificate::Notarization(notarization) => self.notarization = Some(notarization),
-            Certificate::Nullification(nullification) => self.nullification = Some(nullification),
-            Certificate::Finalization(finalization) => self.finalization = Some(finalization),
+            Certificate::Notarization(notarization) => {
+                self.certificates.notarization = Some(notarization)
+            }
+            Certificate::Nullification(nullification) => {
+                self.certificates.nullification = Some(nullification)
+            }
+            Certificate::Finalization(finalization) => {
+                self.certificates.finalization = Some(finalization)
+            }
         }
     }
 
@@ -240,6 +376,18 @@ impl<
     /// while the same claim with a different attestation means at least one signature is
     /// invalid; both block the sender.
     fn reserve<P: Ingest<S, D>>(&mut self, sender: S::PublicKey, vote: Signed<P, S, D>) -> bool {
+        // A vote of another phase from the same signer may contradict this one by rule
+        if let Some(evidence) = P::contradicted_by(&self.pending_votes, &vote) {
+            self.reporter.report(evidence);
+            commonware_p2p::block!(
+                self.blocker,
+                sender,
+                phase = ?P::TAG,
+                "contradictory votes"
+            );
+            return false;
+        }
+
         let votes = P::tracker(&mut self.pending_votes);
         match votes.get(vote.signer()) {
             None => {
@@ -292,26 +440,8 @@ impl<
 
         match message {
             Vote::Notarize(notarize) => self.reserve(sender, notarize),
-            Vote::Nullify(nullify) => {
-                // A finalize from the same signer contradicts the nullify by rule
-                if let Some(previous) = self.pending_votes.finalizes.get(index) {
-                    let activity = NullifyFinalize::new(nullify, previous.clone());
-                    self.reporter.report(Activity::NullifyFinalize(activity));
-                    commonware_p2p::block!(self.blocker, sender, "nullify after finalize");
-                    return false;
-                }
-                self.reserve(sender, nullify)
-            }
-            Vote::Finalize(finalize) => {
-                // A nullify from the same signer contradicts the finalize by rule
-                if let Some(previous) = self.pending_votes.nullifies.get(index) {
-                    let activity = NullifyFinalize::new(previous.clone(), finalize);
-                    self.reporter.report(Activity::NullifyFinalize(activity));
-                    commonware_p2p::block!(self.blocker, sender, "finalize after nullify");
-                    return false;
-                }
-                self.reserve(sender, finalize)
-            }
+            Vote::Nullify(nullify) => self.reserve(sender, nullify),
+            Vote::Finalize(finalize) => self.reserve(sender, finalize),
         }
     }
 
@@ -357,55 +487,27 @@ impl<
         Some(proposal)
     }
 
-    pub fn ready_notarizes(&self) -> bool {
+    /// Checks if votes of phase `P` are ready for batch verification.
+    pub fn ready<P: Ingest<S, D>>(&self) -> bool {
         // Don't bother verifying if we already have a certificate
-        if self.has_notarization() {
+        if P::slot(&self.certificates).is_some() {
             return false;
         }
-        self.verifier.ready_notarizes()
+        self.verifier.ready::<P>()
     }
 
-    #[tracing::instrument(name = "simplex.batcher.verify_notarizes", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
-    pub fn verify_notarizes<E: CryptoRng>(
+    /// Verifies pending votes of phase `P` as a batch.
+    ///
+    /// Returns the successfully verified votes and the signer indices for whom
+    /// verification failed.
+    pub fn verify<P: Ingest<S, D>>(
         &mut self,
-        rng: &mut E,
+        rng: &mut impl CryptoRng,
         strategy: &impl Strategy,
     ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        self.verifier.verify_notarizes(rng, strategy)
-    }
-
-    pub fn ready_nullifies(&self) -> bool {
-        // Don't bother verifying if we already have a certificate
-        if self.has_nullification() {
-            return false;
-        }
-        self.verifier.ready_nullifies()
-    }
-
-    #[tracing::instrument(name = "simplex.batcher.verify_nullifies", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
-    pub fn verify_nullifies<E: CryptoRng>(
-        &mut self,
-        rng: &mut E,
-        strategy: &impl Strategy,
-    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        self.verifier.verify_nullifies(rng, strategy)
-    }
-
-    pub fn ready_finalizes(&self) -> bool {
-        // Don't bother verifying if we already have a certificate
-        if self.has_finalization() {
-            return false;
-        }
-        self.verifier.ready_finalizes()
-    }
-
-    #[tracing::instrument(name = "simplex.batcher.verify_finalizes", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
-    pub fn verify_finalizes<E: CryptoRng>(
-        &mut self,
-        rng: &mut E,
-        strategy: &impl Strategy,
-    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        self.verifier.verify_finalizes(rng, strategy)
+        let _span = P::verify_span(self.round);
+        let (verified, invalid) = self.verifier.verify::<P>(rng, strategy);
+        (verified.into_iter().map(P::vote).collect(), invalid)
     }
 
     /// Returns true if `signer` has a nullify vote in this round.
@@ -413,7 +515,7 @@ impl<
         self.pending_votes.nullifies.contains(signer)
     }
 
-    /// Returns participant indices whose matching vote for `proposal` was not
+    /// Returns true if `participant`'s matching vote for `proposal` was not
     /// observed locally.
     ///
     /// Uses `pending_votes` rather than `verified_votes` because we only
@@ -440,17 +542,8 @@ impl<
             .is_none_or(|vote| &vote.claim != proposal)
     }
 
-    /// Returns participant indices whose matching vote for `proposal` was not
-    /// observed locally.
-    ///
-    /// Uses `pending_votes` rather than `verified_votes` because we only
-    /// verify the first quorum of votes. A peer whose matching vote arrived
-    /// after quorum but before the certificate is still tracked in pending.
-    ///
-    /// Both notarize and finalize votes are checked: a participant who sent
-    /// either for the same proposal already has the block and does not need
-    /// it forwarded. Votes for a conflicting proposal are treated as missing
-    /// because those peers still need the winning block forwarded.
+    /// Returns all participants whose matching vote for `proposal` was not
+    /// observed locally (see [Self::is_missing_voter]).
     pub fn missing_voters(&self, proposal: &Proposal<D>) -> Vec<Participant> {
         (0..self.participants.len())
             .map(Participant::from_usize)
@@ -463,105 +556,25 @@ impl<
         self.verified_votes.insert(vote);
     }
 
-    /// Attempts to construct a certificate of kind `P` from verified votes.
+    /// Attempts to construct a certificate of phase `P` from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    /// `span` is entered only once construction is attempted.
-    fn try_construct<P: Phase>(
-        slot: &mut Option<Certified<P, S, D>>,
-        votes: &AttributableMap<Signed<P, S, D>>,
-        quorum: u32,
-        scheme: &S,
+    /// The construction span is entered only once construction is attempted.
+    pub fn try_construct<P: Ingest<S, D>>(
+        &mut self,
         strategy: &impl Strategy,
-        span: impl FnOnce() -> EnteredSpan,
     ) -> Option<Certified<P, S, D>> {
+        let slot = P::slot_mut(&mut self.certificates);
         if slot.is_some() {
             return None;
         }
-        if votes.len() < quorum as usize {
+        let votes = &*P::tracker(&mut self.verified_votes);
+        if votes.len() < self.participants.quorum::<N3f1>() as usize {
             return None;
         }
-        let _span = span();
-        let certificate = Certified::from_votes(scheme, votes, strategy)?;
+        let _span = P::construct_span(self.round);
+        let certificate = Certified::from_votes(self.verifier.scheme(), votes, strategy)?;
         *slot = Some(certificate.clone());
         Some(certificate)
-    }
-
-    /// Attempts to construct a notarization certificate from verified votes.
-    ///
-    /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_notarization(
-        &mut self,
-        scheme: &S,
-        strategy: &impl Strategy,
-    ) -> Option<Notarization<S, D>> {
-        let (epoch, view) = (self.round.epoch().traced(), self.round.view().traced());
-        Self::try_construct(
-            &mut self.notarization,
-            &self.verified_votes.notarizes,
-            self.participants.quorum::<N3f1>(),
-            scheme,
-            strategy,
-            || {
-                info_span!(
-                    "simplex.batcher.try_construct_notarization",
-                    epoch = epoch,
-                    view = view
-                )
-                .entered()
-            },
-        )
-    }
-
-    /// Attempts to construct a nullification certificate from verified votes.
-    ///
-    /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_nullification(
-        &mut self,
-        scheme: &S,
-        strategy: &impl Strategy,
-    ) -> Option<Nullification<S, D>> {
-        let (epoch, view) = (self.round.epoch().traced(), self.round.view().traced());
-        Self::try_construct(
-            &mut self.nullification,
-            &self.verified_votes.nullifies,
-            self.participants.quorum::<N3f1>(),
-            scheme,
-            strategy,
-            || {
-                info_span!(
-                    "simplex.batcher.try_construct_nullification",
-                    epoch = epoch,
-                    view = view
-                )
-                .entered()
-            },
-        )
-    }
-
-    /// Attempts to construct a finalization certificate from verified votes.
-    ///
-    /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_finalization(
-        &mut self,
-        scheme: &S,
-        strategy: &impl Strategy,
-    ) -> Option<Finalization<S, D>> {
-        let (epoch, view) = (self.round.epoch().traced(), self.round.view().traced());
-        Self::try_construct(
-            &mut self.finalization,
-            &self.verified_votes.finalizes,
-            self.participants.quorum::<N3f1>(),
-            scheme,
-            strategy,
-            || {
-                info_span!(
-                    "simplex.batcher.try_construct_finalization",
-                    epoch = epoch,
-                    view = view
-                )
-                .entered()
-            },
-        )
     }
 }
