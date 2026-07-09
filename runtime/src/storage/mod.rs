@@ -724,6 +724,59 @@ pub(crate) mod tests {
         ));
     }
 
+    /// Every parse failure converts to a contextual error naming its cause.
+    #[test]
+    fn test_header_error_messages() {
+        let cases = [
+            (
+                HeaderError::InvalidMagic { found: *b"XXXX" },
+                "invalid magic",
+            ),
+            (
+                HeaderError::UnsupportedRuntimeVersion {
+                    expected: 1,
+                    found: 0,
+                },
+                "unsupported runtime version",
+            ),
+            (
+                HeaderError::InvalidHeaderChecksum,
+                "invalid header checksum",
+            ),
+            (
+                HeaderError::InvalidDataOffset { found: 4097 },
+                "invalid header data offset",
+            ),
+            (
+                HeaderError::TruncatedHeader {
+                    data_offset: Header::V1_DATA_OFFSET,
+                    raw_len: 100,
+                },
+                "truncated header",
+            ),
+        ];
+        for (err, needle) in cases {
+            match err.into_error("partition", b"name") {
+                crate::Error::BlobCorrupt(partition, _, reason) => {
+                    assert_eq!(partition, "partition");
+                    assert!(reason.contains(needle), "{reason}");
+                }
+                other => panic!("unexpected error: {other}"),
+            }
+        }
+
+        // A version mismatch surfaces as its own error variant.
+        let err = HeaderError::VersionMismatch {
+            expected: 3..=7,
+            found: 10,
+        };
+        assert!(matches!(
+            err.into_error("partition", b"name"),
+            crate::Error::BlobVersionMismatch { expected, found }
+            if expected == (3..=7) && found == 10
+        ));
+    }
+
     /// Classification only triggers for parse failures a torn write can produce; failures
     /// that require a validated CRC describe completely written headers and stay loud.
     #[test]
