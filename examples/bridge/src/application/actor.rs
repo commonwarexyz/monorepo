@@ -183,10 +183,10 @@ impl<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> Applicat
                     let view = activity.view();
                     match activity {
                         Activity::Notarization(notarization) => {
-                            info!(%view, payload = ?notarization.payload.payload, signature = ?notarization.certificate, "notarized");
+                            info!(%view, payload = ?notarization.claim.payload, signature = ?notarization.certificate, "notarized");
                         }
                         Activity::Finalization(finalization) => {
-                            info!(%view, payload = ?finalization.payload.payload, signature = ?finalization.certificate, "finalized");
+                            info!(%view, payload = ?finalization.claim.payload, signature = ?finalization.certificate, "finalized");
 
                             // Post finalization
                             let msg =

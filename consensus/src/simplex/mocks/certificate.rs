@@ -2,31 +2,31 @@
 
 use crate::simplex::{
     scheme::Scheme,
-    types::{Certified, Kind, Signed},
+    types::{Certified, Phase, Signed},
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Sequential;
 
-/// Signs a vote of kind `K` over `payload` with each scheme.
-pub fn sign_votes<'a, K, S, D>(
+/// Signs a vote of phase `P` over `claim` with each scheme.
+pub fn sign_votes<'a, P, S, D>(
     schemes: impl IntoIterator<Item = &'a S>,
-    payload: &K::Payload,
-) -> Vec<Signed<K, S, D>>
+    claim: &P::Claim,
+) -> Vec<Signed<P, S, D>>
 where
-    K: Kind<D>,
+    P: Phase<D>,
     S: Scheme<D> + 'a,
     D: Digest,
 {
     schemes
         .into_iter()
-        .map(|scheme| Signed::sign(scheme, payload.clone()).expect("scheme can sign"))
+        .map(|scheme| Signed::sign(scheme, claim.clone()).expect("scheme can sign"))
         .collect()
 }
 
-/// Builds a certificate of kind `K` from `votes`, assembled by `assembler`.
-pub fn build_certificate<K, S, D>(assembler: &S, votes: &[Signed<K, S, D>]) -> Certified<K, S, D>
+/// Builds a certificate of phase `P` from `votes`, assembled by `assembler`.
+pub fn build_certificate<P, S, D>(assembler: &S, votes: &[Signed<P, S, D>]) -> Certified<P, S, D>
 where
-    K: Kind<D>,
+    P: Phase<D>,
     S: Scheme<D>,
     D: Digest,
 {

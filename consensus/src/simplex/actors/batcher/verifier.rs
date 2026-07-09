@@ -1,7 +1,7 @@
 use crate::{
     simplex::{
         scheme::Scheme,
-        types::{kind, Attributable, Kind, Proposal, Signed, Vote},
+        types::{phase, Attributable, Phase, Proposal, Signed, Vote},
     },
     types::Participant,
 };
@@ -37,22 +37,22 @@ pub struct Verifier<S: Scheme<D>, D: Digest> {
     leader_proposal: Option<Proposal<D>>,
 
     /// Pending notarize votes.
-    notarizes: Pending<kind::Notarize, S, D>,
+    notarizes: Pending<phase::Notarize, S, D>,
     /// Pending nullify votes.
-    nullifies: Pending<kind::Nullify, S, D>,
+    nullifies: Pending<phase::Nullify, S, D>,
     /// Pending finalize votes.
-    finalizes: Pending<kind::Finalize, S, D>,
+    finalizes: Pending<phase::Finalize, S, D>,
 }
 
 /// Pending votes of one kind, alongside the count of votes already verified.
-struct Pending<K: Kind<D>, S: Scheme<D>, D: Digest> {
+struct Pending<P: Phase<D>, S: Scheme<D>, D: Digest> {
     /// Votes waiting to be verified.
-    votes: Vec<Signed<K, S, D>>,
+    votes: Vec<Signed<P, S, D>>,
     /// Count of already-verified votes.
     verified: usize,
 }
 
-impl<K: Kind<D>, S: Scheme<D>, D: Digest> Pending<K, S, D> {
+impl<P: Phase<D>, S: Scheme<D>, D: Digest> Pending<P, S, D> {
     const fn new() -> Self {
         Self {
             votes: Vec::new(),
@@ -61,7 +61,7 @@ impl<K: Kind<D>, S: Scheme<D>, D: Digest> Pending<K, S, D> {
     }
 
     /// Records a vote, either as already verified or as pending verification.
-    fn add(&mut self, vote: Signed<K, S, D>, verified: bool) {
+    fn add(&mut self, vote: Signed<P, S, D>, verified: bool) {
         if verified {
             self.verified += 1;
         } else {
@@ -78,20 +78,20 @@ impl<K: Kind<D>, S: Scheme<D>, D: Digest> Pending<K, S, D> {
         scheme: &S,
         rng: &mut R,
         strategy: &impl Strategy,
-    ) -> (Vec<Signed<K, S, D>>, Vec<Participant>) {
+    ) -> (Vec<Signed<P, S, D>>, Vec<Participant>) {
         let votes = std::mem::take(&mut self.votes);
         if votes.is_empty() {
             return (vec![], vec![]);
         }
 
-        let (payloads, attestations): (Vec<_>, Vec<_>) = votes
+        let (claims, attestations): (Vec<_>, Vec<_>) = votes
             .into_iter()
-            .map(|vote| (vote.payload, vote.attestation))
+            .map(|vote| (vote.claim, vote.attestation))
             .unzip();
 
         let Verification { verified, invalid } = scheme.verify_attestations::<_, D, _>(
             rng,
-            K::subject(&payloads[0]),
+            P::subject(&claims[0]),
             attestations,
             strategy,
         );
@@ -101,11 +101,8 @@ impl<K: Kind<D>, S: Scheme<D>, D: Digest> Pending<K, S, D> {
         (
             verified
                 .into_iter()
-                .zip(payloads)
-                .map(|(attestation, payload)| Signed {
-                    payload,
-                    attestation,
-                })
+                .zip(claims)
+                .map(|(attestation, claim)| Signed { claim, attestation })
                 .collect(),
             invalid,
         )
@@ -161,8 +158,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// proposal. Any votes for other proposals are dropped since they cannot contribute
     /// to a valid certificate.
     fn set_leader_proposal(&mut self, proposal: Proposal<D>) {
-        self.notarizes.votes.retain(|n| n.payload == proposal);
-        self.finalizes.votes.retain(|f| f.payload == proposal);
+        self.notarizes.votes.retain(|n| n.claim == proposal);
+        self.finalizes.votes.retain(|f| f.claim == proposal);
         self.leader_proposal = Some(proposal);
     }
 
@@ -196,14 +193,14 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             Vote::Notarize(notarize) => {
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     // If leader proposal is set and the message is not for it, drop it
-                    if leader_proposal != &notarize.payload {
+                    if leader_proposal != &notarize.claim {
                         return false;
                     }
                 } else if let Some(leader) = self.leader {
                     // If leader is set but leader proposal is not, set it
                     if leader == notarize.signer() {
                         // Set the leader proposal
-                        self.set_leader_proposal(notarize.payload.clone());
+                        self.set_leader_proposal(notarize.claim.clone());
                     }
                 }
 
@@ -218,7 +215,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             Vote::Finalize(finalize) => {
                 // If leader proposal is set and the message is not for it, drop it
                 if let Some(ref leader_proposal) = self.leader_proposal {
-                    if leader_proposal != &finalize.payload {
+                    if leader_proposal != &finalize.claim {
                         return false;
                     }
                 }
@@ -243,7 +240,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         let Some(notarize) = self.notarizes.votes.iter().find(|n| n.signer() == leader) else {
             return;
         };
-        self.set_leader_proposal(notarize.payload.clone());
+        self.set_leader_proposal(notarize.claim.clone());
     }
 
     /// Verifies a batch of pending [Vote::Notarize] messages.
@@ -402,10 +399,7 @@ mod tests {
 
         verifier.set_leader(notarize1.signer());
         assert!(verifier.leader_proposal.is_some());
-        assert_eq!(
-            verifier.leader_proposal.as_ref().unwrap(),
-            &notarize1.payload
-        );
+        assert_eq!(verifier.leader_proposal.as_ref().unwrap(), &notarize1.claim);
         assert_eq!(verifier.notarizes.votes.len(), 1);
 
         verifier.add(Vote::Notarize(notarize2), false);
@@ -428,7 +422,7 @@ mod tests {
         assert!(verifier2.leader_proposal.is_some());
         assert_eq!(
             verifier2.leader_proposal.as_ref().unwrap(),
-            &notarize_leader.payload
+            &notarize_leader.claim
         );
         assert_eq!(verifier2.notarizes.votes.len(), 2);
     }
@@ -472,7 +466,7 @@ mod tests {
         assert!(verifier.leader_proposal.is_some());
         assert_eq!(
             verifier.leader_proposal.as_ref().unwrap(),
-            &leader_notarize.payload
+            &leader_notarize.claim
         );
         assert_eq!(verifier.notarizes.votes.len(), 2);
     }
@@ -665,7 +659,7 @@ mod tests {
 
         verifier.set_leader(finalize_a.signer());
         assert!(verifier.leader_proposal.is_none());
-        verifier.set_leader_proposal(finalize_a.payload.clone());
+        verifier.set_leader_proposal(finalize_a.claim.clone());
         assert_eq!(verifier.finalizes.votes.len(), 1);
         assert_eq!(verifier.finalizes.votes[0], finalize_a);
         assert_eq!(verifier.finalizes.verified, 0);
@@ -709,7 +703,7 @@ mod tests {
         assert!(!verifier.ready_finalizes());
 
         verifier.set_leader(finalizes[0].signer());
-        verifier.set_leader_proposal(finalizes[0].payload.clone());
+        verifier.set_leader_proposal(finalizes[0].claim.clone());
 
         verifier.add(Vote::Finalize(finalizes[0].clone()), true);
         assert_eq!(verifier.finalizes.verified, 1);
@@ -772,9 +766,9 @@ mod tests {
         verifier.set_leader(notarize_a.signer());
 
         assert_eq!(verifier.notarizes.votes.len(), 1);
-        assert_eq!(verifier.notarizes.votes[0].payload, proposal_a);
+        assert_eq!(verifier.notarizes.votes[0].claim, proposal_a);
         assert_eq!(verifier.finalizes.votes.len(), 1);
-        assert_eq!(verifier.finalizes.votes[0].payload, proposal_a);
+        assert_eq!(verifier.finalizes.votes[0].claim, proposal_a);
     }
 
     #[test]
@@ -1180,7 +1174,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
         verifier.set_leader(leader_finalize.signer());
-        verifier.set_leader_proposal(leader_finalize.payload.clone());
+        verifier.set_leader_proposal(leader_finalize.claim.clone());
         verifier.add(Vote::Finalize(leader_finalize), true);
         assert_eq!(verifier.finalizes.verified, 1);
 
@@ -1341,7 +1335,7 @@ mod tests {
         // Prime the leader state so the quorum is already satisfied by verified finalizes.
         let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
         verifier.set_leader(leader_finalize.signer());
-        verifier.set_leader_proposal(leader_finalize.payload);
+        verifier.set_leader_proposal(leader_finalize.claim);
 
         // Feed exactly the number of verified finalizes required to hit the quorum.
         for scheme in schemes.iter().take(quorum as usize) {

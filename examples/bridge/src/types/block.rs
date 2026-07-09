@@ -88,7 +88,7 @@ mod tests {
         let mut signature = <MinSig as Variant>::Signature::generator();
         signature *= &scalar;
         Finalization {
-            payload: Proposal {
+            claim: Proposal {
                 round: Round::new(Epoch::new(333), View::new(12345)),
                 parent: View::new(54321),
                 payload: new_digest(),

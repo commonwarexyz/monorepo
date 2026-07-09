@@ -956,7 +956,7 @@ mod tests {
                         let Some(digest) = notarized.get(&view) else {
                             continue;
                         };
-                        assert_eq!(&notarization.payload.payload, digest);
+                        assert_eq!(&notarization.claim.payload, digest);
                     }
                 }
                 {
@@ -1008,7 +1008,7 @@ mod tests {
                         let Some(digest) = finalized.get(&view) else {
                             continue;
                         };
-                        assert_eq!(&finalization.payload.payload, digest);
+                        assert_eq!(&finalization.claim.payload, digest);
                     }
                 }
             }
@@ -5690,7 +5690,7 @@ mod tests {
                         let Some(digest) = notarized.get(&view) else {
                             continue;
                         };
-                        assert_eq!(&notarization.payload.payload, digest);
+                        assert_eq!(&notarization.claim.payload, digest);
                     }
                 }
                 {
@@ -5735,7 +5735,7 @@ mod tests {
                         let Some(digest) = finalized.get(&view) else {
                             continue;
                         };
-                        assert_eq!(&finalization.payload.payload, digest);
+                        assert_eq!(&finalization.claim.payload, digest);
                     }
                 }
             }
@@ -6140,7 +6140,7 @@ mod tests {
                 for reporter in reporters.iter().skip(honest_start) {
                     let finalizations = reporter.finalizations.lock();
                     for (view, finalization) in finalizations.iter() {
-                        let digest = finalization.payload.payload;
+                        let digest = finalization.claim.payload;
                         if let Some(existing) = finalized_at_view.get(view) {
                             assert_eq!(
                                 existing, &digest,

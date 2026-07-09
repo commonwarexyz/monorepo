@@ -1,4 +1,4 @@
-use crate::simplex::types::{Certificate, Phase, Vote};
+use crate::simplex::types::{Certificate, Tag, Vote};
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_runtime::telemetry::metrics::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
 use commonware_utils::Array;
@@ -74,9 +74,9 @@ pub enum MessageType {
 impl<S: Scheme, D: Digest> From<&Vote<S, D>> for MessageType {
     fn from(vote: &Vote<S, D>) -> Self {
         match vote.phase() {
-            Phase::Notarize => Self::Notarize,
-            Phase::Nullify => Self::Nullify,
-            Phase::Finalize => Self::Finalize,
+            Tag::Notarize => Self::Notarize,
+            Tag::Nullify => Self::Nullify,
+            Tag::Finalize => Self::Finalize,
         }
     }
 }
@@ -84,9 +84,9 @@ impl<S: Scheme, D: Digest> From<&Vote<S, D>> for MessageType {
 impl<S: Scheme, D: Digest> From<&Certificate<S, D>> for MessageType {
     fn from(certificate: &Certificate<S, D>) -> Self {
         match certificate.phase() {
-            Phase::Notarize => Self::Notarization,
-            Phase::Nullify => Self::Nullification,
-            Phase::Finalize => Self::Finalization,
+            Tag::Notarize => Self::Notarization,
+            Tag::Nullify => Self::Nullification,
+            Tag::Finalize => Self::Finalization,
         }
     }
 }

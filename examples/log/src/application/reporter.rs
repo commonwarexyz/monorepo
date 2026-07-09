@@ -26,10 +26,10 @@ impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
         let view = activity.view();
         match activity {
             Activity::Notarization(notarization) => {
-                info!(%view, payload = ?notarization.payload.payload, "notarized");
+                info!(%view, payload = ?notarization.claim.payload, "notarized");
             }
             Activity::Finalization(finalization) => {
-                info!(%view, payload = ?finalization.payload.payload, "finalized");
+                info!(%view, payload = ?finalization.claim.payload, "finalized");
             }
             Activity::Nullification(_) => {
                 info!(%view, "nullified");

@@ -58,28 +58,26 @@ where
                 Vote::Notarize(notarize) => {
                     // Notarize random digest
                     let payload = H::Digest::random(self.context.as_mut());
-                    let proposal =
-                        Proposal::new(notarize.round(), notarize.payload.parent, payload);
+                    let proposal = Proposal::new(notarize.round(), notarize.claim.parent, payload);
                     let n = Notarize::<S, _>::sign(&self.scheme, proposal).unwrap();
                     let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true);
 
                     // Notarize received digest
-                    let n = Notarize::<S, _>::sign(&self.scheme, notarize.payload).unwrap();
+                    let n = Notarize::<S, _>::sign(&self.scheme, notarize.claim).unwrap();
                     let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true);
                 }
                 Vote::Finalize(finalize) => {
                     // Finalize random digest
                     let payload = H::Digest::random(self.context.as_mut());
-                    let proposal =
-                        Proposal::new(finalize.round(), finalize.payload.parent, payload);
+                    let proposal = Proposal::new(finalize.round(), finalize.claim.parent, payload);
                     let f = Finalize::<S, _>::sign(&self.scheme, proposal).unwrap();
                     let msg = Vote::Finalize(f).encode();
                     sender.send(Recipients::All, msg, true);
 
                     // Finalize provided digest
-                    let f = Finalize::<S, _>::sign(&self.scheme, finalize.payload).unwrap();
+                    let f = Finalize::<S, _>::sign(&self.scheme, finalize.claim).unwrap();
                     let msg = Vote::Finalize(f).encode();
                     sender.send(Recipients::All, msg, true);
                 }

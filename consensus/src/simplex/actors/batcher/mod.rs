@@ -1036,11 +1036,7 @@ mod tests {
             let next_leader = Participant::new(2);
             batcher_mailbox.update(Span::none(), view, Participant::new(1), View::zero(), None);
 
-            let proposal = Proposal::new(
-                Round::new(epoch, view),
-                View::zero(),
-                Sha256::hash(b"silent_leader_payload"),
-            );
+            let proposal = Proposal::new(Round::new(epoch, view), View::zero(), Sha256::hash(b"silent_leader_payload"));
 
             // Toggle whether the next leader appears in the observed vote set.
             let voter_indices: &[usize] = if leader_voted { &[1, 2, 3] } else { &[1, 3, 4] };
@@ -1293,11 +1289,7 @@ mod tests {
             let view = View::new(1);
             batcher_mailbox.update(Span::none(), view, Participant::new(1), View::zero(), None);
 
-            let proposal = Proposal::new(
-                Round::new(epoch, view),
-                View::zero(),
-                Sha256::hash(b"payload"),
-            );
+            let proposal = Proposal::new(Round::new(epoch, view), View::zero(), Sha256::hash(b"payload"));
             for i in 1..(quorum_size - 1) {
                 let vote = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
@@ -1499,11 +1491,7 @@ mod tests {
             // Build and inject a notarization from the network so the batcher
             // sees a certificate-only proposal. Without the self-filter, it
             // would treat every participant as missing, including itself.
-            let proposal = Proposal::new(
-                Round::new(epoch, view),
-                View::zero(),
-                Sha256::hash(b"certificate_only_payload"),
-            );
+            let proposal = Proposal::new(Round::new(epoch, view), View::zero(), Sha256::hash(b"certificate_only_payload"));
             let notarization = build_notarization(&schemes, &proposal, quorum_size);
             injector_sender
                 .send(
@@ -1740,7 +1728,7 @@ mod tests {
                     }
                     voter::Message::Verified { certificate: Certificate::Notarization(n), .. } => {
                         assert_eq!(n.view(), view2);
-                        assert_eq!(n.payload.payload, proposal_a.payload);
+                        assert_eq!(n.claim.payload, proposal_a.payload);
                         saw_notarization = true;
                         break;
                     }

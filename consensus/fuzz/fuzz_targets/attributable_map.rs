@@ -43,7 +43,7 @@ fn make_vote(
     sig: commonware_cryptography::ed25519::Signature,
 ) -> Nullify<ed25519::Scheme, Sha256Digest> {
     Nullify {
-        payload: Round::new(data.epoch, data.view),
+        claim: Round::new(data.epoch, data.view),
         attestation: Attestation {
             signer: data.signer,
             signature: sig.into(),

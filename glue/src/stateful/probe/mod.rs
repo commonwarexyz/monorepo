@@ -728,7 +728,7 @@ mod test {
             finalization: Finalization<Scheme, Sha256Digest>,
         ) {
             let mut marshal = self.nodes[index].marshal.clone();
-            let round = finalization.payload.round;
+            let round = finalization.claim.round;
             assert!(marshal.proposed(round, block).await);
             let _ = marshal.report(Activity::Finalization(finalization));
         }

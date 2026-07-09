@@ -525,7 +525,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<P,
             .certificate
             .get()
             .expect("verified certificate must decode");
-        Seed::new(self.payload.round, cert.seed_signature)
+        Seed::new(self.claim.round, cert.seed_signature)
     }
 }
 
@@ -535,7 +535,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P,
             .certificate
             .get()
             .expect("verified certificate must decode");
-        Seed::new(self.payload.round, cert.seed_signature)
+        Seed::new(self.claim.round, cert.seed_signature)
     }
 }
 

@@ -5,7 +5,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Attributable, AttributableMap, Certificate, Certified, ConflictingFinalize,
-            ConflictingNotarize, Finalization, Kind, Notarization, Nullification, NullifyFinalize,
+            ConflictingNotarize, Finalization, Notarization, Nullification, NullifyFinalize, Phase,
             Proposal, Signed, Vote, VoteTracker,
         },
     },
@@ -383,7 +383,7 @@ impl<
             .pending_votes
             .notarizes
             .get(participant)
-            .is_some_and(|vote| &vote.payload == proposal)
+            .is_some_and(|vote| &vote.claim == proposal)
         {
             return false;
         }
@@ -391,7 +391,7 @@ impl<
         self.pending_votes
             .finalizes
             .get(participant)
-            .is_none_or(|vote| &vote.payload != proposal)
+            .is_none_or(|vote| &vote.claim != proposal)
     }
 
     /// Returns participant indices whose matching vote for `proposal` was not
@@ -427,18 +427,18 @@ impl<
         }
     }
 
-    /// Attempts to construct a certificate of kind `K` from verified votes.
+    /// Attempts to construct a certificate of kind `P` from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
     /// `span` is entered only once construction is attempted.
-    fn try_construct<K: Kind<D>>(
-        slot: &mut Option<Certified<K, S, D>>,
-        votes: &AttributableMap<Signed<K, S, D>>,
+    fn try_construct<P: Phase<D>>(
+        slot: &mut Option<Certified<P, S, D>>,
+        votes: &AttributableMap<Signed<P, S, D>>,
         quorum: u32,
         scheme: &S,
         strategy: &impl Strategy,
         span: impl FnOnce() -> EnteredSpan,
-    ) -> Option<Certified<K, S, D>> {
+    ) -> Option<Certified<P, S, D>> {
         if slot.is_some() {
             return None;
         }

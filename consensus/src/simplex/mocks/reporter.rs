@@ -183,7 +183,7 @@ where
                     .lock()
                     .entry(notarize.view())
                     .or_default()
-                    .entry(notarize.payload.payload)
+                    .entry(notarize.claim.payload)
                     .or_default()
                     .insert(public_key);
             }
@@ -227,7 +227,7 @@ where
                 self.nullifications
                     .lock()
                     .insert(view, nullification.clone());
-                self.certified(nullification.payload, &nullification.certificate);
+                self.certified(nullification.claim, &nullification.certificate);
             }
             Activity::Finalize(finalize) => {
                 if !finalize.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
@@ -241,7 +241,7 @@ where
                     .lock()
                     .entry(finalize.view())
                     .or_default()
-                    .entry(finalize.payload.payload)
+                    .entry(finalize.claim.payload)
                     .or_default()
                     .insert(public_key);
             }

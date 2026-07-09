@@ -4,8 +4,8 @@ use crate::{
         actors::span::ViewSpan,
         metrics::TimeoutReason,
         types::{
-            kind, Artifact, Attributable, Certified, Finalization, Kind, Notarization,
-            Nullification, Proposal,
+            phase, Artifact, Attributable, Certified, Finalization, Notarization, Nullification,
+            Phase, Proposal,
         },
     },
     types::{Participant, Round as Rnd},
@@ -42,14 +42,14 @@ enum CertifyState {
 ///
 /// A certificate is returned for broadcast at most once; replayed broadcasts are
 /// honored even when the certificate itself is not restored.
-struct CertSlot<K: Kind<D>, S: Scheme, D: Digest> {
+struct CertSlot<P: Phase<D>, S: Scheme, D: Digest> {
     /// The certificate, if we have received or constructed one.
-    certificate: Option<Certified<K, S, D>>,
+    certificate: Option<Certified<P, S, D>>,
     /// Whether we have already broadcast the certificate.
     broadcast: bool,
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> CertSlot<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> CertSlot<P, S, D> {
     const fn new() -> Self {
         Self {
             certificate: None,
@@ -58,7 +58,7 @@ impl<K: Kind<D>, S: Scheme, D: Digest> CertSlot<K, S, D> {
     }
 
     /// Returns the stored certificate, if any.
-    const fn get(&self) -> Option<&Certified<K, S, D>> {
+    const fn get(&self) -> Option<&Certified<P, S, D>> {
         self.certificate.as_ref()
     }
 
@@ -68,12 +68,12 @@ impl<K: Kind<D>, S: Scheme, D: Digest> CertSlot<K, S, D> {
     }
 
     /// Stores the certificate.
-    fn set(&mut self, certificate: Certified<K, S, D>) {
+    fn set(&mut self, certificate: Certified<P, S, D>) {
         self.certificate = Some(certificate);
     }
 
     /// Returns the certificate for broadcast if present and not yet broadcast.
-    fn broadcast(&mut self) -> Option<Certified<K, S, D>> {
+    fn broadcast(&mut self) -> Option<Certified<P, S, D>> {
         if self.broadcast {
             return None;
         }
@@ -108,11 +108,11 @@ pub struct Round<S: Scheme, D: Digest> {
     timeout_reason: Option<TimeoutReason>,
 
     // Certificates received from batcher (constructed or from network).
-    notarization: CertSlot<kind::Notarize, S, D>,
+    notarization: CertSlot<phase::Notarize, S, D>,
     broadcast_notarize: bool,
-    nullification: CertSlot<kind::Nullify, S, D>,
+    nullification: CertSlot<phase::Nullify, S, D>,
     broadcast_nullify: bool,
-    finalization: CertSlot<kind::Finalize, S, D>,
+    finalization: CertSlot<phase::Finalize, S, D>,
     broadcast_finalize: bool,
     certify: CertifyState,
 }
@@ -207,7 +207,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             .cloned()
             .expect("proposal must be set if notarization is set");
         assert_eq!(
-            &proposal, &notarization.payload,
+            &proposal, &notarization.claim,
             "slot proposal must match notarization proposal"
         );
         Some(proposal)
@@ -479,7 +479,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // Unlike nullification and finalization, we do not clear deadlines when adding a notarization (and
         // instead wait for certification to successfully complete).
 
-        let equivocator = self.add_recovered_proposal(notarization.payload.clone());
+        let equivocator = self.add_recovered_proposal(notarization.claim.clone());
         self.notarization.set(notarization);
         (true, equivocator)
     }
@@ -512,7 +512,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
         self.clear_deadlines();
 
-        let equivocator = self.add_recovered_proposal(finalization.payload.clone());
+        let equivocator = self.add_recovered_proposal(finalization.claim.clone());
         self.finalization.set(finalization);
         (true, equivocator)
     }
@@ -609,9 +609,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                     .as_ref()
                     .is_some_and(|leader| self.is_signer(leader.idx))
                 {
-                    self.proposal.built(notarize.payload.clone());
+                    self.proposal.built(notarize.claim.clone());
                 } else {
-                    self.proposal.notarized(notarize.payload.clone());
+                    self.proposal.notarized(notarize.claim.clone());
                 }
                 self.broadcast_notarize = true;
             }

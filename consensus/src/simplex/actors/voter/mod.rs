@@ -702,7 +702,7 @@ mod tests {
             let (mut finalizes, journal_finalization) =
                 build_finalization(&schemes, &journal_proposal, quorum);
             let finalize = finalizes.remove(0);
-            let finalized_payload = finalize.payload.payload;
+            let finalized_payload = finalize.claim.payload;
             seed_voter_journal_artifacts(
                 context.child("seed_journal"),
                 partition.clone(),
@@ -1502,7 +1502,7 @@ mod tests {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
-                    assert_eq!(notarization.payload, proposal_b);
+                    assert_eq!(notarization.claim, proposal_b);
                     assert_eq!(notarization, notarization_b);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1618,7 +1618,7 @@ mod tests {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
-                    assert_eq!(notarization.payload, proposal_a);
+                    assert_eq!(notarization.claim, proposal_a);
                 }
                 _ => panic!("unexpected resolver message"),
             }
@@ -1643,7 +1643,7 @@ mod tests {
                 match message {
                     batcher::Message::Constructed(Vote::Finalize(finalize)) => {
                         assert_eq!(
-                            finalize.payload, proposal_a,
+                            finalize.claim, proposal_a,
                             "finalize should be for certificate's proposal A"
                         );
                         break;
@@ -1794,7 +1794,7 @@ mod tests {
                     certificate: Certificate::Notarization(n),
                     ..
                 } => {
-                    assert_eq!(n.payload, proposal);
+                    assert_eq!(n.claim, proposal);
                 }
                 _ => panic!("unexpected resolver message"),
             }
@@ -1818,7 +1818,7 @@ mod tests {
                 let message = batcher_receiver.recv().await.unwrap();
                 match message {
                     batcher::Message::Constructed(Vote::Finalize(finalize)) => {
-                        assert_eq!(finalize.payload, proposal);
+                        assert_eq!(finalize.claim, proposal);
                         break;
                     }
                     batcher::Message::Update { .. } => {}
@@ -2011,7 +2011,7 @@ mod tests {
             while let Ok(message) = batcher_receiver.try_recv() {
                 match message {
                     batcher::Message::Constructed(Vote::Notarize(notarize)) => {
-                        assert!(notarize.payload == conflicting_proposal);
+                        assert!(notarize.claim == conflicting_proposal);
                     }
                     _ => panic!("unexpected batcher message"),
                 }
@@ -2031,7 +2031,7 @@ mod tests {
                 let message = batcher_receiver.recv().await.unwrap();
                 match message {
                     batcher::Message::Constructed(Vote::Finalize(f)) => {
-                        assert_eq!(f.payload, conflicting_proposal);
+                        assert_eq!(f.claim, conflicting_proposal);
                         break;
                     }
                     batcher::Message::Update { .. } => {}
@@ -4417,7 +4417,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Notarize(notarize))
                         if notarize.view() == target_view =>
                     {
-                        break notarize.payload;
+                        break notarize.claim;
                     }
                     batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
@@ -4964,11 +4964,7 @@ mod tests {
 
             // Simulate the leader's proposal: broadcast its payload contents to the
             // application via the relay, then deliver the proposal to the voter.
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), target_view),
-                target_view.previous().unwrap(),
-                Sha256::hash(b"follower_proposal"),
-            );
+            let proposal = Proposal::new(Round::new(Epoch::new(333), target_view), target_view.previous().unwrap(), Sha256::hash(b"follower_proposal"));
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader_pk, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
@@ -4979,7 +4975,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Notarize(notarize))
                         if notarize.view() == target_view =>
                     {
-                        assert_eq!(notarize.payload, proposal);
+                        assert_eq!(notarize.claim, proposal);
                         break;
                     }
                     batcher::Message::Update { .. } => {},
@@ -5248,7 +5244,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Notarize(notarize))
                         if notarize.view() == target_view =>
                     {
-                        break notarize.payload;
+                        break notarize.claim;
                     }
                     batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
@@ -5265,7 +5261,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
                         if finalize.view() == target_view =>
                     {
-                        assert_eq!(finalize.payload, proposal);
+                        assert_eq!(finalize.claim, proposal);
                         break;
                     }
                     batcher::Message::Constructed(Vote::Nullify(nullify))
@@ -5423,7 +5419,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Notarize(notarize))
                         if notarize.view() == target_view =>
                     {
-                        break notarize.payload;
+                        break notarize.claim;
                     }
                     batcher::Message::Update { .. } => {},
                     batcher::Message::Constructed(_) => {}
@@ -5527,7 +5523,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
                         if finalize.view() == target_view =>
                     {
-                        assert_eq!(finalize.payload, proposal);
+                        assert_eq!(finalize.claim, proposal);
                         break;
                     }
                     batcher::Message::Constructed(Vote::Nullify(nullify))
@@ -5716,7 +5712,7 @@ mod tests {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
                         if finalize.view() == target_view =>
                     {
-                        assert_eq!(finalize.payload, foreign_proposal);
+                        assert_eq!(finalize.claim, foreign_proposal);
                         break;
                     }
                     batcher::Message::Constructed(Vote::Nullify(nullify))
@@ -6552,7 +6548,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Notarize(n))
                             if n.view() == target_view =>
                         {
-                            break n.payload.clone();
+                            break n.claim.clone();
                         }
                         batcher::Message::Update { .. } => {}
                         _ => {}
@@ -6682,11 +6678,7 @@ mod tests {
             .await;
 
             // Broadcast the payload contents so verification can complete.
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), target_view),
-                target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
-            );
+            let proposal = Proposal::new(Round::new(Epoch::new(333), target_view), target_view.previous().unwrap(), Sha256::hash(b"test_proposal"));
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay
@@ -7001,11 +6993,7 @@ mod tests {
             )
             .await;
 
-            let proposal = Proposal::new(
-                Round::new(epoch, target_view),
-                target_view.previous().unwrap(),
-                Sha256::hash(b"restart_recertify_payload"),
-            );
+            let proposal = Proposal::new(Round::new(epoch, target_view), target_view.previous().unwrap(), Sha256::hash(b"restart_recertify_payload"));
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
@@ -7256,9 +7244,10 @@ mod tests {
             // They certified view 4 and advanced to view 5, where they're making progress.
             // Send a notarization for view 5 to the stuck validator.
             let view_5 = View::new(5);
+            // Parent is view 4 (certified by the advanced validators).
             let proposal_5 = Proposal::new(
                 Round::new(Epoch::new(333), view_5),
-                view_4, // Parent is view 4 (certified by the advanced validators)
+                view_4,
                 Sha256::hash(b"view_5_proposal"),
             );
             let (_, notarization_5) = build_notarization(&schemes, &proposal_5, quorum);
@@ -7418,11 +7407,7 @@ mod tests {
             .await;
 
             // Broadcast the payload contents so verification can complete.
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), target_view),
-                target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
-            );
+            let proposal = Proposal::new(Round::new(Epoch::new(333), target_view), target_view.previous().unwrap(), Sha256::hash(b"test_proposal"));
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
@@ -7552,11 +7537,7 @@ mod tests {
             .await;
 
             // Broadcast the payload contents so verification can complete.
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), target_view),
-                target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
-            );
+            let proposal = Proposal::new(Round::new(Epoch::new(333), target_view), target_view.previous().unwrap(), Sha256::hash(b"test_proposal"));
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
@@ -7700,11 +7681,7 @@ mod tests {
             .await;
 
             // Submit proposal quickly so leader timeout is cleared.
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), target_view),
-                target_view.previous().unwrap(),
-                Sha256::hash(b"proposal_clears_leader_timeout"),
-            );
+            let proposal = Proposal::new(Round::new(Epoch::new(333), target_view), target_view.previous().unwrap(), Sha256::hash(b"proposal_clears_leader_timeout"));
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
@@ -7843,11 +7820,7 @@ mod tests {
             .await;
 
             // Recover a notarization that carries the proposal for this view.
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), target_view),
-                target_view.previous().unwrap(),
-                Sha256::hash(b"recovered_proposal_clears_leader_timeout"),
-            );
+            let proposal = Proposal::new(Round::new(Epoch::new(333), target_view), target_view.previous().unwrap(), Sha256::hash(b"recovered_proposal_clears_leader_timeout"));
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization));
@@ -8342,11 +8315,7 @@ mod tests {
             .await;
 
             // Send proposal + payload so verification passes.
-            let proposal = Proposal::new(
-                Round::new(epoch, target_view),
-                target_view.previous().unwrap(),
-                Sha256::hash(b"cert_replay_payload"),
-            );
+            let proposal = Proposal::new(Round::new(epoch, target_view), target_view.previous().unwrap(), Sha256::hash(b"cert_replay_payload"));
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));

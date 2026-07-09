@@ -466,7 +466,7 @@ mod tests {
             finalizations_by_height
                 .put(
                     height.get(),
-                    finalization.payload.payload,
+                    finalization.claim.payload,
                     finalization.clone(),
                 )
                 .await
@@ -5300,7 +5300,7 @@ mod tests {
             .await;
 
             let subscription = mailbox.subscribe_by_commitment(
-                notarization.payload.payload,
+                notarization.claim.payload,
                 CommitmentFallback::FetchByRound { round },
             );
 

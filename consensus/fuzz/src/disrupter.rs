@@ -275,7 +275,7 @@ where
         // Update the state for effective fuzzing
         self.last_vote_view = self.last_vote_view.max(vote.view().get());
         if let Vote::Notarize(notarize) = &vote {
-            self.latest_proposals.push_back(notarize.payload.clone());
+            self.latest_proposals.push_back(notarize.claim.clone());
         }
 
         if !self.is_faulty_view(self.last_vote_view) {
@@ -291,7 +291,7 @@ where
             Vote::Notarize(notarize) => {
                 let proposal = self.strategy.mutate_proposal(
                     self.context.as_mut(),
-                    &notarize.payload,
+                    &notarize.claim,
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,
@@ -305,7 +305,7 @@ where
             Vote::Finalize(finalize) => {
                 let proposal = self.strategy.mutate_proposal(
                     self.context.as_mut(),
-                    &finalize.payload,
+                    &finalize.claim,
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,

@@ -58,7 +58,7 @@ impl<E: Clock + CryptoRng + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher>
             match msg {
                 Vote::Notarize(notarize) => {
                     // Notarize received digest
-                    let mut n = Notarize::sign(&self.scheme, notarize.payload).unwrap();
+                    let mut n = Notarize::sign(&self.scheme, notarize.claim).unwrap();
 
                     // Manipulate index
                     if n.attestation.signer == Participant::new(0) {
@@ -73,7 +73,7 @@ impl<E: Clock + CryptoRng + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher>
                 }
                 Vote::Finalize(finalize) => {
                     // Finalize provided digest
-                    let mut f = Finalize::sign(&self.scheme, finalize.payload).unwrap();
+                    let mut f = Finalize::sign(&self.scheme, finalize.claim).unwrap();
 
                     // Manipulate signature
                     if f.attestation.signer == Participant::new(0) {

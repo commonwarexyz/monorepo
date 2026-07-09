@@ -200,7 +200,7 @@ where
         };
         let certificate = S::Certificate::decode_cfg(&mut message, &certificate_codec_config)?;
         Ok(Some(Finalization {
-            payload: proposal,
+            claim: proposal,
             certificate,
         }))
     }

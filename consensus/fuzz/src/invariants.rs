@@ -219,7 +219,7 @@ where
                     (
                         view.get(),
                         Notarization {
-                            payload: cert.payload.payload,
+                            payload: cert.claim.payload,
                             signature_count: get_signature_count::<S>(
                                 &cert.certificate,
                                 max_participants,
@@ -252,7 +252,7 @@ where
                     (
                         view.get(),
                         Finalization {
-                            payload: cert.payload.payload,
+                            payload: cert.claim.payload,
                             signature_count: get_signature_count::<S>(
                                 &cert.certificate,
                                 max_participants,

@@ -57,7 +57,7 @@ where
             match msg {
                 Vote::Notarize(notarize) => {
                     // Build identical proposal but with epoch incremented by 1
-                    let mut proposal = notarize.payload.clone();
+                    let mut proposal = notarize.claim.clone();
                     let old_round = proposal.round;
                     let new_epoch = old_round.epoch().next();
                     proposal.round = (new_epoch, old_round.view()).into();
@@ -69,7 +69,7 @@ where
                 }
                 Vote::Finalize(finalize) => {
                     // Build identical proposal but with epoch incremented by 1
-                    let mut proposal = finalize.payload.clone();
+                    let mut proposal = finalize.claim.clone();
                     let old_round = proposal.round;
                     let new_epoch = old_round.epoch().next();
                     proposal.round = (new_epoch, old_round.view()).into();
@@ -81,7 +81,7 @@ where
                 }
                 Vote::Nullify(nullify) => {
                     // Re-sign nullify for the next epoch
-                    let old_round = nullify.payload;
+                    let old_round = nullify.claim;
                     let new_epoch = old_round.epoch().next();
                     let new_round = (new_epoch, old_round.view()).into();
 

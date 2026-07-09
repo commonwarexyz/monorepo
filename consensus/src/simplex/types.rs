@@ -13,6 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
+pub use phase::{Phase, Tag};
 use rand_core::CryptoRng;
 use std::{collections::HashSet, fmt::Debug, hash::Hash, iter, slice};
 
@@ -241,30 +242,22 @@ pub enum Vote<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Vote<S, D> {
     /// Returns the phase of this vote.
-    pub const fn phase(&self) -> Phase {
+    pub const fn phase(&self) -> Tag {
         match self {
-            Self::Notarize(_) => Phase::Notarize,
-            Self::Nullify(_) => Phase::Nullify,
-            Self::Finalize(_) => Phase::Finalize,
+            Self::Notarize(_) => Tag::Notarize,
+            Self::Nullify(_) => Tag::Nullify,
+            Self::Finalize(_) => Tag::Finalize,
         }
     }
 }
 
 impl<S: Scheme, D: Digest> Write for Vote<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
+        (self.phase() as u8).write(writer);
         match self {
-            Self::Notarize(v) => {
-                0u8.write(writer);
-                v.write(writer);
-            }
-            Self::Nullify(v) => {
-                1u8.write(writer);
-                v.write(writer);
-            }
-            Self::Finalize(v) => {
-                2u8.write(writer);
-                v.write(writer);
-            }
+            Self::Notarize(v) => v.write(writer),
+            Self::Nullify(v) => v.write(writer),
+            Self::Finalize(v) => v.write(writer),
         }
     }
 }
@@ -284,21 +277,13 @@ impl<S: Scheme, D: Digest> Read for Vote<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
-        match tag {
-            0 => {
-                let v = Notarize::read(reader)?;
-                Ok(Self::Notarize(v))
-            }
-            1 => {
-                let v = Nullify::read(reader)?;
-                Ok(Self::Nullify(v))
-            }
-            2 => {
-                let v = Finalize::read(reader)?;
-                Ok(Self::Finalize(v))
-            }
-            _ => Err(Error::Invalid("consensus::simplex::Vote", "Invalid type")),
-        }
+        let phase = Tag::try_from(tag)
+            .map_err(|()| Error::Invalid("consensus::simplex::Vote", "Invalid type"))?;
+        Ok(match phase {
+            Tag::Notarize => Self::Notarize(Notarize::read(reader)?),
+            Tag::Nullify => Self::Nullify(Nullify::read(reader)?),
+            Tag::Finalize => Self::Finalize(Finalize::read(reader)?),
+        })
     }
 }
 
@@ -329,22 +314,12 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let tag = u.int_in_range(0..=2)?;
-        match tag {
-            0 => {
-                let v = Notarize::arbitrary(u)?;
-                Ok(Self::Notarize(v))
-            }
-            1 => {
-                let v = Nullify::arbitrary(u)?;
-                Ok(Self::Nullify(v))
-            }
-            2 => {
-                let v = Finalize::arbitrary(u)?;
-                Ok(Self::Finalize(v))
-            }
-            _ => unreachable!(),
-        }
+        let tag: u8 = u.int_in_range(0..=2)?;
+        Ok(match Tag::ALL[tag as usize] {
+            Tag::Notarize => Self::Notarize(Notarize::arbitrary(u)?),
+            Tag::Nullify => Self::Nullify(Nullify::arbitrary(u)?),
+            Tag::Finalize => Self::Finalize(Finalize::arbitrary(u)?),
+        })
     }
 }
 
@@ -361,11 +336,11 @@ pub enum Certificate<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Returns the phase of this certificate.
-    pub const fn phase(&self) -> Phase {
+    pub const fn phase(&self) -> Tag {
         match self {
-            Self::Notarization(_) => Phase::Notarize,
-            Self::Nullification(_) => Phase::Nullify,
-            Self::Finalization(_) => Phase::Finalize,
+            Self::Notarization(_) => Tag::Notarize,
+            Self::Nullification(_) => Tag::Nullify,
+            Self::Finalization(_) => Tag::Finalize,
         }
     }
 
@@ -373,9 +348,9 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn kind(&self) -> &'static str {
         match self.phase() {
-            Phase::Notarize => "notarization",
-            Phase::Nullify => "nullification",
-            Phase::Finalize => "finalization",
+            Tag::Notarize => "notarization",
+            Tag::Nullify => "nullification",
+            Tag::Finalize => "finalization",
         }
     }
 
@@ -396,19 +371,11 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
 
 impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
+        (self.phase() as u8).write(writer);
         match self {
-            Self::Notarization(v) => {
-                0u8.write(writer);
-                v.write(writer);
-            }
-            Self::Nullification(v) => {
-                1u8.write(writer);
-                v.write(writer);
-            }
-            Self::Finalization(v) => {
-                2u8.write(writer);
-                v.write(writer);
-            }
+            Self::Notarization(v) => v.write(writer),
+            Self::Nullification(v) => v.write(writer),
+            Self::Finalization(v) => v.write(writer),
         }
     }
 }
@@ -428,24 +395,13 @@ impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
-        match tag {
-            0 => {
-                let v = Notarization::read_cfg(reader, cfg)?;
-                Ok(Self::Notarization(v))
-            }
-            1 => {
-                let v = Nullification::read_cfg(reader, cfg)?;
-                Ok(Self::Nullification(v))
-            }
-            2 => {
-                let v = Finalization::read_cfg(reader, cfg)?;
-                Ok(Self::Finalization(v))
-            }
-            _ => Err(Error::Invalid(
-                "consensus::simplex::Certificate",
-                "Invalid type",
-            )),
-        }
+        let phase = Tag::try_from(tag)
+            .map_err(|()| Error::Invalid("consensus::simplex::Certificate", "Invalid type"))?;
+        Ok(match phase {
+            Tag::Notarize => Self::Notarization(Notarization::read_cfg(reader, cfg)?),
+            Tag::Nullify => Self::Nullification(Nullification::read_cfg(reader, cfg)?),
+            Tag::Finalize => Self::Finalization(Finalization::read_cfg(reader, cfg)?),
+        })
     }
 }
 
@@ -476,22 +432,12 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let tag = u.int_in_range(0..=2)?;
-        match tag {
-            0 => {
-                let v = Notarization::arbitrary(u)?;
-                Ok(Self::Notarization(v))
-            }
-            1 => {
-                let v = Nullification::arbitrary(u)?;
-                Ok(Self::Nullification(v))
-            }
-            2 => {
-                let v = Finalization::arbitrary(u)?;
-                Ok(Self::Finalization(v))
-            }
-            _ => unreachable!(),
-        }
+        let tag: u8 = u.int_in_range(0..=2)?;
+        Ok(match Tag::ALL[tag as usize] {
+            Tag::Notarize => Self::Notarization(Notarization::arbitrary(u)?),
+            Tag::Nullify => Self::Nullification(Nullification::arbitrary(u)?),
+            Tag::Finalize => Self::Finalization(Finalization::arbitrary(u)?),
+        })
     }
 }
 
@@ -780,117 +726,146 @@ where
     }
 }
 
-/// A phase token: names a vote kind and defines how its payload forms a [Subject].
+/// The vote phase, at the value level ([Tag]) and the type level ([Phase] and its
+/// markers).
 ///
-/// The implementations ([kind::Notarize], [kind::Nullify], [kind::Finalize]) instantiate
-/// [Signed], [Certified], and [Conflicting] for each vote phase.
-/// A vote phase, the value-level counterpart of [Kind].
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub enum Phase {
-    /// Endorsing a proposal for notarization.
-    Notarize,
-    /// Skipping the current round.
-    Nullify,
-    /// Finalizing a proposal.
-    Finalize,
-}
-
-pub trait Kind<D: Digest>: Clone + Debug + Send + Sync + 'static {
-    /// Data attested by votes and certificates of this kind.
-    type Payload: Clone
-        + Debug
-        + PartialEq
-        + Eq
-        + Hash
-        + Write
-        + EncodeSize
-        + Read<Cfg = ()>
-        + Epochable
-        + Viewable
-        + Send
-        + Sync
-        + 'static;
-
-    /// The value-level phase of this kind.
-    const PHASE: Phase;
-
-    /// Builds the domain-separated subject covering `payload`.
-    fn subject(payload: &Self::Payload) -> Subject<'_, D>;
-}
-
-/// Phase tokens instantiating [Signed], [Certified], and [Conflicting].
-pub mod kind {
+/// Each [Tag] variant has a corresponding marker type here implementing [Phase],
+/// which defines the claim the phase attests and binds a claim into the
+/// domain-separated [Subject] covering it. [Signed], [Certified], and [Conflicting]
+/// are indexed by these markers.
+pub mod phase {
     use super::{Digest, Proposal, Round, Subject};
+    use crate::{Epochable, Viewable};
+    use commonware_codec::{EncodeSize, Read, Write};
+    use std::{fmt::Debug, hash::Hash};
 
-    /// Phase token for notarize votes and notarization certificates.
+    /// A phase's runtime tag.
+    ///
+    /// [Vote](super::Vote) and [Certificate](super::Certificate) use the
+    /// discriminants as their wire tags.
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+    #[repr(u8)]
+    pub enum Tag {
+        /// Endorsing a proposal for notarization.
+        Notarize = 0,
+        /// Skipping the current round.
+        Nullify = 1,
+        /// Finalizing a proposal.
+        Finalize = 2,
+    }
+
+    impl Tag {
+        /// All tags, in wire-tag order.
+        pub const ALL: [Self; 3] = [Self::Notarize, Self::Nullify, Self::Finalize];
+    }
+
+    const _: () = {
+        let mut tag = 0;
+        while tag < Tag::ALL.len() {
+            assert!(Tag::ALL[tag] as usize == tag);
+            tag += 1;
+        }
+    };
+
+    impl TryFrom<u8> for Tag {
+        type Error = ();
+
+        fn try_from(tag: u8) -> Result<Self, ()> {
+            Self::ALL.get(tag as usize).copied().ok_or(())
+        }
+    }
+
+    /// A type-level vote phase: defines the claim the phase attests and binds a
+    /// claim into the [Subject] covering it.
+    pub trait Phase<D: Digest>: Clone + Debug + Send + Sync + 'static {
+        /// The runtime tag of this phase.
+        const TAG: Tag;
+
+        /// The claim attested by votes and certificates of this phase.
+        type Claim: Clone
+            + Debug
+            + PartialEq
+            + Eq
+            + Hash
+            + Write
+            + EncodeSize
+            + Read<Cfg = ()>
+            + Epochable
+            + Viewable
+            + Send
+            + Sync
+            + 'static;
+
+        /// Binds `claim` into the domain-separated subject covering it.
+        fn subject(claim: &Self::Claim) -> Subject<'_, D>;
+    }
+
+    /// Marker for notarize votes and notarization certificates.
     #[derive(Clone, Debug)]
     pub struct Notarize;
 
-    impl<D: Digest> super::Kind<D> for Notarize {
-        const PHASE: super::Phase = super::Phase::Notarize;
+    impl<D: Digest> Phase<D> for Notarize {
+        const TAG: Tag = Tag::Notarize;
 
-        type Payload = Proposal<D>;
+        type Claim = Proposal<D>;
 
-        fn subject(payload: &Self::Payload) -> Subject<'_, D> {
-            Subject::Notarize { proposal: payload }
+        fn subject(claim: &Self::Claim) -> Subject<'_, D> {
+            Subject::Notarize { proposal: claim }
         }
     }
 
-    /// Phase token for nullify votes and nullification certificates.
+    /// Marker for nullify votes and nullification certificates.
     #[derive(Clone, Debug)]
     pub struct Nullify;
 
-    impl<D: Digest> super::Kind<D> for Nullify {
-        const PHASE: super::Phase = super::Phase::Nullify;
+    impl<D: Digest> Phase<D> for Nullify {
+        const TAG: Tag = Tag::Nullify;
 
-        type Payload = Round;
+        type Claim = Round;
 
-        fn subject(payload: &Self::Payload) -> Subject<'_, D> {
-            Subject::Nullify { round: *payload }
+        fn subject(claim: &Self::Claim) -> Subject<'_, D> {
+            Subject::Nullify { round: *claim }
         }
     }
 
-    /// Phase token for finalize votes and finalization certificates.
+    /// Marker for finalize votes and finalization certificates.
     #[derive(Clone, Debug)]
     pub struct Finalize;
 
-    impl<D: Digest> super::Kind<D> for Finalize {
-        const PHASE: super::Phase = super::Phase::Finalize;
+    impl<D: Digest> Phase<D> for Finalize {
+        const TAG: Tag = Tag::Finalize;
 
-        type Payload = Proposal<D>;
+        type Claim = Proposal<D>;
 
-        fn subject(payload: &Self::Payload) -> Subject<'_, D> {
-            Subject::Finalize { proposal: payload }
+        fn subject(claim: &Self::Claim) -> Subject<'_, D> {
+            Subject::Finalize { proposal: claim }
         }
     }
 }
 
-/// A validator's vote over a [Kind]-specific payload.
+/// A validator's vote over a [Phase]-specific payload.
 #[derive(Clone, Debug)]
-pub struct Signed<K: Kind<D>, S: Scheme, D: Digest> {
-    /// Payload covered by the vote.
-    pub payload: K::Payload,
+pub struct Signed<P: Phase<D>, S: Scheme, D: Digest> {
+    /// Claim covered by the vote.
+    pub claim: P::Claim,
     /// Scheme-specific attestation material.
     pub attestation: Attestation<S>,
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Signed<K, S, D> {
-    /// Signs a vote over the provided payload.
-    pub fn sign(scheme: &S, payload: K::Payload) -> Option<Self>
+impl<P: Phase<D>, S: Scheme, D: Digest> Signed<P, S, D> {
+    /// Signs a vote over the provided claim.
+    pub fn sign(scheme: &S, claim: P::Claim) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(K::subject(&payload))?;
+        let attestation = scheme.sign::<D>(P::subject(&claim))?;
 
-        Some(Self {
-            payload,
-            attestation,
-        })
+        Some(Self { claim, attestation })
     }
 
     /// Verifies the vote against the provided signing scheme.
     ///
-    /// This ensures that the signature is valid for the claimed payload.
+    /// This ensures that the signature is valid for the claim.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRng,
@@ -901,102 +876,96 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Signed<K, S, D> {
 
     /// Returns the domain-separated subject covered by this vote.
     pub fn subject(&self) -> Subject<'_, D> {
-        K::subject(&self.payload)
+        P::subject(&self.claim)
     }
 
     /// Returns the round associated with this vote.
     pub fn round(&self) -> Round {
-        self.payload.round()
+        self.claim.round()
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> PartialEq for Signed<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> PartialEq for Signed<P, S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.payload == other.payload && self.attestation == other.attestation
+        self.claim == other.claim && self.attestation == other.attestation
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Eq for Signed<K, S, D> {}
+impl<P: Phase<D>, S: Scheme, D: Digest> Eq for Signed<P, S, D> {}
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Hash for Signed<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> Hash for Signed<P, S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.payload.hash(state);
+        self.claim.hash(state);
         self.attestation.hash(state);
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Write for Signed<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> Write for Signed<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.payload.write(writer);
+        self.claim.write(writer);
         self.attestation.write(writer);
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> EncodeSize for Signed<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> EncodeSize for Signed<P, S, D> {
     fn encode_size(&self) -> usize {
-        self.payload.encode_size() + self.attestation.encode_size()
+        self.claim.encode_size() + self.attestation.encode_size()
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Read for Signed<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> Read for Signed<P, S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let payload = K::Payload::read(reader)?;
+        let claim = P::Claim::read(reader)?;
         let attestation = Attestation::read(reader)?;
 
-        Ok(Self {
-            payload,
-            attestation,
-        })
+        Ok(Self { claim, attestation })
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Attributable for Signed<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> Attributable for Signed<P, S, D> {
     fn signer(&self) -> Participant {
         self.attestation.signer
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Epochable for Signed<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> Epochable for Signed<P, S, D> {
     fn epoch(&self) -> Epoch {
-        self.payload.epoch()
+        self.claim.epoch()
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Viewable for Signed<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> Viewable for Signed<P, S, D> {
     fn view(&self) -> View {
-        self.payload.view()
+        self.claim.view()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Kind<D>, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Signed<K, S, D>
+impl<P: Phase<D>, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Signed<P, S, D>
 where
-    K::Payload: for<'a> arbitrary::Arbitrary<'a>,
+    P::Claim: for<'a> arbitrary::Arbitrary<'a>,
     S::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let payload = K::Payload::arbitrary(u)?;
+        let claim = P::Claim::arbitrary(u)?;
         let attestation = Attestation::arbitrary(u)?;
-        Ok(Self {
-            payload,
-            attestation,
-        })
+        Ok(Self { claim, attestation })
     }
 }
 
 /// Validator vote that endorses a proposal for notarization.
-pub type Notarize<S, D> = Signed<kind::Notarize, S, D>;
+pub type Notarize<S, D> = Signed<phase::Notarize, S, D>;
 
 /// Validator vote for nullifying the current round, i.e. skip the current round.
 /// This is typically used when the leader is unresponsive or fails to propose a valid block.
-pub type Nullify<S, D> = Signed<kind::Nullify, S, D>;
+pub type Nullify<S, D> = Signed<phase::Nullify, S, D>;
 
 /// Validator vote to finalize a proposal.
 /// This happens after a proposal has been notarized, confirming it as the canonical block
 /// for this round.
-pub type Finalize<S, D> = Signed<kind::Finalize, S, D>;
+pub type Finalize<S, D> = Signed<phase::Finalize, S, D>;
 
 /// Batch-verifies certificates and returns a per-item result.
 ///
@@ -1016,36 +985,33 @@ where
     scheme.verify_certificates_bisect::<_, D, N3f1>(rng, certificates, strategy)
 }
 
-/// An aggregated certificate recovered from a quorum of votes over a [Kind]-specific payload.
+/// An aggregated certificate recovered from a quorum of votes over a [Phase]-specific claim.
 #[derive(Clone, Debug)]
-pub struct Certified<K: Kind<D>, S: Scheme, D: Digest> {
-    /// Payload covered by the certificate.
-    pub payload: K::Payload,
-    /// The recovered certificate for the payload.
+pub struct Certified<P: Phase<D>, S: Scheme, D: Digest> {
+    /// Claim covered by the certificate.
+    pub claim: P::Claim,
+    /// The recovered certificate for the claim.
     pub certificate: S::Certificate,
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Certified<K, S, D> {
-    /// Builds a certificate from votes over the same payload.
+impl<P: Phase<D>, S: Scheme, D: Digest> Certified<P, S, D> {
+    /// Builds a certificate from votes over the same claim.
     pub fn from_votes<'a, I>(scheme: &S, votes: I, strategy: &impl Strategy) -> Option<Self>
     where
-        I: IntoIterator<Item = &'a Signed<K, S, D>>,
+        I: IntoIterator<Item = &'a Signed<P, S, D>>,
         I::IntoIter: Send,
     {
         let mut iter = votes.into_iter().peekable();
-        let payload = iter.peek()?.payload.clone();
+        let claim = iter.peek()?.claim.clone();
         let certificate =
             scheme.assemble::<_, N3f1>(iter.map(|v| v.attestation.clone()), strategy)?;
 
-        Some(Self {
-            payload,
-            certificate,
-        })
+        Some(Self { claim, certificate })
     }
 
     /// Verifies the certificate against the provided signing scheme.
     ///
-    /// This ensures that the certificate is valid for the claimed payload.
+    /// This ensures that the certificate is valid for the claim.
     pub fn verify<R: CryptoRng>(
         &self,
         rng: &mut R,
@@ -1057,82 +1023,76 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Certified<K, S, D> {
 
     /// Returns the domain-separated subject covered by this certificate.
     pub fn subject(&self) -> Subject<'_, D> {
-        K::subject(&self.payload)
+        P::subject(&self.claim)
     }
 
-    /// Returns the round associated with the certified payload.
+    /// Returns the round associated with the certified claim.
     pub fn round(&self) -> Round {
-        self.payload.round()
+        self.claim.round()
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> PartialEq for Certified<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> PartialEq for Certified<P, S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.payload == other.payload && self.certificate == other.certificate
+        self.claim == other.claim && self.certificate == other.certificate
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Eq for Certified<K, S, D> {}
+impl<P: Phase<D>, S: Scheme, D: Digest> Eq for Certified<P, S, D> {}
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Hash for Certified<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> Hash for Certified<P, S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.payload.hash(state);
+        self.claim.hash(state);
         self.certificate.hash(state);
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Write for Certified<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> Write for Certified<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.payload.write(writer);
+        self.claim.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> EncodeSize for Certified<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> EncodeSize for Certified<P, S, D> {
     fn encode_size(&self) -> usize {
-        self.payload.encode_size() + self.certificate.encode_size()
+        self.claim.encode_size() + self.certificate.encode_size()
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Read for Certified<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> Read for Certified<P, S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let payload = K::Payload::read(reader)?;
+        let claim = P::Claim::read(reader)?;
         let certificate = S::Certificate::read_cfg(reader, cfg)?;
 
-        Ok(Self {
-            payload,
-            certificate,
-        })
+        Ok(Self { claim, certificate })
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Epochable for Certified<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> Epochable for Certified<P, S, D> {
     fn epoch(&self) -> Epoch {
-        self.payload.epoch()
+        self.claim.epoch()
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Viewable for Certified<K, S, D> {
+impl<P: Phase<D>, S: Scheme, D: Digest> Viewable for Certified<P, S, D> {
     fn view(&self) -> View {
-        self.payload.view()
+        self.claim.view()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Kind<D>, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certified<K, S, D>
+impl<P: Phase<D>, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certified<P, S, D>
 where
-    K::Payload: for<'a> arbitrary::Arbitrary<'a>,
+    P::Claim: for<'a> arbitrary::Arbitrary<'a>,
     S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let payload = K::Payload::arbitrary(u)?;
+        let claim = P::Claim::arbitrary(u)?;
         let certificate = S::Certificate::arbitrary(u)?;
-        Ok(Self {
-            payload,
-            certificate,
-        })
+        Ok(Self { claim, certificate })
     }
 }
 
@@ -1142,11 +1102,11 @@ where
 /// Some signing schemes (like [`super::scheme::bls12381_threshold::vrf`]) embed an additional
 /// randomness seed in the certificate. For threshold signatures, the seed can be accessed
 /// via [`super::scheme::bls12381_threshold::vrf::Seedable::seed`].
-pub type Notarization<S, D> = Certified<kind::Notarize, S, D>;
+pub type Notarization<S, D> = Certified<phase::Notarize, S, D>;
 
 /// Aggregated nullification certificate recovered from nullify votes.
 /// When a view is nullified, the consensus moves to the next view without finalizing a block.
-pub type Nullification<S, D> = Certified<kind::Nullify, S, D>;
+pub type Nullification<S, D> = Certified<phase::Nullify, S, D>;
 
 /// Aggregated finalization certificate recovered from finalize votes.
 /// When a proposal is finalized, it becomes the canonical block for its view.
@@ -1154,7 +1114,7 @@ pub type Nullification<S, D> = Certified<kind::Nullify, S, D>;
 /// Some signing schemes (like [`super::scheme::bls12381_threshold::vrf`]) embed an additional
 /// randomness seed in the certificate. For threshold signatures, the seed can be accessed
 /// via [`super::scheme::bls12381_threshold::vrf::Seedable::seed`].
-pub type Finalization<S, D> = Certified<kind::Finalize, S, D>;
+pub type Finalization<S, D> = Certified<phase::Finalize, S, D>;
 
 /// Backfiller is a message type for requesting and receiving missing consensus artifacts.
 /// This is used to synchronize validators that have fallen behind or just joined the network.
@@ -1794,43 +1754,70 @@ where
     }
 }
 
-/// Evidence of a Byzantine validator voting for two conflicting payloads of the same [Kind]
-/// in the same round (equivocation).
-#[derive(Clone, Debug)]
-pub struct Conflicting<K: Kind<D>, S: Scheme, D: Digest> {
-    /// The first conflicting vote.
-    first: Signed<K, S, D>,
-    /// The second conflicting vote.
-    second: Signed<K, S, D>,
+/// Relation satisfied by two votes whose claims contradict each other.
+///
+/// Two contradictory votes from the same signer in the same round constitute
+/// [Conflicting] evidence of Byzantine behavior.
+pub trait Contradicts<Rhs = Self> {
+    /// Returns whether the two claims contradict each other.
+    fn contradicts(&self, other: &Rhs) -> bool;
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> PartialEq for Conflicting<K, S, D> {
+/// Votes of the same phase contradict when they cover different claims (equivocation).
+impl<P: Phase<D>, S: Scheme, D: Digest> Contradicts for Signed<P, S, D> {
+    fn contradicts(&self, other: &Self) -> bool {
+        self.claim != other.claim
+    }
+}
+
+/// A nullify vote contradicts any finalize vote in the same round (a validator should
+/// either try to skip a round or finalize a proposal, not both).
+impl<S: Scheme, D: Digest> Contradicts<Finalize<S, D>> for Nullify<S, D> {
+    fn contradicts(&self, _: &Finalize<S, D>) -> bool {
+        true
+    }
+}
+
+/// Evidence of a Byzantine validator producing two contradictory votes in the same round.
+#[derive(Clone, Debug)]
+pub struct Conflicting<A, B = A> {
+    /// The first conflicting vote.
+    first: A,
+    /// The second conflicting vote.
+    second: B,
+}
+
+impl<A: PartialEq, B: PartialEq> PartialEq for Conflicting<A, B> {
     fn eq(&self, other: &Self) -> bool {
         self.first == other.first && self.second == other.second
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Eq for Conflicting<K, S, D> {}
+impl<A: Eq, B: Eq> Eq for Conflicting<A, B> {}
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Hash for Conflicting<K, S, D> {
+impl<A: Hash, B: Hash> Hash for Conflicting<A, B> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.first.hash(state);
         self.second.hash(state);
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Conflicting<K, S, D> {
-    /// Returns whether the two votes constitute conflicting evidence: same round and signer,
-    /// differing payloads.
-    fn conflicts(first: &Signed<K, S, D>, second: &Signed<K, S, D>) -> bool {
+impl<A, B> Conflicting<A, B>
+where
+    A: Attributable + Epochable + Viewable + Contradicts<B> + Clone,
+    B: Attributable + Epochable + Viewable + Clone,
+{
+    /// Returns whether the two votes constitute conflicting evidence: same round and
+    /// signer, contradictory claims.
+    fn conflicts(first: &A, second: &B) -> bool {
         first.round() == second.round()
             && first.signer() == second.signer()
-            && first.payload != second.payload
+            && first.contradicts(second)
     }
 
     /// Creates conflicting evidence from two votes if they conflict: same round and
-    /// signer, differing payloads.
-    pub fn try_new(first: &Signed<K, S, D>, second: &Signed<K, S, D>) -> Option<Self> {
+    /// signer, contradictory claims.
+    pub fn try_new(first: &A, second: &B) -> Option<Self> {
         Self::conflicts(first, second).then(|| Self {
             first: first.clone(),
             second: second.clone(),
@@ -1841,19 +1828,21 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Conflicting<K, S, D> {
     ///
     /// # Panics
     ///
-    /// Panics if the two votes do not have the same round and signer, or if they
-    /// have identical payloads (which would not constitute conflicting evidence).
-    pub fn new(first: Signed<K, S, D>, second: Signed<K, S, D>) -> Self {
+    /// Panics if the two votes do not have the same round and signer, or if their
+    /// claims do not contradict each other.
+    pub fn new(first: A, second: B) -> Self {
         assert_eq!(first.round(), second.round());
         assert_eq!(first.signer(), second.signer());
-        assert_ne!(
-            first.payload, second.payload,
-            "payloads must differ to constitute conflicting evidence"
+        assert!(
+            first.contradicts(&second),
+            "votes must contradict to constitute conflicting evidence"
         );
 
         Self { first, second }
     }
+}
 
+impl<P: Phase<D>, S: Scheme, D: Digest> Conflicting<Signed<P, S, D>> {
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
@@ -1864,37 +1853,52 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Conflicting<K, S, D> {
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Attributable for Conflicting<K, S, D> {
+impl<S: Scheme, D: Digest> Conflicting<Nullify<S, D>, Finalize<S, D>> {
+    /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
+    where
+        R: CryptoRng,
+        S: scheme::Scheme<D>,
+    {
+        self.first.verify(rng, scheme, strategy) && self.second.verify(rng, scheme, strategy)
+    }
+}
+
+impl<A: Attributable, B> Attributable for Conflicting<A, B> {
     fn signer(&self) -> Participant {
         self.first.signer()
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Epochable for Conflicting<K, S, D> {
+impl<A: Epochable, B> Epochable for Conflicting<A, B> {
     fn epoch(&self) -> Epoch {
         self.first.epoch()
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Viewable for Conflicting<K, S, D> {
+impl<A: Viewable, B> Viewable for Conflicting<A, B> {
     fn view(&self) -> View {
         self.first.view()
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Write for Conflicting<K, S, D> {
+impl<A: Write, B: Write> Write for Conflicting<A, B> {
     fn write(&self, writer: &mut impl BufMut) {
         self.first.write(writer);
         self.second.write(writer);
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> Read for Conflicting<K, S, D> {
+impl<A, B> Read for Conflicting<A, B>
+where
+    A: Attributable + Epochable + Viewable + Contradicts<B> + Clone + Read<Cfg = ()>,
+    B: Attributable + Epochable + Viewable + Clone + Read<Cfg = ()>,
+{
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let first = Signed::read(reader)?;
-        let second = Signed::read(reader)?;
+        let first = A::read(reader)?;
+        let second = B::read(reader)?;
 
         if !Self::conflicts(&first, &second) {
             return Err(Error::Invalid(
@@ -1907,139 +1911,37 @@ impl<K: Kind<D>, S: Scheme, D: Digest> Read for Conflicting<K, S, D> {
     }
 }
 
-impl<K: Kind<D>, S: Scheme, D: Digest> EncodeSize for Conflicting<K, S, D> {
+impl<A: EncodeSize, B: EncodeSize> EncodeSize for Conflicting<A, B> {
     fn encode_size(&self) -> usize {
         self.first.encode_size() + self.second.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Kind<D>, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Conflicting<K, S, D>
+impl<A, B> arbitrary::Arbitrary<'_> for Conflicting<A, B>
 where
-    K::Payload: for<'a> arbitrary::Arbitrary<'a>,
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    A: for<'a> arbitrary::Arbitrary<'a>,
+    B: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let first = Signed::arbitrary(u)?;
-        let second = Signed::arbitrary(u)?;
+        let first = A::arbitrary(u)?;
+        let second = B::arbitrary(u)?;
         Ok(Self { first, second })
     }
 }
 
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
-pub type ConflictingNotarize<S, D> = Conflicting<kind::Notarize, S, D>;
+pub type ConflictingNotarize<S, D> = Conflicting<Notarize<S, D>>;
 
 /// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
 /// Similar to ConflictingNotarize, but for finalizes.
-pub type ConflictingFinalize<S, D> = Conflicting<kind::Finalize, S, D>;
+pub type ConflictingFinalize<S, D> = Conflicting<Finalize<S, D>>;
 
 /// NullifyFinalize represents evidence of a Byzantine validator sending both a nullify and finalize
 /// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
 /// finalize a proposal, not both).
-#[derive(Clone, Debug)]
-pub struct NullifyFinalize<S: Scheme, D: Digest> {
-    /// The conflicting nullify
-    nullify: Nullify<S, D>,
-    /// The conflicting finalize
-    finalize: Finalize<S, D>,
-}
-
-impl<S: Scheme, D: Digest> PartialEq for NullifyFinalize<S, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.nullify == other.nullify && self.finalize == other.finalize
-    }
-}
-
-impl<S: Scheme, D: Digest> Eq for NullifyFinalize<S, D> {}
-
-impl<S: Scheme, D: Digest> Hash for NullifyFinalize<S, D> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.nullify.hash(state);
-        self.finalize.hash(state);
-    }
-}
-
-impl<S: Scheme, D: Digest> NullifyFinalize<S, D> {
-    /// Creates a new nullify-finalize evidence from a nullify and a finalize.
-    pub fn new(nullify: Nullify<S, D>, finalize: Finalize<S, D>) -> Self {
-        assert_eq!(nullify.round(), finalize.round());
-        assert_eq!(nullify.signer(), finalize.signer());
-
-        Self { nullify, finalize }
-    }
-
-    /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
-    where
-        R: CryptoRng,
-        S: scheme::Scheme<D>,
-    {
-        self.nullify.verify(rng, scheme, strategy) && self.finalize.verify(rng, scheme, strategy)
-    }
-}
-
-impl<S: Scheme, D: Digest> Attributable for NullifyFinalize<S, D> {
-    fn signer(&self) -> Participant {
-        self.nullify.signer()
-    }
-}
-
-impl<S: Scheme, D: Digest> Epochable for NullifyFinalize<S, D> {
-    fn epoch(&self) -> Epoch {
-        self.nullify.epoch()
-    }
-}
-
-impl<S: Scheme, D: Digest> Viewable for NullifyFinalize<S, D> {
-    fn view(&self) -> View {
-        self.nullify.view()
-    }
-}
-
-impl<S: Scheme, D: Digest> Write for NullifyFinalize<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.nullify.write(writer);
-        self.finalize.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for NullifyFinalize<S, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let nullify = Nullify::read(reader)?;
-        let finalize = Finalize::read(reader)?;
-
-        if nullify.signer() != finalize.signer() || nullify.round() != finalize.round() {
-            return Err(Error::Invalid(
-                "consensus::simplex::NullifyFinalize",
-                "mismatched signatures",
-            ));
-        }
-
-        Ok(Self { nullify, finalize })
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for NullifyFinalize<S, D> {
-    fn encode_size(&self) -> usize {
-        self.nullify.encode_size() + self.finalize.encode_size()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for NullifyFinalize<S, D>
-where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let nullify = Nullify::arbitrary(u)?;
-        let finalize = Finalize::arbitrary(u)?;
-        Ok(Self { nullify, finalize })
-    }
-}
+pub type NullifyFinalize<S, D> = Conflicting<Nullify<S, D>, Finalize<S, D>>;
 
 #[cfg(test)]
 mod tests {
@@ -2397,9 +2299,9 @@ mod tests {
 
         assert!(decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
 
-        decoded.nullifications[0].payload = Round::new(
-            decoded.nullifications[0].payload.epoch(),
-            decoded.nullifications[0].payload.view().next(),
+        decoded.nullifications[0].claim = Round::new(
+            decoded.nullifications[0].claim.epoch(),
+            decoded.nullifications[0].claim.view().next(),
         );
         assert!(!decoded.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
@@ -2883,7 +2785,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "payloads must differ")]
+    #[should_panic(expected = "votes must contradict")]
     fn issue_2944_regression_conflicting_notarize_new() {
         let mut rng = test_rng();
         let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
@@ -2918,7 +2820,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "payloads must differ")]
+    #[should_panic(expected = "votes must contradict")]
     fn issue_2944_regression_conflicting_finalize_new() {
         let mut rng = test_rng();
         let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);

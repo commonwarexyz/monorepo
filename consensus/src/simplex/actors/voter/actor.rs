@@ -491,7 +491,7 @@ impl<
 
         // Broadcast the notarize vote
         debug!(
-            proposal=?notarize.payload,
+            proposal=?notarize.claim,
             "broadcasting notarize"
         );
         self.broadcast_vote(vote_sender, Vote::Notarize(notarize));
@@ -525,7 +525,7 @@ impl<
         // Persist the certificate before informing others.
         self.sync_journal(view).await;
         // Broadcast the notarization certificate
-        debug!(proposal=?notarization.payload, "broadcasting notarization");
+        debug!(proposal=?notarization.claim, "broadcasting notarization");
         self.broadcast_certificate(
             certificate_sender,
             Certificate::Notarization(notarization.clone()),
@@ -603,7 +603,7 @@ impl<
 
         // Broadcast the finalize vote.
         debug!(
-            proposal=?finalize.payload,
+            proposal=?finalize.claim,
             "broadcasting finalize"
         );
         self.broadcast_vote(vote_sender, Vote::Finalize(finalize));
@@ -637,7 +637,7 @@ impl<
         // Persist the proof before broadcasting it.
         self.sync_journal(view).await;
         // Broadcast the finalization certificate.
-        debug!(proposal=?finalization.payload, "broadcasting finalization");
+        debug!(proposal=?finalization.claim, "broadcasting finalization");
         self.broadcast_certificate(
             certificate_sender,
             Certificate::Finalization(finalization.clone()),
