@@ -4,9 +4,8 @@ use commonware_cryptography::bls12381::dkg::golden::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
-use commonware_utils::{ordered::Set, N3f1, TryCollect};
+use commonware_utils::{ordered::Set, test_rng, N3f1, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, hint::black_box, num::NonZeroU32, sync::LazyLock};
 
@@ -55,18 +54,12 @@ impl Bench {
 
 /// Time for a dealer to produce a [`SignedDealerLog`] addressed to `n` receivers.
 fn bench_deal(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     for &n in RECEIVERS {
         let bench = Bench::new(&mut rng, n);
         c.bench_function(&format!("{}::deal/n={}", module_path!(), n), |b| {
             b.iter_batched(
-                || {
-                    (
-                        bench.info.clone(),
-                        bench.me.clone(),
-                        StdRng::seed_from_u64(0),
-                    )
-                },
+                || (bench.info.clone(), bench.me.clone(), test_rng()),
                 |(info, me, mut rng)| {
                     black_box(
                         golden::deal(&mut rng, &SETUP, &info, &me, None, &Sequential).unwrap(),
@@ -84,13 +77,13 @@ fn bench_deal(c: &mut Criterion) {
 /// via `SignedDealerLog::identify`, plus the eVRF batch check and per-dealing
 /// linear check via `golden::observe`.
 fn bench_verify(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     for &n in RECEIVERS {
         let bench = Bench::new(&mut rng, n);
         let signed = bench.deal(&mut rng);
         c.bench_function(&format!("{}::verify/n={}", module_path!(), n), |b| {
             b.iter_batched(
-                || (bench.info.clone(), signed.clone(), StdRng::seed_from_u64(0)),
+                || (bench.info.clone(), signed.clone(), test_rng()),
                 |(info, signed, mut rng)| {
                     let (pk, log) = signed.identify(&info).expect("honest log should identify");
                     let mut logs = BTreeMap::<PublicKey, DealerLog>::new();
@@ -108,7 +101,7 @@ fn bench_verify(c: &mut Criterion) {
 /// Reported via stdout (no measured timing) in the same style as
 /// `coding/src/benches/bench_size.rs`.
 fn bench_dealing_size(_c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     for &n in RECEIVERS {
         let bench = Bench::new(&mut rng, n);
         let signed = bench.deal(&mut rng);

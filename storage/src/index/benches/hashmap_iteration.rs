@@ -1,5 +1,6 @@
+use commonware_utils::TestRng;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::{collections::HashMap, hint::black_box};
 
 #[cfg(not(full_bench))]
@@ -20,7 +21,7 @@ fn bench_hashmap_iteration(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let mut map = HashMap::with_capacity(n);
-                        let mut rng = StdRng::seed_from_u64((n as u64) ^ (k as u64));
+                        let mut rng = TestRng::new((n as u64) ^ (k as u64));
                         let mut key = vec![0; k];
 
                         // Populate the HashMap with dummy data

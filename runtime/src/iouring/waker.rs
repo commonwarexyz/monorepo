@@ -1138,7 +1138,7 @@ mod loom_tests {
         tests::{eventfd_count, state_bits, submitted_seq},
         *,
     };
-    use commonware_utils::test_rng_seeded;
+    use commonware_utils::TestRng;
     use loom::{
         sync::{
             atomic::{AtomicU32, Ordering},
@@ -1879,7 +1879,7 @@ mod loom_tests {
         // may remain because there is intentionally no loop to consume it.
         const OPS_PER_PROGRAM: usize = 5;
 
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let programs = (0..cases)
             .map(|_| {
                 [
@@ -1938,7 +1938,7 @@ mod loom_tests {
         seed: u64,
         simulate_loop_until: fn(&Waker, u32, u32) -> u32,
     ) {
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let programs = (0..cases)
             .map(|_| ProducerOp::generate_program(&mut rng, ops_per_program))
             .collect::<Vec<_>>();

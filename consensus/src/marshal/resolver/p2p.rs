@@ -6,7 +6,7 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver as P2pReceiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
-use rand::Rng;
+use rand_core::Rng;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).

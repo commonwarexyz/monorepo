@@ -21,7 +21,7 @@ use estimator::{
     mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
 };
 use futures::future::try_join_all;
-use rand::Rng;
+use rand_core::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU32,

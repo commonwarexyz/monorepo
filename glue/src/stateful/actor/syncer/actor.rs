@@ -21,7 +21,7 @@ use commonware_utils::{
     NZUsize,
 };
 use futures::SinkExt;
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
 use tracing::debug;
 

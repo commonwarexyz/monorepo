@@ -50,7 +50,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{test_rng_seeded, vec::NonEmptyVec, NZUsize, NZU16, NZU64};
+use commonware_utils::{test_rng, vec::NonEmptyVec, NZUsize, TestRng, NZU16, NZU64};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
@@ -354,7 +354,7 @@ fn contract_runner(seed: u64) -> deterministic::Runner {
 }
 
 fn restart_cycles_for_seed(seed: u64) -> usize {
-    let mut rng = test_rng_seeded(seed);
+    let mut rng = TestRng::new(seed);
     rng.random_range(2..=4)
 }
 
@@ -909,7 +909,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );
@@ -1018,7 +1018,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );
@@ -1133,7 +1133,7 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );
@@ -1507,7 +1507,7 @@ where
         participants,
         schemes,
         ..
-    } = bls12381_threshold_vrf::fixture::<V, _>(&mut test_rng_seeded(0), NAMESPACE, NUM_VALIDATORS);
+    } = bls12381_threshold_vrf::fixture::<V, _>(&mut test_rng(), NAMESPACE, NUM_VALIDATORS);
 
     let me = participants[0].clone();
     let provider = ConstantProvider::new(schemes[0].clone());
@@ -1638,7 +1638,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(
-            &mut test_rng_seeded(seed),
+            &mut TestRng::new(seed),
             NAMESPACE,
             NUM_VALIDATORS,
         );

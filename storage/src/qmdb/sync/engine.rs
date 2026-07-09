@@ -9,17 +9,14 @@ use crate::{
             requests::{Id as RequestId, Requests},
             resolver::{FetchResult, Resolver},
             target::validate_update,
-            Database, DbResolver, Error as SyncError, Journal, Target,
+            Database, DbResolver, Error as SyncError, Journal, Metrics, Target,
         },
     },
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::{boxed, select};
-use commonware_runtime::{
-    telemetry::metrics::{Gauge, GaugeExt, MetricsExt},
-    Supervisor as _,
-};
+use commonware_runtime::Supervisor as _;
 use commonware_utils::{
     channel::{
         fallible::{AsyncFallibleExt, OneshotExt as _},
@@ -64,34 +61,6 @@ enum Event<F: Family, Op, D: Digest, E> {
     FinishRequested,
     /// The finish signal channel was closed
     FinishChannelClosed,
-}
-
-/// Progress gauges updated by the sync engine.
-struct ProgressMetrics {
-    journal_size: Gauge,
-    target_end: Gauge,
-}
-
-impl ProgressMetrics {
-    /// Register sync progress metrics on the provided context.
-    fn new(context: &impl commonware_runtime::Metrics) -> Self {
-        let journal_size = context.gauge("journal_size", "Current sync journal size");
-        let target_end = context.gauge(
-            "target_end",
-            "Exclusive target range end, equal to journal size when sync completes",
-        );
-
-        Self {
-            journal_size,
-            target_end,
-        }
-    }
-
-    /// Update progress gauges from the current engine snapshot.
-    fn record(&self, journal_size: u64, target_end: u64) {
-        let _ = self.journal_size.try_set(journal_size);
-        let _ = self.target_end.try_set(target_end);
-    }
 }
 
 /// Result from a fetch operation with its request ID and starting location.
@@ -258,7 +227,7 @@ where
     reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
 
     /// Progress gauges updated after target updates and batch application.
-    progress_metrics: ProgressMetrics,
+    metrics: Metrics,
 
     /// Whether explicit finish has been requested.
     finish_requested: bool,
@@ -318,8 +287,7 @@ where
             None
         };
 
-        let sync_context = config.context.child("sync");
-        let progress_metrics = ProgressMetrics::new(&sync_context);
+        let metrics = Metrics::new(&config.context);
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
@@ -341,7 +309,7 @@ where
             reached_target_tx: config.reached_target_tx,
             finish_requested: false,
             reached_current_target_reported: false,
-            progress_metrics,
+            metrics,
         };
         engine.schedule_requests()?;
         engine.record_progress();
@@ -520,8 +488,8 @@ where
 
     /// Record a progress snapshot in metrics.
     fn record_progress(&mut self) {
-        self.progress_metrics
-            .record(self.journal.size(), *self.target.range.end());
+        self.metrics.record_target(*self.target.range.end());
+        self.metrics.record_synced(self.journal.size());
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.

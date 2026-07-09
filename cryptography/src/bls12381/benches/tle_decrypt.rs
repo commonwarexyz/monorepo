@@ -2,12 +2,12 @@ use commonware_cryptography::bls12381::{
     primitives::{ops, variant::MinSig},
     tle::{decrypt, encrypt, Block},
 };
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::rng;
 use std::hint::black_box;
 
 fn bench_tle_decrypt(c: &mut Criterion) {
-    let mut rng = rng();
+    let mut rng = test_rng();
     let (master_secret, master_public) = ops::keypair::<_, MinSig>(&mut rng);
     let target = 10u64.to_be_bytes();
     let message = Block::new([0x42u8; 32]);

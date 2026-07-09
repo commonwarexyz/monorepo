@@ -84,6 +84,7 @@ std = [
 	"parking_lot",
 	"rand/std",
 	"rand/std_rng",
+	"rand/sys_rng",
 	"thiserror/std",
 	"tokio",
 	"tracing",

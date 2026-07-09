@@ -232,7 +232,7 @@ impl RecvCipher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::{test_rng, test_rng_seeded};
+    use commonware_utils::{test_rng, TestRng};
 
     #[test]
     fn test_send_recv_roundtrip() {
@@ -249,8 +249,8 @@ mod tests {
 
     #[test]
     fn test_recv_wrong_key_fails() {
-        let mut send = SendCipher::new(test_rng_seeded(0));
-        let mut recv = RecvCipher::new(test_rng_seeded(1));
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(TestRng::new(1));
 
         let ciphertext = send.send(b"hello").unwrap();
         assert!(matches!(

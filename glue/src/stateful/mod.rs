@@ -94,7 +94,7 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;
 use futures::Stream;
-use rand::Rng;
+use rand_core::Rng;
 use std::future::Future;
 
 mod actor;

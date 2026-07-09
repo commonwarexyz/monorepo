@@ -7,7 +7,6 @@ use libfuzzer_sys::{
     arbitrary::{Arbitrary, Unstructured},
     fuzz_target,
 };
-use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU16};
 
 const MAX_OPERATIONS: usize = 50;
@@ -126,8 +125,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    let _rng = StdRng::seed_from_u64(input.seed);
-
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
         let cfg = Config {

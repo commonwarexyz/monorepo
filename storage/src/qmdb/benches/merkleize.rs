@@ -25,9 +25,8 @@ use commonware_storage::{
     qmdb::any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
 use std::{
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -393,7 +392,7 @@ async fn run_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>
         db.sync().await.unwrap();
     }
     let num_updates = num_keys / 10;
-    let mut rng = StdRng::seed_from_u64(99);
+    let mut rng = TestRng::new(99);
     let mut total = Duration::ZERO;
     for _ in 0..iters {
         let start = Instant::now();
@@ -419,7 +418,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
 ) -> Duration {
     seed_db(&mut db, num_keys).await;
     let num_updates = num_keys / 10;
-    let mut rng = StdRng::seed_from_u64(99);
+    let mut rng = TestRng::new(99);
 
     for _ in 0..churn_batches {
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
@@ -463,7 +462,7 @@ async fn run_chained_bench<
         db.sync().await.unwrap();
     }
     let num_updates = num_keys / 10;
-    let mut rng = StdRng::seed_from_u64(99);
+    let mut rng = TestRng::new(99);
     let mut total = Duration::ZERO;
     for _ in 0..iters {
         // Build and merkleize parent (not timed).

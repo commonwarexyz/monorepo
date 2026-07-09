@@ -5,9 +5,10 @@ use commonware_runtime::{
     Runner,
 };
 use commonware_storage::freezer::Identifier;
+use commonware_utils::TestRng;
 use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
@@ -23,7 +24,7 @@ const READS: [usize; 3] = [1_000, 10_000, 50_000];
 
 /// Select random keys for benchmarking.
 pub fn select_keys(count: usize, keys: &[Key]) -> Vec<Key> {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
     let mut selected_keys = Vec::with_capacity(count);
     for _ in 0..count {
         let idx = rng.random_range(0..keys.len());

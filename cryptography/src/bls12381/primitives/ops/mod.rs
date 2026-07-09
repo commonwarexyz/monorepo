@@ -495,7 +495,7 @@ mod tests {
             // Verify using batch verification
             let hm = hash::<MinPk>(MinPk::MESSAGE, &message);
             let batch_result = MinPk::batch_verify(
-                &mut rand::rng(),
+                &mut test_rng(),
                 &[public_key],
                 &[hm],
                 &[signature],
@@ -568,7 +568,7 @@ mod tests {
         }
 
         MinPk::batch_verify(
-            &mut rand::rng(),
+            &mut test_rng(),
             &valid_publics,
             &valid_hms,
             &valid_signatures,
@@ -577,7 +577,7 @@ mod tests {
         .expect("batch verify of valid vectors should succeed");
 
         assert!(MinPk::batch_verify(
-            &mut rand::rng(),
+            &mut test_rng(),
             &all_publics,
             &all_hms,
             &all_signatures,

@@ -426,7 +426,7 @@ macro_rules! impl_certificate_ed25519 {
             n: u32,
         ) -> $crate::certificate::mocks::Fixture<Scheme>
         where
-            R: rand::Rng + rand::CryptoRng,
+            R: rand_core::CryptoRng,
         {
             $crate::ed25519::certificate::mocks::fixture(
                 rng,

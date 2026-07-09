@@ -1,12 +1,14 @@
 use commonware_cryptography::{ed25519, BatchVerifier, Signer as _};
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::NZUsize;
+use commonware_utils::{test_rng, NZUsize, TestRng};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rng, RngExt as _};
+use rand::RngExt as _;
 use std::hint::black_box;
 
 fn bench_batch_verify_same_signer(c: &mut Criterion) {
+    let mut rng = test_rng();
+    let mut verify_rng = TestRng::new(1);
     let namespace = b"namespace";
     for n_messages in [1, 10, 100, 1000, 10000].into_iter() {
         for concurrency in [1, 8] {
@@ -14,7 +16,7 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
             let mut msgs = Vec::with_capacity(n_messages);
             for _ in 0..n_messages {
                 let mut msg = [0u8; 32];
-                rng().fill(&mut msg);
+                rng.fill(&mut msg);
                 msgs.push(msg);
             }
             c.bench_function(
@@ -28,7 +30,7 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             let mut batch = ed25519::Batch::new(n_messages);
-                            let signer = ed25519::PrivateKey::random(rng());
+                            let signer = ed25519::PrivateKey::random(&mut rng);
                             for msg in msgs.iter() {
                                 let sig = signer.sign(namespace, msg);
                                 assert!(batch.add(namespace, msg, &signer.public_key(), &sig));
@@ -38,9 +40,9 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                         |batch| {
                             #[allow(clippy::option_if_let_else)]
                             if let Some(rayon) = rayon.as_ref() {
-                                black_box(batch.verify(&mut rng(), rayon))
+                                black_box(batch.verify(&mut verify_rng, rayon))
                             } else {
-                                black_box(batch.verify(&mut rng(), &Sequential))
+                                black_box(batch.verify(&mut verify_rng, &Sequential))
                             }
                         },
                         BatchSize::SmallInput,

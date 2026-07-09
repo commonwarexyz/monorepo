@@ -1,7 +1,7 @@
 use commonware_runtime::tokio::Context;
 use commonware_storage::metadata::{Config, Metadata};
-use commonware_utils::sequence::U64;
-use rand::{rngs::StdRng, seq::SliceRandom, RngExt as _, SeedableRng};
+use commonware_utils::{sequence::U64, test_rng};
+use rand::{seq::SliceRandom, RngExt as _};
 
 /// Partition used across all metadata benchmarks.
 pub const PARTITION: &str = "metadata-bench-partition";
@@ -24,7 +24,7 @@ pub async fn init(ctx: Context) -> MetadataType {
 
 /// Generate `count` random key-value pairs.
 pub fn get_random_kvs(count: usize) -> Vec<(Key, Val)> {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let mut kvs = Vec::with_capacity(count);
     for i in 0..(count as u64) {
         let key = U64::new(i);
@@ -37,7 +37,7 @@ pub fn get_random_kvs(count: usize) -> Vec<(Key, Val)> {
 
 /// Modify `modified` of keys and emit a new set of keys.
 pub fn get_modified_kvs(kvs: &[(Key, Val)], modified: usize) -> Vec<(Key, Val)> {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let mut modified_kvs = Vec::with_capacity(kvs.len());
     let mut indices: Vec<usize> = (0..kvs.len()).collect();
     indices.shuffle(&mut rng);

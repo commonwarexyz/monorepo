@@ -10,8 +10,8 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{certificate::Attestation, ed25519::PrivateKey, Signer};
 use commonware_math::algebra::Random;
+use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 
 const MAX_OPERATIONS: usize = 64;
 
@@ -50,7 +50,7 @@ fn make_vote(
 }
 
 fn fuzz(input: FuzzInput) {
-    let mut rng = StdRng::seed_from_u64(input.seed);
+    let mut rng = TestRng::new(input.seed);
     let signer = PrivateKey::random(&mut rng);
     let dummy_sig = signer.sign(b"fuzz", b"dummy");
 

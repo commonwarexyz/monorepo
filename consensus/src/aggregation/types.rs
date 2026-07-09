@@ -469,8 +469,7 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Quorum, test_rng, N3f1};
-    use rand::rngs::StdRng;
+    use commonware_utils::{ordered::Quorum, test_rng, N3f1, TestRng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -486,7 +485,7 @@ mod tests {
     fn codec<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 4);
@@ -581,7 +580,7 @@ mod tests {
     fn activity_invalid_enum<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest>,
-        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut buf = BytesMut::new();

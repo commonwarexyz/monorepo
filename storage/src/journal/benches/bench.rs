@@ -4,9 +4,9 @@ use commonware_storage::journal::contiguous::{
     variable::{Config as VariableConfig, Journal as VariableJournal},
     Mutable,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, test_rng, NZUsize, NZU16, NZU64};
 use criterion::criterion_main;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::Rng;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 mod fixed_append;
@@ -63,7 +63,7 @@ where
     C: Mutable<Item = FixedBytes<ITEM_SIZE>>,
 {
     // Append `items_to_write` random items to the journal.
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let mut arr = [0; ITEM_SIZE];
     for _ in 0..items_to_write {
         rng.fill_bytes(&mut arr);

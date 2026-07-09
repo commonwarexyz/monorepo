@@ -77,7 +77,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::TracedAsyncMutex,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{debug, info_span, Instrument as _};
 
@@ -89,7 +89,7 @@ async fn await_block_subscription<T, D>(
     stage: &'static str,
 ) -> Option<T>
 where
-    D: std::fmt::Debug + ?Sized,
+    D: std::fmt::Debug,
 {
     select! {
         _ = tx.closed() => {

@@ -37,8 +37,8 @@ use commonware_storage::{
     qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig},
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+use rand::Rng;
 use std::{
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -157,7 +157,7 @@ fn key(i: u64) -> Digest {
     Sha256::hash(&i.to_be_bytes())
 }
 
-fn gen_muts(rng: &mut StdRng, num_updates: u64, num_keys: u64) -> Vec<(Digest, Digest)> {
+fn gen_muts(rng: &mut TestRng, num_updates: u64, num_keys: u64) -> Vec<(Digest, Digest)> {
     (0..num_updates)
         .map(|_| {
             let idx = rng.next_u64() % num_keys;
@@ -192,7 +192,7 @@ macro_rules! run_pipeline {
 
         // Seed all keys in one committed batch.
         let seed_start = Instant::now();
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = TestRng::new(42);
         let mut batch = db.new_batch();
         for i in 0..args.num_keys {
             batch = batch.write(key(i), Some(Sha256::hash(&rng.next_u32().to_be_bytes())));
@@ -214,7 +214,7 @@ macro_rules! run_pipeline {
         db.sync().await.unwrap();
         eprintln!("seed+churn done in {:?}", seed_start.elapsed());
 
-        let mut rng = StdRng::seed_from_u64(99);
+        let mut rng = TestRng::new(99);
         let mut times_ms: Vec<f64> = Vec::with_capacity(args.iters);
         for iter in 0..args.iters {
             // Pending ancestors are rebuilt per iteration and never applied (untimed). The

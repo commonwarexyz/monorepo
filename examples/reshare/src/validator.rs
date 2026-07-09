@@ -185,7 +185,7 @@ mod test {
     };
     use commonware_utils::{
         channel::{mpsc, oneshot},
-        test_rng_seeded, union, N3f1, TryCollect,
+        union, N3f1, TestRng, TryCollect,
     };
     use rand::seq::IndexedRandom;
     use rand_core::CryptoRng;
@@ -597,7 +597,7 @@ mod test {
     }
 
     fn test_output(seed: u64) -> Output<MinSig, PublicKey> {
-        Team::reshare(test_rng_seeded(seed), 4, &[4])
+        Team::reshare(TestRng::new(seed), 4, &[4])
             .output
             .expect("reshare output exists")
     }

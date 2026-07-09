@@ -27,7 +27,7 @@ use commonware_math::algebra::Random;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64};
+use commonware_utils::{channel::mpsc, non_empty_range, NZUsize, TestRng, NZU16, NZU64};
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
 use std::{
@@ -902,7 +902,7 @@ pub(crate) mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<Operation<F, sha256::Digest, sha256::Digest>> {
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut ops = Vec::new();
         for _ in 0..n {
             let key = sha256::Digest::random(&mut rng);
@@ -1349,6 +1349,9 @@ mod compact_variable_mmr {
                 resolver: source.clone(),
                 target: target.clone(),
                 db_config: client_cfg.clone(),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -1410,6 +1413,9 @@ mod compact_variable_mmr {
                 },
                 target: target.clone(),
                 db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -1473,6 +1479,9 @@ mod compact_variable_mmr {
                 },
                 target: target.clone(),
                 db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -1530,6 +1539,9 @@ mod compact_variable_mmr {
                 },
                 target: target.clone(),
                 db_config: client_cfg.clone(),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -1588,6 +1600,9 @@ mod compact_variable_mmr {
                 },
                 target: target.clone(),
                 db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -1677,6 +1692,9 @@ mod compact_variable_mmr {
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve1"), &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -1708,6 +1726,9 @@ mod compact_variable_mmr {
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve2"), &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -1738,6 +1759,9 @@ mod compact_variable_mmr {
                 resolver: Arc::new(source),
                 target: target3.clone(),
                 db_config: client_config(&format!("{suffix}-serve3"), &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -1756,6 +1780,9 @@ mod compact_variable_mmr {
                 resolver: source.clone(),
                 target: target2.clone(),
                 db_config: client_config(&format!("{suffix}-stale"), &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await;
             assert!(matches!(
@@ -1830,6 +1857,9 @@ mod compact_variable_mmr {
                 resolver: Arc::new(source),
                 target: target.clone(),
                 db_config: client_cfg.clone(),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -2070,6 +2100,9 @@ mod compact_variable_mmb {
                 resolver: source.clone(),
                 target: target.clone(),
                 db_config: client_cfg.clone(),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -2131,6 +2164,9 @@ mod compact_variable_mmb {
                 },
                 target: target.clone(),
                 db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -2194,6 +2230,9 @@ mod compact_variable_mmb {
                 },
                 target: target.clone(),
                 db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -2251,6 +2290,9 @@ mod compact_variable_mmb {
                 },
                 target: target.clone(),
                 db_config: client_cfg.clone(),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -2312,6 +2354,9 @@ mod compact_variable_mmb {
                 },
                 target: target.clone(),
                 db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -2401,6 +2446,9 @@ mod compact_variable_mmb {
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve1"), &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -2432,6 +2480,9 @@ mod compact_variable_mmb {
                 resolver: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve2"), &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -2462,6 +2513,9 @@ mod compact_variable_mmb {
                 resolver: Arc::new(source),
                 target: target3.clone(),
                 db_config: client_config(&format!("{suffix}-serve3"), &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await
             .unwrap();
@@ -2481,6 +2535,9 @@ mod compact_variable_mmb {
                 resolver: source.clone(),
                 target: target2.clone(),
                 db_config: client_config(&format!("{suffix}-stale"), &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
             })
             .await;
             assert!(matches!(

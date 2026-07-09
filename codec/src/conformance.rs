@@ -7,8 +7,8 @@
 use crate::Encode;
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_conformance::Conformance;
-use rand::{RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use rand_core::{Rng as _, SeedableRng};
 use std::{fmt::Debug, marker::PhantomData};
 
 /// Initial size of the random buffer used for generating arbitrary values.
@@ -36,7 +36,7 @@ where
 
         // Generate random bytes for the Unstructured input
         let mut buffer = vec![0u8; buffer_size];
-        rng.fill(&mut buffer[..]);
+        rng.fill_bytes(&mut buffer);
 
         // Try to generate the arbitrary value
         let mut unstructured = Unstructured::new(&buffer);

@@ -5,10 +5,10 @@ use commonware_runtime::{
     Runner,
 };
 use commonware_storage::utils::bits_for_indices;
-use commonware_utils::NZU64;
+use commonware_utils::{TestRng, NZU64};
 use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
@@ -16,7 +16,7 @@ const ITEMS: u64 = 250_000;
 
 /// Select random indices for benchmarking.
 pub fn select_indices(count: usize, items: u64) -> Vec<u64> {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
     let mut selected_indices = Vec::with_capacity(count);
     for _ in 0..count {
         selected_indices.push(rng.random_range(0..items));

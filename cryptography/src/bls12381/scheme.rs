@@ -9,9 +9,9 @@
 //! ```rust
 //! use commonware_cryptography::{bls12381, PrivateKey, PublicKey, Signature, Verifier as _, Signer as _};
 //! use commonware_math::algebra::Random;
-//! use rand::{rngs::StdRng, SeedableRng};
+//! use commonware_utils::test_rng;
 //!
-//! let mut rng = StdRng::seed_from_u64(0);
+//! let mut rng = test_rng();
 //!
 //! // Generate a new private key
 //! let mut signer = bls12381::PrivateKey::random(&mut rng);

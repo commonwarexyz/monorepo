@@ -2,8 +2,8 @@
 
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::freezer::{Checkpoint, Config, Freezer};
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use commonware_utils::{sequence::FixedBytes, NZUsize, TestRng, NZU16};
+use rand::Rng;
 use std::num::{NonZeroU16, NonZeroUsize};
 
 /// Number of bytes that can be buffered before being written to disk.
@@ -68,7 +68,7 @@ pub async fn init(ctx: Context, checkpoint: Option<Checkpoint>) -> FreezerType {
 
 /// Append `count` key-value pairs with random values to freezer store and sync once.
 pub async fn append_random(freezer: &mut FreezerType, count: u64) -> Vec<Key> {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
     let mut key_buf = [0u8; 64];
     let mut val_buf = [0u8; 128];
 

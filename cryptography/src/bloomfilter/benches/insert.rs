@@ -1,8 +1,8 @@
 use commonware_cryptography::{blake3::Blake3, sha256::Sha256, BloomFilter, Hasher};
-use commonware_utils::rational::BigRationalExt;
+use commonware_utils::{rational::BigRationalExt, TestRng};
 use criterion::{criterion_group, BatchSize, Criterion};
 use num_rational::BigRational;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::Rng;
 use std::num::NonZeroUsize;
 
 const ITEM_SIZES: [usize; 3] = [32, 2048, 4096];
@@ -19,7 +19,7 @@ fn run_insert_bench<H: Hasher>(c: &mut Criterion, hasher: &str) {
     for item_size in ITEM_SIZES {
         for (fp_rate, fp_label) in fp_rates() {
             // Pre-generate items to insert
-            let mut rng = StdRng::seed_from_u64(42);
+            let mut rng = TestRng::new(42);
             let items: Vec<Vec<u8>> = (0..NUM_ITEMS)
                 .map(|_| {
                     let mut item = vec![0u8; item_size];

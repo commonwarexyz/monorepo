@@ -1,21 +1,73 @@
 //! Utilities for random number generation.
 
+use commonware_macros::stability;
+#[stability(ALPHA)]
 use core::{convert::Infallible, mem::size_of};
+#[stability(BETA)]
+use rand::{rand_core::UnwrapErr, rngs::SysRng, CryptoRng};
+#[stability(ALPHA)]
 use rand::{rngs::StdRng, SeedableRng, TryCryptoRng, TryRng};
+
+/// Returns an infallible handle to the operating system's entropy source.
+///
+/// Use this whenever randomness must come directly from the OS (e.g. key
+/// generation) rather than from a seeded or userspace RNG.
+///
+/// # Panics
+///
+/// Panics if the operating system fails to provide randomness.
+#[stability(BETA)]
+pub fn sys_rng() -> impl CryptoRng {
+    UnwrapErr(SysRng)
+}
+
+/// A deterministic RNG for testing.
+///
+/// Like [FuzzRng], this is a named type so tests and helpers can refer to it
+/// in signatures. The underlying generator is private, so consumers can only
+/// interact with it through the RNG traits. Construct it with [test_rng] or
+/// [TestRng::new].
+#[stability(ALPHA)]
+#[derive(Debug)]
+pub struct TestRng(StdRng);
+
+#[stability(ALPHA)]
+impl TryRng for TestRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        self.0.try_next_u32()
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        self.0.try_next_u64()
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        self.0.try_fill_bytes(dest)
+    }
+}
+
+#[stability(ALPHA)]
+impl TryCryptoRng for TestRng {}
+
+#[stability(ALPHA)]
+impl TestRng {
+    /// Returns a deterministic RNG seeded with the provided value.
+    ///
+    /// Use this when you need multiple independent RNG streams in the same test,
+    /// or when a helper function needs its own RNG that won't collide with the caller's.
+    pub fn new(seed: u64) -> Self {
+        Self(StdRng::seed_from_u64(seed))
+    }
+}
 
 /// Returns a seeded RNG for deterministic testing.
 ///
 /// Uses seed 0 by default to ensure reproducible test results.
-pub fn test_rng() -> StdRng {
-    StdRng::seed_from_u64(0)
-}
-
-/// Returns a seeded RNG with a custom seed for deterministic testing.
-///
-/// Use this when you need multiple independent RNG streams in the same test,
-/// or when a helper function needs its own RNG that won't collide with the caller's.
-pub fn test_rng_seeded(seed: u64) -> StdRng {
-    StdRng::seed_from_u64(seed)
+#[stability(ALPHA)]
+pub fn test_rng() -> TestRng {
+    TestRng::new(0)
 }
 
 /// Applies a SplitMix64-style finalizer to a deterministic input word.
@@ -23,6 +75,7 @@ pub fn test_rng_seeded(seed: u64) -> StdRng {
 /// This is useful for cheaply decorrelating derived deterministic seeds while
 /// preserving reproducibility.
 #[inline]
+#[stability(ALPHA)]
 pub const fn mix64(mut word: u64) -> u64 {
     word ^= word >> 30;
     word = word.wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -32,6 +85,7 @@ pub const fn mix64(mut word: u64) -> u64 {
 }
 
 /// Width of each source window in bytes.
+#[stability(ALPHA)]
 const BLOCK_BYTES: usize = size_of::<u64>();
 
 /// An RNG that expands a fuzzer byte slice into an infinite deterministic stream.
@@ -85,6 +139,7 @@ const BLOCK_BYTES: usize = size_of::<u64>();
 /// `fill_bytes` serves output from cached block bytes so callers get a stable
 /// byte stream regardless of whether they request randomness as `next_u64`,
 /// `next_u32`, or arbitrary byte slices.
+#[stability(ALPHA)]
 pub struct FuzzRng {
     bytes: Vec<u8>,
     ctr: u64,
@@ -92,6 +147,7 @@ pub struct FuzzRng {
     cache_pos: usize,
 }
 
+#[stability(ALPHA)]
 impl FuzzRng {
     /// Creates a new `FuzzRng` from a byte buffer.
     pub const fn new(bytes: Vec<u8>) -> Self {
@@ -155,6 +211,7 @@ impl FuzzRng {
     }
 }
 
+#[stability(ALPHA)]
 impl TryRng for FuzzRng {
     type Error = Infallible;
 
@@ -179,6 +236,7 @@ impl TryRng for FuzzRng {
 // SAFETY: FuzzRng is not cryptographically secure. It implements CryptoRng
 // only because the consensus fuzzer requires CryptoRng-bounded RNG. This type
 // must never be used outside of fuzz/test contexts.
+#[stability(ALPHA)]
 impl TryCryptoRng for FuzzRng {}
 
 #[cfg(test)]
@@ -387,7 +445,7 @@ mod tests {
 
         impl Conformance for FuzzRngConformance {
             async fn commit(seed: u64) -> Vec<u8> {
-                let mut seed_rng = test_rng_seeded(seed);
+                let mut seed_rng = TestRng::new(seed);
                 let len = seed_rng.random_range(1..=64);
                 let mut input = vec![0u8; len];
                 seed_rng.fill_bytes(&mut input);

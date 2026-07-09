@@ -103,6 +103,13 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     #!/usr/bin/env bash
     set -euo pipefail
     targets=$(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}} | python3 .github/scripts/hash_partition.py {{partition}})
+    if [ -z "$targets" ]; then
+        exit 0
+    fi
+    # Build every target in one cargo invocation before fuzzing. Each target is
+    # its own sanitizer-instrumented binary, so building inside the run loop
+    # serializes the links against the fuzz sessions while most cores sit idle.
+    cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
     for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
         rm -f {{fuzz_dir}}/target/*/release/$target

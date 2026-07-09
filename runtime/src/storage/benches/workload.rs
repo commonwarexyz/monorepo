@@ -11,11 +11,9 @@ use crate::{
     },
 };
 use commonware_runtime::{tokio::Context, Blob as _, Storage as _};
+use commonware_utils::TestRng;
 use futures::{stream::FuturesUnordered, TryStreamExt};
-use rand::{
-    rngs::{SmallRng, StdRng},
-    RngExt as _, SeedableRng,
-};
+use rand::{rngs::SmallRng, RngExt as _, SeedableRng};
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -52,7 +50,7 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
     let inflight = cfg.inflight as u64;
 
     // Fill the blob with random data so reads return realistic content.
-    let mut rng = StdRng::seed_from_u64(cfg.seed);
+    let mut rng = TestRng::new(cfg.seed);
     let blob = prepare_filled_blob(
         &mut rng, context, &cfg.root, PARTITION, BLOB_NAME, file_size,
     )
@@ -105,7 +103,7 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
 
     // Preallocate the blob so we measure steady-state write cost.
     let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, file_size).await?;
-    let mut rng = StdRng::seed_from_u64(cfg.seed);
+    let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
 
     // Timed phase: drive multiple write futures concurrently from the current
@@ -160,7 +158,7 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
 async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
     // Start from an empty blob.
     let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, 0).await?;
-    let mut rng = StdRng::seed_from_u64(cfg.seed);
+    let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
 
     // Timed phase: single writer appending sequentially.
@@ -201,7 +199,7 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
 
     // Preallocate the blob so we measure steady-state write cost.
     let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, file_size).await?;
-    let mut rng = StdRng::seed_from_u64(cfg.seed);
+    let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
 
     let start = Instant::now();
@@ -242,7 +240,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
     let io_size = cfg.io_size as u64;
 
     // Fill the initial region so readers have data from the start.
-    let mut rng = StdRng::seed_from_u64(cfg.seed);
+    let mut rng = TestRng::new(cfg.seed);
     let blob = prepare_filled_blob(
         &mut rng,
         context,

@@ -13,7 +13,7 @@ use commonware_formatting::{from_hex, hex};
 use commonware_math::algebra::Random;
 use commonware_utils::{
     ordered::{Map, Set},
-    Faults, N3f1, TryCollect, NZU32,
+    sys_rng, Faults, N3f1, TryCollect, NZU32,
 };
 use rand::{rngs::StdRng, seq::IteratorRandom, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -178,7 +178,7 @@ fn generate_identities(
     Vec<(PrivateKey, Option<Share>)>,
 ) {
     // Generate p2p private keys
-    let mut rng = rand::make_rng::<StdRng>();
+    let mut rng = sys_rng();
     let peer_signers = (0..num_peers)
         .map(|_| PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
@@ -223,7 +223,7 @@ fn generate_configs(
     output: Option<&Output<MinSig, PublicKey>>,
     identities: &[(PrivateKey, Option<Share>)],
 ) -> Vec<PathBuf> {
-    let mut rng = rand::make_rng::<StdRng>();
+    let mut rng = sys_rng();
     let bootstrappers = identities
         .iter()
         .enumerate()

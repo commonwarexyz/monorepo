@@ -52,8 +52,9 @@
 
 use arbitrary::Unstructured;
 use commonware_formatting::from_hex;
+use rand::rngs::SysRng;
 use rand_chacha::ChaCha8Rng;
-use rand_core::{Rng as _, SeedableRng};
+use rand_core::{Rng as _, SeedableRng, UnwrapErr};
 use std::{
     panic::{catch_unwind, AssertUnwindSafe, UnwindSafe},
     time::{Duration, Instant},
@@ -384,7 +385,9 @@ impl Builder {
         let mut branch = match (self.reproduce, self.seed) {
             (Some(b), _) => b,
             (None, Some(seed)) => Branch::new(seed),
-            (None, None) => branch_from_env().unwrap_or_else(|| Branch::new(rand::random())),
+            (None, None) => {
+                branch_from_env().unwrap_or_else(|| Branch::new(UnwrapErr(SysRng).next_u64()))
+            }
         };
         let mut sampler = Sampler::new(branch);
         let mut tries: u64 = 0;

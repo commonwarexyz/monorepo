@@ -15,9 +15,10 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+use rand::RngExt as _;
+use rand_core::CryptoRng;
 use std::num::{NonZeroU16, NonZeroU64};
 
 const MAX_OPERATIONS: usize = 50;
@@ -81,7 +82,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn generate_key(rng: &mut StdRng, seed: u64) -> Digest {
+fn generate_key(rng: &mut impl CryptoRng, seed: u64) -> Digest {
     let mut data = vec![0u8; rng.random_range(1..=MAX_KEY_SIZE)];
     for (i, byte) in data.iter_mut().enumerate() {
         *byte = ((seed >> (i % 8)) & 0xFF) as u8 ^ rng.random::<u8>();
@@ -89,7 +90,7 @@ fn generate_key(rng: &mut StdRng, seed: u64) -> Digest {
     Sha256::hash(&data)
 }
 
-fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
+fn generate_value(rng: &mut impl CryptoRng, size: usize) -> Vec<u8> {
     let actual_size = size.clamp(1, MAX_VALUE_SIZE);
     (0..actual_size).map(|_| rng.random()).collect()
 }
@@ -145,7 +146,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     runner.start(|context| {
         let operations = input.operations.clone();
         async move {
-            let mut rng = StdRng::seed_from_u64(input.seed);
+            let mut rng = TestRng::new(input.seed);
 
             let cfg = db_config(suffix, &context);
             let mut db =

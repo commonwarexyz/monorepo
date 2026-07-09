@@ -260,6 +260,7 @@ mod tests {
         storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BufferPoolConfig,
         Storage as _,
     };
+    use commonware_utils::sys_rng;
     use rand::RngExt as _;
     use std::env;
 
@@ -269,13 +270,13 @@ mod tests {
     }
 
     fn random_suffix() -> u64 {
-        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
+        let mut rng = sys_rng();
         rng.random()
     }
 
     #[tokio::test]
     async fn test_storage() {
-        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
+        let mut rng = sys_rng();
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_{}", rng.random::<u64>()));
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
@@ -287,7 +288,7 @@ mod tests {
     /// usable and a later sync still persists data.
     #[tokio::test]
     async fn test_start_sync_dropped_receiver() {
-        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
+        let mut rng = sys_rng();
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_start_sync_{}", rng.random::<u64>()));
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
@@ -311,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_header_handling() {
-        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
+        let mut rng = sys_rng();
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_header_{}", rng.random::<u64>()));
         let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);

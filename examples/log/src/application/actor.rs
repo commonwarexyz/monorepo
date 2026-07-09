@@ -7,7 +7,7 @@ use commonware_actor::mailbox::{self, Receiver};
 use commonware_cryptography::Hasher;
 use commonware_formatting::hex;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use rand::{Rng, RngExt as _};
+use rand_core::Rng;
 use tracing::info;
 
 /// Application actor.
@@ -50,7 +50,7 @@ impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
                 Message::Propose { response } => {
                     // Generate a random message (secret to us)
                     let mut msg = vec![0; 16];
-                    self.context.fill(&mut msg[..]);
+                    self.context.fill_bytes(&mut msg);
 
                     // Hash the message
                     self.hasher.update(&msg);

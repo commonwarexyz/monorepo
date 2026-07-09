@@ -29,7 +29,7 @@ commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-rand.workspace = true
+rand = { workspace = true, features = ["std_rng"] }
 rand_core.workspace = true
 thiserror.workspace = true
 
@@ -40,7 +40,7 @@ commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
 pin-project.workspace = true
-rand_distr.workspace = true
+rand_distr = { workspace = true, optional = true }
 rayon.workspace = true
 tracing.workspace = true
 
@@ -50,6 +50,7 @@ commonware-consensus = { path = ".", features = ["mocks"] }
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 paste.workspace = true
+rand = { workspace = true, features = ["alloc"] }
 rand_chacha.workspace = true
 rstest.workspace = true
 tracing-subscriber.workspace = true
@@ -65,6 +66,7 @@ mocks = [
 	"commonware-cryptography/mocks",
 	"commonware-p2p/mocks",
 	"commonware-resolver/mocks",
+	"dep:rand_distr",
 ]
 arbitrary = [
 	"commonware-codec/arbitrary",

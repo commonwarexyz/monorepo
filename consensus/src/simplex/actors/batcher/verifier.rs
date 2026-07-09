@@ -470,8 +470,7 @@ mod tests {
         sha256::Digest as Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1};
-    use rand::rngs::StdRng;
+    use commonware_utils::{test_rng, Faults, N3f1, TestRng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -510,7 +509,7 @@ mod tests {
     fn add_notarize<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -578,7 +577,7 @@ mod tests {
     fn set_leader<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -622,7 +621,7 @@ mod tests {
     fn ready_and_verify_notarizes<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -696,7 +695,7 @@ mod tests {
     fn add_nullify<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -729,7 +728,7 @@ mod tests {
     fn ready_and_verify_nullifies<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -776,7 +775,7 @@ mod tests {
     fn add_finalize<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -824,7 +823,7 @@ mod tests {
     fn ready_and_verify_finalizes<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -876,7 +875,7 @@ mod tests {
     fn leader_proposal_filters_messages<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
@@ -922,7 +921,7 @@ mod tests {
     fn set_leader_twice_panics<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
@@ -982,7 +981,7 @@ mod tests {
     fn notarizes_wait_for_quorum<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -1028,7 +1027,7 @@ mod tests {
     fn ready_notarizes_without_leader<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
@@ -1073,7 +1072,7 @@ mod tests {
     fn ready_finalizes_without_leader<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
@@ -1117,7 +1116,7 @@ mod tests {
     fn verify_notarizes_empty<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
@@ -1145,7 +1144,7 @@ mod tests {
     fn verify_nullifies_empty<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
@@ -1174,7 +1173,7 @@ mod tests {
     fn verify_finalizes_empty<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
@@ -1204,7 +1203,7 @@ mod tests {
     fn ready_notarizes_exact_quorum<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -1259,7 +1258,7 @@ mod tests {
     fn ready_nullifies_exact_quorum<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -1301,7 +1300,7 @@ mod tests {
     fn ready_finalizes_exact_quorum<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -1348,7 +1347,7 @@ mod tests {
     fn ready_notarizes_quorum_already_met_by_verified<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -1406,7 +1405,7 @@ mod tests {
     fn ready_nullifies_quorum_already_met_by_verified<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
@@ -1456,7 +1455,7 @@ mod tests {
     fn ready_finalizes_quorum_already_met_by_verified<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);

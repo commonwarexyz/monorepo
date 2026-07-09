@@ -158,7 +158,7 @@ pub(crate) mod test {
         deterministic::{self, Context},
         BufferPooler, Runner as _, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, TestRng, NZU16, NZU64};
     use rand::Rng;
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: u16 = 103;
@@ -222,7 +222,7 @@ pub(crate) mod test {
         n: usize,
         seed: u64,
     ) -> Vec<Operation<mmr::Family, Digest, Vec<u8>>> {
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -456,7 +456,7 @@ pub(crate) mod test {
             let base = db.to_batch();
 
             // Parent batch: insert key_a.
-            let key_a = Digest::random(test_rng_seeded(800));
+            let key_a = Digest::random(TestRng::new(800));
             let val_a = vec![1u8; 10];
             let parent_batch = base
                 .new_batch::<Sha256>()
@@ -466,7 +466,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // Child batch: insert key_b.
-            let key_b = Digest::random(test_rng_seeded(801));
+            let key_b = Digest::random(TestRng::new(801));
             let val_b = vec![2u8; 10];
             let child_batch = parent_batch
                 .new_batch::<Sha256>()
@@ -504,7 +504,7 @@ pub(crate) mod test {
 
             let base = db.to_batch();
 
-            let key_x = Digest::random(test_rng_seeded(810));
+            let key_x = Digest::random(TestRng::new(810));
             let val_x = vec![10u8; 8];
             let parent_batch = base
                 .new_batch::<Sha256>()
@@ -548,7 +548,7 @@ pub(crate) mod test {
 
             let base = db.to_batch();
 
-            let key_x = Digest::random(test_rng_seeded(820));
+            let key_x = Digest::random(TestRng::new(820));
             let val_a = vec![10u8; 8];
             let parent_batch = base
                 .new_batch::<Sha256>()
