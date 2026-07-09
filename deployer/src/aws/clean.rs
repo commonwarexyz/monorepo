@@ -2,7 +2,7 @@
 
 use crate::aws::{
     s3::{
-        self, delete_bucket_and_contents, delete_bucket_config, get_bucket_name,
+        self, delete_bucket_and_contents, delete_bucket_config, get_bucket_name_if_exists,
         is_no_such_bucket_error,
     },
     Error, MONITORING_REGION,
@@ -10,9 +10,14 @@ use crate::aws::{
 use aws_config::Region;
 use tracing::info;
 
-/// Deletes the shared S3 cache bucket and all its contents
+/// Deletes the shared deployer caches and their contents.
 pub async fn clean() -> Result<(), Error> {
-    let bucket_name = get_bucket_name();
+    // Use the persisted name only: minting a fresh one here would overwrite the pointer to the
+    // real bucket and orphan it.
+    let Some(bucket_name) = get_bucket_name_if_exists() else {
+        info!("no bucket config found, nothing to clean");
+        return Ok(());
+    };
     info!(bucket = bucket_name.as_str(), "cleaning S3 bucket");
 
     // Create S3 client in the monitoring region (where bucket is located)

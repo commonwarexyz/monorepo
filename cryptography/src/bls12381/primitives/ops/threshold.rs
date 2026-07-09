@@ -22,7 +22,7 @@ use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Map, union_unique, Faults, Participant};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// Prepares partial signature evaluations for threshold recovery.
 fn prepare_evaluations<'a, V: Variant>(
@@ -131,7 +131,7 @@ pub fn batch_verify_same_signer<'a, R, V, I>(
     strategy: &impl Strategy,
 ) -> Result<(), Error>
 where
-    R: CryptoRngCore,
+    R: CryptoRng,
     V: Variant,
     I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], PartialSignature<V>)>,
 {
@@ -172,7 +172,7 @@ fn batch_verify_same_message_bisect<'a, R, V>(
     strategy: &impl Strategy,
 ) -> Vec<&'a PartialSignature<V>>
 where
-    R: CryptoRngCore,
+    R: CryptoRng,
     V: Variant,
 {
     // Convert to the format expected by verify_same_message
@@ -212,7 +212,7 @@ pub fn batch_verify_same_message<'a, R, V, I>(
     strategy: &impl Strategy,
 ) -> Result<(), Vec<&'a PartialSignature<V>>>
 where
-    R: CryptoRngCore,
+    R: CryptoRng,
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
 {

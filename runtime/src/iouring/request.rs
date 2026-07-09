@@ -623,13 +623,13 @@ impl SyncRequest {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => false,
             CqeResult::Cancelled => {
-                self.result = Some(Err(Error::Io(std::io::Error::from_raw_os_error(
-                    libc::ECANCELED,
-                ))));
+                let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
+                self.result = Some(Err(Error::Io(err.into())));
                 true
             }
             CqeResult::Error(code) => {
-                self.result = Some(Err(Error::Io(std::io::Error::from_raw_os_error(-code))));
+                let err = std::io::Error::from_raw_os_error(-code);
+                self.result = Some(Err(Error::Io(err.into())));
                 true
             }
             CqeResult::Zero | CqeResult::Positive(_) => {

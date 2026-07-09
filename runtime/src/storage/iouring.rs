@@ -44,14 +44,14 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
         Error::BlobOpenFailed(
             path.to_string_lossy().to_string(),
             "directory".to_string(),
-            e,
+            e.into(),
         )
     })?;
     dir.sync_all().map_err(|e| {
         Error::BlobSyncFailed(
             path.to_string_lossy().to_string(),
             "directory".to_string(),
-            e,
+            e.into(),
         )
     })
 }
@@ -137,7 +137,7 @@ impl crate::Storage for Storage {
             .create(true)
             .truncate(false)
             .open(&path)
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
 
         // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
@@ -148,13 +148,13 @@ impl crate::Storage for Storage {
             // New (or corrupted) blob - truncate and write header with latest version
             let (header, blob_version) = Header::new(&versions);
             file.set_len(Header::SIZE_U64)
-                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
+                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
             file.seek(SeekFrom::Start(0))
                 .map_err(|_| Error::WriteFailed)?;
             file.write_all(&header.encode())
                 .map_err(|_| Error::WriteFailed)?;
             file.sync_all()
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
 
             // For new files, sync the parent directory to ensure the directory entry is durable.
             if raw_len == 0 {
@@ -379,7 +379,11 @@ impl crate::Blob for Blob {
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
         self.file.set_len(len).map_err(|e| {
-            Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), IoError::other(e))
+            Error::BlobResizeFailed(
+                self.partition.clone(),
+                hex(&self.name),
+                IoError::other(e).into(),
+            )
         })
     }
 

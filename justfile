@@ -71,7 +71,10 @@ test *args='':
 
 # Run loom tests
 test-loom *args='':
-    cargo nextest run --release --features loom --lib {{ args }} loom_tests
+    #!/usr/bin/env bash
+    set -euo pipefail
+    packages=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.features | has("loom")) | "-p " + .name')
+    cargo nextest run --release --features loom --lib $packages {{ args }} loom_tests
 
 # Test the Rust documentation
 test-docs *args='--all':
@@ -87,8 +90,7 @@ check-publish-order:
 
 # Check that locked dependencies are at least 7 days old
 cooldown:
-    cargo cooldown --workspace --all-features check
-    git diff --exit-code Cargo.lock
+    ./.github/scripts/check_dependency_cooldown.sh
 
 # Run custom Dylint lints
 dylint:

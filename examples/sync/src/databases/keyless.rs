@@ -138,11 +138,11 @@ impl<E> super::Syncable for Database<E>
 where
     E: StorageContext,
 {
-    async fn size(&self) -> Location {
-        self.bounds().await.end
+    fn size(&self) -> Location {
+        self.bounds().end
     }
 
-    async fn sync_boundary(&self) -> Location {
+    fn sync_boundary(&self) -> Location {
         self.sync_boundary()
     }
 
@@ -164,8 +164,8 @@ impl<E> super::CompactSyncable for Database<E>
 where
     E: StorageContext,
 {
-    async fn target(&self) -> compact::Target<Self::Family, Key> {
-        compact::Target::new(self.root(), self.bounds().await.end)
+    fn target(&self) -> compact::Target<Self::Family, Key> {
+        compact::Target::new(self.root(), self.bounds().end)
     }
 }
 

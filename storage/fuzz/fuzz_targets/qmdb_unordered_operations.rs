@@ -7,7 +7,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervi
 use commonware_storage::{
     index::unordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
-    merkle::{self, mmb, mmr, Bagging::BackwardFold, Family as MerkleFamily, Location},
+    merkle::{mmb, mmr, Family as MerkleFamily, Location},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
@@ -82,7 +82,6 @@ async fn commit_pending<F: MerkleFamily>(
 }
 
 fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
-    let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
     let runner = deterministic::Runner::default();
 
     runner.start(|context| {
@@ -109,6 +108,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     page_cache,
                 },
                 translator: EightCap,
+                init_cache_size: Some(NZUsize!(3)),
             };
 
             let mut db: GenericDb<F> =
@@ -148,7 +148,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     }
 
                     QmdbOperation::OpCount => {
-                        let _ = db.bounds().await.end;
+                        let _ = db.bounds().end;
                     }
 
                     QmdbOperation::Commit => {
@@ -161,14 +161,14 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     }
 
                     QmdbOperation::Proof { start_loc, max_ops } => {
-                        let actual_op_count = db.bounds().await.end;
+                        let actual_op_count = db.bounds().end;
                         if actual_op_count == 0 || *max_ops == 0 {
                             continue;
                         }
 
                         commit_pending(&mut db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
                         let current_root = db.root();
-                        let actual_op_count = db.bounds().await.end;
+                        let actual_op_count = db.bounds().end;
                         let adjusted_start = Location::<F>::new(*start_loc % *actual_op_count);
                         let adjusted_max_ops = (*max_ops % 100).max(1);
 
@@ -178,8 +178,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             .expect("proof should not fail");
 
                         assert!(
-                            verify_proof(
-                                &hasher,
+                            verify_proof::<Sha256, _, _>(
                                 &proof,
                                 adjusted_start,
                                 &log,

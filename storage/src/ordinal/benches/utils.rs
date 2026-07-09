@@ -1,7 +1,7 @@
 use commonware_runtime::tokio::Context;
 use commonware_storage::ordinal;
 use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
-use rand::{rngs::SmallRng, RngCore, SeedableRng};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::collections::BTreeMap;
 
 /// Number of bytes that can be buffered before being written to disk.

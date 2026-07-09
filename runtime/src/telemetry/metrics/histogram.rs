@@ -66,6 +66,11 @@ impl Timed {
         Self { histogram }
     }
 
+    /// Register a duration histogram (see [`duration_histogram`]) wrapped for timing.
+    pub fn register<M: Metrics>(context: &M, name: &'static str, help: &'static str) -> Self {
+        Self::new(duration_histogram(context, name, help))
+    }
+
     /// Create a new timer that can record a duration from the current time.
     pub fn timer<C: Clock>(&self, clock: &C) -> Timer {
         let start = clock.current();

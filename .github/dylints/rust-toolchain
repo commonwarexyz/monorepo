@@ -1,0 +1,12 @@
+# Shared toolchain for every dylint lint library in this directory.
+#
+# cargo-dylint does not pin the library build itself; it derives the toolchain by
+# running `rustup show active-toolchain` in each lint's directory and then builds
+# with a bare `cargo build` there. rustup resolves both via its ancestor-directory
+# walk, so this single parent file applies to every lint that has no rust-toolchain
+# of its own. The dylint library glob skips this file (it is not a directory).
+#
+# Pinned to the last nightly known to compile dylint_linting 6.0.0.
+[toolchain]
+channel = "nightly-2026-06-21"
+components = ["rustc-dev", "llvm-tools-preview"]

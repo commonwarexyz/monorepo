@@ -28,7 +28,7 @@ use commonware_utils::{
     sync::Mutex,
     N3f1,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -47,7 +47,7 @@ pub struct Config<S: Scheme, L: ElectorConfig<S>> {
     pub elector: L,
 }
 
-pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest> {
+pub struct Reporter<E: CryptoRng, S: Scheme, L: ElectorConfig<S>, D: Digest> {
     context: Arc<Mutex<E>>,
     pub participants: Set<S::PublicKey>,
     scheme: S,
@@ -71,7 +71,7 @@ pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest>
 
 impl<E, S, L, D> Clone for Reporter<E, S, L, D>
 where
-    E: CryptoRngCore,
+    E: CryptoRng,
     S: Scheme,
     L: ElectorConfig<S>,
     L::Elector: Clone,
@@ -102,7 +102,7 @@ where
 
 impl<E, S, L, D> Reporter<E, S, L, D>
 where
-    E: CryptoRngCore,
+    E: CryptoRng,
     S: Scheme,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
@@ -160,7 +160,7 @@ where
 
 impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
 where
-    E: CryptoRngCore + Send + Sync + 'static,
+    E: CryptoRng + Send + Sync + 'static,
     S: scheme::Scheme<D>,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
@@ -345,7 +345,7 @@ where
 
 impl<E, S, L, D> Monitor for Reporter<E, S, L, D>
 where
-    E: CryptoRngCore + Send + Sync + 'static,
+    E: CryptoRng + Send + Sync + 'static,
     S: Scheme,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,

@@ -25,14 +25,14 @@ async fn sync_dir(path: &Path) -> Result<(), Error> {
         Error::BlobOpenFailed(
             path.to_string_lossy().to_string(),
             "directory".to_string(),
-            e,
+            e.into(),
         )
     })?;
     dir.sync_all().await.map_err(|e| {
         Error::BlobSyncFailed(
             path.to_string_lossy().to_string(),
             "directory".to_string(),
-            e,
+            e.into(),
         )
     })
 }
@@ -110,7 +110,7 @@ impl crate::Storage for Storage {
             .truncate(false)
             .open(&path)
             .await
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
+            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
 
         // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
@@ -121,7 +121,7 @@ impl crate::Storage for Storage {
             // Sync the file to ensure it is durable
             file.sync_all()
                 .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
 
             // Windows doesn't have a notion of syncing a directory entry to ensure that it's
             // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
@@ -147,13 +147,13 @@ impl crate::Storage for Storage {
             let (header, blob_version) = Header::new(&versions);
             file.set_len(Header::SIZE_U64)
                 .await
-                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
+                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
             file.write_all(&header.encode())
                 .await
                 .map_err(|_| Error::WriteFailed)?;
             file.sync_all()
                 .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
             (blob_version, 0)
         } else {
             // Existing blob - read and validate header
@@ -260,7 +260,7 @@ mod tests {
         storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BufferPoolConfig,
         Storage as _,
     };
-    use rand::{Rng as _, SeedableRng};
+    use rand::RngExt as _;
     use std::env;
 
     fn test_pool() -> BufferPool {
@@ -268,10 +268,16 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
+    fn random_suffix() -> u64 {
+        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
+        rng.random()
+    }
+
     #[tokio::test]
     async fn test_storage() {
-        let mut rng = rand::rngs::StdRng::from_entropy();
-        let storage_directory = env::temp_dir().join(format!("storage_tokio_{}", rng.gen::<u64>()));
+        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_{}", rng.random::<u64>()));
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
         let storage = Storage::new(config, test_pool());
         run_storage_tests(storage).await;
@@ -281,9 +287,9 @@ mod tests {
     /// usable and a later sync still persists data.
     #[tokio::test]
     async fn test_start_sync_dropped_receiver() {
-        let mut rng = rand::rngs::StdRng::from_entropy();
+        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
         let storage_directory =
-            env::temp_dir().join(format!("storage_tokio_start_sync_{}", rng.gen::<u64>()));
+            env::temp_dir().join(format!("storage_tokio_start_sync_{}", rng.random::<u64>()));
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
         let storage = Storage::new(config, test_pool());
 
@@ -305,9 +311,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_header_handling() {
-        let mut rng = rand::rngs::StdRng::from_entropy();
+        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
         let storage_directory =
-            env::temp_dir().join(format!("storage_tokio_header_{}", rng.gen::<u64>()));
+            env::temp_dir().join(format!("storage_tokio_header_{}", rng.random::<u64>()));
         let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
         let storage = Storage::new(config, test_pool());
 
@@ -404,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn test_blob_magic_mismatch() {
         let storage_directory =
-            env::temp_dir().join(format!("test_magic_mismatch_{}", rand::random::<u64>()));
+            env::temp_dir().join(format!("test_magic_mismatch_{}", random_suffix()));
         let storage = Storage::new(
             Config {
                 storage_directory: storage_directory.clone(),
@@ -439,7 +445,7 @@ mod tests {
             let storage_directory = env::temp_dir().join(format!(
                 "test_scan_non_canonical_{}_{}",
                 bad_name.replace([' ', '0', 'x', 'X'], "_"),
-                rand::random::<u64>()
+                random_suffix()
             ));
             let storage = Storage::new(
                 Config {

@@ -40,10 +40,12 @@
 //!         variant::MinPk,
 //!     },
 //! };
-//! use rand::rngs::OsRng;
+//! use rand::{rngs::StdRng, SeedableRng};
+//!
+//! let mut rng = StdRng::seed_from_u64(0);
 //!
 //! // Generate keypair
-//! let (master_secret, master_public) = keypair::<_, MinPk>(&mut OsRng);
+//! let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
 //!
 //! // Define a target (e.g., a timestamp or round number)
 //! let target = 12345u64.to_be_bytes();
@@ -54,7 +56,7 @@
 //!
 //! // Encrypt the message for the target
 //! let ciphertext = encrypt::<_, MinPk>(
-//!     &mut OsRng,
+//!     &mut rng,
 //!     master_public,
 //!     (b"_TLE_", &target),
 //!     &message,
@@ -93,7 +95,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::CryptoGroup;
 use commonware_utils::sequence::FixedBytes;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 /// Domain separation tag for hashing the `h3` message to a scalar.
@@ -268,7 +270,7 @@ fn xor(a: &Block, b: &Block) -> Block {
 ///
 /// # Returns
 /// * `Ciphertext<V>` - The encrypted ciphertext
-pub fn encrypt<R: CryptoRngCore, V: Variant>(
+pub fn encrypt<R: CryptoRng, V: Variant>(
     rng: &mut R,
     public: V::Public,
     target: (&[u8], &[u8]),

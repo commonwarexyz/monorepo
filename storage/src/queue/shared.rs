@@ -62,11 +62,11 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
         items: impl IntoIterator<Item = V>,
     ) -> Result<Range<u64>, Error> {
         let mut queue = self.queue.lock().await;
-        let start = queue.size().await;
+        let start = queue.size();
         for item in items {
             queue.append(item).await?;
         }
-        let end = queue.size().await;
+        let end = queue.size();
         if end > start {
             queue.commit().await?;
         }
@@ -105,7 +105,7 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
 
     /// Returns the total number of items that have been enqueued.
     pub async fn size(&self) -> u64 {
-        self.queue.lock().await.size().await
+        self.queue.lock().await.size()
     }
 }
 
@@ -164,7 +164,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
     ///
     /// Returns [super::Error::PositionOutOfRange] if the position is invalid.
     pub async fn ack(&self, position: u64) -> Result<(), Error> {
-        self.queue.lock().await.ack(position).await
+        self.queue.lock().await.ack(position)
     }
 
     /// See [Queue::ack_up_to].
@@ -173,7 +173,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
     ///
     /// Returns [super::Error::PositionOutOfRange] if `up_to` is invalid.
     pub async fn ack_up_to(&self, up_to: u64) -> Result<(), Error> {
-        self.queue.lock().await.ack_up_to(up_to).await
+        self.queue.lock().await.ack_up_to(up_to)
     }
 
     /// See [Queue::ack_floor].
@@ -188,7 +188,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
 
     /// See [Queue::is_empty].
     pub async fn is_empty(&self) -> bool {
-        self.queue.lock().await.is_empty().await
+        self.queue.lock().await.is_empty()
     }
 
     /// See [Queue::reset].

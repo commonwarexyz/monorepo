@@ -9,10 +9,12 @@
 //! ```rust
 //! use commonware_cryptography::{bls12381, PrivateKey, PublicKey, Signature, Verifier as _, Signer as _};
 //! use commonware_math::algebra::Random;
-//! use rand::rngs::OsRng;
+//! use rand::{rngs::StdRng, SeedableRng};
+//!
+//! let mut rng = StdRng::seed_from_u64(0);
 //!
 //! // Generate a new private key
-//! let mut signer = bls12381::PrivateKey::random(&mut OsRng);
+//! let mut signer = bls12381::PrivateKey::random(&mut rng);
 //!
 //! // Create a message to sign
 //! let namespace = b"demo";
@@ -46,7 +48,7 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 const CURVE_NAME: &str = "bls12381";
@@ -122,7 +124,7 @@ impl crate::Signer for PrivateKey {
 }
 
 impl Random for PrivateKey {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         let (private, _) = ops::keypair::<_, MinPk>(&mut rng);
         private.into()
     }
@@ -372,11 +374,11 @@ pub struct Batch {
 impl BatchVerifier for Batch {
     type PublicKey = PublicKey;
 
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
-            publics: Vec::new(),
-            hms: Vec::new(),
-            signatures: Vec::new(),
+            publics: Vec::with_capacity(capacity),
+            hms: Vec::with_capacity(capacity),
+            signatures: Vec::with_capacity(capacity),
         }
     }
 
@@ -394,7 +396,7 @@ impl BatchVerifier for Batch {
         true
     }
 
-    fn verify<R: CryptoRngCore>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
+    fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
         MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures, strategy).is_ok()
     }
 }
@@ -484,7 +486,7 @@ mod tests {
 
     #[test]
     fn batch_verify_empty() {
-        let batch = Batch::new();
+        let batch = Batch::new(0);
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 

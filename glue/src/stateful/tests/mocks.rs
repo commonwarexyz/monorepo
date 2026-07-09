@@ -75,7 +75,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(())
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         0
     }
 

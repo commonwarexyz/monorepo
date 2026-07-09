@@ -70,7 +70,7 @@ fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
                 // `cycles` flushes so the journal it appends to never grows without bound.
                 let mut remaining = iters;
                 while remaining > 0 {
-                    let merkle = full::Merkle::<F, _, sha256::Digest, _>::init(
+                    let mut merkle = full::Merkle::<F, _, sha256::Digest, _>::init(
                         ctx.child(family),
                         &hasher,
                         merkle_cfg(&ctx, family),

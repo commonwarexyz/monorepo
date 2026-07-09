@@ -1,9 +1,6 @@
 use crate::{
     index::unordered::Index,
-    journal::{
-        authenticated,
-        contiguous::{Mutable, Reader as _},
-    },
+    journal::{authenticated, contiguous::Mutable},
     merkle::{
         full::{self, Merkle},
         Family, Location,
@@ -95,8 +92,7 @@ where
             Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let (last_commit_loc, inactivity_floor_loc) = {
-            let reader = journal.journal.reader().await;
-            let bounds = reader.bounds();
+            let bounds = journal.journal.bounds();
             let last_commit_loc = Location::<F>::new(
                 bounds
                     .end
@@ -104,7 +100,7 @@ where
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &reader,
+                &journal.journal,
                 Location::new(bounds.end),
                 |op| op.has_floor(),
             )
@@ -113,8 +109,9 @@ where
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
                 inactivity_floor_loc,
-                &reader,
+                &journal.journal,
                 &mut snapshot,
+                db_config.init_cache_size,
                 |_, _| {},
             )
             .await?;
@@ -128,7 +125,7 @@ where
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
-        let db = Self {
+        let mut db = Self {
             journal,
             root,
             snapshot,
@@ -136,10 +133,39 @@ where
             inactivity_floor_loc,
             metrics,
         };
-        db.update_metrics().await;
+        db.update_metrics();
 
         db.sync().await?;
         Ok(db)
+    }
+
+    async fn local_boundary_nodes(
+        context: Self::Context,
+        config: &Self::Config,
+        target: &sync::Target<F, Self::Digest>,
+        journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
+        if target.range.start() == Location::new(0)
+            || !sync::journal_covers_range(journal.bounds(), &target.range)
+        {
+            return Ok(None);
+        }
+
+        // The inactivity floor is carried by the last commit operation rather than being
+        // the target range's start.
+        let inactivity_floor =
+            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end(), |op| {
+                op.has_floor()
+            })
+            .await?;
+
+        sync::local_boundary_nodes::<F, _, H, S>(
+            context,
+            config.merkle_config.clone(),
+            target,
+            inactivity_floor,
+        )
+        .await
     }
 
     fn root(&self) -> Self::Digest {
@@ -188,7 +214,7 @@ where
         self.root()
     }
 
-    async fn persist_compact_state(&self) -> Result<(), Error<F>> {
+    async fn persist_compact_state(&mut self) -> Result<(), Error<F>> {
         self.sync().await
     }
 }

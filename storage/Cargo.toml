@@ -39,9 +39,9 @@ commonware-math.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage = { path = ".", features = ["std", "test-utils"] }
 criterion.workspace = true
-governor.workspace = true
 paste.workspace = true
-rand = { workspace = true, features = ["small_rng"] }
+rand.workspace = true
+rand_distr.workspace = true
 rstest.workspace = true
 tracing-subscriber.workspace = true
 
@@ -92,6 +92,12 @@ path = "src/qmdb/benches/bench.rs"
 required-features = ["test-traits"]
 
 [[bench]]
+name = "init_scale"
+harness = false
+path = "src/qmdb/benches/init_scale.rs"
+required-features = ["test-traits"]
+
+[[bench]]
 name="archive"
 harness = false
 path = "src/archive/benches/bench.rs"
@@ -110,6 +116,11 @@ path = "src/freezer/benches/bench.rs"
 name="index"
 harness = false
 path = "src/index/benches/bench.rs"
+
+[[bench]]
+name = "index_scale"
+harness = false
+path = "src/index/benches/scale.rs"
 
 [[bench]]
 name="journal"

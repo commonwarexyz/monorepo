@@ -18,7 +18,7 @@ use commonware_storage::{
     qmdb::any::traits::DbAny,
 };
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::{Duration, Instant};
 
 const NUM_ELEMENTS: u64 = 1_000;
@@ -42,10 +42,14 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
         elements,
         operations,
         Some(commit_frequency),
+        None, // seed_batch
+        None, // prune_frequency
+        None, // key_zipf_exponent (uniform churn)
+        None, // keyspace (all keys seeded)
         make_value,
     )
     .await;
-    db.prune(db.sync_boundary().await).await.unwrap();
+    db.prune(db.sync_boundary()).await.unwrap();
     db.sync().await.unwrap();
     let elapsed = start.elapsed();
     db.destroy().await.unwrap();

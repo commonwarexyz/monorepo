@@ -459,7 +459,7 @@ mod tests {
     use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::future::join_all;
-    use rand::{rngs::StdRng, Rng as _, SeedableRng};
+    use rand::{rngs::StdRng, RngExt as _, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -989,7 +989,7 @@ mod tests {
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             for finalizer in finalizers.iter() {
                                 if nullifies.contains(finalizer) {
                                     panic!("should not nullify and finalize at same view");
@@ -1585,12 +1585,12 @@ mod tests {
             schemes,
             ..
         } = fixture(&mut rng, &namespace, n);
+        let reporter_seed: [u8; 32] = rng.random();
 
         // Create block relay, shared across restarts.
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, S::PublicKey>::new());
 
         loop {
-            let rng = rng.clone();
             let participants = participants.clone();
             let schemes = schemes.clone();
             let shutdowns = shutdowns.clone();
@@ -1633,7 +1633,8 @@ mod tests {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                     };
-                    let reporter = mocks::reporter::Reporter::new(rng.clone(), reporter_config);
+                    let reporter_rng = StdRng::from_seed(reporter_seed);
+                    let reporter = mocks::reporter::Reporter::new(reporter_rng, reporter_config);
                     reporters.insert(validator.clone(), reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
@@ -1687,7 +1688,7 @@ mod tests {
 
                 // Store all finalizer handles
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < required_containers {
@@ -1698,7 +1699,7 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    context.gen_range(Duration::from_millis(100)..Duration::from_millis(2_000));
+                    context.random_range(Duration::from_millis(100)..Duration::from_millis(2_000));
                 let result = select! {
                     _ = context.sleep(wait) => {
                         // Collect reporters to check faults
@@ -1714,7 +1715,7 @@ mod tests {
                         // Check reporters for faults activity
                         let supervised = supervised.lock();
                         for reporters in supervised.iter() {
-                            for (_, reporter) in reporters.iter() {
+                            for reporter in reporters.values() {
                                 reporter.assert_no_faults();
                             }
                         }
@@ -2139,7 +2140,7 @@ mod tests {
                 {
                     let notarizes = reporter.notarizes.lock();
                     for (view, payloads) in notarizes.iter() {
-                        for (_, participants) in payloads.iter() {
+                        for participants in payloads.values() {
                             if participants.contains(offline) {
                                 panic!("view: {view}");
                             }
@@ -2157,7 +2158,7 @@ mod tests {
                 {
                     let finalizes = reporter.finalizes.lock();
                     for (view, payloads) in finalizes.iter() {
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             if finalizers.contains(offline) {
                                 panic!("view: {view}");
                             }
@@ -3093,7 +3094,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
+                    for faults in faulter.values() {
                         for fault in faults.iter() {
                             match fault {
                                 Activity::ConflictingNotarize(_) => {
@@ -3882,7 +3883,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Abort a validator
-            let idx = context.gen_range(1..engines.len()); // skip byzantine validator
+            let idx = context.random_range(1..engines.len()); // skip byzantine validator
             let validator = &participants[idx];
             let handle = engines.remove(idx);
             handle.abort();
@@ -4283,7 +4284,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
+                    for faults in faulter.values() {
                         for fault in faults.iter() {
                             match fault {
                                 Activity::NullifyFinalize(_) => {
@@ -4908,7 +4909,7 @@ mod tests {
 
                 // Check finalizes
                 let finalizes = reporter.finalizes.lock();
-                for (_, payloads) in finalizes.iter() {
+                for payloads in finalizes.values() {
                     let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
                     // For attributable schemes, we should see peer activities
@@ -5554,7 +5555,7 @@ mod tests {
 
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5566,7 +5567,7 @@ mod tests {
                 target = target.saturating_add(interval);
 
                 // Select a random engine to shutdown
-                let idx = context.gen_range(0..engine_handlers.len());
+                let idx = context.random_range(0..engine_handlers.len());
                 let validator = &participants[idx];
                 let handle = engine_handlers.remove(&idx).unwrap();
                 handle.abort();
@@ -5576,7 +5577,7 @@ mod tests {
 
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5644,7 +5645,7 @@ mod tests {
 
                 // Wait for all engines to hit required containers
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5658,7 +5659,7 @@ mod tests {
 
             // Check reporters for correct activity
             let latest_complete = target.saturating_sub(activity_timeout);
-            for (_, reporter) in reporters.iter() {
+            for reporter in reporters.values() {
                 // Ensure no faults
                 reporter.assert_no_faults();
 
@@ -5718,7 +5719,7 @@ mod tests {
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             for finalizer in finalizers.iter() {
                                 if nullifies.contains(finalizer) {
                                     panic!("should not nullify and finalize at same view");
@@ -5854,8 +5855,7 @@ mod tests {
             let trailing_finalizations = campaign.trailing_finalizations;
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
-            let cfg = deterministic::Config::new()
-                .with_rng(Box::new(StdRng::from_rng(&mut *rng).unwrap()));
+            let cfg = deterministic::Config::new().with_rng(Box::new(StdRng::from_rng(&mut *rng)));
             let executor = deterministic::Runner::new(cfg);
             executor.start(|mut context| async move {
                 let Fixture {
@@ -6210,7 +6210,7 @@ mod tests {
                 // Ensure faults are attributable to twins.
                 for reporter in reporters.iter().skip(honest_start) {
                     let faults = reporter.faults.lock();
-                    for (faulter, _) in faults.iter() {
+                    for faulter in faults.keys() {
                         assert!(
                             twin_identities.contains(faulter),
                             "fault from non-twin participant"

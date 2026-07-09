@@ -177,7 +177,7 @@ mod test {
                 "db_last_commit 2",
                 "db_get_calls_total 1",
                 "db_get_many_calls_total 1",
-                "db_locations_requested_total 2",
+                "db_lookups_requested_total 2",
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 2",
                 "db_commit_calls_total 1",
@@ -969,7 +969,7 @@ mod test {
             target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();
-            let bounds = target_db.bounds().await;
+            let bounds = target_db.bounds();
             let lower_bound = bounds.start;
             let upper_bound = bounds.end;
 
@@ -994,7 +994,7 @@ mod test {
             let synced_db: TestDb<mmr::Family> = sync::sync(config).await.unwrap();
 
             assert_eq!(synced_db.root(), target_root);
-            let bounds = synced_db.bounds().await;
+            let bounds = synced_db.bounds();
             assert_eq!(bounds.end, upper_bound);
             assert_eq!(bounds.start, lower_bound);
 

@@ -18,7 +18,7 @@ use commonware_utils::channel::{
     fallible::{FallibleExt, OneshotExt},
     mpsc, oneshot,
 };
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt as _};
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{HashMap, HashSet},
@@ -166,7 +166,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub should_certify: Certifier<H::Digest>,
 }
 
-pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
+pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     context: ContextCell<E>,
     hasher: H,
     me: P,
@@ -209,7 +209,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     pending_certifications: Vec<oneshot::Sender<bool>>,
 }
 
-impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
+impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
     pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest, P>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.me.clone());
@@ -297,7 +297,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // Generate the payload
-        let rand = self.context.gen::<u64>();
+        let rand = self.context.random::<u64>();
         let payload = (context.round, context.parent.1, rand).encode();
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();

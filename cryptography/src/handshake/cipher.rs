@@ -1,6 +1,6 @@
 use super::error::Error;
 use crate::Secret;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::vec::Vec;
 use zeroize::Zeroizing;
 
@@ -135,7 +135,7 @@ pub struct SendCipher {
 
 impl SendCipher {
     /// Creates a new sending cipher with a random key.
-    pub fn new(mut rng: impl CryptoRngCore) -> Self {
+    pub fn new(mut rng: impl CryptoRng) -> Self {
         let mut key_bytes = Zeroizing::new([0u8; KEY_SIZE_BYTES]);
         rng.fill_bytes(key_bytes.as_mut());
         Self {
@@ -172,7 +172,7 @@ pub struct RecvCipher {
 
 impl RecvCipher {
     /// Creates a new receiving cipher with a random key.
-    pub fn new(mut rng: impl CryptoRngCore) -> Self {
+    pub fn new(mut rng: impl CryptoRng) -> Self {
         let mut key_bytes = Zeroizing::new([0u8; KEY_SIZE_BYTES]);
         rng.fill_bytes(key_bytes.as_mut());
         Self {
@@ -236,8 +236,8 @@ mod tests {
 
     #[test]
     fn test_send_recv_roundtrip() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         let plaintext = b"hello world";
         let ciphertext = send.send(plaintext).unwrap();
@@ -249,8 +249,8 @@ mod tests {
 
     #[test]
     fn test_recv_wrong_key_fails() {
-        let mut send = SendCipher::new(&mut test_rng_seeded(0));
-        let mut recv = RecvCipher::new(&mut test_rng_seeded(1));
+        let mut send = SendCipher::new(test_rng_seeded(0));
+        let mut recv = RecvCipher::new(test_rng_seeded(1));
 
         let ciphertext = send.send(b"hello").unwrap();
         assert!(matches!(
@@ -280,8 +280,8 @@ mod tests {
 
     #[test]
     fn test_send_recv_in_place_roundtrip() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         let plaintext = b"hello world";
         let mut buf = vec![0u8; plaintext.len() + TAG_SIZE];
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_recv_in_place_ciphertext_too_short() {
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         // Buffer smaller than tag size
         let mut buf = vec![0u8; TAG_SIZE - 1];
@@ -313,8 +313,8 @@ mod tests {
 
     #[test]
     fn test_send_in_place_recv_compatibility() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         let plaintext = b"cross-api test";
         let mut buf = vec![0u8; plaintext.len() + TAG_SIZE];
@@ -330,8 +330,8 @@ mod tests {
 
     #[test]
     fn test_send_recv_in_place_compatibility() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         let plaintext = b"cross-api test";
         let mut ciphertext = send.send(plaintext).unwrap();
@@ -343,8 +343,8 @@ mod tests {
 
     #[test]
     fn test_nonce_sync_after_truncated_recv() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         // Send message (sender nonce: 0 -> 1)
         let ciphertext = send.send(b"message 1").unwrap();
@@ -359,8 +359,8 @@ mod tests {
 
     #[test]
     fn test_nonce_sync_after_corrupted_recv() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         // Send message (sender nonce: 0 -> 1)
         let ciphertext = send.send(b"message 1").unwrap();

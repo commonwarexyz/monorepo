@@ -17,7 +17,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_COOLDOWN_VERSION: 0.3.0
   UDEPS_VERSION: 0.1.57
-  NIGHTLY_VERSION: nightly
+  NIGHTLY_VERSION: nightly-2026-06-21
   PANDOC_VERSION: 3.8.2.1
 
 jobs:
@@ -43,9 +43,14 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
+        components: clippy
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-components: ${{ matrix.os == 'ubuntu-latest' && matrix.flags == '' && 'rustfmt,rustc-dev,llvm-tools-preview' || 'rustfmt' }}
         additional-cache-key: ${{ matrix.flags || 'default' }}
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -103,7 +108,12 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: ${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
+        additional-cache-key: ${{ matrix.flags || 'default' }}
+        rust-cache-save: ${{ matrix.partition == 1 }}
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -134,6 +144,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-cache-key: ${{ matrix.flags || 'default' }}
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -158,7 +172,11 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: stability-${{ matrix.level }}
+        additional-cache-key: ${{ matrix.level }}
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -179,7 +197,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        additional-cache-key: unstable-public
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -223,6 +244,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & cargo-udeps
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -236,13 +261,20 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+      with:
+        fetch-depth: 0
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        rust-cache-enabled: false
     - name: Install just & cargo-cooldown
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
         tool: just@1.43.0,cargo-cooldown@${{ env.CARGO_COOLDOWN_VERSION }}
     - name: Check dependency cooldown
+      env:
+        COOLDOWN_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        COOLDOWN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: just cooldown
 
   Lock:
@@ -255,6 +287,11 @@ jobs:
       uses: ./.github/actions/disk
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Build entire workspace
       run: cargo build --workspace --all-targets
     - name: Check Cargo.lock unchanged
@@ -300,6 +337,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         targets: wasm32-unknown-unknown
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Build cryptography
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
     - name: Build macros
@@ -323,6 +364,8 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        rust-cache-enabled: false
     - name: Check no_std compatibility
       run: ./.github/scripts/check_no_std.sh
 
@@ -351,6 +394,8 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        rust-cache-enabled: false
     - name: Check publish order
       run: python3 .github/scripts/check_publish_order.py
 
@@ -371,7 +416,7 @@ jobs:
         run: zepter run check
 
   build:
-    name: "Build (toolchain: ${{ matrix.toolchain }})"
+    name: "Build (toolchain: ${{ matrix.toolchain }}, partition: ${{ matrix.partition.name }})"
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -381,6 +426,23 @@ jobs:
           - msrv
           - stable
           - nightly
+        # commonware-runtime dominates the feature powerset (~80% of all
+        # combinations), so it is split into four partitions that fix the
+        # loom and tokio-console features on or off and enumerate the
+        # powerset of the remaining features. The union of the runtime
+        # partitions and `rest` (every other crate) is identical to the
+        # full workspace powerset (`just hack check`).
+        partition:
+          - name: runtime-0
+            args: -p commonware-runtime --features loom,tokio-console
+          - name: runtime-1
+            args: -p commonware-runtime --features loom --exclude-features tokio-console
+          - name: runtime-2
+            args: -p commonware-runtime --features tokio-console --exclude-features loom
+          - name: runtime-3
+            args: -p commonware-runtime --exclude-features loom,tokio-console
+          - name: rest
+            args: --workspace --exclude commonware-runtime
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -398,7 +460,11 @@ jobs:
         uses: ./.github/actions/setup
         with:
           toolchain: ${{ steps.toolchain.outputs.version }}
-          additional-cache-key: toolchain-${{ matrix.toolchain }}
+          rust-cache-save: ${{ matrix.partition.name == 'rest' }}
+          sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+          sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+          sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       - name: Install just & cargo-hack
         uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
         with:
@@ -406,4 +472,18 @@ jobs:
       - name: Print Rust version
         run: rustc --version
       - name: Check feature powerset
-        run: RUSTFLAGS="-D warnings" just hack check
+        run: RUSTFLAGS="-D warnings" just hack ${{ matrix.partition.args }} check
+
+  Build-Gate:
+    name: "Builds"
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+      - name: Check build results
+        run: |
+          if [ "${{ needs.build.result }}" != "success" ]; then
+            echo "Builds failed or were cancelled"
+            exit 1
+          fi
+          echo "All builds passed successfully!"

@@ -88,11 +88,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         Values::new(Some(head), &self.overflow, *k)
     }
 
-    /// Translate a key without probing.
-    pub(super) fn translate(&self, key: &[u8]) -> T::Key {
-        self.translator.transform(key)
-    }
-
     /// Returns an iterator over all values associated with an already-translated key.
     pub(super) fn get_translated(&self, key: T::Key) -> Values<'_, T::Key, V, T> {
         Values::new(self.map.get(&key), &self.overflow, key)

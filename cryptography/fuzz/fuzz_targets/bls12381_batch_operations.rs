@@ -54,7 +54,7 @@ struct FuzzState {
 impl FuzzState {
     fn new() -> Self {
         Self {
-            batch: Batch::new(),
+            batch: Batch::new(0),
             expected_result: true,
         }
     }

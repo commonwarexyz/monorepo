@@ -96,7 +96,7 @@ impl<E> super::CompactSyncable for Database<E>
 where
     E: StorageContext,
 {
-    async fn target(&self) -> compact::Target<Self::Family, Key> {
+    fn target(&self) -> compact::Target<Self::Family, Key> {
         Self::target(self)
     }
 }

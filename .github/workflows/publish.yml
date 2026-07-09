@@ -15,6 +15,11 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Publish macros-impl
       run: cargo publish --manifest-path macros/impl/Cargo.toml
       continue-on-error: true

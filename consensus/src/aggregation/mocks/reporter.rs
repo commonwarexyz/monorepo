@@ -14,7 +14,7 @@ use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{channel::oneshot, NZUsize};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::collections::{btree_map::Entry, BTreeMap, HashSet, VecDeque};
 
 #[allow(clippy::large_enum_variant)]
@@ -35,7 +35,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     }
 }
 
-pub struct Reporter<R: CryptoRngCore, S: Scheme, D: Digest> {
+pub struct Reporter<R: CryptoRng, S: Scheme, D: Digest> {
     // RNG used for signature verification
     context: ContextCell<R>,
 
@@ -63,7 +63,7 @@ pub struct Reporter<R: CryptoRngCore, S: Scheme, D: Digest> {
 
 impl<R, S, D> Reporter<R, S, D>
 where
-    R: CryptoRngCore + Metrics,
+    R: CryptoRng + Metrics,
     S: scheme::Scheme<D>,
     D: Digest,
 {

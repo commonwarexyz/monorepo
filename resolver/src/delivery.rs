@@ -144,8 +144,7 @@ where
     /// Dropped entries abort in-progress deliveries. Returns the number of
     /// removed entries.
     pub fn retain<F: FnMut(&Con::Key) -> bool>(&mut self, mut predicate: F) -> usize {
-        let removed: Vec<_> = self.entries.extract_if(|key, _| !predicate(key)).collect();
-        removed.len()
+        self.entries.extract_if(|key, _| !predicate(key)).count()
     }
 
     /// Remove all entries and abort all in-progress deliveries.

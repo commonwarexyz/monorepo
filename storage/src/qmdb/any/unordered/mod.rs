@@ -1,6 +1,6 @@
 use crate::{
     index::Unordered as Index,
-    journal::contiguous::{Contiguous, Reader},
+    journal::contiguous::Contiguous,
     merkle::{Family, Location},
     qmdb::{
         any::{db::Db, ValueEncoding},
@@ -39,9 +39,8 @@ where
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
 
-        let reader = self.log.reader().await;
         for loc in locs {
-            let op = reader.read(*loc).await?;
+            let op = self.log.read(*loc).await?;
             match &op {
                 Operation::Update(Update(k, value)) => {
                     if k == key {

@@ -1,7 +1,7 @@
-mod bandersnatch;
+mod banderwagon;
 
 use crate::{
-    bls12381::primitives::group::{Scalar, G1},
+    bls12381::primitives::group::{Scalar, ScalarReadCfg, G1},
     transcript::{Summary, Transcript},
     zk::{
         bulletproofs::circuit::{self, prove, verify},
@@ -9,7 +9,7 @@ use crate::{
     },
     Secret,
 };
-use bandersnatch::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
+use banderwagon::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read, ReadExt,
@@ -27,7 +27,7 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::num::NonZeroU32;
 use zeroize::Zeroizing;
 
@@ -39,14 +39,14 @@ const BULLETPROOFS_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_BULLETPROO
 //
 //     internal_vars(n) = WIRES_PER_PLAYER * n + WIRES_BASE
 //
-// (See `bandersnatch::tests::measure_circuit_size_per_receiver` for the
+// (See `banderwagon::tests::measure_circuit_size_per_receiver` for the
 // raw data this fit was derived from.)
 //
-// TODO: with a hand-tailored scalar-mul gadget the per-receiver constant
-// could drop to ~2.5k (Golden paper, eprint 2025/1924), letting us hit a much
-// larger receiver count with the same (or smaller) setup.
-const WIRES_PER_PLAYER: usize = 8664;
-const WIRES_BASE: usize = 3065;
+// The circuit uses windowed fixed-base scalar multiplication and shares window
+// selectors across bases that use the same scalar. A hand-tailored x-only or
+// endomorphism-based gadget may reduce this further.
+const WIRES_PER_PLAYER: usize = 2247;
+const WIRES_BASE: usize = 1327;
 
 /// `ceil(log2(WIRES_PER_PLAYER * num_players + WIRES_BASE))`.
 ///
@@ -159,7 +159,7 @@ pub struct PrivateKey {
 }
 
 impl Random for PrivateKey {
-    fn random(rng: impl CryptoRngCore) -> Self {
+    fn random(rng: impl CryptoRng) -> Self {
         Self {
             inner: Secret::new(F::random(rng)),
         }
@@ -185,13 +185,13 @@ impl crate::Signer for PrivateKey {
             let mut nonce_t = t.fork(b"nonce");
             let x_bytes = Zeroizing::new(x.encode_fixed::<{ F::SIZE }>());
             nonce_t.commit(x_bytes.as_slice());
-            F::random(&mut nonce_t.noise(b"k"))
+            F::random(nonce_t.noise(b"k"))
         });
 
         let k_big = G::generator() * &k;
         let k_big_bytes: [u8; G::SIZE] = k_big.encode_fixed();
         t.commit(k_big_bytes.as_slice());
-        let e = F::random(&mut t.noise(b"challenge"));
+        let e = F::random(t.noise(b"challenge"));
 
         // s = k + e * x
         let s = self.inner.expose(|x| e * x + &k);
@@ -219,7 +219,7 @@ impl PrivateKey {
     /// a random value.
     pub(super) fn vrf_recv(&self, msg: &Summary, sender: &PublicKey) -> Scalar {
         self.inner
-            .expose(|inner| vrf_recv(msg, sender.point.clone(), inner))
+            .expose(|inner| vrf_recv(msg, &sender.point, inner))
     }
 
     /// Compute the VRF output for each receiver, along with [`VrfCommitments`]
@@ -230,7 +230,7 @@ impl PrivateKey {
     /// Panics if `receivers` contains duplicate public keys.
     pub(super) fn vrf_batch_checked(
         &self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         setup: &Setup,
         transcript: &mut Transcript,
         msg: &Summary,
@@ -415,7 +415,7 @@ impl crate::Verifier for PublicKey {
             .commit(msg)
             .commit(self.raw.as_slice())
             .commit(sig.raw[..G::SIZE].as_ref());
-        let e = F::random(&mut t.noise(b"challenge"));
+        let e = F::random(t.noise(b"challenge"));
 
         // Check: s * G == K + e * X
         let lhs = G::generator() * &s;
@@ -531,11 +531,15 @@ impl Read for Proof {
 
     fn read_cfg(buf: &mut impl Buf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
         let max_proof_len = 1usize << lg_len_for_players(max_players.get());
-        let circuit_proof =
-            circuit::Proof::<Scalar, G1>::read_cfg(buf, &(max_proof_len, ((), ())))?;
+        let circuit_proof = circuit::Proof::<Scalar, G1>::read_cfg(
+            buf,
+            &(max_proof_len, ((), ScalarReadCfg::AllowZero)),
+        )?;
         let range = commonware_codec::RangeCfg::new(0..=max_players.get() as usize);
-        let pedersen_to_plain =
-            Vec::<pedersen_to_plain::Proof<Scalar, G1>>::read_cfg(buf, &(range, ((), ())))?;
+        let pedersen_to_plain = Vec::<pedersen_to_plain::Proof<Scalar, G1>>::read_cfg(
+            buf,
+            &(range, ((), ScalarReadCfg::AllowZero)),
+        )?;
         Ok(Self {
             circuit_proof,
             pedersen_to_plain,
@@ -612,7 +616,7 @@ impl VrfCommitments {
     ///
     /// Panics if `outputs` contains duplicate sender public keys.
     pub fn check_batch(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         setup: &Setup,
         transcript: &Transcript,
         players: &Set<PublicKey>,
@@ -675,7 +679,7 @@ impl VrfCommitments {
                         .map(|pk| pk.point.clone())
                         .collect();
                     let circuit =
-                        vrf_batch_checked_circuit(msg.as_ref(), sender.point.clone(), &receivers);
+                        vrf_batch_checked_circuit(msg.as_ref(), &sender.point, &receivers);
                     let claim = circuit::Claim {
                         commitments: commitments.commitments.values().to_vec(),
                     };

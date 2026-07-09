@@ -11,10 +11,10 @@ use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Metrics, Storage,
+    Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
 };
 use commonware_utils::Array;
-use futures::{future::try_join_all, pin_mut, StreamExt};
+use futures::{pin_mut, StreamExt};
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use tracing::debug;
 
@@ -108,7 +108,21 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     /// Combined index + value storage with crash recovery.
     oversized: Oversized<E, Record<K>, V>,
 
+    /// Sections with writes not yet included in any sync request. Moved into `requested` when a
+    /// sync is requested; the `syncs` metric counts only this set, so each section of writes is
+    /// counted once per request.
     pending: BTreeSet<u64>,
+
+    /// Sections included in a sync request by [crate::archive::Archive::start_sync], retained
+    /// until a full sync completes.
+    ///
+    /// Retention is load-bearing: a [crate::archive::Archive::start_sync] handle must cover
+    /// every previously accepted write, even when the call itself wrote nothing (e.g. a
+    /// duplicate put). Re-requesting these sections makes their buffers return the in-flight
+    /// sync's handle (a completed sync resolves immediately; no new I/O is issued). Pruned
+    /// sections must be removed from this set, or a later request would trip the journal's
+    /// prune guard.
+    requested: BTreeSet<u64>,
 
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -143,6 +157,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         (index / self.items_per_section) * self.items_per_section
     }
 
+    /// Returns true when `index` is below the prune floor.
+    const fn pruned(&self, index: u64) -> bool {
+        match self.oldest_allowed {
+            Some(oldest_allowed) => index < oldest_allowed,
+            None => false,
+        }
+    }
+
     /// Iterate over all positions for a given index (first + extras).
     fn iter_positions(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
         self.indices.get(&index).into_iter().copied().chain(
@@ -168,7 +190,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
-        let oversized: Oversized<E, Record<K>, V> =
+        let mut oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.child("oversized"), oversized_cfg).await?;
 
         // Initialize keys and replay index journal (no values read!)
@@ -219,6 +241,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             items_per_section: cfg.items_per_section.get(),
             oversized,
             pending: BTreeSet::new(),
+            requested: BTreeSet::new(),
             oldest_allowed: None,
             indices,
             extra_indices,
@@ -262,10 +285,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Fetch index
         let iter = self.keys.get(key);
-        let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
             // Continue if index is no longer allowed due to pruning.
-            if *index < min_allowed {
+            if self.pruned(*index) {
                 continue;
             }
 
@@ -371,14 +393,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // Prune oversized journal (handles both index and values)
         self.oversized.prune(min).await?;
 
-        // Remove pending writes (no need to call `sync` as we are pruning)
-        loop {
-            let next = match self.pending.iter().next() {
-                Some(section) if *section < min => *section,
-                _ => break,
-            };
-            self.pending.remove(&next);
-        }
+        // Remove pending and requested sync work (no need to call `sync` as we are pruning)
+        self.pending = self.pending.split_off(&min);
+        self.requested = self.requested.split_off(&min);
 
         // Remove all indices that are less than min
         loop {
@@ -429,16 +446,27 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        // Collect pending sections and update metrics
-        let pending: Vec<u64> = self.pending.iter().copied().collect();
-        self.syncs.inc_by(pending.len() as u64);
+        // Update metrics (`requested` sections were already counted by `start_sync`)
+        self.syncs.inc_by(self.pending.len() as u64);
+        self.requested.append(&mut self.pending);
 
-        // Sync oversized journal (handles both index and values)
-        let syncs: Vec<_> = pending.iter().map(|s| self.oversized.sync(*s)).collect();
-        try_join_all(syncs).await?;
+        // Sync oversized journal (handles both index and values). Re-syncing `requested` sections
+        // also waits for any of their syncs still in flight.
+        self.oversized.sync(&self.requested).await?;
 
-        self.pending.clear();
+        self.requested.clear();
         Ok(())
+    }
+
+    async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+        // Update metrics
+        self.syncs.inc_by(self.pending.len() as u64);
+
+        // Move sections into `requested` rather than dropping them: section buffers reuse
+        // in-flight syncs, so re-requesting a section makes this handle observe outstanding work
+        // without issuing a new sync.
+        self.requested.append(&mut self.pending);
+        Ok(self.oversized.start_sync(&self.requested).await?)
     }
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
@@ -505,6 +533,32 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     async fn put_multi(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
         self.put_internal(index, key, data, false).await
+    }
+
+    async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
+        self.has.inc();
+
+        // Ignore pruned indices.
+        if self.pruned(index) {
+            return Ok(false);
+        }
+
+        // A key absent from the in-memory index is not stored anywhere, so
+        // absence is decided without touching disk. A translated-key hit may
+        // be a collision, so confirm against the stored keys at `index`
+        // (reads index journal entries, never values).
+        if !self.keys.get(key).any(|candidate| *candidate == index) {
+            return Ok(false);
+        }
+        let section = self.section(index);
+        for position in self.iter_positions(index) {
+            let entry = self.oversized.get(section, position).await?;
+            if entry.key.as_ref() == key.as_ref() {
+                return Ok(true);
+            }
+            self.unnecessary_reads.inc();
+        }
+        Ok(false)
     }
 }
 

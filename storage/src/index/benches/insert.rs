@@ -2,7 +2,7 @@ use super::DummyMetrics;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
     index::{ordered, partitioned, unordered, Unordered},
-    translator::{Cap, FourCap, Hashed, TwoCap},
+    translator::{Cap, EightCap, Hashed},
 };
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -17,10 +17,10 @@ const N_ITEMS: [usize; 5] = [10_000, 50_000, 100_000, 500_000, 1_000_000];
 enum Variant {
     Ordered,
     Unordered,
-    PartitionedUnordered1,
-    PartitionedUnordered2,
     PartitionedOrdered1,
     PartitionedOrdered2,
+    PartitionedUnordered1,
+    PartitionedUnordered2,
     HashedUnordered,
     HashedPartitionedUnordered1,
     HashedPartitionedUnordered2,
@@ -31,10 +31,10 @@ impl Variant {
         match self {
             Self::Ordered => "ordered",
             Self::Unordered => "unordered",
-            Self::PartitionedUnordered1 => "partitioned_unordered_1",
-            Self::PartitionedUnordered2 => "partitioned_unordered_2",
             Self::PartitionedOrdered1 => "partitioned_ordered_1",
             Self::PartitionedOrdered2 => "partitioned_ordered_2",
+            Self::PartitionedUnordered1 => "partitioned_unordered_1",
+            Self::PartitionedUnordered2 => "partitioned_unordered_2",
             Self::HashedUnordered => "hashed_unordered",
             Self::HashedPartitionedUnordered1 => "hashed_partitioned_unordered_1",
             Self::HashedPartitionedUnordered2 => "hashed_partitioned_unordered_2",
@@ -45,10 +45,10 @@ impl Variant {
 const VARIANTS: [Variant; 9] = [
     Variant::Ordered,
     Variant::Unordered,
-    Variant::PartitionedUnordered1,
-    Variant::PartitionedUnordered2,
     Variant::PartitionedOrdered1,
     Variant::PartitionedOrdered2,
+    Variant::PartitionedUnordered1,
+    Variant::PartitionedUnordered2,
     Variant::HashedUnordered,
     Variant::HashedPartitionedUnordered1,
     Variant::HashedPartitionedUnordered2,
@@ -78,60 +78,59 @@ fn bench_insert(c: &mut Criterion) {
                     for _ in 0..iters {
                         match variant {
                             Variant::Ordered => {
-                                let mut index = ordered::Index::new(DummyMetrics, FourCap);
+                                let mut index = ordered::Index::new(DummyMetrics, EightCap);
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::Unordered => {
-                                let mut index = unordered::Index::new(DummyMetrics, FourCap);
-                                total += run_benchmark(&mut index, &kvs_data);
-                            }
-                            Variant::PartitionedUnordered1 => {
-                                let mut index = partitioned::unordered::Index::<_, _, 1>::new(
-                                    DummyMetrics,
-                                    Cap::<3>::new(),
-                                );
-                                total += run_benchmark(&mut index, &kvs_data);
-                            }
-                            Variant::PartitionedUnordered2 => {
-                                let mut index = partitioned::unordered::Index::<_, _, 2>::new(
-                                    DummyMetrics,
-                                    TwoCap,
-                                );
+                                let mut index = unordered::Index::new(DummyMetrics, EightCap);
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedOrdered1 => {
                                 let mut index = partitioned::ordered::Index::<_, _, 1>::new(
                                     DummyMetrics,
-                                    Cap::<3>::new(),
+                                    Cap::<7>::new(),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedOrdered2 => {
                                 let mut index = partitioned::ordered::Index::<_, _, 2>::new(
                                     DummyMetrics,
-                                    Cap::<2>::new(),
+                                    Cap::<6>::new(),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
-
+                            Variant::PartitionedUnordered1 => {
+                                let mut index = partitioned::unordered::Index::<_, _, 1>::new(
+                                    DummyMetrics,
+                                    Cap::<7>::new(),
+                                );
+                                total += run_benchmark(&mut index, &kvs_data);
+                            }
+                            Variant::PartitionedUnordered2 => {
+                                let mut index = partitioned::unordered::Index::<_, _, 2>::new(
+                                    DummyMetrics,
+                                    Cap::<6>::new(),
+                                );
+                                total += run_benchmark(&mut index, &kvs_data);
+                            }
                             Variant::HashedUnordered => {
                                 let mut index = unordered::Index::new(
                                     DummyMetrics,
-                                    Hashed::from_seed(0, FourCap),
+                                    Hashed::from_seed(0, EightCap),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::HashedPartitionedUnordered1 => {
                                 let mut index = partitioned::unordered::Index::<_, _, 1>::new(
                                     DummyMetrics,
-                                    Hashed::from_seed(0, Cap::<3>::new()),
+                                    Hashed::from_seed(0, Cap::<7>::new()),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::HashedPartitionedUnordered2 => {
                                 let mut index = partitioned::unordered::Index::<_, _, 2>::new(
                                     DummyMetrics,
-                                    Hashed::from_seed(0, TwoCap),
+                                    Hashed::from_seed(0, Cap::<6>::new()),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }

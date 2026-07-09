@@ -3,7 +3,7 @@ use commonware_coding::{Config, PhasedAsScheme, ReedSolomon, Scheme, Zoda};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_utils::NZU16;
-use rand::{RngCore as _, SeedableRng as _};
+use rand::{Rng as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 
 const STRATEGY: Sequential = Sequential;

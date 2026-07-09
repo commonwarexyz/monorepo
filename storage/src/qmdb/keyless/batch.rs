@@ -12,12 +12,12 @@ use crate::{
     Context,
 };
 use commonware_codec::EncodeShared;
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::Strategy;
 use std::sync::{Arc, Weak};
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] in the keyless-batch chain.
-type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest, V, S>>;
+type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, DigestOf<H>, V, S>>;
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
@@ -195,7 +195,7 @@ where
             return Ok(Vec::new());
         }
         assert!(
-            locs.windows(2).all(|w| w[0] < w[1]),
+            locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
         let mut results = Vec::with_capacity(locs.len());
@@ -363,7 +363,7 @@ where
             return Ok(Vec::new());
         }
         assert!(
-            locs.windows(2).all(|w| w[0] < w[1]),
+            locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
         let mut results = Vec::with_capacity(locs.len());

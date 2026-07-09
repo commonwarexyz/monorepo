@@ -23,7 +23,7 @@ where
                 let executor = R::default();
                 executor.start(|ctx| async move {
                     let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
-                    let append = create_append(&ctx, &name, cache_ref).await;
+                    let mut append = create_append(&ctx, &name, cache_ref).await;
 
                     let start = Instant::now();
                     for _ in 0..iters {

@@ -32,7 +32,7 @@ use commonware_utils::{
     NZU64,
 };
 use futures::{pin_mut, FutureExt};
-use rand::RngCore as _;
+use rand::Rng as _;
 use std::{
     num::NonZeroU64,
     sync::{
@@ -231,16 +231,13 @@ where
         let target_ops = H::create_ops(target_db_ops);
         target_db = H::apply_ops(target_db, target_ops).await;
         // commit already done in apply_ops
-        target_db
-            .prune(target_db.sync_boundary().await)
-            .await
-            .unwrap();
+        target_db.prune(target_db.sync_boundary()).await.unwrap();
 
-        let target_op_count = target_db.bounds().await.end;
-        let target_inactivity_floor = target_db.inactivity_floor_loc().await;
+        let target_op_count = target_db.bounds().end;
+        let target_inactivity_floor = target_db.inactivity_floor_loc();
         let sync_root = H::sync_target_root(&target_db);
         let verification_root = target_db.root();
-        let lower_bound = target_db.sync_boundary().await;
+        let lower_bound = target_db.sync_boundary();
 
         // Configure sync
         let db_config = H::config(&context.next_u64().to_string(), &context);
@@ -267,26 +264,20 @@ where
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify database state (root hash is the key verification)
-        assert_eq!(synced_db.bounds().await.end, target_op_count);
-        assert_eq!(
-            synced_db.inactivity_floor_loc().await,
-            target_inactivity_floor
-        );
+        assert_eq!(synced_db.bounds().end, target_op_count);
+        assert_eq!(synced_db.inactivity_floor_loc(), target_inactivity_floor);
         assert_eq!(synced_db.root(), verification_root);
 
         // Verify persistence
         let final_root = synced_db.root();
-        let final_op_count = synced_db.bounds().await.end;
-        let final_inactivity_floor = synced_db.inactivity_floor_loc().await;
+        let final_op_count = synced_db.bounds().end;
+        let final_inactivity_floor = synced_db.inactivity_floor_loc();
 
         // Reopen and verify state persisted
         drop(synced_db);
         let reopened_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
-        assert_eq!(reopened_db.bounds().await.end, final_op_count);
-        assert_eq!(
-            reopened_db.inactivity_floor_loc().await,
-            final_inactivity_floor
-        );
+        assert_eq!(reopened_db.bounds().end, final_op_count);
+        assert_eq!(reopened_db.inactivity_floor_loc(), final_inactivity_floor);
         assert_eq!(reopened_db.root(), final_root);
 
         // Cleanup
@@ -315,10 +306,10 @@ where
         target_db = H::apply_ops(target_db, target_ops[0..target_db_ops - 1].to_vec()).await;
         // commit already done in apply_ops
 
-        let upper_bound = target_db.bounds().await.end;
+        let upper_bound = target_db.bounds().end;
         let sync_root = H::sync_target_root(&target_db);
         let verification_root = target_db.root();
-        let lower_bound = target_db.sync_boundary().await;
+        let lower_bound = target_db.sync_boundary();
 
         // Add another operation after the sync range
         let final_op = target_ops[target_db_ops - 1].clone();
@@ -348,8 +339,8 @@ where
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify the synced database has the correct range of operations
-        assert_eq!(synced_db.sync_boundary().await, lower_bound);
-        assert_eq!(synced_db.bounds().await.end, upper_bound);
+        assert_eq!(synced_db.sync_boundary(), lower_bound);
+        assert_eq!(synced_db.bounds().end, upper_bound);
 
         // Verify the final root digest matches our target
         assert_eq!(synced_db.root(), verification_root);
@@ -398,8 +389,8 @@ where
 
         let sync_root = H::sync_target_root(&target_db);
         let verification_root = target_db.root();
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
 
         // Reopen the sync database and sync it to the target database
         let target_db = Arc::new(target_db);
@@ -422,13 +413,13 @@ where
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify database state
-        let bounds = synced_db.bounds().await;
+        let bounds = synced_db.bounds();
         assert_eq!(bounds.end, upper_bound);
         assert_eq!(
-            synced_db.inactivity_floor_loc().await,
-            target_db.inactivity_floor_loc().await
+            synced_db.inactivity_floor_loc(),
+            target_db.inactivity_floor_loc()
         );
-        assert_eq!(bounds.end, target_db.bounds().await.end);
+        assert_eq!(bounds.end, target_db.bounds().end);
         // Verify the root digest matches the target
         assert_eq!(synced_db.root(), verification_root);
 
@@ -483,11 +474,8 @@ where
         sync_db = H::apply_ops(sync_db, target_ops.clone()).await;
         // commit already done in apply_ops
 
-        target_db
-            .prune(target_db.sync_boundary().await)
-            .await
-            .unwrap();
-        sync_db.prune(sync_db.sync_boundary().await).await.unwrap();
+        target_db.prune(target_db.sync_boundary()).await.unwrap();
+        sync_db.prune(sync_db.sync_boundary()).await.unwrap();
 
         sync_db.sync().await.unwrap();
         drop(sync_db);
@@ -495,8 +483,8 @@ where
         // Capture target state
         let sync_root = H::sync_target_root(&target_db);
         let verification_root = target_db.root();
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
 
         // sync_db should never ask the resolver for operations
         // because it is already complete. Use a resolver that always fails
@@ -521,10 +509,10 @@ where
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify database state
-        let bounds = synced_db.bounds().await;
+        let bounds = synced_db.bounds();
         assert_eq!(bounds.end, upper_bound);
-        assert_eq!(bounds.end, target_db.bounds().await.end);
-        assert_eq!(synced_db.sync_boundary().await, lower_bound);
+        assert_eq!(bounds.end, target_db.bounds().end);
+        assert_eq!(synced_db.sync_boundary(), lower_bound);
 
         // Verify the root digest matches the target
         assert_eq!(synced_db.root(), verification_root);
@@ -561,12 +549,12 @@ where
         // Use inactivity_floor as range.start so we have a non-zero bound to decrement.
         // The engine only checks that range.start does not decrease on updates; it doesn't
         // require range.start to equal sync_boundary here.
-        let initial_lower_bound = target_db.inactivity_floor_loc().await;
+        let initial_lower_bound = target_db.inactivity_floor_loc();
         assert!(
             *initial_lower_bound > 0,
             "test setup requires non-zero inactivity floor"
         );
-        let initial_upper_bound = target_db.bounds().await.end;
+        let initial_upper_bound = target_db.bounds().end;
         let initial_root = H::sync_target_root(&target_db);
 
         // Create client with initial target
@@ -634,8 +622,8 @@ where
         // commit already done in apply_ops
 
         // Capture initial target state
-        let initial_lower_bound = target_db.sync_boundary().await;
-        let initial_upper_bound = target_db.bounds().await.end;
+        let initial_lower_bound = target_db.sync_boundary();
+        let initial_upper_bound = target_db.bounds().end;
         let initial_root = H::sync_target_root(&target_db);
 
         // Create client with initial target
@@ -703,8 +691,8 @@ where
         // commit already done in apply_ops
 
         // Capture initial target state
-        let initial_lower_bound = target_db.sync_boundary().await;
-        let initial_upper_bound = target_db.bounds().await.end;
+        let initial_lower_bound = target_db.sync_boundary();
+        let initial_upper_bound = target_db.bounds().end;
         let initial_root = H::sync_target_root(&target_db);
 
         // Apply more operations to the target database
@@ -715,8 +703,8 @@ where
             // commit already done in apply_ops
 
             // Capture new target state
-            let new_lower_bound = target_db.sync_boundary().await;
-            let new_upper_bound = target_db.bounds().await.end;
+            let new_lower_bound = target_db.sync_boundary();
+            let new_upper_bound = target_db.bounds().end;
             let new_sync_root = H::sync_target_root(&target_db);
             let new_verification_root = target_db.root();
 
@@ -755,8 +743,8 @@ where
 
             // Verify the synced database has the expected final state
             assert_eq!(synced_db.root(), new_verification_root);
-            assert_eq!(synced_db.bounds().await.end, new_upper_bound);
-            assert_eq!(synced_db.sync_boundary().await, new_lower_bound);
+            assert_eq!(synced_db.bounds().end, new_upper_bound);
+            assert_eq!(synced_db.sync_boundary(), new_lower_bound);
 
             synced_db.destroy().await.unwrap();
 
@@ -788,8 +776,8 @@ where
         // commit already done in apply_ops
 
         // Capture target state
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
         let sync_root = H::sync_target_root(&target_db);
         let verification_root = target_db.root();
 
@@ -828,8 +816,8 @@ where
 
         // Verify the synced database has the expected state
         assert_eq!(synced_db.root(), verification_root);
-        assert_eq!(synced_db.bounds().await.end, upper_bound);
-        assert_eq!(synced_db.sync_boundary().await, lower_bound);
+        assert_eq!(synced_db.bounds().end, upper_bound);
+        assert_eq!(synced_db.sync_boundary(), lower_bound);
 
         synced_db.destroy().await.unwrap();
 
@@ -853,12 +841,12 @@ where
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(50)).await;
 
-        let initial_lower_bound = target_db.inactivity_floor_loc().await;
+        let initial_lower_bound = target_db.inactivity_floor_loc();
         assert!(
             *initial_lower_bound > 1,
             "test setup requires lower bound that can advance twice"
         );
-        let upper_bound = target_db.bounds().await.end;
+        let upper_bound = target_db.bounds().end;
         let root = H::sync_target_root(&target_db);
 
         let (update_sender, update_receiver) = mpsc::channel(2);
@@ -921,15 +909,12 @@ where
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
         let initial_target = Target {
             root: H::sync_target_root(&target_db),
-            range: non_empty_range!(
-                target_db.sync_boundary().await,
-                target_db.bounds().await.end
-            ),
+            range: non_empty_range!(target_db.sync_boundary(), target_db.bounds().end),
         };
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 1)).await;
-        let updated_lower_bound = target_db.sync_boundary().await;
-        let updated_upper_bound = target_db.bounds().await.end;
+        let updated_lower_bound = target_db.sync_boundary();
+        let updated_upper_bound = target_db.bounds().end;
         let updated_target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(updated_lower_bound, updated_upper_bound),
@@ -999,8 +984,8 @@ where
             .await
             .expect("sync should succeed after finish signal");
         assert_eq!(synced_db.root(), updated_verification_root);
-        assert_eq!(synced_db.bounds().await.end, updated_upper_bound);
-        assert_eq!(synced_db.sync_boundary().await, updated_lower_bound);
+        assert_eq!(synced_db.bounds().end, updated_upper_bound);
+        assert_eq!(synced_db.sync_boundary(), updated_lower_bound);
 
         synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)
@@ -1044,8 +1029,8 @@ where
         let initial_target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(
-                target_db.sync_boundary().await,
-                target_db.bounds().await.end
+                target_db.sync_boundary(),
+                target_db.bounds().end
             ),
         };
 
@@ -1053,8 +1038,8 @@ where
         let first_update = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(
-                target_db.sync_boundary().await,
-                target_db.bounds().await.end
+                target_db.sync_boundary(),
+                target_db.bounds().end
             ),
         };
 
@@ -1062,8 +1047,8 @@ where
         let second_update = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(
-                target_db.sync_boundary().await,
-                target_db.bounds().await.end
+                target_db.sync_boundary(),
+                target_db.bounds().end
             ),
         };
         let final_root = target_db.root();
@@ -1138,8 +1123,8 @@ where
             .await
             .expect("sync should succeed after finish signal");
         assert_eq!(synced_db.root(), final_root);
-        assert_eq!(synced_db.bounds().await.end, *second_update.range.end());
-        assert_eq!(synced_db.sync_boundary().await, *second_update.range.start());
+        assert_eq!(synced_db.bounds().end, *second_update.range.end());
+        assert_eq!(synced_db.sync_boundary(), *second_update.range.start());
 
         synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)
@@ -1161,8 +1146,8 @@ where
     executor.start(|mut context| async move {
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(30)).await;
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
         let target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(lower_bound, upper_bound),
@@ -1201,8 +1186,8 @@ where
 
         assert_eq!(reached, target);
         assert_eq!(synced_db.root(), verification_root);
-        assert_eq!(synced_db.bounds().await.end, upper_bound);
-        assert_eq!(synced_db.sync_boundary().await, lower_bound);
+        assert_eq!(synced_db.bounds().end, upper_bound);
+        assert_eq!(synced_db.sync_boundary(), lower_bound);
 
         synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)
@@ -1224,8 +1209,8 @@ where
     executor.start(|mut context| async move {
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
 
         let (finish_sender, finish_receiver) = mpsc::channel(1);
         drop(finish_sender);
@@ -1273,8 +1258,8 @@ where
     executor.start(|mut context| async move {
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
         let verification_root = target_db.root();
 
         let (reached_sender, reached_receiver) = mpsc::channel(1);
@@ -1302,8 +1287,8 @@ where
             .await
             .expect("sync should succeed when reached-target receiver is dropped");
         assert_eq!(synced_db.root(), verification_root);
-        assert_eq!(synced_db.bounds().await.end, upper_bound);
-        assert_eq!(synced_db.sync_boundary().await, lower_bound);
+        assert_eq!(synced_db.bounds().end, upper_bound);
+        assert_eq!(synced_db.sync_boundary(), lower_bound);
 
         synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)
@@ -1332,8 +1317,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         // commit already done in apply_ops
 
         // Capture initial target state
-        let initial_lower_bound = target_db.sync_boundary().await;
-        let initial_upper_bound = target_db.bounds().await.end;
+        let initial_lower_bound = target_db.sync_boundary();
+        let initial_upper_bound = target_db.bounds().end;
         let initial_sync_root = H::sync_target_root(&target_db);
 
         // Wrap target database for shared mutable access (using Option so we can take ownership)
@@ -1366,7 +1351,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                     NextStep::Continue(new_client) => new_client,
                     NextStep::Complete(_) => panic!("client should not be complete"),
                 };
-                let log_size = client.journal().size().await;
+                let log_size = Contiguous::bounds(client.journal()).end;
                 if log_size > initial_lower_bound {
                     break client;
                 }
@@ -1382,8 +1367,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             let db = H::apply_ops(db, additional_ops_data).await;
 
             // Capture new target state
-            let new_lower_bound = db.sync_boundary().await;
-            let new_upper_bound = db.bounds().await.end;
+            let new_lower_bound = db.sync_boundary();
+            let new_upper_bound = db.bounds().end;
             let new_sync_root = H::sync_target_root(&db);
             let new_verification_root = db.root();
             *db_guard = Some(db);
@@ -1412,12 +1397,12 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             |rw_lock| rw_lock.into_inner().expect("db should be present"),
         );
         {
-            let synced_bounds = synced_db.bounds().await;
-            let target_bounds = target_db.bounds().await;
+            let synced_bounds = synced_db.bounds();
+            let target_bounds = target_db.bounds();
             assert_eq!(synced_bounds.end, target_bounds.end);
             assert_eq!(
-                synced_db.inactivity_floor_loc().await,
-                target_db.inactivity_floor_loc().await
+                synced_db.inactivity_floor_loc(),
+                target_db.inactivity_floor_loc()
             );
             assert_eq!(synced_db.root(), target_db.root());
         }
@@ -1445,8 +1430,8 @@ where
         // Capture target state
         let sync_root = H::sync_target_root(&target_db);
         let verification_root = target_db.root();
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
 
         // Perform sync
         let db_config = H::config(&context.next_u64().to_string(), &context);
@@ -1475,8 +1460,8 @@ where
 
         // Save state before dropping
         let expected_root = synced_db.root();
-        let expected_op_count = synced_db.bounds().await.end;
-        let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc().await;
+        let expected_op_count = synced_db.bounds().end;
+        let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc();
 
         // Re-open the database
         drop(synced_db);
@@ -1484,9 +1469,9 @@ where
 
         // Verify the state is unchanged
         assert_eq!(reopened_db.root(), expected_root);
-        assert_eq!(reopened_db.bounds().await.end, expected_op_count);
+        assert_eq!(reopened_db.bounds().end, expected_op_count);
         assert_eq!(
-            reopened_db.inactivity_floor_loc().await,
+            reopened_db.inactivity_floor_loc(),
             expected_inactivity_floor_loc
         );
 
@@ -1514,8 +1499,8 @@ where
         target_db = H::apply_ops(target_db, target_ops).await;
 
         let sync_root = H::sync_target_root(&target_db);
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
         let target_db = Arc::new(target_db);
 
         let config = H::config(&context.next_u64().to_string(), &context);
@@ -1545,7 +1530,7 @@ where
 
         // Root should change after applying more ops.
         assert_ne!(synced_db.root(), root_after_sync);
-        assert!(synced_db.bounds().await.end > upper_bound);
+        assert!(synced_db.bounds().end > upper_bound);
 
         synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)
@@ -1571,11 +1556,11 @@ where
         db = H::apply_ops(db, ops).await;
         // commit already done in apply_ops
 
-        let sync_lower_bound = db.sync_boundary().await;
-        let bounds = db.bounds().await;
+        let sync_lower_bound = db.sync_boundary();
+        let bounds = db.bounds();
         let sync_upper_bound = bounds.end;
         let target_db_op_count = bounds.end;
-        let target_db_inactivity_floor_loc = db.inactivity_floor_loc().await;
+        let target_db_inactivity_floor_loc = db.inactivity_floor_loc();
 
         let pinned_nodes = db.pinned_nodes_at(sync_lower_bound).await;
         let (_, journal) = db.into_log_components();
@@ -1592,12 +1577,12 @@ where
         .unwrap();
 
         // Verify database state
-        assert_eq!(sync_db.bounds().await.end, target_db_op_count);
+        assert_eq!(sync_db.bounds().end, target_db_op_count);
         assert_eq!(
-            sync_db.inactivity_floor_loc().await,
+            sync_db.inactivity_floor_loc(),
             target_db_inactivity_floor_loc
         );
-        assert_eq!(sync_db.sync_boundary().await, sync_lower_bound);
+        assert_eq!(sync_db.sync_boundary(), sync_lower_bound);
 
         sync_db.destroy().await.unwrap();
     });
@@ -1623,13 +1608,10 @@ where
         let original_ops = H::create_ops(NUM_OPS);
         target_db = H::apply_ops(target_db, original_ops.clone()).await;
         // commit already done in apply_ops
-        target_db
-            .prune(target_db.sync_boundary().await)
-            .await
-            .unwrap();
+        target_db.prune(target_db.sync_boundary()).await.unwrap();
         sync_db = H::apply_ops(sync_db, original_ops.clone()).await;
         // commit already done in apply_ops
-        sync_db.prune(sync_db.sync_boundary().await).await.unwrap();
+        sync_db.prune(sync_db.sync_boundary()).await.unwrap();
         sync_db.sync().await.unwrap();
         drop(sync_db);
 
@@ -1640,10 +1622,10 @@ where
         // commit already done in apply_ops
 
         // Capture target db state for comparison
-        let bounds = target_db.bounds().await;
+        let bounds = target_db.bounds();
         let target_db_op_count = bounds.end;
-        let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc().await;
-        let sync_lower_bound = target_db.sync_boundary().await;
+        let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc();
+        let sync_lower_bound = target_db.sync_boundary();
         let sync_upper_bound = bounds.end;
         let target_hash = target_db.root();
 
@@ -1665,12 +1647,12 @@ where
         .unwrap();
 
         // Verify database state
-        assert_eq!(sync_db.bounds().await.end, target_db_op_count);
+        assert_eq!(sync_db.bounds().end, target_db_op_count);
         assert_eq!(
-            sync_db.inactivity_floor_loc().await,
+            sync_db.inactivity_floor_loc(),
             target_db_inactivity_floor_loc
         );
-        assert_eq!(sync_db.sync_boundary().await, sync_lower_bound);
+        assert_eq!(sync_db.sync_boundary(), sync_lower_bound);
 
         // Verify the root digest matches the target (verifies content integrity)
         assert_eq!(sync_db.root(), target_hash);
@@ -1696,19 +1678,16 @@ where
         let ops = H::create_ops(NUM_OPS);
         source_db = H::apply_ops(source_db, ops).await;
         // commit already done in apply_ops
-        source_db
-            .prune(source_db.sync_boundary().await)
-            .await
-            .unwrap();
+        source_db.prune(source_db.sync_boundary()).await.unwrap();
 
-        let lower_bound = source_db.sync_boundary().await;
-        let upper_bound = source_db.bounds().await.end;
+        let lower_bound = source_db.sync_boundary();
+        let upper_bound = source_db.bounds().end;
 
         // Get pinned nodes and target hash before deconstructing source_db
         let pinned_nodes = source_db.pinned_nodes_at(lower_bound).await;
         let target_hash = source_db.root();
-        let target_op_count = source_db.bounds().await.end;
-        let target_inactivity_floor = source_db.inactivity_floor_loc().await;
+        let target_op_count = source_db.bounds().end;
+        let target_inactivity_floor = source_db.inactivity_floor_loc();
 
         let (mmr, journal) = source_db.into_log_components();
 
@@ -1727,9 +1706,9 @@ where
         .unwrap();
 
         // Verify database state
-        assert_eq!(db.bounds().await.end, target_op_count);
-        assert_eq!(db.inactivity_floor_loc().await, target_inactivity_floor);
-        assert_eq!(db.sync_boundary().await, lower_bound);
+        assert_eq!(db.bounds().end, target_op_count);
+        assert_eq!(db.inactivity_floor_loc(), target_inactivity_floor);
+        assert_eq!(db.sync_boundary(), lower_bound);
 
         // Verify the root digest matches the target
         assert_eq!(db.root(), target_hash);
@@ -1752,7 +1731,7 @@ where
         let source_db = H::init_db(context.child("source")).await;
 
         // An empty database has exactly 1 operation (the initial CommitFloor)
-        assert_eq!(source_db.bounds().await.end, Location::new(1));
+        assert_eq!(source_db.bounds().end, Location::new(1));
 
         let target_hash = source_db.root();
         let (mmr, journal) = source_db.into_log_components();
@@ -1772,8 +1751,8 @@ where
         .unwrap();
 
         // Verify database state
-        assert_eq!(synced_db.bounds().await.end, Location::new(1));
-        assert_eq!(synced_db.inactivity_floor_loc().await, Location::new(0));
+        assert_eq!(synced_db.bounds().end, Location::new(1));
+        assert_eq!(synced_db.inactivity_floor_loc(), Location::new(0));
         assert_eq!(synced_db.root(), target_hash);
 
         // Test that we can perform operations on the synced database
@@ -1781,7 +1760,7 @@ where
         synced_db = H::apply_ops(synced_db, ops).await;
 
         // Verify the operations worked
-        assert!(synced_db.bounds().await.end > Location::new(1));
+        assert!(synced_db.bounds().end > Location::new(1));
 
         synced_db.destroy().await.unwrap();
         mmr.destroy().await.unwrap();
@@ -1853,14 +1832,11 @@ where
         let mut target_db = H::init_db(context.child("target")).await;
         let ops = H::create_ops(20);
         target_db = H::apply_ops(target_db, ops).await;
-        target_db
-            .prune(target_db.sync_boundary().await)
-            .await
-            .unwrap();
+        target_db.prune(target_db.sync_boundary()).await.unwrap();
 
         let sync_root = H::sync_target_root(&target_db);
-        let lower_bound = target_db.sync_boundary().await;
-        let upper_bound = target_db.bounds().await.end;
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
 
@@ -1992,11 +1968,11 @@ where
         loop {
             target_db = H::apply_ops(target_db, H::create_ops_seeded(32, seed)).await;
             target_db
-                .prune(target_db.sync_boundary().await)
+                .prune(target_db.sync_boundary())
                 .await
                 .unwrap();
 
-            if target_db.inactivity_floor_loc().await > Location::new(0) {
+            if target_db.inactivity_floor_loc() > Location::new(0) {
                 break;
             }
 
@@ -2007,8 +1983,8 @@ where
         let old_target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(
-                target_db.inactivity_floor_loc().await,
-                target_db.bounds().await.end
+                target_db.inactivity_floor_loc(),
+                target_db.bounds().end
             ),
         };
 
@@ -2016,8 +1992,8 @@ where
         let new_target = Target {
             root: H::sync_target_root(&target_db),
             range: non_empty_range!(
-                target_db.inactivity_floor_loc().await,
-                target_db.bounds().await.end
+                target_db.inactivity_floor_loc(),
+                target_db.bounds().end
             ),
         };
         let verification_root = target_db.root();
@@ -2067,7 +2043,7 @@ where
 
         let _ = release_historical_gap_tx.send(());
 
-        let journal_start = engine.journal().size().await;
+        let journal_start = engine.journal().bounds().end;
         for step_idx in 0..4 {
             let next_step = engine.step();
             pin_mut!(next_step);
@@ -2079,7 +2055,7 @@ where
                         NextStep::Complete(_) => panic!("boundary retry should still be required"),
                     };
                     assert_eq!(
-                        engine.journal().size().await,
+                        engine.journal().bounds().end,
                         journal_start,
                         "replayed fresh boundary responses must not advance the journal"
                     );
@@ -2124,7 +2100,7 @@ mod harnesses {
     use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic::Context, BufferPooler};
     use commonware_utils::test_rng_seeded;
-    use rand::RngCore;
+    use rand::Rng;
 
     // ===== Family-generic op creation helpers =====
     //

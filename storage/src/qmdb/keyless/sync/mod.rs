@@ -1,7 +1,7 @@
 use crate::{
     journal::{
         authenticated,
-        contiguous::{Contiguous as _, Mutable, Reader as _},
+        contiguous::{Contiguous as _, Mutable},
     },
     merkle::{
         full::{self, Merkle},
@@ -83,8 +83,7 @@ where
         .await?;
 
         let (last_commit_loc, inactivity_floor_loc) = {
-            let reader = journal.reader().await;
-            let bounds = reader.bounds();
+            let bounds = journal.bounds();
             let loc = bounds
                 .end
                 .checked_sub(1)
@@ -92,7 +91,7 @@ where
                     bounds.end,
                 )))?;
             let floor =
-                qmdb::find_inactivity_floor_at::<F, _>(&reader, Location::new(bounds.end), |op| {
+                qmdb::find_inactivity_floor_at::<F, _>(&journal, Location::new(bounds.end), |op| {
                     op.has_floor()
                 })
                 .await?;
@@ -105,17 +104,46 @@ where
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
-        let db = Self {
+        let mut db = Self {
             journal,
             root,
             last_commit_loc,
             inactivity_floor_loc,
             metrics,
         };
-        db.update_metrics().await;
+        db.update_metrics();
 
         db.sync().await?;
         Ok(db)
+    }
+
+    async fn local_boundary_nodes(
+        context: Self::Context,
+        config: &Self::Config,
+        target: &sync::Target<F, Self::Digest>,
+        journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
+        if target.range.start() == Location::new(0)
+            || !sync::journal_covers_range(journal.bounds(), &target.range)
+        {
+            return Ok(None);
+        }
+
+        // The inactivity floor is carried by the last commit operation rather than being
+        // the target range's start.
+        let inactivity_floor =
+            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end(), |op| {
+                op.has_floor()
+            })
+            .await?;
+
+        sync::local_boundary_nodes::<F, _, H, S>(
+            context,
+            config.merkle.clone(),
+            target,
+            inactivity_floor,
+        )
+        .await
     }
 
     fn root(&self) -> Self::Digest {
@@ -163,7 +191,7 @@ where
         self.root()
     }
 
-    async fn persist_compact_state(&self) -> Result<(), qmdb::Error<F>> {
+    async fn persist_compact_state(&mut self) -> Result<(), qmdb::Error<F>> {
         self.sync().await
     }
 }

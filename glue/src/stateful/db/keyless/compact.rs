@@ -249,14 +249,14 @@ where
         Self::prune(self, target.leaf_count).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         self.target()
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.leaf_count).await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -308,14 +308,14 @@ where
         Self::prune(self, target.leaf_count).await
     }
 
-    async fn sync_target(&self) -> Self::SyncTarget {
+    fn sync_target(&self) -> Self::SyncTarget {
         self.target()
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.leaf_count).await?;
 
-        let rewound_target = self.sync_target().await;
+        let rewound_target = self.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
@@ -649,7 +649,7 @@ mod tests {
             assert_eq!(guard.root(), expected_root);
             assert_eq!(guard.get_metadata(), Some(U64::new(9)));
 
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard).await;
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard);
             assert_eq!(target.root, guard.root());
             assert_eq!(target.leaf_count, mmr::Location::new(3));
         });
@@ -747,7 +747,7 @@ mod tests {
             source.sync().await.unwrap();
             let first_target = sync::compact::Target {
                 root: source.root(),
-                leaf_count: source.bounds().await.end,
+                leaf_count: source.bounds().end,
             };
 
             let floor = source.inactivity_floor_loc();
@@ -760,7 +760,7 @@ mod tests {
             source.sync().await.unwrap();
             let second_target = sync::compact::Target {
                 root: source.root(),
-                leaf_count: source.bounds().await.end,
+                leaf_count: source.bounds().end,
             };
 
             let (update_tx, update_rx) = mpsc::channel(1);
@@ -870,7 +870,7 @@ mod tests {
                     .merkleize(&db, Some(U64::new(11)), floor);
             db.apply_batch(batch).unwrap();
             db.sync().await.unwrap();
-            let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db).await;
+            let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
 
             // Commit two more ranges so the rewind below spans multiple commits.
             for i in [2u64, 3] {
@@ -883,14 +883,14 @@ mod tests {
                 db.apply_batch(batch).unwrap();
                 db.sync().await.unwrap();
             }
-            let third_target = <FixedDb as ManagedDb<_>>::sync_target(&db).await;
+            let third_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
             assert_ne!(third_target, first_target);
 
             <FixedDb as ManagedDb<_>>::rewind_to_target(&mut db, first_target.clone())
                 .await
                 .unwrap();
 
-            let rewound_target = <FixedDb as ManagedDb<_>>::sync_target(&db).await;
+            let rewound_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
             assert_eq!(rewound_target, first_target);
             assert_eq!(db.get_metadata(), Some(U64::new(11)));
         });
@@ -915,7 +915,7 @@ mod tests {
                 );
                 db.apply_batch(batch).unwrap();
                 db.sync().await.unwrap();
-                targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db).await);
+                targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));
             }
 
             assert_ne!(targets[0], targets[1]);
@@ -934,10 +934,7 @@ mod tests {
             <FixedDb as ManagedDb<_>>::rewind_to_target(&mut db, targets[1].clone())
                 .await
                 .unwrap();
-            assert_eq!(
-                <FixedDb as ManagedDb<_>>::sync_target(&db).await,
-                targets[1]
-            );
+            assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), targets[1]);
         });
     }
 }

@@ -15,7 +15,7 @@ use core::{
     hash::Hash,
     ops::Deref,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
 use zeroize::Zeroizing;
@@ -59,7 +59,7 @@ impl PrivateKey {
 }
 
 impl Random for PrivateKey {
-    fn random(rng: impl CryptoRngCore) -> Self {
+    fn random(rng: impl CryptoRng) -> Self {
         let key = ed_core::SigningKey::new(rng);
         Self {
             key: Secret::new(key),
@@ -325,9 +325,9 @@ pub struct Batch {
 impl BatchVerifier for Batch {
     type PublicKey = PublicKey;
 
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
-            verifier: ed_core::batch::Verifier::new(),
+            verifier: ed_core::batch::Verifier::new(capacity),
         }
     }
 
@@ -341,7 +341,7 @@ impl BatchVerifier for Batch {
         self.add_inner(Some(namespace), message, public_key, signature)
     }
 
-    fn verify<R: CryptoRngCore>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
+    fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
         self.verifier.verify(rng, strategy).is_ok()
     }
 }
@@ -355,14 +355,12 @@ impl Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let payload = namespace
-            .map(|ns| Cow::Owned(union_unique(ns, message)))
-            .unwrap_or_else(|| Cow::Borrowed(message));
-        self.verifier.queue((
+        self.verifier.queue(
             public_key.key,
             ed_core::Signature::from(signature.raw),
-            &payload,
-        ));
+            namespace,
+            message,
+        );
         true
     }
 }
@@ -525,7 +523,7 @@ mod tests {
     #[should_panic]
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
-        let private_key_2 = PrivateKey::random(&mut test_rng());
+        let private_key_2 = PrivateKey::random(test_rng());
         let bad_signature = private_key_2.sign_inner(None, &message);
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
@@ -711,7 +709,7 @@ mod tests {
     fn batch_verify_valid() {
         let v1 = vector_1();
         let v2 = vector_2();
-        let mut batch = ed25519::Batch::new();
+        let mut batch = ed25519::Batch::new(2);
         assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
         assert!(batch.add_inner(None, &v2.2, &v2.1, &v2.3));
         assert!(batch.verify(&mut test_rng(), &Sequential));
@@ -724,7 +722,7 @@ mod tests {
         let mut bad_signature = v2.3.to_vec();
         bad_signature[3] = 0xff;
 
-        let mut batch = Batch::new();
+        let mut batch = Batch::new(2);
         assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
         assert!(batch.add_inner(
             None,
@@ -737,7 +735,18 @@ mod tests {
 
     #[test]
     fn batch_verify_empty() {
-        let batch = Batch::new();
+        let batch = Batch::new(0);
+        assert!(batch.verify(&mut test_rng(), &Sequential));
+    }
+
+    #[test]
+    fn batch_verify_capacity_hint() {
+        let v1 = vector_1();
+        let v2 = vector_2();
+        // The capacity is a hint: adding more items must still verify.
+        let mut batch = Batch::new(1);
+        assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
+        assert!(batch.add_inner(None, &v2.2, &v2.1, &v2.3));
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
@@ -778,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_private_key_redacted() {
-        let private_key = PrivateKey::random(&mut test_rng());
+        let private_key = PrivateKey::random(test_rng());
         let debug = format!("{:?}", private_key);
         let display = format!("{}", private_key);
         assert!(debug.contains("REDACTED"));
@@ -787,7 +796,7 @@ mod tests {
 
     #[test]
     fn test_from_private_key_to_public_key() {
-        let private_key = PrivateKey::random(&mut test_rng());
+        let private_key = PrivateKey::random(test_rng());
         assert_eq!(private_key.public_key(), PublicKey::from(private_key));
     }
 
