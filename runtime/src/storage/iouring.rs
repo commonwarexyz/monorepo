@@ -1057,7 +1057,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
-            super::DirSync::new(storage_directory.clone(), storage_directory.clone()),
+            crate::storage::DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
 
         // Read and write should fail through their wrapper-specific error enums
@@ -1117,7 +1117,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
-            super::DirSync::new(storage_directory.clone(), storage_directory.clone()),
+            crate::storage::DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
         // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
         let err = blob
@@ -1157,7 +1157,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
-            super::DirSync::new(storage_directory.clone(), storage_directory.clone()),
+            crate::storage::DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
         let err = blob
             .start_sync()
@@ -1201,7 +1201,7 @@ mod tests {
             submitter,
             pool,
             Header::PRELUDE_SIZE_U64,
-            super::DirSync::new(storage_directory.clone(), storage_directory.clone()),
+            crate::storage::DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
         let err = blob
             .resize(0)
@@ -1240,7 +1240,7 @@ mod tests {
             submitter.clone(),
             pool,
             Header::PRELUDE_SIZE_U64,
-            super::DirSync::new(storage_directory.clone(), storage_directory.clone()),
+            crate::storage::DirSync::new(storage_directory.clone(), storage_directory.clone()),
         );
         // The request should reach the kernel and come back as a wrapped sync failure.
         let err = blob
