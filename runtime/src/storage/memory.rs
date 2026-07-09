@@ -343,7 +343,10 @@ mod tests {
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"test".to_vec()).unwrap();
             assert_eq!(raw_content.len(), data_offset + data.len());
-            assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Header::MAGIC);
+            assert_eq!(
+                &raw_content[..Header::MAGIC_LENGTH],
+                &BlobHeaderLayout::V1.magic()
+            );
             assert_eq!(&raw_content[data_offset..], data);
         }
 
@@ -364,7 +367,10 @@ mod tests {
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"v0".to_vec()).unwrap();
             assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + data.len());
-            assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Header::MAGIC);
+            assert_eq!(
+                &raw_content[..Header::MAGIC_LENGTH],
+                &BlobHeaderLayout::V0.magic()
+            );
             assert_eq!(&raw_content[Header::PRELUDE_SIZE..], data);
         }
 

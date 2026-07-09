@@ -102,11 +102,26 @@ stability_scope!(BETA {
             }
         }
 
-        /// The layout recorded by a header with the given runtime version, if supported.
-        pub(crate) const fn from_runtime_version(version: u16) -> Option<Self> {
-            match version {
-                0 => Some(Self::V0),
-                1 => Some(Self::V1),
+        /// The magic bytes recorded in a header of this layout: a fixed 3-byte brand (`CWI`,
+        /// "is this file ours?") followed by a 1-byte layout tag ("which container layout?").
+        ///
+        /// The layout tag lives in the magic rather than the runtime version field because V0
+        /// stamped that field as zero, and zeros are exactly what a torn header write leaves
+        /// behind. Tags are nonzero and distinct, so no layout's magic can be turned into
+        /// another's by zeroing bytes, and a torn write can never be misread as a complete
+        /// header of a different layout.
+        pub(crate) const fn magic(self) -> [u8; 4] {
+            match self {
+                Self::V0 => *b"CWIC", // Commonware Is CWIC
+                Self::V1 => *b"CWI1",
+            }
+        }
+
+        /// The layout recorded by a header with the given magic bytes, if supported.
+        pub(crate) const fn from_magic(magic: &[u8; 4]) -> Option<Self> {
+            match magic {
+                b"CWIC" => Some(Self::V0),
+                b"CWI1" => Some(Self::V1),
                 _ => None,
             }
         }

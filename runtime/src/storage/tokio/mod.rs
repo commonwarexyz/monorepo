@@ -384,7 +384,10 @@ mod tests {
 
         // Verify raw file layout
         let raw_content = std::fs::read(&file_path).unwrap();
-        assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Header::MAGIC);
+        assert_eq!(
+            &raw_content[..Header::MAGIC_LENGTH],
+            &BlobHeaderLayout::V1.magic()
+        );
         // Header version (bytes 4-5) and App version (bytes 6-7)
         assert_eq!(
             &raw_content[Header::MAGIC_LENGTH..Header::MAGIC_LENGTH + Header::VERSION_LENGTH],
