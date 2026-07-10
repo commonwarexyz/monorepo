@@ -154,7 +154,7 @@ impl SyncState {
                 self.status = Status::Clean;
                 Ok(())
             }
-            Status::Pending(_) => unreachable!("pending sync waited above"),
+            Status::Pending(_) => unreachable!("pending sync was waited on first"),
         }
     }
 
@@ -967,7 +967,7 @@ mod tests {
             assert_eq!(reader.position(), 10);
             assert_eq!(reader.buffer_remaining(), 0);
 
-            // Refill should happen only now (at exhaustion), not at seek/read above.
+            // Refill should happen only now (at exhaustion), not at the earlier seek/read.
             let third = reader.read(1).await.unwrap();
             assert_eq!(third.coalesce().as_ref(), b"K");
             assert_eq!(reader.position(), 11);
@@ -1403,7 +1403,7 @@ mod tests {
     }
 
     // A grow after a canceled shrink must not resurrect the bytes the shrink removed:
-    // everything above the shrunken size reads as zeros.
+    // everything after the shrunken size reads as zeros.
     #[test_traced]
     fn test_write_grow_after_canceled_shrink_zeros() {
         let executor = deterministic::Runner::default();

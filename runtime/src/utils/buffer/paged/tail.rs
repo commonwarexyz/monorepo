@@ -76,7 +76,7 @@ impl Tail {
         self.tip.slice(range)
     }
 
-    /// Append `buf`, returning the logical offset of its first byte.
+    /// Append borrowed bytes and return their first logical offset.
     pub(super) fn append(&mut self, buf: &[u8]) -> u64 {
         let offset = self.tip.size();
         self.tip.append(buf);
@@ -153,10 +153,10 @@ impl Tail {
     }
 }
 
-/// A borrowed, read-only in-memory tail: the authoritative bytes at `[start, size)`.
+/// A borrowed, read-only in-memory tail.
 #[derive(Clone, Copy)]
 pub(super) struct View<'a> {
-    /// First byte served by the tail; bytes below it come from the page cache or blob.
+    /// First byte served by the tail; earlier bytes come from the page cache or blob.
     pub(super) start: u64,
     /// Finished page-aligned bytes.
     pub(super) full_pages: &'a [IoBuf],
@@ -195,8 +195,9 @@ impl View<'_> {
         }
     }
 
-    /// Copy any tail overlap into `buf`, returning the remaining prefix length that must be
-    /// served from the cache or blob.
+    /// Copy the portion of `buf` covered by the tail.
+    ///
+    /// Return the length that still needs a cache or blob read.
     pub(super) fn copy_overlap(&self, buf: &mut [u8], offset: u64) -> usize {
         let tail_start = self.start.max(offset);
         let prefix_len = (tail_start - offset) as usize;

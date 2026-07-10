@@ -46,7 +46,7 @@ struct SealedInner<B: Blob> {
     size: u64,
 
     /// Logical bytes of the partial last page, if the blob ends in one. Bytes at offsets
-    /// `[size - partial_page.len(), size)` come from here; bytes below come from full pages on the
+    /// `[size - partial_page.len(), size)` come from here; earlier bytes come from full pages on the
     /// blob (via the page cache).
     partial_page: Option<IoBuf>,
 

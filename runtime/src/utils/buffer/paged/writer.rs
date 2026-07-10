@@ -324,7 +324,7 @@ impl<B: Blob> Writer<B> {
         let protected_end = protected_start + CHECKSUM_SLOT_SIZE;
 
         // Split the prepared bytes into the two segments that may need writing: `before` is
-        // the first page's new bytes ([prefix_len, protected_start): everything below
+        // the first page's new bytes ([prefix_len, protected_start): everything before
         // `prefix_len` is already committed), and `after` is everything past the slot.
         let mut before = physical_pages.split_to(protected_start);
         before.advance(prefix_len);
@@ -376,7 +376,7 @@ impl<B: Blob> Writer<B> {
         self.sync_state.settle(&self.blob).await?;
 
         // A canceled shrink leaves the tip page's on-disk record in an unknown slot state;
-        // re-read it so the writes below go around the true authoritative slot.
+        // re-read it so following writes avoid the true authoritative slot.
         self.verify_partial_page().await?;
 
         // Prepare physical pages for the tail. The old partial-page record determines how the
@@ -632,7 +632,7 @@ impl<B: Blob> Writer<B> {
     ) -> Result<Checksum, Error> {
         // Recovery chooses the valid slot with the larger length. While shrinking, the new
         // checksum must be made durable without becoming authoritative until the old longer slot
-        // can be disabled. The sequence below therefore lets recovery observe either the old page
+        // can be disabled. The following sequence lets recovery observe either the old page
         // or the new shorter page, but not a footer where both slots were damaged by one torn write.
         let physical_page_size = logical_page_size
             .checked_add(CHECKSUM_SIZE)
@@ -835,9 +835,9 @@ impl<B: Blob> Writer<B> {
         };
 
         // Evict cached pages at or beyond the new full-page boundary. The page at
-        // `full_pages` (if partial) is now owned by the tip buffer, and anything above is
+        // `full_pages` (if partial) is now owned by the tip buffer, and anything after it is
         // beyond the new size. Leaving their pre-resize contents in the cache
-        // lets `try_read_sync_into` (whose reads below the tip boundary come straight from
+        // lets `try_read_sync_into` (whose reads before the tip boundary come straight from
         // the page cache) observe stale bytes once
         // the tip is repopulated.
         self.cache_ref.invalidate_from(self.id, full_pages);
@@ -847,7 +847,7 @@ impl<B: Blob> Writer<B> {
         // updating after would leave the writer claiming pages the blob no longer holds if the
         // truncate is dropped. Updating first is safe: a dropped truncate then leaves the
         // writer claiming less than the blob holds, and later appends overwrite the excess.
-        // The sync above wrote out any partial tip, so a boundary shrink always reduces the
+        // The earlier sync wrote out any partial tip, so a boundary shrink always reduces the
         // physical page count and the truncate is never a no-op.
         if partial_bytes == 0 {
             self.partial_page_state = PartialPage::None;
@@ -856,7 +856,7 @@ impl<B: Blob> Writer<B> {
         }
 
         // Shrink into a partial page. Read the target page now: its retained prefix becomes
-        // the new tip, and its CRC record seeds the rewrite below.
+        // the new tip, and its CRC record seeds the following rewrite.
         let (page_data, old_crc) =
             super::get_page_with_checksum_from_blob(&self.blob, full_pages, logical_page_size)
                 .await?;
@@ -868,8 +868,8 @@ impl<B: Blob> Writer<B> {
 
         // Publish a reduced claim before any destructive step: the target page's full
         // contents become the tip (so reads of it are served from memory) and the writer
-        // claims nothing above it. If the truncate below is dropped, the writer
-        // under-claims and never claims deleted pages. If a CRC slot write below is dropped,
+        // claims nothing after it. If the following truncate is dropped, the writer
+        // under-claims and never claims deleted pages. If a following CRC slot write is dropped,
         // the record's on-disk slot state is unknown, so mark it unverified: the next write
         // to the page re-reads the record first (see [Self::verify_partial_page]) and writes
         // around whichever slot is actually authoritative.
@@ -877,7 +877,7 @@ impl<B: Blob> Writer<B> {
         self.tail.restart_at(tail_offset, page_data.as_ref());
 
         // If the target stays within the current tip page, the physical page count is
-        // unchanged and no truncate is needed. Otherwise truncate every physical page above
+        // unchanged and no truncate is needed. Otherwise truncate every physical page after
         // the target page.
         if new_physical_size != current_physical_size {
             self.sync_state
@@ -1011,7 +1011,7 @@ mod tests {
             writer.sync().await.unwrap();
 
             // Cancel a shrink parked before the truncate reaches the blob. The writer
-            // published the reduced claim: the target page and below.
+            // published the reduced claim: the target page and earlier pages.
             gate.cancel(writer.resize(page as u64 + 30)).await;
             assert_eq!(writer.size(), 2 * page as u64);
 
@@ -1929,7 +1929,7 @@ mod tests {
             let target = page as u64 + 30;
             gate.cancel(writer.resize(target)).await;
 
-            // The writer claims only the target page and below, all of it readable: page 0
+            // The writer claims only the target page and earlier pages, all readable: page 0
             // from the blob and page 1 from the in-memory tip.
             assert!(writer.partial_page_state.is_unverified());
             assert_eq!(writer.current_page(), 1);
@@ -2326,7 +2326,7 @@ mod tests {
             writer.append(&data);
             writer.sync().await.unwrap();
 
-            // Shrink into the last full page. As above, skip two slot writes so the gate
+            // Shrink into the last full page. As before, skip two slot writes so the gate
             // parks at the applied commit point, then cancel.
             gate.set_skip(2);
             gate.cancel(writer.resize((2 * page + 30) as u64)).await;
@@ -2604,7 +2604,7 @@ mod tests {
             drop(writer);
 
             // The page still validates via the surviving slot: size is the transferred
-            // target, never a truncation below the committed pages.
+            // target, never a truncation inside the committed pages.
             let (blob, blob_size) = context
                 .open("test_partition", b"shrink_heal_torn")
                 .await
@@ -4786,7 +4786,7 @@ mod tests {
     #[test]
     fn test_resize_invalidates_cache() {
         // Regression: shrinking a blob across a page boundary must drop cached pages for the
-        // truncated region. Before the fix, `try_read_sync_into` (whose reads below the tip
+        // truncated region. Before the fix, `try_read_sync_into` (whose reads before the tip
         // boundary come straight from the page cache)
         // would observe pre-resize bytes at offsets later reclaimed by new appends.
         let executor = deterministic::Runner::default();
@@ -5045,7 +5045,7 @@ mod tests {
                 .unwrap();
 
             // Create a partial page whose authoritative CRC is in the first slot. The interrupted
-            // tests below exercise the opposite slot orientation.
+            // later tests exercise the opposite slot orientation.
             append.append(&data);
             append.sync().await.unwrap();
 
@@ -5352,7 +5352,7 @@ mod tests {
                 .await
                 .unwrap();
             // Put the old authoritative CRC in slot 1, so the shorter CRC will be staged in slot
-            // 0. The old length is above 255, so a one-byte tear changes the decoded length.
+            // 0. The old length exceeds 255, so a one-byte tear changes the decoded length.
             append.append(&data[..255]);
             append.sync().await.unwrap();
             append.append(&data[255..]);
@@ -5723,7 +5723,7 @@ mod tests {
             writer.sync().await.unwrap();
             assert_eq!(writer.size(), (page_size * 2) as u64);
 
-            // Shrink below the last observed size.
+            // Shrink to a smaller size.
             let new_size = (page_size / 2) as u64;
             writer.resize(new_size).await.unwrap();
 

@@ -2,7 +2,7 @@
 //!
 //! [`Writer`](super::Writer) and [`Sealed`](super::Sealed) read the same way: logical bytes in
 //! `[tail.start, size)` come from an in-memory tail view (the writer's tail, or the sealed
-//! blob's partial last page), and bytes below come from the page cache, falling back to a blob
+//! blob's partial last page), and bytes before the tail come from the page cache, falling back to a blob
 //! read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in exactly
 //! one place.
 
@@ -13,9 +13,9 @@ use std::num::NonZeroUsize;
 
 /// A borrowed view over a paged blob.
 pub struct View<'a, B: Blob> {
-    /// Underlying blob, used for bytes below the tail not resident in the cache.
+    /// Underlying blob, used for bytes before the tail not resident in the cache.
     pub(super) blob: &'a B,
-    /// Page cache used for bytes below the tail.
+    /// Page cache used for bytes before the tail.
     pub(super) cache_ref: &'a CacheRef,
     /// Page-cache id of the originating blob.
     pub(super) id: u64,
@@ -34,12 +34,9 @@ impl<B: Blob> Clone for View<'_, B> {
 impl<B: Blob> Copy for View<'_, B> {}
 
 impl<B: Blob> View<'_, B> {
-    /// Split validated read ranges into tail copies (performed inline) and ranges needing a
-    /// cache or blob read (returned with their slots).
+    /// Copy each range's tail portion into `buf`.
     ///
-    /// `buf` holds one slot per range, back to back. Ranges entirely within the tail are
-    /// copied from memory; a range straddling the boundary is copied above it and returned
-    /// below it.
+    /// Return the earlier portions that need a cache or blob read.
     fn split_read_ranges<'b>(
         &self,
         mut buf: &'b mut [u8],
@@ -54,7 +51,7 @@ impl<B: Blob> View<'_, B> {
             }
             let end = offset + len as u64;
             if end <= self.tail.start {
-                // Entirely below the tail, so this needs a cache/blob read.
+                // Entirely before the tail, so this needs a cache/blob read.
                 cache_ranges.push((slot, offset));
             } else if offset >= self.tail.start {
                 // Entirely within the tail.
@@ -89,7 +86,7 @@ impl<B: Blob> View<'_, B> {
             return self.cache_ref.read_cached(self.id, buf, offset) == buf.len();
         }
 
-        // Copy the suffix overlapping the tail, then serve any prefix below it from the cache.
+        // Copy the suffix overlapping the tail, then serve any earlier prefix from the cache.
         let dst_start = self.tail.copy_overlap(buf, offset);
 
         if dst_start == 0 {
@@ -110,7 +107,7 @@ impl<B: Blob> View<'_, B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Copy any suffix from the tail, leaving the prefix below it to be served from the
+        // Copy any suffix from the tail, leaving the earlier prefix to be served from the
         // page cache or blob.
         let remaining = if end_offset <= self.tail.start {
             buf.len()
@@ -143,7 +140,7 @@ impl<B: Blob> View<'_, B> {
 
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        // SAFETY: read_into below initializes all `len` bytes.
+        // SAFETY: read_into afterward initializes all `len` bytes.
         let mut buf = unsafe { self.cache_ref.pool().alloc_len(len) };
         self.read_into(buf.as_mut(), offset).await?;
         Ok(buf.into())
@@ -168,7 +165,7 @@ impl<B: Blob> View<'_, B> {
         if available == 0 {
             return Err(Error::BlobInsufficientLength);
         }
-        // SAFETY: read_into below fills all `available` bytes.
+        // SAFETY: read_into afterward fills all `available` bytes.
         unsafe { bufs.set_len(available) };
         self.read_into(bufs.as_mut(), offset).await?;
         Ok((bufs, available))

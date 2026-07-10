@@ -186,8 +186,8 @@ impl<B: Blob> Write<B> {
 
             // Chunk could not be merged (exceeds buffer capacity or outside its range), so
             // write directly. Note that we may end up writing an intersecting range twice:
-            // once when the buffer is flushed above, then again when we write the chunk
-            // below. Removing this inefficiency may not be worth the additional complexity.
+            // once when the buffer is flushed first, then again when we write the chunk.
+            // Removing this inefficiency may not be worth the additional complexity.
             let direct = bufs.split_to(chunk_len);
             self.sync_state
                 .write_at(&self.blob, current_offset, direct)
@@ -204,8 +204,8 @@ impl<B: Blob> Write<B> {
 
     /// Resize the logical blob to `len`.
     ///
-    /// If buffered data exists and the resize does not shrink below it, buffered data is flushed
-    /// before resizing the underlying blob.
+    /// If a resize retains buffered data, it flushes that data before resizing the underlying
+    /// blob.
     ///
     /// A dropped resize may still be applied to the blob by a later operation. [Self::size]
     /// reflects a grow only once it returns `Ok`, and a shrink as soon as it is issued.

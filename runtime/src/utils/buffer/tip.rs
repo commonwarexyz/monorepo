@@ -109,7 +109,7 @@ impl Buffer {
         self.offset += n as u64;
     }
 
-    /// Shrinks the logical blob size ([Self::size]) to `len`. Buffered bytes below `len` are
+    /// Shrinks the logical blob size ([Self::size]) to `len`. Buffered bytes before `len` are
     /// kept; the rest are discarded.
     ///
     /// # Panics
@@ -123,7 +123,7 @@ impl Buffer {
             self.len = 0;
             self.offset = len;
         } else {
-            // Keep only the buffered bytes below `len`.
+            // Keep only the buffered bytes before `len`.
             self.len = (len - self.offset) as usize;
         }
     }
@@ -266,7 +266,7 @@ mod tests {
         buffer.append(&[4, 5, 6]);
         assert_eq!(buffer.size(), 63);
 
-        // Truncate into the buffered bytes: the prefix below the new size survives.
+        // Truncate into the buffered bytes: the prefix before the new size survives.
         buffer.truncate(61);
         assert_eq!(buffer.size(), 61);
         assert_eq!(buffer.as_ref(), &[4]);
@@ -275,7 +275,7 @@ mod tests {
 
         buffer.append(&[7, 8, 9]);
 
-        // Truncate below the buffer's offset of 61: all buffered bytes are dropped and the
+        // Truncate before the buffer's offset of 61: all buffered bytes are dropped and the
         // empty buffer restarts at the new size.
         buffer.truncate(59);
         assert_eq!(buffer.size(), 59);
