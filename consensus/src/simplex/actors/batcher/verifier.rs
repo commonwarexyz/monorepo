@@ -7,9 +7,10 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Verification, Digest};
 use commonware_parallel::Strategy;
+use commonware_utils::ordered::Set;
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
-use std::sync::Arc;
+use std::{mem, sync::Arc};
 use tracing::Span;
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
@@ -23,8 +24,8 @@ use tracing::Span;
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
 ///
-/// Once polled, async verification removes the pending batch from this verifier. Do not cancel
-/// an in-flight verification unless the verifier will also be discarded.
+/// Once polled, async verification moves the pending batch and accumulated verified votes into
+/// the worker. Do not cancel an in-flight verification unless the verifier will also be discarded.
 ///
 /// [ed25519]: crate::simplex::scheme::ed25519
 /// [bls12381_multisig]: crate::simplex::scheme::bls12381_multisig
@@ -47,18 +48,18 @@ pub struct Verifier<S: Scheme<D>, D: Digest> {
 
     /// Pending notarize votes waiting to be verified.
     notarizes: Vec<Notarize<S, D>>,
-    /// Count of already-verified notarize votes.
-    notarizes_verified: usize,
+    /// Verified notarize votes available for certificate recovery.
+    verified_notarizes: Vec<Notarize<S, D>>,
 
     /// Pending nullify votes waiting to be verified.
     nullifies: Vec<Nullify<S>>,
-    /// Count of already-verified nullify votes.
-    nullifies_verified: usize,
+    /// Verified nullify votes available for certificate recovery.
+    verified_nullifies: Vec<Nullify<S>>,
 
     /// Pending finalize votes waiting to be verified.
     finalizes: Vec<Finalize<S, D>>,
-    /// Count of already-verified finalize votes.
-    finalizes_verified: usize,
+    /// Verified finalize votes available for certificate recovery.
+    verified_finalizes: Vec<Finalize<S, D>>,
 }
 
 impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
@@ -79,14 +80,19 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             leader_proposal: None,
 
             notarizes: Vec::new(),
-            notarizes_verified: 0,
+            verified_notarizes: Vec::new(),
 
             nullifies: Vec::new(),
-            nullifies_verified: 0,
+            verified_nullifies: Vec::new(),
 
             finalizes: Vec::new(),
-            finalizes_verified: 0,
+            verified_finalizes: Vec::new(),
         }
+    }
+
+    /// Returns the ordered participant set.
+    pub(super) fn participants(&self) -> &Set<S::PublicKey> {
+        self.scheme.participants()
     }
 
     /// Returns the shared signing scheme.
@@ -94,9 +100,22 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         Arc::clone(&self.scheme)
     }
 
-    /// Returns the number of verified votes required to assemble a certificate.
-    pub(super) const fn quorum(&self) -> usize {
-        self.quorum
+    /// Takes verified notarize votes once they reach quorum.
+    pub(super) fn take_verified_notarizes(&mut self) -> Option<Vec<Notarize<S, D>>> {
+        (self.verified_notarizes.len() >= self.quorum)
+            .then(|| mem::take(&mut self.verified_notarizes))
+    }
+
+    /// Takes verified nullify votes once they reach quorum.
+    pub(super) fn take_verified_nullifies(&mut self) -> Option<Vec<Nullify<S>>> {
+        (self.verified_nullifies.len() >= self.quorum)
+            .then(|| mem::take(&mut self.verified_nullifies))
+    }
+
+    /// Takes verified finalize votes once they reach quorum.
+    pub(super) fn take_verified_finalizes(&mut self) -> Option<Vec<Finalize<S, D>>> {
+        (self.verified_finalizes.len() >= self.quorum)
+            .then(|| mem::take(&mut self.verified_finalizes))
     }
 
     /// Sets the leader's proposal and filters out any pending votes for other proposals.
@@ -106,7 +125,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// to a valid certificate.
     fn set_leader_proposal(&mut self, proposal: Proposal<D>) {
         self.notarizes.retain(|n| n.proposal == proposal);
+        self.verified_notarizes.retain(|n| n.proposal == proposal);
         self.finalizes.retain(|f| f.proposal == proposal);
+        self.verified_finalizes.retain(|f| f.proposal == proposal);
         self.leader_proposal = Some(proposal);
     }
 
@@ -119,9 +140,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
     /// Adds a [Vote] message to the batch for later verification.
     ///
-    /// If the message has already been verified (e.g., we built it), it increments
-    /// the count of verified messages directly. Otherwise, it adds the message to
-    /// the appropriate pending queue.
+    /// If the message has already been verified (e.g., we built it), it is stored
+    /// directly for certificate recovery. Otherwise, it is added to the appropriate
+    /// pending queue.
     ///
     /// If a leader is known and the message is a [Vote::Notarize] from that leader,
     /// this method may trigger `set_leader_proposal`.
@@ -153,7 +174,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
                 // If we've made it this far, add the notarize
                 if verified {
-                    self.notarizes_verified += 1;
+                    self.verified_notarizes.push(notarize);
                 } else {
                     self.notarizes.push(notarize);
                 }
@@ -161,7 +182,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             }
             Vote::Nullify(nullify) => {
                 if verified {
-                    self.nullifies_verified += 1;
+                    self.verified_nullifies.push(nullify);
                 } else {
                     self.nullifies.push(nullify);
                 }
@@ -177,7 +198,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
                 // If we've made it this far, add the finalize
                 if verified {
-                    self.finalizes_verified += 1;
+                    self.verified_finalizes.push(finalize);
                 } else {
                     self.finalizes.push(finalize);
                 }
@@ -196,7 +217,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         self.leader = Some(leader);
 
         // If we already have the leader's vote, set the leader proposal
-        let Some(notarize) = self.notarizes.iter().find(|n| n.signer() == leader) else {
+        let Some(notarize) = self
+            .notarizes
+            .iter()
+            .chain(&self.verified_notarizes)
+            .find(|n| n.signer() == leader)
+        else {
             return;
         };
         self.set_leader_proposal(notarize.proposal.clone());
@@ -214,25 +240,26 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// # Returns
     ///
-    /// A tuple containing:
-    /// * A `Vec<Vote<S, D>>` of successfully verified [Vote::Notarize] messages.
-    /// * A `Vec<Participant>` of signer indices for whom verification failed.
+    /// A tuple containing the number of votes processed and the signer indices for whom
+    /// verification failed.
     pub async fn verify_notarizes<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
-    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        let notarizes = std::mem::take(&mut self.notarizes);
+    ) -> (usize, Vec<Participant>) {
+        let notarizes = mem::take(&mut self.notarizes);
 
         // Early return if there are no notarizes to verify
         if notarizes.is_empty() {
-            return (vec![], vec![]);
+            return (0, vec![]);
         }
+        let batch = notarizes.len();
+        let mut verified_notarizes = mem::take(&mut self.verified_notarizes);
 
         let scheme = Arc::clone(&self.scheme);
         let mut rng = StdRng::from_rng(rng);
         let span = Span::current();
-        let (verified, invalid) = strategy
+        let (verified_notarizes, invalid) = strategy
             .spawn(move |strategy| {
                 let _guard = span.entered();
                 let (proposals, attestations): (Vec<_>, Vec<_>) = notarizes
@@ -248,25 +275,19 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                     &strategy,
                 );
 
-                (
-                    verified
-                        .into_iter()
-                        .zip(proposals)
-                        .map(|(attestation, proposal)| {
-                            Vote::Notarize(Notarize {
-                                proposal,
-                                attestation,
-                            })
-                        })
-                        .collect::<Vec<_>>(),
-                    invalid,
-                )
+                verified_notarizes.extend(verified.into_iter().zip(proposals).map(
+                    |(attestation, proposal)| Notarize {
+                        proposal,
+                        attestation,
+                    },
+                ));
+                (verified_notarizes, invalid)
             })
             .await;
 
-        self.notarizes_verified += verified.len();
+        self.verified_notarizes = verified_notarizes;
 
-        (verified, invalid)
+        (batch, invalid)
     }
 
     /// Checks if there are [Vote::Notarize] messages ready for batch verification.
@@ -290,7 +311,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
 
         // If we have already verified enough messages, there is nothing more to do.
-        if self.notarizes_verified >= self.quorum {
+        if self.verified_notarizes.len() >= self.quorum {
             return false;
         }
 
@@ -300,7 +321,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
 
         // If we don't have enough to reach the quorum, there is nothing to do yet.
-        if self.notarizes_verified + self.notarizes.len() < self.quorum {
+        if self.verified_notarizes.len() + self.notarizes.len() < self.quorum {
             return false;
         }
 
@@ -319,27 +340,28 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// # Returns
     ///
-    /// A tuple containing:
-    /// * A `Vec<Vote<S, D>>` of successfully verified [Vote::Nullify] messages.
-    /// * A `Vec<Participant>` of signer indices for whom verification failed.
+    /// A tuple containing the number of votes processed and the signer indices for whom
+    /// verification failed.
     pub async fn verify_nullifies<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
-    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        let nullifies = std::mem::take(&mut self.nullifies);
+    ) -> (usize, Vec<Participant>) {
+        let nullifies = mem::take(&mut self.nullifies);
 
         // Early return if there are no nullifies to verify
         if nullifies.is_empty() {
-            return (vec![], vec![]);
+            return (0, vec![]);
         }
+        let batch = nullifies.len();
+        let mut verified_nullifies = mem::take(&mut self.verified_nullifies);
 
         let round = nullifies[0].round;
 
         let scheme = Arc::clone(&self.scheme);
         let mut rng = StdRng::from_rng(rng);
         let span = Span::current();
-        let (verified, invalid) = strategy
+        let (verified_nullifies, invalid) = strategy
             .spawn(move |strategy| {
                 let _guard = span.entered();
                 let Verification { verified, invalid } = scheme.verify_attestations::<_, D, _>(
@@ -349,19 +371,18 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                     &strategy,
                 );
 
-                (
+                verified_nullifies.extend(
                     verified
                         .into_iter()
-                        .map(|attestation| Vote::Nullify(Nullify { round, attestation }))
-                        .collect::<Vec<_>>(),
-                    invalid,
-                )
+                        .map(|attestation| Nullify { round, attestation }),
+                );
+                (verified_nullifies, invalid)
             })
             .await;
 
-        self.nullifies_verified += verified.len();
+        self.verified_nullifies = verified_nullifies;
 
-        (verified, invalid)
+        (batch, invalid)
     }
 
     /// Checks if there are [Vote::Nullify] messages ready for batch verification.
@@ -378,7 +399,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
 
         // If we have already verified enough messages, there is nothing more to do.
-        if self.nullifies_verified >= self.quorum {
+        if self.verified_nullifies.len() >= self.quorum {
             return false;
         }
 
@@ -388,7 +409,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
 
         // If we don't have enough to reach the quorum, there is nothing to do yet.
-        if self.nullifies_verified + self.nullifies.len() < self.quorum {
+        if self.verified_nullifies.len() + self.nullifies.len() < self.quorum {
             return false;
         }
 
@@ -407,25 +428,26 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// # Returns
     ///
-    /// A tuple containing:
-    /// * A `Vec<Vote<S, D>>` of successfully verified [Vote::Finalize] messages.
-    /// * A `Vec<Participant>` of signer indices for whom verification failed.
+    /// A tuple containing the number of votes processed and the signer indices for whom
+    /// verification failed.
     pub async fn verify_finalizes<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
-    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        let finalizes = std::mem::take(&mut self.finalizes);
+    ) -> (usize, Vec<Participant>) {
+        let finalizes = mem::take(&mut self.finalizes);
 
         // Early return if there are no finalizes to verify
         if finalizes.is_empty() {
-            return (vec![], vec![]);
+            return (0, vec![]);
         }
+        let batch = finalizes.len();
+        let mut verified_finalizes = mem::take(&mut self.verified_finalizes);
 
         let scheme = Arc::clone(&self.scheme);
         let mut rng = StdRng::from_rng(rng);
         let span = Span::current();
-        let (verified, invalid) = strategy
+        let (verified_finalizes, invalid) = strategy
             .spawn(move |strategy| {
                 let _guard = span.entered();
                 let (proposals, attestations): (Vec<_>, Vec<_>) = finalizes
@@ -441,25 +463,19 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                     &strategy,
                 );
 
-                (
-                    verified
-                        .into_iter()
-                        .zip(proposals)
-                        .map(|(attestation, proposal)| {
-                            Vote::Finalize(Finalize {
-                                proposal,
-                                attestation,
-                            })
-                        })
-                        .collect::<Vec<_>>(),
-                    invalid,
-                )
+                verified_finalizes.extend(verified.into_iter().zip(proposals).map(
+                    |(attestation, proposal)| Finalize {
+                        proposal,
+                        attestation,
+                    },
+                ));
+                (verified_finalizes, invalid)
             })
             .await;
 
-        self.finalizes_verified += verified.len();
+        self.verified_finalizes = verified_finalizes;
 
-        (verified, invalid)
+        (batch, invalid)
     }
 
     /// Checks if there are [Vote::Finalize] messages ready for batch verification.
@@ -483,7 +499,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
 
         // If we have already verified enough messages, there is nothing more to do.
-        if self.finalizes_verified >= self.quorum {
+        if self.verified_finalizes.len() >= self.quorum {
             return false;
         }
 
@@ -493,7 +509,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
 
         // If we don't have enough to reach the quorum, there is nothing to do yet.
-        if self.finalizes_verified + self.finalizes.len() < self.quorum {
+        if self.verified_finalizes.len() + self.finalizes.len() < self.quorum {
             return false;
         }
 
@@ -575,11 +591,11 @@ mod tests {
 
         verifier.add(Vote::Notarize(notarize1.clone()), false);
         assert_eq!(verifier.notarizes.len(), 1);
-        assert_eq!(verifier.notarizes_verified, 0);
+        assert_eq!(verifier.verified_notarizes.len(), 0);
 
         verifier.add(Vote::Notarize(notarize1.clone()), true);
         assert_eq!(verifier.notarizes.len(), 1);
-        assert_eq!(verifier.notarizes_verified, 1);
+        assert_eq!(verifier.verified_notarizes.len(), 1);
 
         verifier.set_leader(notarize1.signer());
         assert!(verifier.leader_proposal.is_some());
@@ -656,6 +672,14 @@ mod tests {
             &leader_notarize.proposal
         );
         assert_eq!(verifier.notarizes.len(), 2);
+
+        let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+        verifier2.add(Vote::Notarize(leader_notarize.clone()), true);
+        verifier2.set_leader(leader);
+        assert_eq!(
+            verifier2.leader_proposal.as_ref().unwrap(),
+            &leader_notarize.proposal
+        );
     }
 
     #[test]
@@ -701,11 +725,10 @@ mod tests {
         assert!(verifier.ready_notarizes());
         assert_eq!(verifier.notarizes.len(), 4);
 
-        let (verified_bulk, failed_bulk) =
-            block_on(verifier.verify_notarizes(&mut rng, &Sequential));
-        assert_eq!(verified_bulk.len(), 4);
+        let (batch, failed_bulk) = block_on(verifier.verify_notarizes(&mut rng, &Sequential));
+        assert_eq!(batch, 4);
         assert!(failed_bulk.is_empty());
-        assert_eq!(verifier.notarizes_verified, 4);
+        assert_eq!(verifier.verified_notarizes.len(), 4);
         assert!(verifier.notarizes.is_empty());
         assert!(!verifier.ready_notarizes());
 
@@ -726,11 +749,12 @@ mod tests {
         }
         assert!(verifier2.ready_notarizes());
 
-        let (verified_second, failed_second) =
-            block_on(verifier2.verify_notarizes(&mut rng, &Sequential));
-        assert!(verified_second
+        let (batch, failed_second) = block_on(verifier2.verify_notarizes(&mut rng, &Sequential));
+        assert_eq!(batch, quorum as usize);
+        assert!(verifier2
+            .verified_notarizes
             .iter()
-            .any(|v| matches!(v, Vote::Notarize(ref n) if n == &leader_vote)));
+            .any(|notarize| notarize == &leader_vote));
         assert_eq!(failed_second, vec![faulty_vote.signer()]);
     }
 
@@ -760,11 +784,11 @@ mod tests {
 
         verifier.add(Vote::Nullify(nullify.clone()), false);
         assert_eq!(verifier.nullifies.len(), 1);
-        assert_eq!(verifier.nullifies_verified, 0);
+        assert_eq!(verifier.verified_nullifies.len(), 0);
 
         verifier.add(Vote::Nullify(nullify), true);
         assert_eq!(verifier.nullifies.len(), 1);
-        assert_eq!(verifier.nullifies_verified, 1);
+        assert_eq!(verifier.verified_nullifies.len(), 1);
     }
 
     #[test]
@@ -795,7 +819,7 @@ mod tests {
             .collect();
 
         verifier.add(Vote::Nullify(nullifies[0].clone()), true);
-        assert_eq!(verifier.nullifies_verified, 1);
+        assert_eq!(verifier.verified_nullifies.len(), 1);
 
         verifier.add(Vote::Nullify(nullifies[1].clone()), false);
         // Non-batchable schemes verify immediately when pending votes exist
@@ -806,10 +830,10 @@ mod tests {
         assert!(verifier.ready_nullifies());
         assert_eq!(verifier.nullifies.len(), 3);
 
-        let (verified, failed) = block_on(verifier.verify_nullifies(&mut rng, &Sequential));
-        assert_eq!(verified.len(), 3);
+        let (batch, failed) = block_on(verifier.verify_nullifies(&mut rng, &Sequential));
+        assert_eq!(batch, 3);
         assert!(failed.is_empty());
-        assert_eq!(verifier.nullifies_verified, 4);
+        assert_eq!(verifier.verified_nullifies.len(), 4);
         assert!(verifier.nullifies.is_empty());
         assert!(!verifier.ready_nullifies());
     }
@@ -841,7 +865,7 @@ mod tests {
 
         verifier.add(Vote::Finalize(finalize_b.clone()), false);
         assert_eq!(verifier.finalizes.len(), 1);
-        assert_eq!(verifier.finalizes_verified, 0);
+        assert_eq!(verifier.verified_finalizes.len(), 0);
 
         verifier.add(Vote::Finalize(finalize_a.clone()), false);
         assert_eq!(verifier.finalizes.len(), 2);
@@ -851,15 +875,15 @@ mod tests {
         verifier.set_leader_proposal(finalize_a.proposal.clone());
         assert_eq!(verifier.finalizes.len(), 1);
         assert_eq!(verifier.finalizes[0], finalize_a);
-        assert_eq!(verifier.finalizes_verified, 0);
+        assert_eq!(verifier.verified_finalizes.len(), 0);
 
         verifier.add(Vote::Finalize(finalize_a), true);
         assert_eq!(verifier.finalizes.len(), 1);
-        assert_eq!(verifier.finalizes_verified, 1);
+        assert_eq!(verifier.verified_finalizes.len(), 1);
 
         verifier.add(Vote::Finalize(finalize_b), false);
         assert_eq!(verifier.finalizes.len(), 1);
-        assert_eq!(verifier.finalizes_verified, 1);
+        assert_eq!(verifier.verified_finalizes.len(), 1);
     }
 
     #[test]
@@ -895,7 +919,7 @@ mod tests {
         verifier.set_leader_proposal(finalizes[0].proposal.clone());
 
         verifier.add(Vote::Finalize(finalizes[0].clone()), true);
-        assert_eq!(verifier.finalizes_verified, 1);
+        assert_eq!(verifier.verified_finalizes.len(), 1);
         assert!(verifier.finalizes.is_empty());
 
         verifier.add(Vote::Finalize(finalizes[1].clone()), false);
@@ -906,10 +930,10 @@ mod tests {
         verifier.add(Vote::Finalize(finalizes[3].clone()), false);
         assert!(verifier.ready_finalizes());
 
-        let (verified, failed) = block_on(verifier.verify_finalizes(&mut rng, &Sequential));
-        assert_eq!(verified.len(), 3);
+        let (batch, failed) = block_on(verifier.verify_finalizes(&mut rng, &Sequential));
+        assert_eq!(batch, 3);
         assert!(failed.is_empty());
-        assert_eq!(verifier.finalizes_verified, 4);
+        assert_eq!(verifier.verified_finalizes.len(), 4);
         assert!(verifier.finalizes.is_empty());
         assert!(!verifier.ready_finalizes());
     }
@@ -945,19 +969,29 @@ mod tests {
         let finalize_b = Finalize::sign(&schemes[1], proposal_b).unwrap();
 
         verifier.add(Vote::Notarize(notarize_a.clone()), false);
-        verifier.add(Vote::Notarize(notarize_b), false);
-        verifier.add(Vote::Finalize(finalize_a), false);
-        verifier.add(Vote::Finalize(finalize_b), false);
+        verifier.add(Vote::Notarize(notarize_b.clone()), false);
+        verifier.add(Vote::Notarize(notarize_a.clone()), true);
+        verifier.add(Vote::Notarize(notarize_b), true);
+        verifier.add(Vote::Finalize(finalize_a.clone()), false);
+        verifier.add(Vote::Finalize(finalize_b.clone()), false);
+        verifier.add(Vote::Finalize(finalize_a), true);
+        verifier.add(Vote::Finalize(finalize_b), true);
 
         assert_eq!(verifier.notarizes.len(), 2);
+        assert_eq!(verifier.verified_notarizes.len(), 2);
         assert_eq!(verifier.finalizes.len(), 2);
+        assert_eq!(verifier.verified_finalizes.len(), 2);
 
         verifier.set_leader(notarize_a.signer());
 
         assert_eq!(verifier.notarizes.len(), 1);
         assert_eq!(verifier.notarizes[0].proposal, proposal_a);
+        assert_eq!(verifier.verified_notarizes.len(), 1);
+        assert_eq!(verifier.verified_notarizes[0].proposal, proposal_a);
         assert_eq!(verifier.finalizes.len(), 1);
         assert_eq!(verifier.finalizes[0].proposal, proposal_a);
+        assert_eq!(verifier.verified_finalizes.len(), 1);
+        assert_eq!(verifier.verified_finalizes[0].proposal, proposal_a);
     }
 
     #[test]
@@ -1061,8 +1095,8 @@ mod tests {
         }
         assert!(verifier.ready_notarizes(), "Should be ready at quorum");
 
-        let (verified, _) = block_on(verifier.verify_notarizes(&mut rng, &Sequential));
-        assert_eq!(verified.len(), quorum as usize);
+        let (batch, _) = block_on(verifier.verify_notarizes(&mut rng, &Sequential));
+        assert_eq!(batch, quorum as usize);
         assert!(!verifier.ready_notarizes());
     }
 
@@ -1206,10 +1240,10 @@ mod tests {
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         assert!(verifier.nullifies.is_empty());
         assert!(!verifier.ready_nullifies());
-        let (verified, failed) = block_on(verifier.verify_nullifies(&mut rng, &Sequential));
-        assert!(verified.is_empty());
+        let (batch, failed) = block_on(verifier.verify_nullifies(&mut rng, &Sequential));
+        assert_eq!(batch, 0);
         assert!(failed.is_empty());
-        assert_eq!(verifier.nullifies_verified, 0);
+        assert_eq!(verifier.verified_nullifies.len(), 0);
     }
 
     #[test]
@@ -1236,10 +1270,10 @@ mod tests {
         verifier.set_leader(Participant::new(0));
         assert!(verifier.finalizes.is_empty());
         assert!(!verifier.ready_finalizes());
-        let (verified, failed) = block_on(verifier.verify_finalizes(&mut rng, &Sequential));
-        assert!(verified.is_empty());
+        let (batch, failed) = block_on(verifier.verify_finalizes(&mut rng, &Sequential));
+        assert_eq!(batch, 0);
         assert!(failed.is_empty());
-        assert_eq!(verifier.finalizes_verified, 0);
+        assert_eq!(verifier.verified_finalizes.len(), 0);
     }
 
     #[test]
@@ -1268,7 +1302,7 @@ mod tests {
         let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
         verifier.set_leader(leader_vote.signer());
         verifier.add(Vote::Notarize(leader_vote), true);
-        assert_eq!(verifier.notarizes_verified, 1);
+        assert_eq!(verifier.verified_notarizes.len(), 1);
 
         for (i, scheme) in schemes.iter().enumerate().skip(1).take(quorum as usize - 1) {
             let is_last = i == quorum as usize - 1;
@@ -1290,10 +1324,10 @@ mod tests {
             }
         }
 
-        let (verified, failed) = block_on(verifier.verify_notarizes(&mut rng, &Sequential));
-        assert_eq!(verified.len(), quorum as usize - 1);
+        let (batch, failed) = block_on(verifier.verify_notarizes(&mut rng, &Sequential));
+        assert_eq!(batch, quorum as usize - 1);
         assert!(failed.is_empty());
-        assert_eq!(verifier.notarizes_verified, quorum as usize);
+        assert_eq!(verifier.verified_notarizes.len(), quorum as usize);
         assert!(!verifier.ready_notarizes());
     }
 
@@ -1321,7 +1355,7 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(1));
 
         verifier.add(Vote::Nullify(create_nullify(&schemes[0], round)), true);
-        assert_eq!(verifier.nullifies_verified, 1);
+        assert_eq!(verifier.verified_nullifies.len(), 1);
 
         let pending_schemes: Vec<_> = schemes.iter().take(quorum as usize).skip(1).collect();
         for (i, scheme) in pending_schemes.iter().enumerate() {
@@ -1365,7 +1399,7 @@ mod tests {
         verifier.set_leader(leader_finalize.signer());
         verifier.set_leader_proposal(leader_finalize.proposal.clone());
         verifier.add(Vote::Finalize(leader_finalize), true);
-        assert_eq!(verifier.finalizes_verified, 1);
+        assert_eq!(verifier.verified_finalizes.len(), 1);
 
         let pending_schemes: Vec<_> = schemes.iter().take(quorum as usize).skip(1).collect();
         for (i, scheme) in pending_schemes.iter().enumerate() {
@@ -1425,7 +1459,7 @@ mod tests {
                 true,
             );
         }
-        assert_eq!(verifier.notarizes_verified, quorum as usize);
+        assert_eq!(verifier.verified_notarizes.len(), quorum as usize);
         assert!(
             !verifier.ready_notarizes(),
             "Should not be ready if quorum already met by verified messages"
@@ -1475,7 +1509,7 @@ mod tests {
         for scheme in schemes.iter().take(quorum as usize) {
             verifier.add(Vote::Nullify(create_nullify(scheme, round)), true);
         }
-        assert_eq!(verifier.nullifies_verified, quorum as usize);
+        assert_eq!(verifier.verified_nullifies.len(), quorum as usize);
         assert!(
             !verifier.ready_nullifies(),
             "Should not be ready if quorum already met by verified messages"
@@ -1533,7 +1567,7 @@ mod tests {
                 true,
             );
         }
-        assert_eq!(verifier.finalizes_verified, quorum as usize);
+        assert_eq!(verifier.verified_finalizes.len(), quorum as usize);
         assert!(
             !verifier.ready_finalizes(),
             "Should not be ready if quorum already met by verified messages"

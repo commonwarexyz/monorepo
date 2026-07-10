@@ -28,7 +28,7 @@ use commonware_runtime::{
     },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::ordered::{Quorum, Set};
+use commonware_utils::ordered::Quorum;
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, info_span, trace, Instrument as _, Span};
@@ -53,7 +53,6 @@ where
 {
     context: ContextCell<E>,
 
-    participants: Set<S::PublicKey>,
     scheme: Arc<S>,
 
     blocker: B,
@@ -90,7 +89,7 @@ where
 {
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
         let scheme = Arc::new(cfg.scheme);
-        let participants = scheme.participants().clone();
+        let participants = scheme.participants();
         let participant_count = participants.len();
         let added = context.counter("added", "number of messages added to the verifier");
         let verified = context.counter("verified", "number of messages verified");
@@ -120,7 +119,6 @@ where
             Self {
                 context: ContextCell::new(context),
 
-                participants,
                 scheme,
 
                 blocker: cfg.blocker,
@@ -151,7 +149,6 @@ where
     fn new_round(&self, view: View) -> Round<S, B, D, Re> {
         Round::new(
             Rnd::new(self.epoch, view),
-            self.participants.clone(),
             Arc::clone(&self.scheme),
             self.blocker.clone(),
             self.reporter.clone(),
@@ -164,7 +161,7 @@ where
     /// it meant to be). If a peer sends us a certificate very far in the future,
     /// we will record that as their latest activity (and not attempt to skip them).
     fn record_activity(&mut self, sender: &S::PublicKey, view: View) {
-        let Some(participant) = self.participants.index(sender) else {
+        let Some(participant) = self.scheme.participants().index(sender) else {
             return;
         };
         let seen_view = &mut self.latest_seen[usize::from(participant)];
@@ -197,7 +194,7 @@ where
         missing
             .iter()
             .filter(|&&p| Some(p) != me)
-            .filter_map(|&p| self.participants.key(p).cloned())
+            .filter_map(|&p| self.scheme.participants().key(p).cloned())
             .collect()
     }
 
@@ -605,18 +602,16 @@ where
                     };
 
                     // Process batch verification results
-                    if let Some((voters, failed)) = verified {
+                    if let Some((batch, failed)) = verified {
                         timer.observe(self.context.as_ref());
 
-                        // Process verified votes
-                        let batch = voters.len() + failed.len();
                         trace!(%updated_view, batch, "batch verified votes");
                         self.verified.inc_by(batch as u64);
                         self.batch_size.observe(batch as f64);
 
                         // Block invalid signers
                         for invalid in failed {
-                            if let Some(signer) = self.participants.key(invalid) {
+                            if let Some(signer) = self.scheme.participants().key(invalid) {
                                 commonware_p2p::block!(
                                     self.blocker,
                                     signer.clone(),
@@ -625,10 +620,6 @@ where
                             }
                         }
 
-                        // Store verified votes for certificate construction
-                        for valid in voters {
-                            round.add_verified(valid);
-                        }
                     } else {
                         trace!(
                             current = %current.view,
