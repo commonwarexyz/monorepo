@@ -123,9 +123,11 @@ impl EventKind {
         )
     }
 
-    /// Classify a tracing event by its target + human message. Returns
-    /// `None` for events outside the simplex module or without a modeled kind.
-    pub fn classify(target: &str, message: &str) -> Option<Self> {
+    /// Classify a tracing event by its target + human message; `fields` is the
+    /// Debug-rendered non-message field blob, consulted when the message alone
+    /// is ambiguous. Returns `None` for events outside the simplex module or
+    /// without a modeled kind.
+    pub fn classify(target: &str, message: &str, fields: &str) -> Option<Self> {
         if !target.contains("commonware_consensus::simplex") {
             return None;
         }
@@ -134,8 +136,18 @@ impl EventKind {
             "broadcasting nullify" => Self::SendNullify,
             "broadcasting finalize" => Self::SendFinalize,
             "broadcasting notarization" => Self::SendNotarization,
-            "broadcasting nullification" | "broadcasting nullification floor" => {
-                Self::SendNullification
+            "broadcasting nullification" => Self::SendNullification,
+            // The floor is the leader's parent notarization or finalization
+            // rebroadcast (never a nullification); classify by the certificate
+            // variant so a peer's sniffed receive matches its send snapshot.
+            "broadcasting nullification floor" => {
+                if fields.contains("Notarization(") {
+                    Self::SendNotarization
+                } else if fields.contains("Finalization(") {
+                    Self::SendFinalization
+                } else {
+                    return None;
+                }
             }
             "broadcasting finalization" => Self::SendFinalization,
             "received proposal" => Self::ReceiveProposal,
@@ -393,8 +405,9 @@ fn mean_pairwise_jaccard_distance(sets: &[&BTreeSet<(Token, Token)>]) -> f64 {
         for j in (i + 1)..sets.len() {
             let inter = sets[i].intersection(sets[j]).count();
             let union = sets[i].union(sets[j]).count();
+            // Two empty sets are identical, not maximally divergent.
             let jaccard = if union == 0 {
-                0.0
+                1.0
             } else {
                 inter as f64 / union as f64
             };
@@ -560,7 +573,7 @@ pub mod capture {
             }
             let mut v = Visitor::default();
             event.record(&mut v);
-            let Some(kind) = EventKind::classify(target, &v.message) else {
+            let Some(kind) = EventKind::classify(target, &v.message, &v.blob) else {
                 return;
             };
             let Some(view) = v.view() else {
@@ -794,6 +807,36 @@ mod capture_tests {
     }
 
     #[test]
+    fn floor_broadcast_matches_receives_by_certificate_variant() {
+        // The floor is the leader's parent notarization/finalization
+        // rebroadcast, never a nullification: it classifies by the certificate
+        // variant in the field blob, so a peer's sniffed certificate receive
+        // finds the send snapshot and inherits the leader's causal history.
+        let log = EventLog::new();
+        let d = Dispatch::new(NodeSubscriber::new(0, log.clone()));
+        dispatcher::with_default(&d, || {
+            tracing::info!(target: T, view = 1u64, reason = "LeaderTimeout", "timing out view");
+            tracing::warn!(
+                target: T,
+                floor = "Notarization(Notarization { round: Round { view: View(1) } })",
+                "broadcasting nullification floor"
+            );
+        });
+        rec(&log, 1, 1, EventKind::ReceiveNotarization, Some(0));
+        rec(&log, 2, 1, EventKind::ReceiveNullification, Some(0));
+
+        let toks = log.summary().tokens();
+        // The receive merges the floor's frozen snapshot: cross-node causality.
+        assert!(
+            toks.contains("hb:timeout@new->recv_notarization@new"),
+            "expected the floor to match the certificate receive, got {toks:?}"
+        );
+        // A nullification receive has no snapshot: the floor is not one.
+        assert!(!toks.iter().any(|t| t.contains("send_nullification")));
+        assert!(!toks.iter().any(|t| t.contains("->recv_nullification")));
+    }
+
+    #[test]
     fn receive_without_known_sender_does_not_merge() {
         let log = EventLog::new();
         rec(&log, 0, 1, EventKind::SendNotarization, None);
@@ -815,36 +858,49 @@ mod tests {
     #[test]
     fn classify_maps_real_messages() {
         assert_eq!(
-            EventKind::classify(T, "broadcasting notarize"),
+            EventKind::classify(T, "broadcasting notarize", ""),
             Some(EventKind::SendNotarize)
         );
         // The tracing "received X" events mark the node PROCESSING a certificate
         // (it passed the interesting-check); wire arrival is captured from p2p.
         assert_eq!(
-            EventKind::classify(T, "received notarization"),
+            EventKind::classify(T, "received notarization", ""),
             Some(EventKind::ProcessNotarization)
         );
         assert_eq!(
-            EventKind::classify(T, "timing out view"),
+            EventKind::classify(T, "timing out view", ""),
             Some(EventKind::TimeoutFired)
         );
         assert_eq!(
-            EventKind::classify(T, "constructed nullification, forwarding to voter"),
+            EventKind::classify(T, "constructed nullification, forwarding to voter", ""),
             Some(EventKind::QuorumNullification)
         );
         assert_eq!(
-            EventKind::classify(T, "constructed finalization, forwarding to voter"),
+            EventKind::classify(T, "constructed finalization, forwarding to voter", ""),
             Some(EventKind::QuorumFinalization)
         );
         // Resolver backfill is also a processing event (the voter handles it).
         assert_eq!(
-            EventKind::classify(T, "received finalization for request"),
+            EventKind::classify(T, "received finalization for request", ""),
             Some(EventKind::ProcessFinalization)
         );
-        // Non-modeled and non-simplex events are dropped.
-        assert_eq!(EventKind::classify(T, "no verifier ready"), None);
+        // The floor is classified by its certificate variant.
         assert_eq!(
-            EventKind::classify("commonware_runtime::storage", "broadcasting notarize"),
+            EventKind::classify(T, "broadcasting nullification floor", "Notarization(..)"),
+            Some(EventKind::SendNotarization)
+        );
+        assert_eq!(
+            EventKind::classify(T, "broadcasting nullification floor", "Finalization(..)"),
+            Some(EventKind::SendFinalization)
+        );
+        assert_eq!(
+            EventKind::classify(T, "broadcasting nullification floor", ""),
+            None
+        );
+        // Non-modeled and non-simplex events are dropped.
+        assert_eq!(EventKind::classify(T, "no verifier ready", ""), None);
+        assert_eq!(
+            EventKind::classify("commonware_runtime::storage", "broadcasting notarize", ""),
             None
         );
     }
@@ -929,6 +985,17 @@ mod tests {
         diverge.observe(ev(1, 1, EventKind::TimeoutFired));
         diverge.observe(ev(1, 1, EventKind::SendNullify));
         assert!(diverge.dispersion() > 0.0);
+    }
+
+    #[test]
+    fn identical_empty_pair_sets_do_not_disperse() {
+        // Two advanced replicas with one event each have empty (identical)
+        // pair-sets: no divergence, not the maximal bucket.
+        let mut s = Summary::new();
+        s.observe(ev(0, 1, EventKind::EnterView));
+        s.observe(ev(1, 1, EventKind::EnterView));
+        assert_eq!(s.dispersion(), 0.0);
+        assert_eq!(s.dispersion_bucket(), Some(0));
     }
 
     #[test]

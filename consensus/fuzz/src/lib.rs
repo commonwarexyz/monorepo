@@ -1140,10 +1140,58 @@ fn run_with_warn_trace_collection<T>(run: impl FnOnce(&Dispatch) -> T) -> T {
 enum SniffChannel {
     Vote,
     Certificate,
+    Resolver,
 }
 
-/// p2p-boundary capture: wraps a validator's vote or certificate receiver,
-/// decodes each incoming message and records the wire RECEIVE into the
+/// Decode a sniffed payload into its wire-arrival event (view, kind). Vote and
+/// certificate channels carry the message directly; the resolver channel frames
+/// it, with backfill responses delivering certificates (requests and errors
+/// carry none and record nothing). `None` when the payload does not decode.
+fn sniff_event<P: simplex::Simplex>(
+    channel: SniffChannel,
+    payload: &IoBuf,
+    cert_cfg: &CertCfgOf<P>,
+) -> Option<(u64, happens_before::EventKind)> {
+    let cert_event = |cert: Certificate<P::Scheme, Sha256Digest>| {
+        let kind = match &cert {
+            Certificate::Notarization(_) => happens_before::EventKind::ReceiveNotarization,
+            Certificate::Nullification(_) => happens_before::EventKind::ReceiveNullification,
+            Certificate::Finalization(_) => happens_before::EventKind::ReceiveFinalization,
+        };
+        (cert.view().get(), kind)
+    };
+    match channel {
+        SniffChannel::Vote => Vote::<P::Scheme, Sha256Digest>::decode(payload.clone())
+            .ok()
+            .map(|vote| {
+                let kind = match &vote {
+                    Vote::Notarize(_) => happens_before::EventKind::ReceiveNotarize,
+                    Vote::Nullify(_) => happens_before::EventKind::ReceiveNullify,
+                    Vote::Finalize(_) => happens_before::EventKind::ReceiveFinalize,
+                };
+                (vote.view().get(), kind)
+            }),
+        SniffChannel::Certificate => {
+            Certificate::<P::Scheme, Sha256Digest>::decode_cfg(payload.clone(), cert_cfg)
+                .ok()
+                .map(cert_event)
+        }
+        SniffChannel::Resolver => match ResolverMessage::<U64>::decode(payload.clone())
+            .ok()?
+            .payload
+        {
+            ResolverPayload::Response(bytes) => {
+                Certificate::<P::Scheme, Sha256Digest>::decode_cfg(bytes, cert_cfg)
+                    .ok()
+                    .map(cert_event)
+            }
+            ResolverPayload::Request(_) | ResolverPayload::Error => None,
+        },
+    }
+}
+
+/// p2p-boundary capture: wraps a validator's vote, certificate, or resolver
+/// receiver, decodes each incoming message and records the wire RECEIVE into the
 /// happens-before log, attributed to the receiving node and tagged with the
 /// real sender's node id (resolved against the participant set, so the
 /// send-before-receive merge uses that exact sender's history). This is the
@@ -1188,38 +1236,7 @@ where
     async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
         let (sender, payload) = self.inner.recv().await?;
         if let Some((node, log, peers)) = &self.sink {
-            let event = match self.channel {
-                SniffChannel::Vote => Vote::<P::Scheme, Sha256Digest>::decode(payload.clone())
-                    .ok()
-                    .map(|vote| {
-                        let kind = match &vote {
-                            Vote::Notarize(_) => happens_before::EventKind::ReceiveNotarize,
-                            Vote::Nullify(_) => happens_before::EventKind::ReceiveNullify,
-                            Vote::Finalize(_) => happens_before::EventKind::ReceiveFinalize,
-                        };
-                        (vote.view().get(), kind)
-                    }),
-                SniffChannel::Certificate => Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
-                    payload.clone(),
-                    &self.cert_cfg,
-                )
-                .ok()
-                .map(|cert| {
-                    let kind = match &cert {
-                        Certificate::Notarization(_) => {
-                            happens_before::EventKind::ReceiveNotarization
-                        }
-                        Certificate::Nullification(_) => {
-                            happens_before::EventKind::ReceiveNullification
-                        }
-                        Certificate::Finalization(_) => {
-                            happens_before::EventKind::ReceiveFinalization
-                        }
-                    };
-                    (cert.view().get(), kind)
-                }),
-            };
-            if let Some((view, kind)) = event {
+            if let Some((view, kind)) = sniff_event::<P>(self.channel, &payload, &self.cert_cfg) {
                 let from = peers.iter().position(|p| p == &sender).map(|i| i as u32);
                 log.record(happens_before::Event {
                     node: *node,
@@ -1286,9 +1303,10 @@ fn run_standard_once<P: simplex::Simplex>(
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
-            // p2p-boundary sniffing: capture wire arrivals of votes and
-            // certificates (distinct from the node processing them, which the
-            // tracing source records). Pass-through when not capturing.
+            // p2p-boundary sniffing: capture wire arrivals of votes,
+            // certificates, and resolver backfill responses (distinct from the
+            // node processing them, which the tracing source records).
+            // Pass-through when not capturing.
             let pending = {
                 let (vote_sender, vote_receiver) = pending;
                 let sink = hb_log
@@ -1311,6 +1329,22 @@ fn run_standard_once<P: simplex::Simplex>(
                     SniffingReceiver::<P, _>::new(
                         cert_receiver,
                         SniffChannel::Certificate,
+                        cfg,
+                        sink,
+                    ),
+                )
+            };
+            let resolver = {
+                let (backfill_sender, backfill_receiver) = resolver;
+                let sink = hb_log
+                    .as_ref()
+                    .map(|log| (i as u32, log.clone(), peers.clone()));
+                let cfg = schemes[i].certificate_codec_config();
+                (
+                    backfill_sender,
+                    SniffingReceiver::<P, _>::new(
+                        backfill_receiver,
+                        SniffChannel::Resolver,
                         cfg,
                         sink,
                     ),
@@ -1391,17 +1425,19 @@ fn run_standard_once<P: simplex::Simplex>(
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let hb_summary = hb_log.as_ref().map(|log| log.summary());
-        if let Some(summary) = &hb_summary {
-            let mut tokens = summary.tokens();
-            if let Some(bucket) = summary.dispersion_bucket() {
-                tokens.insert(format!("hb:dispersion={bucket}"));
-            }
-            tokens.extend(summary.lsh_tokens());
-            state_cov::observe_tokens(tokens);
-        }
-
         if config.is_valid() {
+            // Feedback stays behind the validity gate (like protocol-state
+            // coverage): invalid configurations never reach the invariant
+            // checks, so their interleavings must not be retained as novel.
+            let hb_summary = hb_log.as_ref().map(|log| log.summary());
+            if let Some(summary) = &hb_summary {
+                let mut tokens = summary.tokens();
+                if let Some(bucket) = summary.dispersion_bucket() {
+                    tokens.insert(format!("hb:dispersion={bucket}"));
+                }
+                tokens.extend(summary.lsh_tokens());
+                state_cov::observe_tokens(tokens);
+            }
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(config.faults as usize, &reporter_only);
@@ -2405,6 +2441,61 @@ mod tests {
 
         assert_eq!(unwrapped.auditor_state, wrapped.auditor_state);
         assert_eq!(unwrapped.reporter_states, wrapped.reporter_states);
+    }
+
+    #[test]
+    fn resolver_sniff_decodes_backfill_responses() {
+        use commonware_codec::Encode;
+        use commonware_consensus::{
+            simplex::types::{Notarization, Notarize, Proposal},
+            types::Round,
+        };
+
+        let executor = deterministic::Runner::seeded(7);
+        executor.start(|mut context| async move {
+            let (_, schemes) =
+                <simplex::SimplexId as simplex::Simplex>::setup(&mut context, NAMESPACE, 4);
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(EPOCH), View::new(3)),
+                View::new(2),
+                Sha256Digest::from([7u8; 32]),
+            );
+            let votes: Vec<_> = schemes[..3]
+                .iter()
+                .map(|s| Notarize::sign(s, proposal.clone()).unwrap())
+                .collect();
+            let cert = Certificate::Notarization(
+                Notarization::from_notarizes(&schemes[0], &votes, &Sequential).unwrap(),
+            );
+            let cfg = schemes[0].certificate_codec_config();
+
+            let response = ResolverMessage::<U64> {
+                id: 9,
+                payload: ResolverPayload::Response(cert.encode()),
+            };
+            assert_eq!(
+                sniff_event::<simplex::SimplexId>(
+                    SniffChannel::Resolver,
+                    &IoBuf::from(response.encode()),
+                    &cfg,
+                ),
+                Some((3, happens_before::EventKind::ReceiveNotarization)),
+            );
+
+            // Requests deliver no certificate; nothing is recorded.
+            let request = ResolverMessage::<U64> {
+                id: 9,
+                payload: ResolverPayload::Request(U64::from(3u64)),
+            };
+            assert_eq!(
+                sniff_event::<simplex::SimplexId>(
+                    SniffChannel::Resolver,
+                    &IoBuf::from(request.encode()),
+                    &cfg,
+                ),
+                None,
+            );
+        });
     }
 
     #[test]

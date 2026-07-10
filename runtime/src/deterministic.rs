@@ -2009,7 +2009,8 @@ mod tests {
 
     #[test]
     fn poc_dispatch_propagation_attributes_by_node() {
-        use std::sync::{Arc, Mutex};
+        use commonware_utils::sync::Mutex;
+        use std::sync::Arc;
         use tracing_subscriber::layer::SubscriberExt;
 
         // Per-node collecting layer: tags each event with the node it belongs to.
@@ -2039,10 +2040,7 @@ mod tests {
                 let mut m = Msg(String::new());
                 event.record(&mut m);
                 if !m.0.is_empty() {
-                    self.sink
-                        .lock()
-                        .unwrap()
-                        .push(format!("node={} {}", self.node, m.0));
+                    self.sink.lock().push(format!("node={} {}", self.node, m.0));
                 }
             }
         }
@@ -2080,7 +2078,7 @@ mod tests {
             });
         }
 
-        let log = sink.lock().unwrap().clone();
+        let log = sink.lock().clone();
         for l in &log {
             println!("{l}");
         }
