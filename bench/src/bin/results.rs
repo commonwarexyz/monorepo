@@ -66,7 +66,11 @@ impl Comparison {
     fn output(&self) -> ComparisonOutput {
         ComparisonOutput {
             current: self.current.clone(),
-            metric_deltas: self.deltas.clone(),
+            metric_deltas: self
+                .deltas
+                .iter()
+                .map(|(label, delta)| (label.clone(), MetricDeltaOutput::from(*delta)))
+                .collect(),
             failed_gates: self.gate_failures(),
             baseline_metrics: self
                 .baseline
@@ -197,12 +201,34 @@ struct ComparisonFile {
 struct ComparisonOutput {
     #[serde(flatten)]
     current: BenchResult,
-    metric_deltas: BTreeMap<String, f64>,
+    metric_deltas: BTreeMap<String, MetricDeltaOutput>,
     failed_gates: Vec<Gate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     baseline_metrics: Option<BTreeMap<String, u64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     regressed: Option<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum MetricDeltaOutput {
+    Finite(f64),
+    NonFinite(&'static str),
+}
+
+impl From<f64> for MetricDeltaOutput {
+    fn from(delta: f64) -> Self {
+        if delta.is_finite() {
+            return Self::Finite(delta);
+        }
+        if delta.is_nan() {
+            return Self::NonFinite("nan");
+        }
+        if delta.is_sign_positive() {
+            return Self::NonFinite("inf");
+        }
+        Self::NonFinite("-inf")
+    }
 }
 
 pub(crate) fn write_outputs(

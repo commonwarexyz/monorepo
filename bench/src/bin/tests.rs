@@ -191,10 +191,9 @@ fn custom_metric_gate_regresses() {
 #[test]
 fn zero_baseline_metric_regresses_when_current_increases() {
     let benchmark = custom_metric_benchmark();
-    let current = result_for(
-        benchmark.clone(),
-        Some(BTreeMap::from([("blob_reads".to_string(), 1)])),
-    );
+    let mut current_metrics = complete_metrics();
+    current_metrics.insert("blob_reads".to_string(), 1);
+    let current = result_for(benchmark.clone(), Some(current_metrics));
     let baseline = result_for(
         benchmark.clone(),
         Some(BTreeMap::from([("blob_reads".to_string(), 0)])),
@@ -211,6 +210,16 @@ fn zero_baseline_metric_regresses_when_current_increases() {
     assert!(comparisons[0].regressed());
     assert!(report.contains("Regressions: `1`."));
     assert!(report.contains("| `blob_reads` | 0 | 1 | +inf% |"));
+
+    let output_dir = unique_temp_dir();
+    write_outputs(&output_dir, &[current], Some(&comparisons)).unwrap();
+    let comparison = fs::read_to_string(output_dir.join("comparison.toml")).unwrap();
+    let summary = fs::read_to_string(output_dir.join("summary.toml")).unwrap();
+    let comment = fs::read_to_string(output_dir.join("comment.md")).unwrap();
+    assert!(comparison.contains("blob_reads = \"inf\""));
+    assert!(summary.contains("regression_count = 1"));
+    assert!(comment.contains("Regressions: `1`."));
+    fs::remove_dir_all(output_dir).unwrap();
 }
 
 #[test]
