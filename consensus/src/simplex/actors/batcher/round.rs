@@ -38,7 +38,7 @@ pub struct Round<
     verifier: Verifier<S, D>,
     /// Votes received from network (may not be verified yet).
     /// Used for duplicate detection and conflict reporting.
-    pending_votes: VoteTracker<S, D>,
+    votes: VoteTracker<S, D>,
 
     /// Whether we've already sent the leader's proposal to the voter.
     proposal_sent: bool,
@@ -72,7 +72,7 @@ impl<
             reporter,
             verifier: Verifier::new(scheme, quorum),
 
-            pending_votes: VoteTracker::new(len),
+            votes: VoteTracker::new(len),
 
             proposal_sent: false,
 
@@ -150,7 +150,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.pending_votes.notarize(index) {
+                match self.votes.notarize(index) {
                     Some(previous) => {
                         if previous.proposal != notarize.proposal {
                             let activity = ConflictingNotarize::new(previous.clone(), notarize);
@@ -164,7 +164,7 @@ impl<
                     }
                     None => {
                         self.reporter.report(Activity::Notarize(notarize.clone()));
-                        self.pending_votes.insert_notarize(notarize.clone());
+                        self.votes.insert_notarize(notarize.clone());
                         self.verifier.add(Vote::Notarize(notarize), false);
                         true
                     }
@@ -178,7 +178,7 @@ impl<
                 }
 
                 // Check if finalized
-                if let Some(previous) = self.pending_votes.finalize(index) {
+                if let Some(previous) = self.votes.finalize(index) {
                     let activity = NullifyFinalize::new(nullify, previous.clone());
                     self.reporter.report(Activity::NullifyFinalize(activity));
                     commonware_p2p::block!(self.blocker, sender, "nullify after finalize");
@@ -186,7 +186,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.pending_votes.nullify(index) {
+                match self.votes.nullify(index) {
                     Some(previous) => {
                         if previous != &nullify {
                             commonware_p2p::block!(self.blocker, sender, "conflicting nullify");
@@ -195,7 +195,7 @@ impl<
                     }
                     None => {
                         self.reporter.report(Activity::Nullify(nullify.clone()));
-                        self.pending_votes.insert_nullify(nullify.clone());
+                        self.votes.insert_nullify(nullify.clone());
                         self.verifier.add(Vote::Nullify(nullify), false);
                         true
                     }
@@ -209,7 +209,7 @@ impl<
                 }
 
                 // Check if nullified
-                if let Some(previous) = self.pending_votes.nullify(index) {
+                if let Some(previous) = self.votes.nullify(index) {
                     let activity = NullifyFinalize::new(previous.clone(), finalize);
                     self.reporter.report(Activity::NullifyFinalize(activity));
                     commonware_p2p::block!(self.blocker, sender, "finalize after nullify");
@@ -217,7 +217,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.pending_votes.finalize(index) {
+                match self.votes.finalize(index) {
                     Some(previous) => {
                         if previous.proposal != finalize.proposal {
                             let activity = ConflictingFinalize::new(previous.clone(), finalize);
@@ -231,7 +231,7 @@ impl<
                     }
                     None => {
                         self.reporter.report(Activity::Finalize(finalize.clone()));
-                        self.pending_votes.insert_finalize(finalize.clone());
+                        self.votes.insert_finalize(finalize.clone());
                         self.verifier.add(Vote::Finalize(finalize), false);
                         true
                     }
@@ -249,7 +249,7 @@ impl<
 
                 // Our own votes are already verified
                 assert!(
-                    self.pending_votes.insert_notarize(notarize.clone()),
+                    self.votes.insert_notarize(notarize.clone()),
                     "duplicate notarize"
                 );
             }
@@ -259,7 +259,7 @@ impl<
 
                 // Our own votes are already verified
                 assert!(
-                    self.pending_votes.insert_nullify(nullify.clone()),
+                    self.votes.insert_nullify(nullify.clone()),
                     "duplicate nullify"
                 );
             }
@@ -269,7 +269,7 @@ impl<
 
                 // Our own votes are already verified
                 assert!(
-                    self.pending_votes.insert_finalize(finalize.clone()),
+                    self.votes.insert_finalize(finalize.clone()),
                     "duplicate finalize"
                 );
             }
@@ -356,13 +356,13 @@ impl<
 
     /// Returns true if `signer` has a nullify vote in this round.
     pub fn has_nullify(&self, signer: Participant) -> bool {
-        self.pending_votes.has_nullify(signer)
+        self.votes.has_nullify(signer)
     }
 
     /// Returns participant indices whose matching vote for `proposal` was not
     /// observed locally.
     ///
-    /// Uses `pending_votes` rather than the verified vote vectors because we only
+    /// Uses `votes` rather than the verified vote vectors because we only
     /// verify the first quorum of votes. A peer whose matching vote arrived
     /// after quorum but before the certificate is still tracked in pending.
     ///
@@ -372,14 +372,14 @@ impl<
     /// because those peers still need the winning block forwarded.
     pub fn is_missing_voter(&self, proposal: &Proposal<D>, participant: Participant) -> bool {
         if self
-            .pending_votes
+            .votes
             .notarize(participant)
             .is_some_and(|vote| &vote.proposal == proposal)
         {
             return false;
         }
 
-        self.pending_votes
+        self.votes
             .finalize(participant)
             .is_none_or(|vote| &vote.proposal != proposal)
     }
@@ -387,7 +387,7 @@ impl<
     /// Returns participant indices whose matching vote for `proposal` was not
     /// observed locally.
     ///
-    /// Uses `pending_votes` rather than the verified vote vectors because we only
+    /// Uses `votes` rather than the verified vote vectors because we only
     /// verify the first quorum of votes. A peer whose matching vote arrived
     /// after quorum but before the certificate is still tracked in pending.
     ///

@@ -44,17 +44,17 @@ pub struct Verifier<S: Scheme<D>, D: Digest> {
     leader_proposal: Option<Proposal<D>>,
 
     /// Pending notarize votes waiting to be verified.
-    notarizes: Vec<Notarize<S, D>>,
+    pending_notarizes: Vec<Notarize<S, D>>,
     /// Verified notarize votes available for certificate recovery.
     verified_notarizes: Vec<Notarize<S, D>>,
 
     /// Pending nullify votes waiting to be verified.
-    nullifies: Vec<Nullify<S>>,
+    pending_nullifies: Vec<Nullify<S>>,
     /// Verified nullify votes available for certificate recovery.
     verified_nullifies: Vec<Nullify<S>>,
 
     /// Pending finalize votes waiting to be verified.
-    finalizes: Vec<Finalize<S, D>>,
+    pending_finalizes: Vec<Finalize<S, D>>,
     /// Verified finalize votes available for certificate recovery.
     verified_finalizes: Vec<Finalize<S, D>>,
 }
@@ -77,13 +77,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             leader: None,
             leader_proposal: None,
 
-            notarizes: Vec::with_capacity(quorum),
+            pending_notarizes: Vec::with_capacity(quorum),
             verified_notarizes: Vec::with_capacity(quorum),
 
-            nullifies: Vec::with_capacity(quorum),
+            pending_nullifies: Vec::with_capacity(quorum),
             verified_nullifies: Vec::with_capacity(quorum),
 
-            finalizes: Vec::with_capacity(quorum),
+            pending_finalizes: Vec::with_capacity(quorum),
             verified_finalizes: Vec::with_capacity(quorum),
         }
     }
@@ -122,9 +122,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// proposal. Any votes for other proposals are dropped since they cannot contribute
     /// to a valid certificate.
     fn set_leader_proposal(&mut self, proposal: Proposal<D>) {
-        self.notarizes.retain(|n| n.proposal == proposal);
+        self.pending_notarizes.retain(|n| n.proposal == proposal);
         self.verified_notarizes.retain(|n| n.proposal == proposal);
-        self.finalizes.retain(|f| f.proposal == proposal);
+        self.pending_finalizes.retain(|f| f.proposal == proposal);
         self.verified_finalizes.retain(|f| f.proposal == proposal);
         self.leader_proposal = Some(proposal);
     }
@@ -174,7 +174,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 if verified {
                     self.verified_notarizes.push(notarize);
                 } else {
-                    self.notarizes.push(notarize);
+                    self.pending_notarizes.push(notarize);
                 }
                 true
             }
@@ -182,7 +182,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 if verified {
                     self.verified_nullifies.push(nullify);
                 } else {
-                    self.nullifies.push(nullify);
+                    self.pending_nullifies.push(nullify);
                 }
                 true
             }
@@ -198,7 +198,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 if verified {
                     self.verified_finalizes.push(finalize);
                 } else {
-                    self.finalizes.push(finalize);
+                    self.pending_finalizes.push(finalize);
                 }
                 true
             }
@@ -216,7 +216,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
         // If we already have the leader's vote, set the leader proposal
         let Some(notarize) = self
-            .notarizes
+            .pending_notarizes
             .iter()
             .chain(&self.verified_notarizes)
             .find(|n| n.signer() == leader)
@@ -245,7 +245,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> (usize, Vec<Participant>) {
-        let notarizes = mem::take(&mut self.notarizes);
+        let notarizes = mem::take(&mut self.pending_notarizes);
 
         // Early return if there are no notarizes to verify
         if notarizes.is_empty() {
@@ -298,7 +298,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///    or the scheme doesn't benefit from batching (eager verification).
     pub fn ready_notarizes(&self) -> bool {
         // If there are no pending notarizes, there is nothing to do.
-        if self.notarizes.is_empty() {
+        if self.pending_notarizes.is_empty() {
             return false;
         }
 
@@ -319,7 +319,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
 
         // If we don't have enough to reach the quorum, there is nothing to do yet.
-        if self.verified_notarizes.len() + self.notarizes.len() < self.quorum {
+        if self.verified_notarizes.len() + self.pending_notarizes.len() < self.quorum {
             return false;
         }
 
@@ -345,7 +345,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> (usize, Vec<Participant>) {
-        let nullifies = mem::take(&mut self.nullifies);
+        let nullifies = mem::take(&mut self.pending_nullifies);
 
         // Early return if there are no nullifies to verify
         if nullifies.is_empty() {
@@ -392,7 +392,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///    or the scheme doesn't benefit from batching (eager verification).
     pub fn ready_nullifies(&self) -> bool {
         // If there are no pending nullifies, there is nothing to do.
-        if self.nullifies.is_empty() {
+        if self.pending_nullifies.is_empty() {
             return false;
         }
 
@@ -407,7 +407,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
 
         // If we don't have enough to reach the quorum, there is nothing to do yet.
-        if self.verified_nullifies.len() + self.nullifies.len() < self.quorum {
+        if self.verified_nullifies.len() + self.pending_nullifies.len() < self.quorum {
             return false;
         }
 
@@ -433,7 +433,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> (usize, Vec<Participant>) {
-        let finalizes = mem::take(&mut self.finalizes);
+        let finalizes = mem::take(&mut self.pending_finalizes);
 
         // Early return if there are no finalizes to verify
         if finalizes.is_empty() {
@@ -486,7 +486,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///    or the scheme doesn't benefit from batching (eager verification).
     pub fn ready_finalizes(&self) -> bool {
         // If there are no pending finalizes, there is nothing to do.
-        if self.finalizes.is_empty() {
+        if self.pending_finalizes.is_empty() {
             return false;
         }
 
@@ -507,7 +507,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
 
         // If we don't have enough to reach the quorum, there is nothing to do yet.
-        if self.verified_finalizes.len() + self.finalizes.len() < self.quorum {
+        if self.verified_finalizes.len() + self.pending_finalizes.len() < self.quorum {
             return false;
         }
 
