@@ -3876,7 +3876,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a strategy backed by a pool with 4 threads.
             let strategy = context.child("pool").strategy(NZUsize!(4));
-            assert_eq!(strategy.manual().parallelism_hint(), 4);
+            assert_eq!(strategy.manual().parallelism(), 4);
 
             // Use the strategy to sum a vector of numbers.
             let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
@@ -3890,7 +3890,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a strategy that plans for a parallelism of 4.
             let strategy = context.child("pool").strategy(NZUsize!(4));
-            assert_eq!(strategy.manual().parallelism_hint(), 4);
+            assert_eq!(strategy.manual().parallelism(), 4);
 
             // Use the strategy to sum a vector of numbers.
             let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
@@ -3919,7 +3919,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
-            assert_eq!(strategy.parallelism_hint(), 2);
+            assert_eq!(strategy.parallelism(), 2);
 
             let output = strategy
                 .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
@@ -3937,7 +3937,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let first = context.child("pool_a").strategy(NZUsize!(1)).manual();
-            assert_eq!(first.parallelism_hint(), 1);
+            assert_eq!(first.parallelism(), 1);
             assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
             let output = first
                 .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
@@ -3946,7 +3946,7 @@ mod tests {
             assert_eq!(output, vec![1, 2]);
 
             let second = context.child("pool_b").strategy(NZUsize!(3)).manual();
-            assert_eq!(second.parallelism_hint(), 3);
+            assert_eq!(second.parallelism(), 3);
             assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
             let output = second
                 .spawn(|strategy| strategy.map_collect_vec(0..3, |i| i + 1))
@@ -3958,7 +3958,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let third = context.child("pool_c").strategy(NZUsize!(4)).manual();
-            assert_eq!(third.parallelism_hint(), 4);
+            assert_eq!(third.parallelism(), 4);
             assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
             let output = third
                 .spawn(|strategy| strategy.map_collect_vec(0..4, |i| i + 1))

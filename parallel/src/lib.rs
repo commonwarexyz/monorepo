@@ -101,7 +101,7 @@ commonware_macros::stability_scope!(BETA {
     #[derive(Clone, Debug)]
     pub struct Manual<S> {
         strategy: S,
-        parallelism: NonZeroUsize,
+        parallelism: usize,
     }
 
     impl<S> Manual<S> {
@@ -109,13 +109,13 @@ commonware_macros::stability_scope!(BETA {
         pub const fn new(strategy: S, parallelism: NonZeroUsize) -> Self {
             Self {
                 strategy,
-                parallelism,
+                parallelism: parallelism.get(),
             }
         }
 
         /// Returns the parallelism to use for manually partitioned work.
-        pub const fn parallelism_hint(&self) -> usize {
-            self.parallelism.get()
+        pub const fn parallelism(&self) -> usize {
+            self.parallelism
         }
     }
 
@@ -586,7 +586,10 @@ commonware_macros::stability_scope!(BETA {
 
     impl<S: Strategy> Strategy for Manual<S> {
         fn manual(&self) -> Manual<Self> {
-            Manual::new(self.clone(), self.parallelism)
+            Manual {
+                strategy: self.clone(),
+                parallelism: self.parallelism,
+            }
         }
 
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
@@ -918,7 +921,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         thread_pool: ThreadPool,
         // The parallelism assumed for policy decisions and manual partitioning. Defaults to the
         // pool's thread count.
-        parallelism: NonZeroUsize,
+        parallelism: usize,
         // `Some` enables adaptive serial-vs-parallel decisions; `None` (used by `manual`) runs the
         // parallel body whenever the parallelism exceeds one and allocates no policy state.
         policy: Option<policy::Policy>,
@@ -936,8 +939,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
         /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`].
         pub fn with_pool(thread_pool: ThreadPool) -> Self {
-            let parallelism = NonZeroUsize::new(thread_pool.current_num_threads())
-                .unwrap_or(NonZeroUsize::MIN);
+            let parallelism = thread_pool.current_num_threads().max(1);
             Self {
                 thread_pool,
                 parallelism,
@@ -951,7 +953,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// thread count; override it when the strategy should expose a different parallelism
         /// (e.g. a runtime that executes strategy work inline on a single thread).
         pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
-            self.parallelism = parallelism;
+            self.parallelism = parallelism.get();
             self
         }
 
@@ -977,7 +979,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             multiplier: usize,
             run: impl FnOnce(policy::Execution) -> Result<R, E>,
         ) -> Result<R, E> {
-            let parallelism = self.parallelism.get();
+            let parallelism = self.parallelism;
             let Some(policy) = &self.policy else {
                 let execution = if parallelism <= 1 {
                     policy::Execution::Serial
@@ -994,14 +996,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
     impl Strategy for Rayon {
         fn manual(&self) -> Manual<Self> {
-            Manual::new(
-                Self {
+            Manual {
+                strategy: Self {
                     thread_pool: self.thread_pool.clone(),
                     parallelism: self.parallelism,
                     policy: None,
                 },
-                self.parallelism,
-            )
+                parallelism: self.parallelism,
+            }
         }
 
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
@@ -1364,7 +1366,7 @@ mod test {
             .unwrap()
             .with_parallelism(NonZeroUsize::new(4).unwrap());
         let strategy = strategy.manual();
-        assert_eq!(strategy.parallelism_hint(), 4);
+        assert_eq!(strategy.parallelism(), 4);
         assert_eq!(strategy.run(2, || "serial", || "parallel"), "parallel");
     }
 
@@ -1552,7 +1554,7 @@ mod test {
         let strategy =
             Rayon::with_pool(Arc::new(pool)).with_parallelism(NonZeroUsize::new(4).unwrap());
 
-        assert_eq!(strategy.manual().parallelism_hint(), 4);
+        assert_eq!(strategy.manual().parallelism(), 4);
 
         let result = strategy.spawn(|_| 7).now_or_never();
 

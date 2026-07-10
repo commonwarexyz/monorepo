@@ -781,7 +781,7 @@ where
             || journal.try_read_many_sync(positions),
             || {
                 let manual = strategy.manual();
-                let shard = positions.len().div_ceil(manual.parallelism_hint());
+                let shard = positions.len().div_ceil(manual.parallelism());
                 let shards = manual
                     .map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
                         journal.try_read_many_sync(shard)

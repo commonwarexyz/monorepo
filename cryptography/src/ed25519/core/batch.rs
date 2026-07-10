@@ -119,7 +119,7 @@ impl Verifier {
         // can borrow them.
         let manual = strategy.manual();
         let total = self.signatures.len();
-        let shard_count = manual.parallelism_hint().min(total.max(1));
+        let shard_count = manual.parallelism().min(total.max(1));
         let seeds: Vec<Summary> = (0..shard_count)
             .map(|_| Summary::random(&mut rng))
             .collect();

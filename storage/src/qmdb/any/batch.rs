@@ -446,7 +446,7 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
         || resolve(pending),
         || {
             let manual = strategy.manual();
-            let chunk_len = pending.len().div_ceil(manual.parallelism_hint());
+            let chunk_len = pending.len().div_ceil(manual.parallelism());
             let chunks: Vec<_> = pending.chunks(chunk_len).collect();
             manual
                 .map_collect_vec(chunks, &resolve)
@@ -970,7 +970,7 @@ where
                         // manual strategy execution and keep each location aligned with the
                         // operation resolved for the same filtered candidate.
                         let manual = strategy.manual();
-                        let chunk_len = read_candidates.len().div_ceil(manual.parallelism_hint());
+                        let chunk_len = read_candidates.len().div_ceil(manual.parallelism());
                         let chunks: Vec<CandidateChunk<'_, F, U>> = read_candidates
                             .chunks(chunk_len)
                             .zip(resolved.chunks(chunk_len))
