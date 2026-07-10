@@ -258,6 +258,42 @@ fn straus(
     acc
 }
 
+/// Decompose scalars into signed radix-2^w digits and cache points, in
+/// parallel chunks under `manual`. `term` returns a term's padded
+/// little-endian limbs and its point. Digits are stored point-major.
+fn setup<S: Strategy>(
+    manual: &Manual<S>,
+    n: usize,
+    w: u32,
+    windows: usize,
+    term: impl Fn(usize) -> ([u64; 5], Affine) + Send + Sync,
+) -> (Vec<i16>, Vec<CachedAffine>) {
+    const CHUNK: usize = 1024;
+    let chunks: Vec<(Vec<i16>, Vec<CachedAffine>)> =
+        manual.map_collect_vec((0..n).step_by(CHUNK), |start| {
+            let end = (start + CHUNK).min(n);
+            let mut digits = vec![0i16; (end - start) * windows];
+            let mut cached = Vec::with_capacity(end - start);
+            for i in start..end {
+                let (limbs, point) = term(i);
+                signed_digits(
+                    &limbs,
+                    w,
+                    &mut digits[(i - start) * windows..(i - start + 1) * windows],
+                );
+                cached.push(point.to_cached());
+            }
+            (digits, cached)
+        });
+    let mut digits = Vec::with_capacity(n * windows);
+    let mut cached = Vec::with_capacity(n);
+    for (d, c) in chunks {
+        digits.extend(d);
+        cached.extend(c);
+    }
+    (digits, cached)
+}
+
 /// Compute `sum(wide[i].0 * wide[i].1) + sum(narrow_scalars[i] *
 /// narrow_points[i])` in variable time, with each Pippenger window bucketed
 /// as an independent task under `manual`.
@@ -291,26 +327,17 @@ pub(crate) fn msm_global<S: Strategy>(
     let wide_windows = window_count(253, w);
     let narrow_windows = window_count(128, w);
 
-    let mut wide_digits = vec![0i16; wide.len() * wide_windows];
-    let mut wide_cached = Vec::with_capacity(wide.len());
-    for (i, (s, p)) in wide.iter().enumerate() {
-        signed_digits(
-            &wide_limbs(s),
-            w,
-            &mut wide_digits[i * wide_windows..(i + 1) * wide_windows],
-        );
-        wide_cached.push(p.to_cached());
-    }
-    let mut narrow_digits = vec![0i16; narrow_scalars.len() * narrow_windows];
-    let mut narrow_cached = Vec::with_capacity(narrow_points.len());
-    for (i, (z, p)) in narrow_scalars.iter().zip(narrow_points).enumerate() {
-        signed_digits(
-            &narrow_limbs(*z),
-            w,
-            &mut narrow_digits[i * narrow_windows..(i + 1) * narrow_windows],
-        );
-        narrow_cached.push(p.to_cached());
-    }
+    // Digit decomposition and point caching parallelize over chunks so the
+    // window tasks are not gated behind a serial setup pass.
+    let (wide_digits, wide_cached) = setup(manual, wide.len(), w, wide_windows, |i| {
+        (wide_limbs(&wide[i].0), wide[i].1)
+    });
+    let (narrow_digits, narrow_cached) =
+        setup(manual, narrow_scalars.len(), w, narrow_windows, |i| {
+            let mut limbs = [0u64; 5];
+            limbs[..4].copy_from_slice(&narrow_limbs(narrow_scalars[i]));
+            (limbs, narrow_points[i])
+        });
 
     let sums = manual.map_collect_vec(0..wide_windows, |j| {
         let mut buckets = vec![Extended::IDENTITY; 1 << (w - 1)];
