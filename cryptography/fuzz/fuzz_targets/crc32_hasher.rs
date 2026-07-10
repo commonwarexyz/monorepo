@@ -7,8 +7,8 @@ use commonware_cryptography::{
     Hasher,
 };
 use commonware_math::algebra::Random;
-use crc::{Crc, CRC_32_ISCSI};
 use commonware_utils::TestRng;
+use crc::{Crc, CRC_32_ISCSI};
 use libfuzzer_sys::fuzz_target;
 
 /// Reference CRC32C implementation from the `crc` crate.

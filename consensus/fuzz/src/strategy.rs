@@ -168,7 +168,8 @@ fn sample_messaging_faults(
         let idx = rng.random_range(i..views.len());
         views.swap(i, idx);
         let view = views[i];
-        let rate = rng.random_range(MIN_HONEST_MESSAGES_DROP_RATIO..=MAX_HONEST_MESSAGES_DROP_RATIO);
+        let rate =
+            rng.random_range(MIN_HONEST_MESSAGES_DROP_RATIO..=MAX_HONEST_MESSAGES_DROP_RATIO);
         entries.push((View::new(view), rate));
     }
     entries
