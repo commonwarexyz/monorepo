@@ -29,7 +29,7 @@ use commonware_parallel::Rayon;
 use commonware_runtime::{
     buffer::paged::CacheRef,
     tokio::{Config as RConfig, Context, Runner},
-    Runner as _, Supervisor as _, ThreadPooler as _,
+    Runner as _, Strategizer as _, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -346,7 +346,7 @@ fn main() {
             metadata_partition: "constantinople-merkle-metadata".into(),
             items_per_blob: ITEMS_PER_BLOB,
             write_buffer: WRITE_BUFFER,
-            strategy: ctx.create_strategy(threads).unwrap(),
+            strategy: ctx.strategy(threads),
             page_cache: pc.clone(),
         };
         let journal_config = FConfig {

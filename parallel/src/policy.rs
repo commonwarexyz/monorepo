@@ -1,15 +1,15 @@
 //! Adaptive execution policy for collection operations.
 //!
-//! Entries are keyed by callsite, input-size bucket, work-size bucket, and thread count so a
-//! decision learned for one workload does not leak into another. The policy compares recent
-//! wall-clock estimates of each path and picks whichever is faster, with ties going to
-//! serial (equal wall time for fewer busy workers).
+//! Entries are keyed by callsite, input-size bucket, work-size bucket, and planning parallelism
+//! so a decision learned for one workload does not leak into another. The policy compares recent
+//! wall-clock estimates of each path and picks whichever is faster, with ties going to serial
+//! (equal wall time for fewer busy workers).
 //!
 //! The tuner only arbitrates small cases. Choosing parallel for work that is better run
 //! serially costs microseconds of dispatch overhead, while running big work serially forfeits
 //! the pool's entire speedup, so serial is gated by a live estimate in both of its roles.
 //! Sampling serial (the seed and every probe) requires the projected serial cost, parallel's
-//! wall time multiplied by pool parallelism, to fit under [`SERIAL_SAMPLE_BUDGET_NS`].
+//! wall time multiplied by planning parallelism, to fit under [`SERIAL_SAMPLE_BUDGET_NS`].
 //! Preferring serial in steady state requires both the projected and the measured serial
 //! cost to fit under the same budget. Big cases therefore always run parallel and never pay
 //! a serial sample.
@@ -95,8 +95,8 @@ impl Policy {
         parallelism: usize,
         run: impl FnOnce(Execution) -> Result<R, E>,
     ) -> Result<R, E> {
-        // A single-threaded pool cannot benefit from rayon scheduling, so always run serial and
-        // never spend a measurement on it.
+        // A strategy configured for serial execution cannot benefit from rayon scheduling, so
+        // always run serial and never spend a measurement on it.
         if parallelism <= 1 {
             return run(Execution::Serial);
         }

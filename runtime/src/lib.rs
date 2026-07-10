@@ -350,21 +350,17 @@ stability_scope!(BETA {
         fn stopped(&self) -> signal::Signal;
     }
 
-    /// Trait for creating [Rayon] strategies backed by [rayon]-compatible thread pools
-    /// hosted on threads placed via [Spawner].
-    pub trait ThreadPooler: Spawner {
-        /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
+    /// Interface that runtimes implement to provide parallel execution strategies.
+    pub trait Strategizer: Spawner {
+        /// Returns a new cloneable [Rayon] strategy with the requested planning parallelism.
         ///
         /// # Arguments
-        /// - `concurrency`: The number of tasks to execute concurrently.
+        /// - `parallelism`: The parallelism the strategy should plan for.
         ///
-        /// # Returns
-        /// A `Result` containing the configured [Rayon] strategy or a [commonware_parallel::Error] if the
-        /// backing pool cannot be built.
-        fn create_strategy(
-            &self,
-            concurrency: NonZeroUsize,
-        ) -> Result<Rayon, commonware_parallel::Error>;
+        /// # Panics
+        ///
+        /// Panics if the runtime cannot initialize the strategy's backing Rayon thread pool.
+        fn strategy(&self, parallelism: NonZeroUsize) -> Rayon;
     }
 
     /// Interface to register and encode metrics.
@@ -3875,42 +3871,38 @@ mod tests {
     }
 
     #[test]
-    fn test_create_strategy_tokio() {
+    fn test_strategy_tokio() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            // Create a strategy backed by a pool with 4 threads
-            let strategy = context.child("pool").create_strategy(NZUsize!(4)).unwrap();
+            // Create a strategy backed by a pool with 4 threads.
+            let strategy = context.child("pool").strategy(NZUsize!(4));
             assert_eq!(strategy.manual().parallelism_hint(), 4);
 
-            // Use the strategy to sum a vector of numbers
+            // Use the strategy to sum a vector of numbers.
             let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
             assert_eq!(sum, 10000 * 9999 / 2);
         });
     }
 
     #[test]
-    fn test_create_strategy_deterministic() {
+    fn test_strategy_deterministic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Create a strategy backed by a pool with 4 threads
-            let strategy = context.child("pool").create_strategy(NZUsize!(4)).unwrap();
+            // Create a strategy that plans for a parallelism of 4.
+            let strategy = context.child("pool").strategy(NZUsize!(4));
             assert_eq!(strategy.manual().parallelism_hint(), 4);
 
-            // Use the strategy to sum a vector of numbers
+            // Use the strategy to sum a vector of numbers.
             let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
             assert_eq!(sum, 10000 * 9999 / 2);
         });
     }
 
     #[test]
-    fn test_deterministic_nested_parallel_strategy_uses_spawn_worker() {
+    fn test_deterministic_nested_strategy_runs_inline() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let strategy = context
-                .child("pool")
-                .create_strategy(NZUsize!(1))
-                .unwrap()
-                .manual();
+            let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
 
             let output = strategy
                 .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
@@ -3920,19 +3912,13 @@ mod tests {
         });
     }
 
-    /// A multi-thread pool request must behave as configured under the deterministic
-    /// runtime even though no worker threads exist: the strategy reports the requested
-    /// parallelism and awaited `Strategy::spawn` jobs are driven inline on the executor
-    /// thread (registered as a pool member at creation).
+    /// A strategy with parallelism greater than one must behave as configured under the
+    /// deterministic runtime even though no worker threads exist.
     #[test]
-    fn test_deterministic_multithread_strategy_spawn_completes() {
+    fn test_deterministic_parallel_strategy_spawn_completes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let strategy = context
-                .child("pool")
-                .create_strategy(NZUsize!(2))
-                .unwrap()
-                .manual();
+            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
             assert_eq!(strategy.parallelism_hint(), 2);
 
             let output = strategy
@@ -3943,68 +3929,42 @@ mod tests {
         });
     }
 
-    /// Later strategies must execute on the pool the executor thread registered with:
-    /// rayon permits one registration per OS thread (and it is permanent), so work
-    /// submitted to a fresh pool could never execute. Each strategy still plans with its
-    /// own requested parallelism. Covers a second strategy within one runner and a
-    /// strategy created by a later runner on the same thread.
+    /// Strategies share the pool registered with the executor thread, but each request must
+    /// retain its own planning parallelism and execute work. This covers multiple strategies
+    /// within one runner and a later runner on the same thread.
     #[test]
-    fn test_deterministic_thread_pool_reused_across_pools_and_runners() {
+    fn test_deterministic_strategies_reuse_pool_across_runners() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first = context
-                .child("pool_a")
-                .create_strategy(NZUsize!(2))
-                .unwrap()
-                .manual();
-            assert_eq!(first.parallelism_hint(), 2);
+            let first = context.child("pool_a").strategy(NZUsize!(1)).manual();
+            assert_eq!(first.parallelism_hint(), 1);
+            assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
             let output = first
                 .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
-                .await;
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2]);
 
-            let second = context
-                .child("pool_b")
-                .create_strategy(NZUsize!(3))
-                .unwrap()
-                .manual();
+            let second = context.child("pool_b").strategy(NZUsize!(3)).manual();
             assert_eq!(second.parallelism_hint(), 3);
+            assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
             let output = second
                 .spawn(|strategy| strategy.map_collect_vec(0..3, |i| i + 1))
-                .await;
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2, 3]);
         });
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let third = context
-                .child("pool_c")
-                .create_strategy(NZUsize!(2))
-                .unwrap()
-                .manual();
+            let third = context.child("pool_c").strategy(NZUsize!(4)).manual();
+            assert_eq!(third.parallelism_hint(), 4);
+            assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
             let output = third
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
-                .await;
-            assert_eq!(output, vec![1, 2]);
-        });
-    }
-
-    /// Strategy requests at different concurrencies must each report their own
-    /// parallelism even though they share the single registered pool.
-    #[test]
-    fn test_deterministic_strategy_reports_requested_parallelism() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let first = context
-                .child("pool_a")
-                .create_strategy(NZUsize!(2))
-                .unwrap();
-            let second = context
-                .child("pool_b")
-                .create_strategy(NZUsize!(3))
-                .unwrap();
-            assert_eq!(first.manual().parallelism_hint(), 2);
-            assert_eq!(second.manual().parallelism_hint(), 3);
+                .spawn(|strategy| strategy.map_collect_vec(0..4, |i| i + 1))
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
+            assert_eq!(output, vec![1, 2, 3, 4]);
         });
     }
 
@@ -4015,11 +3975,7 @@ mod tests {
     fn test_deterministic_pool_survives_suspension() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let strategy = context
-                .child("pool")
-                .create_strategy(NZUsize!(2))
-                .unwrap()
-                .manual();
+            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
             context.sleep(Duration::from_millis(10)).await;
 
             let output = strategy
@@ -4034,14 +3990,10 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_nested_parallel_strategy_uses_spawn_worker() {
+    fn test_tokio_nested_strategy_runs_inline() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let strategy = context
-                .child("pool")
-                .create_strategy(NZUsize!(1))
-                .unwrap()
-                .manual();
+            let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
 
             let output = strategy
                 .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))

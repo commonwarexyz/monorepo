@@ -28,7 +28,7 @@ use crate::{
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
-use commonware_parallel::{Error as ParallelError, Rayon};
+use commonware_parallel::Rayon;
 use commonware_utils::{sync::Mutex, sys_rng, NZUsize};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
@@ -636,10 +636,10 @@ impl crate::Spawner for Context {
 }
 
 #[stability(BETA)]
-impl crate::ThreadPooler for Context {
-    fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ParallelError> {
+impl crate::Strategizer for Context {
+    fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
         let pool = ThreadPoolBuilder::new()
-            .num_threads(concurrency.get())
+            .num_threads(parallelism.get())
             .spawn_handler(move |thread| {
                 // Tasks spawned in a thread pool are expected to run longer than any single
                 // task and thus should be provisioned as a dedicated thread.
@@ -648,8 +648,9 @@ impl crate::ThreadPooler for Context {
                     .spawn(move |_| async move { thread.run() });
                 Ok(())
             })
-            .build()?;
-        Ok(Rayon::with_pool(Arc::new(pool)))
+            .build()
+            .expect("failed to create Tokio Rayon thread pool");
+        Rayon::with_pool(Arc::new(pool))
     }
 }
 

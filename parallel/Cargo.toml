@@ -18,7 +18,6 @@ commonware-macros.workspace = true
 dashmap = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
-thiserror = { workspace = true, optional = true }
 
 [dev-dependencies]
 dashmap.workspace = true
@@ -28,4 +27,4 @@ rayon.workspace = true
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std", "dep:dashmap", "dep:futures", "dep:rayon", "dep:thiserror" ]
+std = [ "commonware-macros/std", "dep:dashmap", "dep:futures", "dep:rayon" ]
