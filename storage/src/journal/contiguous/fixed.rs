@@ -522,7 +522,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             cfg.write_buffer,
         );
         let tail_blob = super::position_to_blob(clear_target, cfg.items_per_blob.get());
-        let blobs = Writable::recover(partition, BTreeMap::new(), tail_blob).await?;
+        let mut blobs = Writable::recover(partition, BTreeMap::new(), tail_blob).await?;
+        // Make the fresh tail durable (creation defers that to the first sync, including its
+        // directory entries) before the checkpoint durably records the clear against it.
+        blobs.sync_from(tail_blob).await?;
         checkpoint
             .finish_clear(cfg.items_per_blob.get(), clear_target)
             .await?;
@@ -4347,6 +4350,91 @@ mod tests {
             let bounds = journal.bounds();
             assert_eq!(bounds.start, 2);
             assert_eq!(bounds.end, 2);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_clear_syncs_fresh_tail_before_checkpoint() {
+        // The clear path creates a fresh tail blob and then durably records the clear in the
+        // checkpoint; the tail must be synced first, or the checkpoint could survive a crash
+        // that the never-synced tail does not. A sync fault scoped to the blobs partition
+        // must therefore fail the clear before the checkpoint finalizes.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0u64..3 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let faulty = commonware_runtime::mocks::SyncFaultContext {
+                inner: context.child("faulty"),
+                fail_partition: blob_partition(&cfg),
+            };
+            let mut journal = Journal::<_, Digest>::init(faulty, cfg.clone())
+                .await
+                .unwrap();
+            assert!(
+                journal.clear_to_size(10).await.is_err(),
+                "clear must sync the fresh tail before finalizing the checkpoint"
+            );
+            drop(journal);
+
+            // The intent was staged but never finalized, so recovery completes the clear.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 10..10);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_staged_clear_completion_syncs_fresh_tail_before_checkpoint() {
+        // Completing a staged clear at init recreates the tail blob and finalizes the
+        // checkpoint; the tail must be synced first. A sync fault scoped to the blobs
+        // partition must fail init before the checkpoint finalizes, and a clean reopen
+        // still completes the staged clear.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0u64..3 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Durably stage a clear intent, as a crash between staging and completion
+            // leaves it.
+            Journal::<_, Digest>::test_stage_clear(context.child("stage"), &cfg.partition, 10)
+                .await
+                .unwrap();
+
+            let faulty = commonware_runtime::mocks::SyncFaultContext {
+                inner: context.child("faulty"),
+                fail_partition: blob_partition(&cfg),
+            };
+            assert!(
+                Journal::<_, Digest>::init(faulty, cfg.clone())
+                    .await
+                    .is_err(),
+                "staged-clear completion must sync the fresh tail before finalizing the \
+                 checkpoint"
+            );
+
+            // The clean reopen completes the staged clear.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 10..10);
             journal.destroy().await.unwrap();
         });
     }

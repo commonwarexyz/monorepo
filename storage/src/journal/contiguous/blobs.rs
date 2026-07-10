@@ -379,7 +379,9 @@ impl<E: Context> Writable<E> {
         self.oldest_blob_index = tail_blob;
         self.sealed.clear();
         self.sealed_snapshot = None;
-        Ok(())
+        // Make the fresh tail durable (creation defers that to the first sync, including its
+        // directory entries) before callers durably record state that references it.
+        self.sync_from(tail_blob).await
     }
 
     /// Make every blob from `start_blob` onward durable.
