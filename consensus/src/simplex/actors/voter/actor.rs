@@ -62,12 +62,12 @@ enum Resolved {
 /// [Actor::notify]).
 #[allow(clippy::type_complexity)]
 struct Staged<S: Scheme<D>, D: Digest> {
+    notarize: Option<Notarize<S, D>>,
+    notarization: Option<Notarization<S, D>>,
+    certification: Option<(Rnd, bool, Notarization<S, D>)>,
     /// A nullify vote constructed on timeout, with the best certificate from
     /// the previous view (on retry) to help others enter the view.
     nullify: Option<(Nullify<S>, Option<Certificate<S, D>>)>,
-    certification: Option<(Rnd, bool, Notarization<S, D>)>,
-    notarize: Option<Notarize<S, D>>,
-    notarization: Option<Notarization<S, D>>,
     /// A nullification certificate, with the parent certificate of our proposal
     /// (the "floor") if we were the leader of the nullified view.
     nullification: Option<(Nullification<S>, Option<Certificate<S, D>>)>,
@@ -805,10 +805,10 @@ impl<
         let finalize = self.prepare_finalize(batcher, view).await;
         let finalization = self.prepare_finalization(resolver, view, resolved).await;
         Staged {
-            nullify,
-            certification,
             notarize,
             notarization,
+            certification,
+            nullify,
             nullification,
             finalize,
             finalization,
