@@ -305,7 +305,8 @@ stability_scope!(BETA {
         ///
         /// Callers writing this region over an existing blob must truncate it to zero first, so
         /// a torn write cannot splice old bytes into a fully valid header with a wrong version:
-        /// every partial state then remains classifiable as an interrupted creation.
+        /// every partial state in the canonical-prefix model then remains classifiable as an
+        /// interrupted creation.
         pub(crate) fn create(versions: &RangeInclusive<u16>) -> (Vec<u8>, BlobInfo) {
             let layout = BlobHeaderLayout::V1;
             let blob_version = *versions.end();
@@ -442,7 +443,7 @@ stability_scope!(BETA {
 
     /// Resolves a header that failed to parse: `Ok(None)` if the blob's raw contents are those
     /// of a creation that was interrupted before its header became durable (the caller
-    /// recreates the blob), and the loud corruption error otherwise.
+    /// recreates the blob), and the original parse error otherwise.
     pub(crate) fn resolve_unparseable(
         err: HeaderError,
         raw: &[u8],
