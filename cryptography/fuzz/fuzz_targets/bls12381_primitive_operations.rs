@@ -717,7 +717,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::ScalarConversions { seed, value, a, b } => {
             let _ = Scalar::from(value);
             let _ = Scalar::zero();
-            let small = SmallScalar::random(&mut StdRng::from_seed(seed));
+            let small = SmallScalar::random(StdRng::from_seed(seed));
             let _ = Scalar::from(small);
             let ord = a.cmp(&b);
             assert_eq!(a < b, ord == core::cmp::Ordering::Less);
