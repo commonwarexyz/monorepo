@@ -1,12 +1,11 @@
-use super::Verifier;
+use super::{verifier::offload, Verifier};
 use crate::{
     simplex::{
         actors::span::ViewSpan,
         scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Proposal,
-            Vote, VoteTracker,
+            Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
         },
     },
     types::{Participant, Round as Rnd},
@@ -18,8 +17,8 @@ use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{ordered::Quorum, N3f1};
 use rand_core::CryptoRng;
-use std::{iter::once, sync::Arc};
-use tracing::{info_span, Instrument as _, Span};
+use std::sync::Arc;
+use tracing::{info_span, Span};
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -421,30 +420,11 @@ impl<
             view = self.round.view().traced()
         );
         let scheme = self.verifier.scheme();
-        let worker_span = span.clone();
-        let notarization = strategy
-            .spawn(move |strategy| {
-                worker_span.in_scope(|| {
-                    let mut notarizes = notarizes.into_iter();
-                    let Notarize {
-                        proposal,
-                        attestation,
-                    } = notarizes
-                        .next()
-                        .expect("verified notarize quorum must not be empty");
-                    let attestations = once(attestation)
-                        .chain(notarizes.map(|Notarize { attestation, .. }| attestation));
-                    let certificate = scheme
-                        .assemble::<_, N3f1>(attestations, &strategy)
-                        .expect("verified notarize quorum must assemble");
-                    Notarization {
-                        proposal,
-                        certificate,
-                    }
-                })
-            })
-            .instrument(span)
-            .await;
+        let notarization = offload(span, strategy, move |strategy| {
+            Notarization::from_owned_notarizes(scheme.as_ref(), notarizes, &strategy)
+                .expect("verified notarize quorum must assemble")
+        })
+        .await;
         self.mark_notarized();
         Some(notarization)
     }
@@ -468,24 +448,11 @@ impl<
             view = self.round.view().traced()
         );
         let scheme = self.verifier.scheme();
-        let worker_span = span.clone();
-        let nullification = strategy
-            .spawn(move |strategy| {
-                worker_span.in_scope(|| {
-                    let mut nullifies = nullifies.into_iter();
-                    let Nullify { round, attestation } = nullifies
-                        .next()
-                        .expect("verified nullify quorum must not be empty");
-                    let attestations = once(attestation)
-                        .chain(nullifies.map(|Nullify { attestation, .. }| attestation));
-                    let certificate = scheme
-                        .assemble::<_, N3f1>(attestations, &strategy)
-                        .expect("verified nullify quorum must assemble");
-                    Nullification { round, certificate }
-                })
-            })
-            .instrument(span)
-            .await;
+        let nullification = offload(span, strategy, move |strategy| {
+            Nullification::from_owned_nullifies(scheme.as_ref(), nullifies, &strategy)
+                .expect("verified nullify quorum must assemble")
+        })
+        .await;
         self.mark_nullified();
         Some(nullification)
     }
@@ -509,30 +476,11 @@ impl<
             view = self.round.view().traced()
         );
         let scheme = self.verifier.scheme();
-        let worker_span = span.clone();
-        let finalization = strategy
-            .spawn(move |strategy| {
-                worker_span.in_scope(|| {
-                    let mut finalizes = finalizes.into_iter();
-                    let Finalize {
-                        proposal,
-                        attestation,
-                    } = finalizes
-                        .next()
-                        .expect("verified finalize quorum must not be empty");
-                    let attestations = once(attestation)
-                        .chain(finalizes.map(|Finalize { attestation, .. }| attestation));
-                    let certificate = scheme
-                        .assemble::<_, N3f1>(attestations, &strategy)
-                        .expect("verified finalize quorum must assemble");
-                    Finalization {
-                        proposal,
-                        certificate,
-                    }
-                })
-            })
-            .instrument(span)
-            .await;
+        let finalization = offload(span, strategy, move |strategy| {
+            Finalization::from_owned_finalizes(scheme.as_ref(), finalizes, &strategy)
+                .expect("verified finalize quorum must assemble")
+        })
+        .await;
         self.mark_finalized();
         Some(finalization)
     }

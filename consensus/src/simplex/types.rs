@@ -14,7 +14,7 @@ use commonware_cryptography::{
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
 use rand_core::CryptoRng;
-use std::{collections::HashSet, fmt::Debug, hash::Hash};
+use std::{collections::HashSet, fmt::Debug, hash::Hash, iter::once};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
@@ -975,21 +975,38 @@ pub struct Notarization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
+    /// Builds a notarization certificate from owned notarize votes for the same proposal,
+    /// consuming the votes to avoid cloning each attestation.
+    pub fn from_owned_notarizes<I>(
+        scheme: &S,
+        notarizes: I,
+        strategy: &impl Strategy,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = Notarize<S, D>>,
+        I::IntoIter: Send,
+    {
+        let mut notarizes = notarizes.into_iter();
+        let Notarize {
+            proposal,
+            attestation,
+        } = notarizes.next()?;
+        let attestations = once(attestation).chain(notarizes.map(|n| n.attestation));
+        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
+
+        Some(Self {
+            proposal,
+            certificate,
+        })
+    }
+
     /// Builds a notarization certificate from notarize votes for the same proposal.
     pub fn from_notarizes<'a, I>(scheme: &S, notarizes: I, strategy: &impl Strategy) -> Option<Self>
     where
         I: IntoIterator<Item = &'a Notarize<S, D>>,
         I::IntoIter: Send,
     {
-        let mut iter = notarizes.into_iter().peekable();
-        let proposal = iter.peek()?.proposal.clone();
-        let certificate =
-            scheme.assemble::<_, N3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
-
-        Some(Self {
-            proposal,
-            certificate,
-        })
+        Self::from_owned_notarizes(scheme, notarizes.into_iter().cloned(), strategy)
     }
 
     /// Verifies the notarization certificate against the provided signing scheme.
@@ -1210,18 +1227,32 @@ pub struct Nullification<S: Scheme> {
 }
 
 impl<S: Scheme> Nullification<S> {
+    /// Builds a nullification certificate from owned nullify votes from the same round,
+    /// consuming the votes to avoid cloning each attestation.
+    pub fn from_owned_nullifies<I>(
+        scheme: &S,
+        nullifies: I,
+        strategy: &impl Strategy,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = Nullify<S>>,
+        I::IntoIter: Send,
+    {
+        let mut nullifies = nullifies.into_iter();
+        let Nullify { round, attestation } = nullifies.next()?;
+        let attestations = once(attestation).chain(nullifies.map(|n| n.attestation));
+        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
+
+        Some(Self { round, certificate })
+    }
+
     /// Builds a nullification certificate from nullify votes from the same round.
     pub fn from_nullifies<'a, I>(scheme: &S, nullifies: I, strategy: &impl Strategy) -> Option<Self>
     where
         I: IntoIterator<Item = &'a Nullify<S>>,
         I::IntoIter: Send,
     {
-        let mut iter = nullifies.into_iter().peekable();
-        let round = iter.peek()?.round;
-        let certificate =
-            scheme.assemble::<_, N3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
-
-        Some(Self { round, certificate })
+        Self::from_owned_nullifies(scheme, nullifies.into_iter().cloned(), strategy)
     }
 
     /// Verifies the nullification certificate against the provided signing scheme.
@@ -1452,21 +1483,38 @@ pub struct Finalization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
+    /// Builds a finalization certificate from owned finalize votes for the same proposal,
+    /// consuming the votes to avoid cloning each attestation.
+    pub fn from_owned_finalizes<I>(
+        scheme: &S,
+        finalizes: I,
+        strategy: &impl Strategy,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = Finalize<S, D>>,
+        I::IntoIter: Send,
+    {
+        let mut finalizes = finalizes.into_iter();
+        let Finalize {
+            proposal,
+            attestation,
+        } = finalizes.next()?;
+        let attestations = once(attestation).chain(finalizes.map(|f| f.attestation));
+        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
+
+        Some(Self {
+            proposal,
+            certificate,
+        })
+    }
+
     /// Builds a finalization certificate from finalize votes for the same proposal.
     pub fn from_finalizes<'a, I>(scheme: &S, finalizes: I, strategy: &impl Strategy) -> Option<Self>
     where
         I: IntoIterator<Item = &'a Finalize<S, D>>,
         I::IntoIter: Send,
     {
-        let mut iter = finalizes.into_iter().peekable();
-        let proposal = iter.peek()?.proposal.clone();
-        let certificate =
-            scheme.assemble::<_, N3f1>(iter.map(|f| f.attestation.clone()), strategy)?;
-
-        Some(Self {
-            proposal,
-            certificate,
-        })
+        Self::from_owned_finalizes(scheme, finalizes.into_iter().cloned(), strategy)
     }
 
     /// Verifies the finalization certificate against the provided signing scheme.
