@@ -436,9 +436,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic,
-        mocks::{
-            fail_pending_syncs, release_pending_syncs, DelayedSyncContext, PendingSyncs,
-        },
+        mocks::{fail_pending_syncs, release_pending_syncs, DelayedSyncContext, PendingSyncs},
         BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16};

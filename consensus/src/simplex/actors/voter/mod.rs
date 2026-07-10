@@ -89,8 +89,9 @@ mod tests {
     use commonware_runtime::{
         deterministic,
         mocks::{next_pending_sync, DelayedSyncContext, PendingSyncs},
-        reschedule, telemetry::traces::collector::TraceStorage, Clock, Metrics as _, Quota, Runner,
-        Supervisor as _,
+        reschedule,
+        telemetry::traces::collector::TraceStorage,
+        Clock, Metrics as _, Quota, Runner, Supervisor as _,
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{sync::Mutex, NZUsize, NZU16};
