@@ -247,18 +247,21 @@ stability_scope!(BETA {
         /// Returns true if a blob's raw contents are consistent with the creation of a
         /// [BlobHeaderLayout::V1] blob that was interrupted before its header became durable.
         ///
-        /// Creation writes the region with set_len(0) -> write -> sync, so an interrupted
-        /// creation leaves a prefix of the canonical region, possibly followed by zeros (a
-        /// persisted length without persisted bytes reads as zeros). A file is therefore
-        /// accepted iff it fits within the region and equals a canonical prefix followed by
-        /// zeros: the magic and runtime version are fixed; the blob version bytes continue
-        /// the prefix with whatever value the writer chose; the CRC bytes must be a prefix
-        /// of the CRC over the preceding prelude, which can only have begun persisting once
-        /// the full prelude did; and everything past the prefix must be zero.
+        /// Creation writes the region with set_len(0) -> write -> sync, and this classifier
+        /// models the states it recovers as a prefix of the canonical region, possibly
+        /// followed by zeros (a persisted length without persisted bytes reads as zeros). A
+        /// file is accepted iff it fits within the region and equals a canonical prefix
+        /// followed by zeros: the magic and runtime version are fixed; the blob version
+        /// bytes continue the prefix with whatever value the writer chose; the CRC bytes
+        /// must be a prefix of the CRC over the preceding prelude, which can only have begun
+        /// persisting once the full prelude did; and everything past the prefix must be
+        /// zero.
         ///
-        /// A file that is not a canonical prefix -- a lost byte followed by persisted ones,
-        /// a CRC that does not match its own prelude -- is not what an interrupted write
-        /// leaves behind and stays loud.
+        /// The prefix shape is a model, not a filesystem guarantee: device writeback before
+        /// the sync completes may persist bytes out of order. A file that is not a canonical
+        /// prefix -- a lost byte followed by persisted ones, a CRC that does not match its
+        /// own prelude -- stays loudly corrupt rather than healing, trading recovery
+        /// coverage for never accepting a state that could hold data.
         pub(crate) fn interrupted_creation(raw: &[u8]) -> bool {
             // The file cannot extend past the region creation writes, and everything past
             // the parseable header must be zero padding.
@@ -673,8 +676,8 @@ pub(crate) mod tests {
         ));
     }
 
-    /// Classification only triggers for parse failures a torn write can produce; failures
-    /// that require a validated CRC describe completely written headers and stay loud.
+    /// Classification only triggers for parse failures a torn write can produce; a version
+    /// mismatch requires a validated CRC over a complete header region and stays loud.
     #[test]
     fn test_header_error_torn_creation_candidates() {
         assert!(HeaderError::InvalidMagic { found: [0; 4] }.may_be_torn_creation());
@@ -738,8 +741,8 @@ pub(crate) mod tests {
     }
 
     /// A V1 blob version outside the accepted range is only reported once the CRC has
-    /// validated: a torn version byte breaks the CRC first, so [HeaderError::VersionMismatch]
-    /// always describes a completely written header.
+    /// validated and the region is complete: a torn version byte breaks the CRC first, so
+    /// [HeaderError::VersionMismatch] always describes a completely written header.
     #[test]
     fn test_header_v1_blob_version_checked_after_crc() {
         let raw = v1_blob_bytes(10, b"");

@@ -68,9 +68,10 @@ const CHECKSUM_SLOT_SIZE: usize = CHECKSUM_SLOT_LEN_SIZE + crc32::Digest::SIZE;
 ///
 /// # Panics
 ///
-/// Panics if `physical_page_size` is not a power of two or does not exceed the CRC record size,
-/// so misconfiguration is caught at construction (or compile time, in const contexts).
-pub const fn page_size(physical_page_size: u16) -> NonZeroU16 {
+/// Panics if `physical_page_size` is not a power of two, does not exceed the CRC record size,
+/// or yields a logical size that does not fit a `u16`, so misconfiguration is caught at
+/// construction (or compile time, in const contexts).
+pub const fn page_size(physical_page_size: u32) -> NonZeroU16 {
     assert!(
         physical_page_size.is_power_of_two(),
         "physical page size must be a power of two"
@@ -79,7 +80,12 @@ pub const fn page_size(physical_page_size: u16) -> NonZeroU16 {
         physical_page_size as u64 > CHECKSUM_SIZE,
         "physical page size must exceed the CRC record size"
     );
-    match NonZeroU16::new(physical_page_size - CHECKSUM_SIZE as u16) {
+    let logical = physical_page_size as u64 - CHECKSUM_SIZE;
+    assert!(
+        logical <= u16::MAX as u64,
+        "logical page size must fit in a u16"
+    );
+    match NonZeroU16::new(logical as u16) {
         Some(size) => size,
         None => unreachable!(),
     }

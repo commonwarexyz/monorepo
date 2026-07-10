@@ -450,7 +450,7 @@ mod tests {
 
         // A logical page size whose physical page is exactly one 4096-byte storage page.
         const PHYSICAL_PAGE_SIZE: u64 = 4096;
-        let logical = crate::buffer::paged::page_size(PHYSICAL_PAGE_SIZE as u16);
+        let logical = crate::buffer::paged::page_size(PHYSICAL_PAGE_SIZE as u32);
         let cache = crate::buffer::paged::CacheRef::new(
             test_pool(),
             logical,
