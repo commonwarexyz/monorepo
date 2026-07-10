@@ -77,13 +77,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             leader: None,
             leader_proposal: None,
 
-            notarizes: Vec::new(),
+            notarizes: Vec::with_capacity(quorum),
             verified_notarizes: Vec::with_capacity(quorum),
 
-            nullifies: Vec::new(),
+            nullifies: Vec::with_capacity(quorum),
             verified_nullifies: Vec::with_capacity(quorum),
 
-            finalizes: Vec::new(),
+            finalizes: Vec::with_capacity(quorum),
             verified_finalizes: Vec::with_capacity(quorum),
         }
     }
