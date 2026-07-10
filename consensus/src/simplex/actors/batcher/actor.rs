@@ -30,8 +30,8 @@ use commonware_runtime::{
 };
 use commonware_utils::ordered::{Quorum, Set};
 use rand_core::CryptoRng;
-use std::collections::BTreeMap;
-use tracing::{debug, info_span, trace, Span};
+use std::{collections::BTreeMap, sync::Arc};
+use tracing::{debug, info_span, trace, Instrument as _, Span};
 
 /// Tracks the current view, its leader, and whether the voter has
 /// already been told to timeout this view.
@@ -54,7 +54,7 @@ where
     context: ContextCell<E>,
 
     participants: Set<S::PublicKey>,
-    scheme: S,
+    scheme: Arc<S>,
 
     blocker: B,
     reporter: Re,
@@ -89,7 +89,8 @@ where
     T: Strategy,
 {
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
-        let participants = cfg.scheme.participants().clone();
+        let scheme = Arc::new(cfg.scheme);
+        let participants = scheme.participants().clone();
         let participant_count = participants.len();
         let added = context.counter("added", "number of messages added to the verifier");
         let verified = context.counter("verified", "number of messages verified");
@@ -106,12 +107,12 @@ where
         );
         let verify_latency = context.histogram(
             "verify_latency",
-            "latency of signature verification",
+            "latency of signature verification (including strategy job scheduling)",
             Buckets::CRYPTOGRAPHY,
         );
         let recover_latency = context.histogram(
             "recover_latency",
-            "certificate recover latency",
+            "certificate recover latency (including strategy job scheduling)",
             Buckets::CRYPTOGRAPHY,
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
@@ -120,7 +121,7 @@ where
                 context: ContextCell::new(context),
 
                 participants,
-                scheme: cfg.scheme,
+                scheme,
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
@@ -151,7 +152,7 @@ where
         Round::new(
             Rnd::new(self.epoch, view),
             self.participants.clone(),
-            self.scheme.clone(),
+            Arc::clone(&self.scheme),
             self.blocker.clone(),
             self.reporter.clone(),
         )
@@ -442,17 +443,29 @@ where
                     epoch = self.epoch.traced(),
                     view = view.traced()
                 );
+
+                let verified = message
+                    .verify_spawned(
+                        self.context.as_mut(),
+                        Arc::clone(&self.scheme),
+                        &self.strategy,
+                    )
+                    .instrument(span.clone())
+                    .await;
                 let _guard = span.entered();
+                let Some(message) = verified else {
+                    commonware_p2p::block!(
+                        self.blocker,
+                        sender,
+                        %view,
+                        kind,
+                        "invalid certificate"
+                    );
+                    continue;
+                };
 
                 match message {
                     Certificate::Notarization(notarization) => {
-                        // Verify the certificate
-                        if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
-                        {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid notarization");
-                            continue;
-                        }
-
                         // Store and forward to voter
                         work.entry(view)
                             .or_insert_with(|| self.new_round(view))
@@ -460,16 +473,6 @@ where
                         voter.recovered(Certificate::Notarization(notarization));
                     }
                     Certificate::Nullification(nullification) => {
-                        // Verify the certificate
-                        if !nullification.verify::<_, D>(
-                            self.context.as_mut(),
-                            &self.scheme,
-                            &self.strategy,
-                        ) {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid nullification");
-                            continue;
-                        }
-
                         // Store and forward to voter
                         work.entry(view)
                             .or_insert_with(|| self.new_round(view))
@@ -477,13 +480,6 @@ where
                         voter.recovered(Certificate::Nullification(nullification));
                     }
                     Certificate::Finalization(finalization) => {
-                        // Verify the certificate
-                        if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
-                        {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid finalization");
-                            continue;
-                        }
-
                         // Store and forward to voter
                         work.entry(view)
                             .or_insert_with(|| self.new_round(view))
@@ -582,17 +578,16 @@ where
                 let Some(round) = work.get_mut(&updated_view) else {
                     continue;
                 };
-                {
-                    let _guard = round.span().entered();
-
+                let span = round.span();
+                async {
                     // Batch verify votes if ready
                     let timer = self.verify_latency.timer(self.context.as_ref());
                     let verified = if round.ready_notarizes() {
-                        Some(round.verify_notarizes(self.context.as_mut(), &self.strategy))
+                        Some(round.verify_notarizes(self.context.as_mut(), &self.strategy).await)
                     } else if round.ready_nullifies() {
-                        Some(round.verify_nullifies(self.context.as_mut(), &self.strategy))
+                        Some(round.verify_nullifies(self.context.as_mut(), &self.strategy).await)
                     } else if round.ready_finalizes() {
-                        Some(round.verify_finalizes(self.context.as_mut(), &self.strategy))
+                        Some(round.verify_finalizes(self.context.as_mut(), &self.strategy).await)
                     } else {
                         None
                     };
@@ -631,33 +626,38 @@ where
                     }
 
                     // Try to construct and forward certificates
-                    if let Some(notarization) =
-                        self.recover_latency.time_some(self.context.as_ref(), || {
-                            round.try_construct_notarization(&self.scheme, &self.strategy)
-                        })
+                    let timer = self.recover_latency.timer(self.context.as_ref());
+                    if let Some(notarization) = round
+                        .try_construct_notarization(&self.strategy)
+                        .await
                     {
+                        timer.observe(self.context.as_ref());
                         debug!(%updated_view, "constructed notarization, forwarding to voter");
 
                         // Forward notarization to voter
                         voter.recovered(Certificate::Notarization(notarization));
                     }
-                    if let Some(nullification) =
-                        self.recover_latency.time_some(self.context.as_ref(), || {
-                            round.try_construct_nullification(&self.scheme, &self.strategy)
-                        })
+                    let timer = self.recover_latency.timer(self.context.as_ref());
+                    if let Some(nullification) = round
+                        .try_construct_nullification(&self.strategy)
+                        .await
                     {
+                        timer.observe(self.context.as_ref());
                         debug!(%updated_view, "constructed nullification, forwarding to voter");
                         voter.recovered(Certificate::Nullification(nullification));
                     }
-                    if let Some(finalization) =
-                        self.recover_latency.time_some(self.context.as_ref(), || {
-                            round.try_construct_finalization(&self.scheme, &self.strategy)
-                        })
+                    let timer = self.recover_latency.timer(self.context.as_ref());
+                    if let Some(finalization) = round
+                        .try_construct_finalization(&self.strategy)
+                        .await
                     {
+                        timer.observe(self.context.as_ref());
                         debug!(%updated_view, "constructed finalization, forwarding to voter");
                         voter.recovered(Certificate::Finalization(finalization));
                     }
                 }
+                .instrument(span)
+                .await;
 
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {

@@ -451,10 +451,10 @@ mod tests {
         utils::mocks::inert_channel,
         Manager as _, Recipients, Sender as _, TrackedPeers,
     };
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks, Clock,
-        IoBuf, Metrics as _, Quota, Runner, Spawner, Supervisor as _,
+        IoBuf, Metrics as _, Quota, Runner, Spawner, Supervisor as _, ThreadPooler as _,
     };
     use commonware_utils::{
         ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, TestRng, NZU16,
@@ -790,11 +790,23 @@ mod tests {
             .count() as u32
     }
 
-    fn all_online<S, F, L>(mut fixture: F)
+    fn all_online<S, F, L>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
+    {
+        all_online_with_strategy::<S, F, L, _>(fixture, |_| Sequential);
+    }
+
+    fn all_online_with_strategy<S, F, L, T>(
+        mut fixture: F,
+        strategy: impl FnOnce(&mut deterministic::Context) -> T + Send + 'static,
+    ) where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: Elector<S>,
+        T: Strategy,
     {
         // Create context
         let n = 5;
@@ -811,6 +823,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let strategy = strategy(&mut context);
             let mut oracle =
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
@@ -866,7 +879,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
-                    strategy: Sequential,
+                    strategy: strategy.clone(),
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
@@ -1023,6 +1036,15 @@ mod tests {
     }
 
     test_for_all_fixtures!(all_online);
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_all_online_rayon_bls12381_threshold_vrf_min_pk() {
+        all_online_with_strategy::<_, _, Random, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            |context| context.create_strategy(NZUsize!(2)).unwrap(),
+        );
+    }
 
     fn non_genesis_floor_joiner_catches_tip<S, F, L>(mut fixture: F)
     where

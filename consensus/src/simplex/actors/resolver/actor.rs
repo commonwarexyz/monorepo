@@ -26,8 +26,8 @@ use commonware_runtime::{
 };
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRng;
-use std::{num::NonZeroUsize, time::Duration};
-use tracing::{debug, info_span};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+use tracing::{debug, info_span, Instrument as _};
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -38,7 +38,7 @@ pub struct Actor<
     T: Strategy,
 > {
     context: ContextCell<E>,
-    scheme: S,
+    scheme: Arc<S>,
     blocker: Option<B>,
     strategy: T,
 
@@ -64,7 +64,7 @@ impl<
         (
             Self {
                 context: ContextCell::new(context),
-                scheme: cfg.scheme,
+                scheme: Arc::new(cfg.scheme),
                 blocker: Some(cfg.blocker),
                 strategy: cfg.strategy,
 
@@ -157,7 +157,7 @@ impl<
                 if message.response_closed() {
                     continue;
                 }
-                self.handle_resolver(message, &mut voter, &mut resolver);
+                self.handle_resolver(message, &mut voter, &mut resolver).await;
             },
         }
     }
@@ -211,13 +211,13 @@ impl<
     }
 
     /// Validates an incoming message, returning the parsed message if valid.
-    fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
+    async fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
         // Decode message
         let incoming =
             Certificate::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
 
-        // Validate message
-        match incoming {
+        // Validate message metadata before submitting the cryptographic work.
+        match &incoming {
             Certificate::Notarization(notarization) => {
                 let notarization_view = notarization.view();
                 if notarization.view() < view {
@@ -239,12 +239,6 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
-                    debug!(%view, "notarization failed verification");
-                    return None;
-                }
-                debug!(%view, received = %notarization_view, "received notarization for request");
-                Some(Certificate::Notarization(notarization))
             }
             Certificate::Finalization(finalization) => {
                 if finalization.view() < view {
@@ -259,12 +253,6 @@ impl<
                     );
                     return None;
                 }
-                if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
-                    debug!(%view, "finalization failed verification");
-                    return None;
-                }
-                debug!(%view, received = %finalization.view(), "received finalization for request");
-                Some(Certificate::Finalization(finalization))
             }
             Certificate::Nullification(nullification) => {
                 if nullification.view() != view {
@@ -279,22 +267,28 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(
-                    self.context.as_mut(),
-                    &self.scheme,
-                    &self.strategy,
-                ) {
-                    debug!(%view, "nullification failed verification");
-                    return None;
-                }
-                debug!(%view, received = %nullification.view(), "received nullification for request");
-                Some(Certificate::Nullification(nullification))
             }
         }
+
+        let kind = incoming.kind();
+        let received = incoming.view();
+        let Some(incoming) = incoming
+            .verify_spawned(
+                self.context.as_mut(),
+                Arc::clone(&self.scheme),
+                &self.strategy,
+            )
+            .await
+        else {
+            debug!(%view, kind, "certificate failed verification");
+            return None;
+        };
+        debug!(%view, %received, kind, "received certificate for request");
+        Some(incoming)
     }
 
     /// Handles a message from the [p2p::Engine].
-    fn handle_resolver(
+    async fn handle_resolver(
         &mut self,
         message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
@@ -313,15 +307,17 @@ impl<
                     epoch = self.epoch.traced(),
                     view = view.traced()
                 );
-                let _guard = span.entered();
 
                 // Validate incoming message
                 let validate = info_span!(
+                    parent: &span,
                     "simplex.resolver.validate",
                     epoch = self.epoch.traced(),
                     view = view.traced()
                 );
-                let Some(parsed) = validate.in_scope(|| self.validate(view, data)) else {
+                let parsed = self.validate(view, data).instrument(validate).await;
+                let _guard = span.entered();
+                let Some(parsed) = parsed else {
                     // Resolver will block any peers that send invalid responses, so
                     // we don't need to do again here
                     response.send_lossy(false);

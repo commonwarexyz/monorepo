@@ -20,7 +20,8 @@ use commonware_utils::{
     N3f1,
 };
 use rand_core::CryptoRng;
-use tracing::{info_span, Span};
+use std::sync::Arc;
+use tracing::{info_span, Instrument as _, Span};
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -70,7 +71,7 @@ impl<
     pub fn new(
         round: Rnd,
         participants: Set<S::PublicKey>,
-        scheme: S,
+        scheme: Arc<S>,
         blocker: B,
         reporter: R,
     ) -> Self {
@@ -327,12 +328,12 @@ impl<
     }
 
     #[tracing::instrument(name = "simplex.batcher.verify_notarizes", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
-    pub fn verify_notarizes<E: CryptoRng>(
+    pub async fn verify_notarizes<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,
     ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        self.verifier.verify_notarizes(rng, strategy)
+        self.verifier.verify_notarizes(rng, strategy).await
     }
 
     pub fn ready_nullifies(&self) -> bool {
@@ -344,12 +345,12 @@ impl<
     }
 
     #[tracing::instrument(name = "simplex.batcher.verify_nullifies", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
-    pub fn verify_nullifies<E: CryptoRng>(
+    pub async fn verify_nullifies<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,
     ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        self.verifier.verify_nullifies(rng, strategy)
+        self.verifier.verify_nullifies(rng, strategy).await
     }
 
     pub fn ready_finalizes(&self) -> bool {
@@ -361,12 +362,12 @@ impl<
     }
 
     #[tracing::instrument(name = "simplex.batcher.verify_finalizes", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
-    pub fn verify_finalizes<E: CryptoRng>(
+    pub async fn verify_finalizes<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,
     ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        self.verifier.verify_finalizes(rng, strategy)
+        self.verifier.verify_finalizes(rng, strategy).await
     }
 
     /// Returns true if `signer` has a nullify vote in this round.
@@ -435,9 +436,8 @@ impl<
     /// Attempts to construct a notarization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_notarization(
+    pub async fn try_construct_notarization(
         &mut self,
-        scheme: &S,
         strategy: &impl Strategy,
     ) -> Option<Notarization<S, D>> {
         if self.has_notarization() {
@@ -446,14 +446,26 @@ impl<
         if self.verified_votes.len_notarizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
-        let _span = info_span!(
+        let span = info_span!(
             "simplex.batcher.try_construct_notarization",
             epoch = self.round.epoch().traced(),
             view = self.round.view().traced()
-        )
-        .entered();
-        let notarization =
-            Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes(), strategy)?;
+        );
+        let mut notarizes = self.verified_votes.iter_notarizes().peekable();
+        let proposal = notarizes.peek()?.proposal.clone();
+        let attestations: Vec<_> = notarizes.map(|vote| vote.attestation.clone()).collect();
+        let scheme = self.verifier.scheme();
+        let worker_span = span.clone();
+        let certificate = strategy
+            .spawn(move |strategy| {
+                worker_span.in_scope(|| scheme.assemble::<_, N3f1>(attestations, &strategy))
+            })
+            .instrument(span)
+            .await?;
+        let notarization = Notarization {
+            proposal,
+            certificate,
+        };
         self.set_notarization(notarization.clone());
         Some(notarization)
     }
@@ -461,9 +473,8 @@ impl<
     /// Attempts to construct a nullification certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_nullification(
+    pub async fn try_construct_nullification(
         &mut self,
-        scheme: &S,
         strategy: &impl Strategy,
     ) -> Option<Nullification<S>> {
         if self.has_nullification() {
@@ -472,14 +483,23 @@ impl<
         if self.verified_votes.len_nullifies() < self.participants.quorum::<N3f1>() {
             return None;
         }
-        let _span = info_span!(
+        let span = info_span!(
             "simplex.batcher.try_construct_nullification",
             epoch = self.round.epoch().traced(),
             view = self.round.view().traced()
-        )
-        .entered();
-        let nullification =
-            Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies(), strategy)?;
+        );
+        let mut nullifies = self.verified_votes.iter_nullifies().peekable();
+        let round = nullifies.peek()?.round;
+        let attestations: Vec<_> = nullifies.map(|vote| vote.attestation.clone()).collect();
+        let scheme = self.verifier.scheme();
+        let worker_span = span.clone();
+        let certificate = strategy
+            .spawn(move |strategy| {
+                worker_span.in_scope(|| scheme.assemble::<_, N3f1>(attestations, &strategy))
+            })
+            .instrument(span)
+            .await?;
+        let nullification = Nullification { round, certificate };
         self.set_nullification(nullification.clone());
         Some(nullification)
     }
@@ -487,9 +507,8 @@ impl<
     /// Attempts to construct a finalization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_finalization(
+    pub async fn try_construct_finalization(
         &mut self,
-        scheme: &S,
         strategy: &impl Strategy,
     ) -> Option<Finalization<S, D>> {
         if self.has_finalization() {
@@ -498,14 +517,26 @@ impl<
         if self.verified_votes.len_finalizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
-        let _span = info_span!(
+        let span = info_span!(
             "simplex.batcher.try_construct_finalization",
             epoch = self.round.epoch().traced(),
             view = self.round.view().traced()
-        )
-        .entered();
-        let finalization =
-            Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
+        );
+        let mut finalizes = self.verified_votes.iter_finalizes().peekable();
+        let proposal = finalizes.peek()?.proposal.clone();
+        let attestations: Vec<_> = finalizes.map(|vote| vote.attestation.clone()).collect();
+        let scheme = self.verifier.scheme();
+        let worker_span = span.clone();
+        let certificate = strategy
+            .spawn(move |strategy| {
+                worker_span.in_scope(|| scheme.assemble::<_, N3f1>(attestations, &strategy))
+            })
+            .instrument(span)
+            .await?;
+        let finalization = Finalization {
+            proposal,
+            certificate,
+        };
         self.set_finalization(finalization.clone());
         Some(finalization)
     }

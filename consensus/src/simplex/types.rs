@@ -13,8 +13,22 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
+#[cfg(not(target_arch = "wasm32"))]
+use rand::rngs::StdRng;
 use rand_core::CryptoRng;
+#[cfg(not(target_arch = "wasm32"))]
+use rand_core::SeedableRng;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::Span;
+
+/// Derives an owned rng for a job submitted through [`Strategy::spawn`].
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn seeded_rng<R: CryptoRng>(rng: &mut R) -> StdRng {
+    StdRng::from_rng(rng)
+}
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
@@ -428,6 +442,36 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
             Self::Nullification(_) => "nullification",
             Self::Finalization(_) => "finalization",
         }
+    }
+
+    /// Verifies this certificate in a CPU-bound strategy job.
+    pub(crate) async fn verify_spawned<R: CryptoRng>(
+        self,
+        rng: &mut R,
+        scheme: Arc<S>,
+        strategy: &impl Strategy,
+    ) -> Option<Self>
+    where
+        S: scheme::Scheme<D>,
+    {
+        let mut rng = seeded_rng(rng);
+        let span = Span::current();
+        strategy
+            .spawn(move |strategy| {
+                let valid = span.in_scope(|| match &self {
+                    Self::Notarization(certificate) => {
+                        certificate.verify(&mut rng, scheme.as_ref(), &strategy)
+                    }
+                    Self::Nullification(certificate) => {
+                        certificate.verify::<_, D>(&mut rng, scheme.as_ref(), &strategy)
+                    }
+                    Self::Finalization(certificate) => {
+                        certificate.verify(&mut rng, scheme.as_ref(), &strategy)
+                    }
+                });
+                valid.then_some(self)
+            })
+            .await
     }
 }
 
