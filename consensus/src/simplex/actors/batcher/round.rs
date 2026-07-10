@@ -470,9 +470,8 @@ impl<
                     } = notarizes
                         .next()
                         .expect("verified notarize quorum must not be empty");
-                    let attestations = once(attestation).chain(notarizes.map(
-                        |Notarize { attestation, .. }| attestation,
-                    ));
+                    let attestations = once(attestation)
+                        .chain(notarizes.map(|Notarize { attestation, .. }| attestation));
                     let certificate = scheme
                         .assemble::<_, N3f1>(attestations, &strategy)
                         .expect("verified notarize quorum must assemble");
@@ -565,9 +564,8 @@ impl<
                     } = finalizes
                         .next()
                         .expect("verified finalize quorum must not be empty");
-                    let attestations = once(attestation).chain(finalizes.map(
-                        |Finalize { attestation, .. }| attestation,
-                    ));
+                    let attestations = once(attestation)
+                        .chain(finalizes.map(|Finalize { attestation, .. }| attestation));
                     let certificate = scheme
                         .assemble::<_, N3f1>(attestations, &strategy)
                         .expect("verified finalize quorum must assemble");
