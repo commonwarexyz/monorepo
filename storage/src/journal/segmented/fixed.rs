@@ -126,7 +126,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         // Encode the item
         let buf = item.encode_mut();
-        let offset = blob.append(&buf).await?;
+        let offset = blob.append(&buf);
         if !offset.is_multiple_of(Self::CHUNK_SIZE_U64) {
             return Err(Error::InvalidBlobSize(section, offset));
         }

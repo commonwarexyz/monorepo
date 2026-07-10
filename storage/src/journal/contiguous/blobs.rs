@@ -826,7 +826,7 @@ mod tests {
                 .await
                 .unwrap();
             let mut writer = Writer::new(blob, size, 128, cache_ref).await.unwrap();
-            writer.append(b"abc").await.unwrap();
+            writer.append(b"abc");
 
             let size = writer.size();
             let tail = Blob::Writer(&writer);

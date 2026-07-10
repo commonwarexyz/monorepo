@@ -118,10 +118,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("cannot create append wrapper");
 
-        append
-            .append(&expected_data)
-            .await
-            .expect("cannot append data");
+        append.append(&expected_data);
         append.sync().await.expect("cannot sync");
         drop(append);
 

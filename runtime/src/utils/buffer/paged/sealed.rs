@@ -247,7 +247,7 @@ mod tests {
 
             // Append some data crossing several pages but don't sync.
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
 
             let (_durable_before, _writes_before, full_before, range_before) = blob.snapshot();
 
@@ -277,7 +277,7 @@ mod tests {
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            writer.append(b"hello world").await.unwrap();
+            writer.append(b"hello world");
 
             // A snapshot captures the buffered bytes as an owned, frozen read handle.
             let reader = writer.snapshot().await.unwrap();
@@ -315,7 +315,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let total = page_size * 3 + 7;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
-            writer.append(&data).await.unwrap();
+            writer.append(&data);
 
             let reader = writer.snapshot().await.unwrap();
             let sealed = writer.seal().await.unwrap();
@@ -354,7 +354,7 @@ mod tests {
 
             // Write data with no fsync.
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             let (durable_before, _, full_before, _) = blob.snapshot();
@@ -432,7 +432,7 @@ mod tests {
             // Append exactly two pages.
             let page_size = PAGE_SIZE.get() as usize;
             let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 2).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             assert_eq!(sealed.size(), data.len() as u64);
@@ -458,7 +458,7 @@ mod tests {
 
             // Append fewer than one page of data.
             let data: Vec<u8> = (0u8..=50).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             assert_eq!(sealed.size(), data.len() as u64);
@@ -485,7 +485,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let total = page_size + 17;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             assert_eq!(sealed.size(), total as u64);
@@ -523,7 +523,7 @@ mod tests {
                 .unwrap();
 
             let data: Vec<u8> = (0u8..=255).cycle().take(250).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             let bufs = sealed.read_at(0, data.len()).await.unwrap();
@@ -548,7 +548,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let total = page_size + 50;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             // 4-byte items at three positions: pure cache, straddling boundary, pure partial.
@@ -587,7 +587,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let total = page_size * 2 + 50;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             // Items: page 0, page 1, straddling page 1 and the tail, pure tail.
@@ -647,7 +647,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let total = page_size * 2 + 50;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             // Ranges: page 0, a zero-length range sharing its offset with the page 1 range
@@ -701,7 +701,7 @@ mod tests {
 
             let page_size = PAGE_SIZE.get() as usize;
             let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 2).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             let offsets = [0u64, page_size as u64];
@@ -732,7 +732,7 @@ mod tests {
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            append.append(&[7; 32]).await.unwrap();
+            append.append(&[7; 32]);
             let sealed = append.seal().await.unwrap();
 
             let mut out = vec![0u8; 8];
@@ -751,7 +751,7 @@ mod tests {
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            append.append(&[7; 32]).await.unwrap();
+            append.append(&[7; 32]);
             let sealed = append.seal().await.unwrap();
 
             let mut out = vec![0u8; 8];
@@ -787,7 +787,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let total = page_size + 30;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             // Read fully within partial.
@@ -819,7 +819,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let total = page_size + 30;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             let mut buf = vec![0u8; 12];
@@ -842,7 +842,7 @@ mod tests {
 
             let page_size = PAGE_SIZE.get() as usize;
             let data: Vec<u8> = (0u8..=255).cycle().take(page_size + 5).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             let sealed = append.seal().await.unwrap();
 
             let mut buf = vec![9u8; 10];
@@ -866,7 +866,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let total = page_size * 2 + 25;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             append.sync().await.unwrap();
             let sealed = append.seal().await.unwrap();
 
@@ -904,7 +904,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let mut original = vec![0xAA; page_size];
             original.extend_from_slice(b"old");
-            writer.append(&original).await.unwrap();
+            writer.append(&original);
             writer.sync().await.unwrap();
 
             let snapshot = writer.snapshot().await.unwrap();
@@ -916,7 +916,7 @@ mod tests {
             let mut replay = snapshot.replay(NZUsize!(BUFFER_SIZE)).unwrap();
             assert_eq!(replay.blob_size(), original.len() as u64);
 
-            writer.append(b"newtail").await.unwrap();
+            writer.append(b"newtail");
             writer.sync().await.unwrap();
 
             let mut out = Vec::new();
@@ -948,7 +948,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let total = page_size * 2 + 25;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
-            append.append(&data).await.unwrap();
+            append.append(&data);
             // Seal without a prior append sync.
             let sealed = append.seal().await.unwrap();
 
@@ -988,7 +988,7 @@ mod tests {
                 let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                     .await
                     .unwrap();
-                append.append(&data).await.unwrap();
+                append.append(&data);
                 let sealed = append.seal().await.unwrap();
                 sealed.sync().await.unwrap();
             }
@@ -1020,7 +1020,7 @@ mod tests {
                 let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref.clone())
                     .await
                     .unwrap();
-                writer.append(&data).await.unwrap();
+                writer.append(&data);
                 writer.sync().await.unwrap();
             }
 

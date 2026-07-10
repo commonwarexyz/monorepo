@@ -957,9 +957,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
             self.blobs
                 .tail_writer()
-                .append_owned(items_buf.slice(start..end))
-                .await
-                .map_err(Error::Runtime)?;
+                .append_owned(items_buf.slice(start..end));
             self.bounds.end = new_size;
             written += batch_count;
 
@@ -2304,7 +2302,7 @@ mod tests {
                 .unwrap();
             let mut append = Writer::new(blob, blob_size, 2048, cache_ref).await.unwrap();
             let extra = test_digest(999);
-            append.append(extra.as_ref()).await.unwrap();
+            append.append(extra.as_ref());
             append.sync().await.unwrap();
             drop(append);
 
@@ -2759,10 +2757,7 @@ mod tests {
                 let mut append = Writer::new(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 0");
-                append
-                    .append(extra.as_ref())
-                    .await
-                    .expect("failed to append extra item");
+                append.append(extra.as_ref());
                 append.sync().await.expect("failed to sync corrupted blob");
             }
 

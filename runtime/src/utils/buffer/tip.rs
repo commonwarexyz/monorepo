@@ -194,28 +194,16 @@ impl Buffer {
         true
     }
 
-    /// Replaces the buffered contents with `data` positioned at blob offset `offset`, without
-    /// copying. The capacity and pool are preserved; a later mutation recovers or reallocates
-    /// backing via [Self::writable].
-    pub(super) fn replace(&mut self, offset: u64, data: IoBuf) {
-        self.len = data.len();
-        self.data = data;
-        self.offset = offset;
-    }
-
-    /// Appends the provided `data` to the buffer, and returns `true` if the buffer is over capacity
-    /// after the append.
+    /// Appends the provided `data` to the buffer.
     ///
-    /// If the buffer is above capacity, the caller is responsible for flushing. Further appends
-    /// are safe, but will continue growing the buffer beyond its capacity.
-    pub(super) fn append(&mut self, data: &[u8]) -> bool {
+    /// The buffer grows beyond `capacity` as needed; callers bound growth by draining full
+    /// pages at flush points.
+    pub(super) fn append(&mut self, data: &[u8]) {
         let end = self.len + data.len();
         let mut writable = self.writable(end);
         writable.put_slice(data);
-        let over_capacity = writable.len() > self.capacity;
         self.len = writable.len();
         self.data = writable.freeze();
-        over_capacity
     }
 
     /// Clears buffered data while preserving offset.
@@ -250,7 +238,7 @@ mod tests {
         assert!(buffer.is_empty());
 
         // Add some data to the buffer.
-        assert!(!buffer.append(&[1, 2, 3]));
+        buffer.append(&[1, 2, 3]);
         assert_eq!(buffer.size(), 53);
         assert!(!buffer.is_empty());
 
@@ -263,11 +251,11 @@ mod tests {
 
         // Fill the buffer to capacity.
         let mut buf = vec![42; 100];
-        assert!(!buffer.append(&buf));
+        buffer.append(&buf);
         assert_eq!(buffer.size(), 153);
 
-        // Add one more byte, which should push it over capacity. The byte should still be appended.
-        assert!(buffer.append(&[43]));
+        // Add one more byte, growing the buffer past capacity.
+        buffer.append(&[43]);
         assert_eq!(buffer.size(), 154);
         buf.push(43);
         let flushed = buffer.slice(..);
@@ -338,7 +326,7 @@ mod tests {
         let pool = test_pool();
         let mut buffer = Buffer::new(0, 16, pool);
 
-        assert!(!buffer.append(b"abc"));
+        buffer.append(b"abc");
         let snapshot = buffer.slice(..);
 
         let mut writable = buffer.writable(6);
@@ -361,7 +349,7 @@ mod tests {
         assert_eq!(buffer.len(), 3);
         assert_eq!(buffer.as_ref(), b"abc");
 
-        assert!(!buffer.append(b"def"));
+        buffer.append(b"def");
         assert_eq!(buffer.as_ref(), b"abcdef");
     }
 }

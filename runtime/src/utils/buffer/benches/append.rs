@@ -29,7 +29,7 @@ where
                     for _ in 0..iters {
                         // Write double the bytes that can be held by the cache.
                         for _ in 0..(CACHE_SIZE * PAGE_SIZE.get() as usize / chunk_size) * 2 {
-                            append.append(&data).await.unwrap();
+                            append.append(&data);
                         }
                     }
                     let elapsed = start.elapsed();

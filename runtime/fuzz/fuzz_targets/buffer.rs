@@ -255,7 +255,7 @@ fn fuzz(input: FuzzInput) {
                         };
                         let current_size = append.size();
                         if current_size.checked_add(data.len() as u64).is_some() {
-                            let _ = append.append(&data).await;
+                            append.append(&data);
                         }
                     }
                 }

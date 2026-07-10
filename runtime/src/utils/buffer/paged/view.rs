@@ -291,8 +291,8 @@ mod tests {
 
             // A full page (flushed to the blob) followed by a partial tail kept in the tip buffer.
             let page_size = PAGE_SIZE.get() as usize;
-            writer.append(&vec![0xAA; page_size]).await.unwrap();
-            writer.append(b"TAIL").await.unwrap();
+            writer.append(&vec![0xAA; page_size]);
+            writer.append(b"TAIL");
             writer.sync().await.unwrap();
 
             // Warm the cache for the first page, then read across the page/tail boundary.

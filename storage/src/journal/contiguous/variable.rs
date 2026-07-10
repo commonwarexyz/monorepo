@@ -1463,14 +1463,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 .unwrap_or(encoded.len());
 
             // Append pre-encoded data to the tail, then convert relative item starts into
-            // absolute offsets. A large batch is written whole-page-direct to the blob; the
-            // returned offset is where this batch's first byte was written.
+            // absolute offsets. The returned offset is where this batch's first byte was
+            // staged.
             let base_offset = self
                 .blobs
                 .tail_writer()
-                .append_owned(encoded.slice(batch_start..batch_end))
-                .await
-                .map_err(Error::Runtime)?;
+                .append_owned(encoded.slice(batch_start..batch_end));
 
             let absolute_offsets = item_starts[written..written + batch_count]
                 .iter()
@@ -2260,13 +2258,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         if blob == tail_blob {
             let writer = self.blobs.tail_writer();
             let offset = writer.size();
-            writer.append(&encoded).await.map_err(Error::Runtime)?;
+            writer.append(&encoded);
             return Ok((offset, item_len));
         }
         assert!(blob > tail_blob, "cannot append to a sealed blob");
         let mut writer = self.blobs.open_blob(blob).await?;
         let offset = writer.size();
-        writer.append(&encoded).await.map_err(Error::Runtime)?;
+        writer.append(&encoded);
         writer.sync().await.map_err(Error::Runtime)?;
         Ok((offset, item_len))
     }
@@ -4334,7 +4332,7 @@ mod tests {
 
             let mut encoded = Vec::new();
             encode_frame_into(None, &100u64, &mut encoded).unwrap();
-            pending.get_mut(&0).unwrap().append(&encoded).await.unwrap();
+            pending.get_mut(&0).unwrap().append(&encoded);
             offsets.append(&0).await.unwrap();
 
             let result = Journal::<_, u64>::rebuild_offsets_from_anchor(
@@ -4725,7 +4723,7 @@ mod tests {
                 .await
                 .unwrap();
                 let expected_size = append.size();
-                append.append(&[0xFF, 0xFF]).await.unwrap();
+                append.append(&[0xFF, 0xFF]);
                 append.sync().await.unwrap();
                 drop(append);
 
