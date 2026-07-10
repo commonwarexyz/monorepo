@@ -140,10 +140,10 @@ stability_scope!(BETA {
         /// before the header became durable, making the blob a candidate for
         /// [Header::interrupted_creation] classification.
         ///
-        /// [HeaderError::VersionMismatch] is excluded: for V1 it fires only after the CRC has
-        /// validated, so the header was completely written and the failure is a genuine
-        /// version disagreement. (A V0 version mismatch is checked without a CRC, but V0
-        /// recovery is out of scope.)
+        /// [HeaderError::VersionMismatch] is excluded: for V1 it fires only once the CRC has
+        /// validated and the full header region is present, so the header was completely
+        /// written and the failure is a genuine version disagreement. (A V0 version mismatch
+        /// is checked without a CRC, but V0 recovery is out of scope.)
         pub(crate) const fn may_be_torn_creation(&self) -> bool {
             matches!(
                 self,
@@ -390,8 +390,8 @@ stability_scope!(BETA {
         ///
         /// The magic alone selects the layout; the runtime version must agree with it. Requiring
         /// agreement (rather than deriving the layout from the runtime version) means a header
-        /// with any bytes zeroed by a torn write fails validation instead of parsing as a
-        /// different layout.
+        /// with any layout-identifying bytes zeroed by a torn write fails validation instead
+        /// of parsing as a different layout.
         pub(crate) const fn validate(&self) -> Result<BlobHeaderLayout, HeaderError> {
             let Some(layout) = BlobHeaderLayout::from_magic(&self.magic) else {
                 return Err(HeaderError::InvalidMagic { found: self.magic });
@@ -785,8 +785,8 @@ pub(crate) mod tests {
                     // The magics share the `CWI` brand, so a V0 blob whose surviving bytes
                     // form a canonical V1 prefix -- version stamp 0 (the default), all-zero
                     // payload, and the tag byte lost -- is byte-identical to a V1 creation
-                    // torn inside the magic, and heals. Only the blob's existence is lost:
-                    // every payload byte it held is zero. Any nonzero stamp, payload, or
+                    // torn inside the magic, and heals. Its logical length is lost, but
+                    // every erased payload byte is zero. Any nonzero stamp, payload, or
                     // non-prefix survivor stays loud (see the reject table).
                     let mut raw = v0_blob_bytes(0, &[0u8; 100]);
                     raw[3] = 0;

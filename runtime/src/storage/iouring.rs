@@ -509,7 +509,7 @@ mod tests {
     }
 
     /// Verify the end-to-end storage-page alignment invariant on the io_uring backend: paged
-    /// data written to a V1 blob with a power-of-two physical page size occupies exactly one
+    /// data written to a V1 blob with a 4096-byte physical page size occupies exactly one
     /// aligned 4096-byte disk page per physical page (header page included), so page reads
     /// never straddle a page boundary.
     #[tokio::test]
