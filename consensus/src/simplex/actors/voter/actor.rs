@@ -136,7 +136,7 @@ pub struct Actor<
     write_buffer: NonZeroUsize,
     page_cache: CacheRef,
     journal: Option<Journal<E, Artifact<S, D>>>,
-    dirty: Option<View>,
+    dirty: bool,
 
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
@@ -202,7 +202,7 @@ impl<
                 write_buffer: cfg.write_buffer,
                 page_cache: cfg.page_cache,
                 journal: None,
-                dirty: None,
+                dirty: false,
 
                 mailbox_receiver,
 
@@ -253,35 +253,35 @@ impl<
 
     /// Appends a verified message to the journal.
     ///
-    /// The append is not immediately durable. Sections with pending appends are
-    /// tracked and synced together by [Self::sync_journal].
+    /// The append is not immediately durable. All appends in an event loop
+    /// iteration target the view being processed and are synced together by
+    /// [Self::sync_journal].
     async fn append_journal(&mut self, view: View, artifact: Artifact<S, D>) {
         if let Some(journal) = self.journal.as_mut() {
             journal
                 .append(view.get(), &artifact)
                 .await
                 .expect("unable to append to journal");
-            assert!(
-                self.dirty.is_none_or(|dirty| dirty == view),
-                "event loop iteration appended to multiple journal sections"
-            );
-            self.dirty = Some(view);
+            self.dirty = true;
         }
     }
 
-    /// Syncs the journal section with pending appends.
+    /// Syncs the journal section for `view` (the view being processed) if the
+    /// iteration appended anything.
     ///
     /// Invoked once per event loop iteration, after [Self::construct] and before
     /// [Self::notify] (regardless of whether anything will be broadcast), so
     /// everything we tell the network is recoverable after a restart. Deferring
     /// syncs to this boundary (rather than syncing after each append) coalesces
     /// all appends in the same loop iteration into a single sync.
-    async fn sync_journal(&mut self) {
-        let Some(view) = self.dirty else { return };
+    async fn sync_journal(&mut self, view: View) {
+        if !self.dirty {
+            return;
+        }
         let journal = self
             .journal
             .as_mut()
-            .expect("pending journal sections without a journal");
+            .expect("pending journal appends without a journal");
         let span = info_span!(
             "simplex.voter.journal.sync",
             epoch = self.state.epoch().traced(),
@@ -292,7 +292,7 @@ impl<
             .instrument(span)
             .await
             .expect("unable to sync journal");
-        self.dirty = None;
+        self.dirty = false;
     }
 
     /// Send a vote to every peer.
@@ -826,10 +826,7 @@ impl<
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         staged: Staged<S, D>,
     ) {
-        assert!(
-            self.dirty.is_none(),
-            "journal must be synced before broadcast"
-        );
+        assert!(!self.dirty, "journal must be synced before broadcast");
 
         if let Some((round, certified, notarization)) = staged.certification {
             // Always forward certification outcomes to resolver. This can happen
@@ -1210,7 +1207,7 @@ impl<
                     // This runs even if there is nothing to broadcast (e.g. a
                     // certification result was recorded) so every artifact is
                     // durable by the end of the iteration that appended it.
-                    self.sync_journal().await;
+                    self.sync_journal(view).await;
 
                     // Broadcast everything we built (and report it to the application).
                     self.notify(
