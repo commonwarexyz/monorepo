@@ -223,6 +223,7 @@ fn fuzz_family<F: Family, S: Strategy>(
     suffix: &str,
     strategy: impl FnOnce(&deterministic::Context) -> S,
 ) {
+    deterministic::Runner::default();
     let cfg =
         deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
     let runner = deterministic::Runner::new(cfg);
@@ -431,14 +432,14 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let start_loc: Location<F> = Location::new(start_loc);
                     let root = db.root();
                     if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
-                            assert!(
-                                verify_proof::<Sha256, _, _>(
-                                    &proof,
-                                    start_loc,
-                                    &ops,
-                                    &root),
-                                "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
-                            );
+                        assert!(
+                            verify_proof::<Sha256, _, _>(
+                                &proof,
+                                start_loc,
+                                &ops,
+                                &root),
+                            "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
+                        );
                     }
                 }
 
@@ -468,16 +469,16 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let root = db.root();
                     if let Ok((proof, ops)) = db
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
-                            .await {
-                            assert!(
-                                verify_proof::<Sha256, _, _>(
-                                    &proof,
-                                    start_loc,
-                                    &ops,
-                                    &root),
-                                "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
-                            );
-                        }
+                        .await {
+                        assert!(
+                            verify_proof::<Sha256, _, _>(
+                                &proof,
+                                start_loc,
+                                &ops,
+                                &root),
+                            "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
+                        );
+                    }
                 }
 
                 Operation::SimulateFailure{} => {
@@ -489,8 +490,8 @@ fn fuzz_family<F: Family, S: Strategy>(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
-                    .await
-                    .expect("Failed to init keyless db");
+                        .await
+                        .expect("Failed to init keyless db");
                     restarts += 1;
                 }
             }
