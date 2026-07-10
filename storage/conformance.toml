@@ -170,259 +170,259 @@ hash = "ffc3a9f974c710e714a78629af00a32d6e7afef28757a5d5a818206e9049745f"
 n_cases = 65536
 hash = "75d4969d0ba96bbfaac96c59464f1cadbb779b4ed6e85b1984f4ff8eee544cfc"
 
-["commonware_storage::qmdb::conformance::AnyMmbOrderedFixedConf"]
+["commonware_storage::qmdb::conformance::tests::AnyMmbOrderedFixedConf"]
 n_cases = 200
 hash = "b3c1e2f17435b89294b6fc2f9b779574dc3fe9cc1d9e86a0ba76f3bd3f9361a0"
 
-["commonware_storage::qmdb::conformance::AnyMmbOrderedVariableConf"]
+["commonware_storage::qmdb::conformance::tests::AnyMmbOrderedVariableConf"]
 n_cases = 200
 hash = "bf14ce04fbb2fe8b4ff0865664d1b1fe1386645f3fdb43ea00efdc739eb17a42"
 
-["commonware_storage::qmdb::conformance::AnyMmbUnorderedFixedConf"]
+["commonware_storage::qmdb::conformance::tests::AnyMmbUnorderedFixedConf"]
 n_cases = 200
 hash = "8b42c684f9b0057ce941ec49ddf91e9cf6243bef26bac30c3976180903b4659f"
 
-["commonware_storage::qmdb::conformance::AnyMmbUnorderedVariableConf"]
+["commonware_storage::qmdb::conformance::tests::AnyMmbUnorderedVariableConf"]
 n_cases = 200
 hash = "c681dc3a211feab68a0ee817d163767cbea302f883505b64668fa4398167b7fc"
 
-["commonware_storage::qmdb::conformance::AnyMmrOrderedFixedConf"]
+["commonware_storage::qmdb::conformance::tests::AnyMmrOrderedFixedConf"]
 n_cases = 200
 hash = "2c82870cf341bd0a55cdec3114d8dee0b8033a4cc552dd1d5ab421f092496b55"
 
-["commonware_storage::qmdb::conformance::AnyMmrOrderedVariableConf"]
+["commonware_storage::qmdb::conformance::tests::AnyMmrOrderedVariableConf"]
 n_cases = 200
 hash = "e42304d395e9fa591637a5559c76086f86b9d2af9245ff45d31cacb2db1d65cf"
 
-["commonware_storage::qmdb::conformance::AnyMmrUnorderedFixedConf"]
+["commonware_storage::qmdb::conformance::tests::AnyMmrUnorderedFixedConf"]
 n_cases = 200
 hash = "79c5de9509b38d619ea082cdee833f80eadfa0ef21211f69039ee2d37de07bad"
 
-["commonware_storage::qmdb::conformance::AnyMmrUnorderedVariableConf"]
+["commonware_storage::qmdb::conformance::tests::AnyMmrUnorderedVariableConf"]
 n_cases = 200
 hash = "22374a7cbdfa0bdac17e2e285422a54375fec27017942ef7abea2cf8da298c70"
 
-["commonware_storage::qmdb::conformance::CurrentMmbOrderedFixedConf"]
+["commonware_storage::qmdb::conformance::tests::CurrentMmbOrderedFixedConf"]
 n_cases = 200
 hash = "f6b8828f933b6ed2db8c4ac77c9c3d88e1320274748fce5494a28c96d05aa473"
 
-["commonware_storage::qmdb::conformance::CurrentMmbOrderedVariableConf"]
+["commonware_storage::qmdb::conformance::tests::CurrentMmbOrderedVariableConf"]
 n_cases = 200
 hash = "4c9dcee11720117c8200081712cc10e94f646117185f10d675e07a0aa91ed04c"
 
-["commonware_storage::qmdb::conformance::CurrentMmbUnorderedFixedConf"]
+["commonware_storage::qmdb::conformance::tests::CurrentMmbUnorderedFixedConf"]
 n_cases = 200
 hash = "84a912ffcf79d324ae07a6f12090f5b26b5618f8ebeca30b7220b045a97812cc"
 
-["commonware_storage::qmdb::conformance::CurrentMmbUnorderedVariableConf"]
+["commonware_storage::qmdb::conformance::tests::CurrentMmbUnorderedVariableConf"]
 n_cases = 200
 hash = "12160d3dc3e5ae7b0a98fcb84c7e328eab148111940fe5c3e4e1691c046e2687"
 
-["commonware_storage::qmdb::conformance::CurrentMmrOrderedFixedConf"]
+["commonware_storage::qmdb::conformance::tests::CurrentMmrOrderedFixedConf"]
 n_cases = 200
 hash = "0e5264ac6a0c0d56ace9ebc986635b128f9d7a118471875ad874b08e80f66ebb"
 
-["commonware_storage::qmdb::conformance::CurrentMmrOrderedVariableConf"]
+["commonware_storage::qmdb::conformance::tests::CurrentMmrOrderedVariableConf"]
 n_cases = 200
 hash = "66cd3cc0299ef062e23d4f9812d5d45896cd808ee0bc65d9745a4265895ae8b5"
 
-["commonware_storage::qmdb::conformance::CurrentMmrUnorderedFixedConf"]
+["commonware_storage::qmdb::conformance::tests::CurrentMmrUnorderedFixedConf"]
 n_cases = 200
 hash = "8ce052fef8ce8e4d817a2961144cf3a28aec4bd6eb75d32b013499116a6981da"
 
-["commonware_storage::qmdb::conformance::CurrentMmrUnorderedVariableConf"]
+["commonware_storage::qmdb::conformance::tests::CurrentMmrUnorderedVariableConf"]
 n_cases = 200
 hash = "0d0591823b7d5ed8dcb940d086ec214062eb3cfffd018e9fbadf9e16ce8da0f7"
 
-["commonware_storage::qmdb::conformance::ImmutableMmbCompactFixedConf"]
+["commonware_storage::qmdb::conformance::tests::ImmutableMmbCompactFixedConf"]
 n_cases = 200
 hash = "4f247819136cb0a077007db74e385fd9a0935275bb23e3fe4647b32feb6c9456"
 
-["commonware_storage::qmdb::conformance::ImmutableMmbCompactVariableConf"]
+["commonware_storage::qmdb::conformance::tests::ImmutableMmbCompactVariableConf"]
 n_cases = 200
 hash = "612fc203d1f94a4c66a271d33b3e20aba244def32a37f2e6cba19591b6cbb9bf"
 
-["commonware_storage::qmdb::conformance::ImmutableMmbFixedConf"]
+["commonware_storage::qmdb::conformance::tests::ImmutableMmbFixedConf"]
 n_cases = 200
 hash = "4f247819136cb0a077007db74e385fd9a0935275bb23e3fe4647b32feb6c9456"
 
-["commonware_storage::qmdb::conformance::ImmutableMmbVariableConf"]
+["commonware_storage::qmdb::conformance::tests::ImmutableMmbVariableConf"]
 n_cases = 200
 hash = "612fc203d1f94a4c66a271d33b3e20aba244def32a37f2e6cba19591b6cbb9bf"
 
-["commonware_storage::qmdb::conformance::ImmutableMmrCompactFixedConf"]
+["commonware_storage::qmdb::conformance::tests::ImmutableMmrCompactFixedConf"]
 n_cases = 200
 hash = "e7917ffa234b8a156ac3d556ae4056bf307be259b1d6afe50256adc06e4ba133"
 
-["commonware_storage::qmdb::conformance::ImmutableMmrCompactVariableConf"]
+["commonware_storage::qmdb::conformance::tests::ImmutableMmrCompactVariableConf"]
 n_cases = 200
 hash = "e4e85deaf4b968ee4074a3e7d82edc4fe244feec4361a6c17c085302febfb6d3"
 
-["commonware_storage::qmdb::conformance::ImmutableMmrFixedConf"]
+["commonware_storage::qmdb::conformance::tests::ImmutableMmrFixedConf"]
 n_cases = 200
 hash = "e7917ffa234b8a156ac3d556ae4056bf307be259b1d6afe50256adc06e4ba133"
 
-["commonware_storage::qmdb::conformance::ImmutableMmrVariableConf"]
+["commonware_storage::qmdb::conformance::tests::ImmutableMmrVariableConf"]
 n_cases = 200
 hash = "e4e85deaf4b968ee4074a3e7d82edc4fe244feec4361a6c17c085302febfb6d3"
 
-["commonware_storage::qmdb::conformance::KeylessMmbCompactFixedConf"]
+["commonware_storage::qmdb::conformance::tests::KeylessMmbCompactFixedConf"]
 n_cases = 200
 hash = "1bd0005c478a1feeea63b709ecafadb03d67f69ce2c14cfdf9c294f51d2839c5"
 
-["commonware_storage::qmdb::conformance::KeylessMmbCompactVariableConf"]
+["commonware_storage::qmdb::conformance::tests::KeylessMmbCompactVariableConf"]
 n_cases = 200
 hash = "37b13e76d7bd5e2fad9d0428e3c2f04de48746d87d77c8a30c95b5a77f4db453"
 
-["commonware_storage::qmdb::conformance::KeylessMmbFixedConf"]
+["commonware_storage::qmdb::conformance::tests::KeylessMmbFixedConf"]
 n_cases = 200
 hash = "1bd0005c478a1feeea63b709ecafadb03d67f69ce2c14cfdf9c294f51d2839c5"
 
-["commonware_storage::qmdb::conformance::KeylessMmbVariableConf"]
+["commonware_storage::qmdb::conformance::tests::KeylessMmbVariableConf"]
 n_cases = 200
 hash = "37b13e76d7bd5e2fad9d0428e3c2f04de48746d87d77c8a30c95b5a77f4db453"
 
-["commonware_storage::qmdb::conformance::KeylessMmrCompactFixedConf"]
+["commonware_storage::qmdb::conformance::tests::KeylessMmrCompactFixedConf"]
 n_cases = 200
 hash = "311e78baa8209313a49f2d788d96aa880ba4b3c1c5c88f3151b665f25160fad8"
 
-["commonware_storage::qmdb::conformance::KeylessMmrCompactVariableConf"]
+["commonware_storage::qmdb::conformance::tests::KeylessMmrCompactVariableConf"]
 n_cases = 200
 hash = "d6b0f89534be60d85f5754c16574536d84899fce930dfc182ef973475d3078e4"
 
-["commonware_storage::qmdb::conformance::KeylessMmrFixedConf"]
+["commonware_storage::qmdb::conformance::tests::KeylessMmrFixedConf"]
 n_cases = 200
 hash = "311e78baa8209313a49f2d788d96aa880ba4b3c1c5c88f3151b665f25160fad8"
 
-["commonware_storage::qmdb::conformance::KeylessMmrVariableConf"]
+["commonware_storage::qmdb::conformance::tests::KeylessMmrVariableConf"]
 n_cases = 200
 hash = "d6b0f89534be60d85f5754c16574536d84899fce930dfc182ef973475d3078e4"
 
-["commonware_storage::qmdb::conformance::StorageConformance<AnyMmbOrderedFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<AnyMmbOrderedFixedStorage>"]
 n_cases = 64
 hash = "a958fc2ca550490f51dd36e4ecc106dd0085dc39af90cc447983f4be47a74b83"
 
-["commonware_storage::qmdb::conformance::StorageConformance<AnyMmbOrderedVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<AnyMmbOrderedVariableStorage>"]
 n_cases = 64
 hash = "a04fc2f3bfe1091c6aa5e69cbb98841c20706d59051576186f715ad82e7a8f69"
 
-["commonware_storage::qmdb::conformance::StorageConformance<AnyMmbUnorderedFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<AnyMmbUnorderedFixedStorage>"]
 n_cases = 64
 hash = "180640323946223c0ca28ebf7f473ecb6a1953d5c983e9361a19676eaf5225e5"
 
-["commonware_storage::qmdb::conformance::StorageConformance<AnyMmbUnorderedVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<AnyMmbUnorderedVariableStorage>"]
 n_cases = 64
 hash = "7deeb4cd0fe63fd6ed76c8935d4ff0cca4eaf3500b9a9d06fd5fdef967de136a"
 
-["commonware_storage::qmdb::conformance::StorageConformance<AnyMmrOrderedFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<AnyMmrOrderedFixedStorage>"]
 n_cases = 64
 hash = "8983e984cd552ae2311f0316902d997a8ca39fd7d0bfa2125d3f9e329ce81a67"
 
-["commonware_storage::qmdb::conformance::StorageConformance<AnyMmrOrderedVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<AnyMmrOrderedVariableStorage>"]
 n_cases = 64
 hash = "a12767770a92631544eb3305d20947eda3a0e69dd18e5709e69daef57c9fe442"
 
-["commonware_storage::qmdb::conformance::StorageConformance<AnyMmrUnorderedFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<AnyMmrUnorderedFixedStorage>"]
 n_cases = 64
 hash = "585035c4b1bdb0043ba6c8c1197ebd38aacbe14230d77076730d84db45e0fb7c"
 
-["commonware_storage::qmdb::conformance::StorageConformance<AnyMmrUnorderedVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<AnyMmrUnorderedVariableStorage>"]
 n_cases = 64
 hash = "d624a9909bd383733c8d07244a9d2b504fec7472a92a9975478e376620eac76a"
 
-["commonware_storage::qmdb::conformance::StorageConformance<CurrentMmbOrderedFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<CurrentMmbOrderedFixedStorage>"]
 n_cases = 64
 hash = "797745b383bb20218c724e1aabdf591da631e6f3bfa7dc63eaed873f0725843d"
 
-["commonware_storage::qmdb::conformance::StorageConformance<CurrentMmbOrderedVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<CurrentMmbOrderedVariableStorage>"]
 n_cases = 64
 hash = "c2c9cd14591681154e0d00382f3b20d71018b2030f92308ba9e4bf491c8f7b35"
 
-["commonware_storage::qmdb::conformance::StorageConformance<CurrentMmbUnorderedFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<CurrentMmbUnorderedFixedStorage>"]
 n_cases = 64
 hash = "e3bc41a6c4b1afd009ee9a0bb863a82ef1ab1256c52013cf9046be9818dd35fa"
 
-["commonware_storage::qmdb::conformance::StorageConformance<CurrentMmbUnorderedVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<CurrentMmbUnorderedVariableStorage>"]
 n_cases = 64
 hash = "234e5ae816ecb358c61e271872608c75ceb7caa705b5f02f01e50b370bfb2936"
 
-["commonware_storage::qmdb::conformance::StorageConformance<CurrentMmrOrderedFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<CurrentMmrOrderedFixedStorage>"]
 n_cases = 64
 hash = "d566e066deb64ebb84a64c723ec66b04eb826e86e7987660b9cbb2f8a9e2fc65"
 
-["commonware_storage::qmdb::conformance::StorageConformance<CurrentMmrOrderedVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<CurrentMmrOrderedVariableStorage>"]
 n_cases = 64
 hash = "57ac46194df7df53b6dcd24bfe9afd03105dc1501a396bde73c625c13ed21d5a"
 
-["commonware_storage::qmdb::conformance::StorageConformance<CurrentMmrUnorderedFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<CurrentMmrUnorderedFixedStorage>"]
 n_cases = 64
 hash = "37ad5f62f64df29cdbebd2174324d23a93cc01b7c4c7dd95c3bfe465864fc903"
 
-["commonware_storage::qmdb::conformance::StorageConformance<CurrentMmrUnorderedVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<CurrentMmrUnorderedVariableStorage>"]
 n_cases = 64
 hash = "d7c00f5aea49f06e1c6c98b8951c2d80953818b2b4e4658048f9236cf5e8b879"
 
-["commonware_storage::qmdb::conformance::StorageConformance<ImmutableMmbCompactFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<ImmutableMmbCompactFixedStorage>"]
 n_cases = 64
 hash = "c25123d8d518ed07365e2885e8fdce9c12ccf99f1939d5a98d517410cc79e2aa"
 
-["commonware_storage::qmdb::conformance::StorageConformance<ImmutableMmbCompactVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<ImmutableMmbCompactVariableStorage>"]
 n_cases = 64
 hash = "79a22c00b710103296711204124528fc11d1b12eda8c5d5e1d422b22e26d2c1d"
 
-["commonware_storage::qmdb::conformance::StorageConformance<ImmutableMmbFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<ImmutableMmbFixedStorage>"]
 n_cases = 64
 hash = "b7fb162397fbb6017870a307e0adf4150669c9154e609c8d7771acae9ae4f989"
 
-["commonware_storage::qmdb::conformance::StorageConformance<ImmutableMmbVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<ImmutableMmbVariableStorage>"]
 n_cases = 64
 hash = "7470401a3283064068737695489af0c2e7b79b3079e8078b6b57b793298aa188"
 
-["commonware_storage::qmdb::conformance::StorageConformance<ImmutableMmrCompactFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<ImmutableMmrCompactFixedStorage>"]
 n_cases = 64
 hash = "102b4eb1246f4ddf726168f62192760b46f2e6cf88c88d1b929e6687e3fbf2e8"
 
-["commonware_storage::qmdb::conformance::StorageConformance<ImmutableMmrCompactVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<ImmutableMmrCompactVariableStorage>"]
 n_cases = 64
 hash = "8523097d7018e2cb1b74e2abfa33cd886cc4d7d880c33aa2bc640a07edaaafa1"
 
-["commonware_storage::qmdb::conformance::StorageConformance<ImmutableMmrFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<ImmutableMmrFixedStorage>"]
 n_cases = 64
 hash = "45c3099758637a3c0078eb5a73ecc9cd602692b9c50eee59d49eef59464cf510"
 
-["commonware_storage::qmdb::conformance::StorageConformance<ImmutableMmrVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<ImmutableMmrVariableStorage>"]
 n_cases = 64
 hash = "48d60ffb1d65e2df259d416d844d33f638462b576b6f73458d0a50a3e747f9be"
 
-["commonware_storage::qmdb::conformance::StorageConformance<KeylessMmbCompactFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<KeylessMmbCompactFixedStorage>"]
 n_cases = 64
 hash = "f561c3b523c528431cd478a496e0ddd00e252314f41a14539dd301e83dadc78a"
 
-["commonware_storage::qmdb::conformance::StorageConformance<KeylessMmbCompactVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<KeylessMmbCompactVariableStorage>"]
 n_cases = 64
 hash = "8373fb8a1e385735e6e9b8684ac55756e14bc50f736492da35f96cfebbe6ca4d"
 
-["commonware_storage::qmdb::conformance::StorageConformance<KeylessMmbFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<KeylessMmbFixedStorage>"]
 n_cases = 64
 hash = "b079bfa075b096225c31f26a5e9b11b81acf68f5c4eb66afa62ebf8ce0d91c65"
 
-["commonware_storage::qmdb::conformance::StorageConformance<KeylessMmbVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<KeylessMmbVariableStorage>"]
 n_cases = 64
 hash = "9d959fe01db0496d882f38b5fd5bc82acce96a7cfa46f482a164da8819ee604b"
 
-["commonware_storage::qmdb::conformance::StorageConformance<KeylessMmrCompactFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<KeylessMmrCompactFixedStorage>"]
 n_cases = 64
 hash = "e628a7441380d23e560611b2e8f39f5bc1d6e1307c47dd2c8de8418f5cc490b0"
 
-["commonware_storage::qmdb::conformance::StorageConformance<KeylessMmrCompactVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<KeylessMmrCompactVariableStorage>"]
 n_cases = 64
 hash = "00a8406ae76977f32118b6cd6d64c9fc3acba160d0b4108793bd2dcbb0c94ed4"
 
-["commonware_storage::qmdb::conformance::StorageConformance<KeylessMmrFixedStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<KeylessMmrFixedStorage>"]
 n_cases = 64
 hash = "66d605efde74470e70ae37977b34b24f86a9b48ea5f7d1ad83a67b6e5a1037e4"
 
-["commonware_storage::qmdb::conformance::StorageConformance<KeylessMmrVariableStorage>"]
+["commonware_storage::qmdb::conformance::tests::StorageConformance<KeylessMmrVariableStorage>"]
 n_cases = 64
 hash = "6177c048edae40c3432b659e5f1c7e86adb73d42eb89b9ca5c0364c82cc17ca3"
 
