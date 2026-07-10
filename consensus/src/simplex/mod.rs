@@ -454,7 +454,7 @@ mod tests {
     use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks, Clock,
-        IoBuf, Metrics as _, Quota, Runner, Spawner, Supervisor as _, ThreadPooler as _,
+        IoBuf, Metrics as _, Quota, Runner, Spawner, Strategizer as _, Supervisor as _,
     };
     use commonware_utils::{
         ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, TestRng, NZU16,
@@ -1042,7 +1042,7 @@ mod tests {
     fn test_all_online_rayon_bls12381_threshold_vrf_min_pk() {
         all_online_with_strategy::<_, _, Random, _>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
-            |context| context.create_strategy(NZUsize!(2)).unwrap(),
+            |context| context.strategy(NZUsize!(2)),
         );
     }
 
