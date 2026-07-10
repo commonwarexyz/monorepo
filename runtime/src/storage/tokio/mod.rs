@@ -150,30 +150,7 @@ impl crate::Storage for Storage {
             .await
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
 
-        // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
-        let newly_created = len == 0;
-
-        // Only sync if we created a new file
-        if newly_created {
-            // Sync the file to ensure it is durable
-            file.sync_all()
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
-            #[cfg(unix)]
-            {
-                // Sync the parent directory to ensure the directory entry is durable.
-                sync_dir(parent).await?;
-
-                // Sync storage directory if parent directory did not exist
-                if !parent_existed {
-                    sync_dir(&self.cfg.storage_directory).await?;
-                }
-            }
-        }
 
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
@@ -197,6 +174,20 @@ impl crate::Storage for Storage {
                 file.sync_all()
                     .await
                     .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
+
+                // Sync the directories to ensure the directory entry is durable. This must
+                // also run when recreating a torn blob: the creation it is recovering from
+                // may have crashed before its own directory syncs completed. (Windows has
+                // no notion of syncing a directory entry; see
+                // https://github.com/commonwarexyz/monorepo/issues/2026.)
+                #[cfg(unix)]
+                {
+                    sync_dir(parent).await?;
+                    if !parent_existed {
+                        sync_dir(&self.cfg.storage_directory).await?;
+                    }
+                }
+
                 (info, data_offset)
             }
         };
