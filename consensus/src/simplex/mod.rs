@@ -494,36 +494,31 @@ mod tests {
     // Supported forms:
     //   test_for_all_fixtures!(callee);                  // callee::<_, _, Elector>(fixture)
     //   test_for_all_fixtures!(callee, arg);             // callee::<_, _, Elector, _>(fixture, arg)
+    //   test_for_all_fixtures!(callee, arg, level = "INFO"); // arg with a trace-level override
     //   test_for_all_fixtures!(callee, seeds = N);       // loops callee::<_, _, Elector>(seed, fixture)
     //   test_for_all_fixtures!(callee, level = "INFO");  // overrides the trace level
     macro_rules! test_for_all_fixtures {
         ($callee:ident) => {
-            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee));
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee [] []));
         };
         ($callee:ident, level = $level:literal) => {
-            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee));
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee [] []));
         };
         ($callee:ident, seeds = $n:expr) => {
             for_each_fixture!(test_for_all_fixtures!(@seeded $n, $callee));
         };
+        ($callee:ident, $arg:expr, level = $level:literal) => {
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee [, _] [, $arg]));
+        };
         ($callee:ident, $arg:expr) => {
-            for_each_fixture!(test_for_all_fixtures!(@emit_arg [$arg] $callee));
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee [, _] [, $arg]));
         };
-        (@emit_arg [$arg:expr] $callee:ident, $suffix:ident, $elector:ty, $fixture:expr) => {
-            paste::paste! {
-                #[test_group("slow")]
-                #[test_traced]
-                fn [<test_ $callee _ $suffix>]() {
-                    $callee::<_, _, $elector, _>($fixture, $arg);
-                }
-            }
-        };
-        (@emit [$traced:meta] $callee:ident, $suffix:ident, $elector:ty, $fixture:expr) => {
+        (@emit [$traced:meta] $callee:ident [$($generics:tt)*] [$($args:tt)*], $suffix:ident, $elector:ty, $fixture:expr) => {
             paste::paste! {
                 #[test_group("slow")]
                 #[$traced]
                 fn [<test_ $callee _ $suffix>]() {
-                    $callee::<_, _, $elector>($fixture);
+                    $callee::<_, _, $elector $($generics)*>($fixture $($args)*);
                 }
             }
         };

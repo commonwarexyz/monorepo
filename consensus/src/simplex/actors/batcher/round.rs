@@ -274,8 +274,7 @@ impl<
             }
         }
 
-        // Only retain the verified vote if the verifier accepts it.
-        // The verifier may reject votes for a different proposal than the leader's.
+        // The verifier drops votes for a different proposal than the leader's.
         self.verifier.add(message, true);
     }
 

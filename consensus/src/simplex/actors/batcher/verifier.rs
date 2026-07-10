@@ -155,7 +155,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// If the message has already been verified (e.g., we built it), it is stored
     /// directly for certificate recovery. Otherwise, it is added to the appropriate
-    /// pending queue.
+    /// pending queue. Notarize and finalize votes for a proposal other than the
+    /// known leader's are dropped since they cannot contribute to a certificate.
     ///
     /// If a leader is known and the message is a [Vote::Notarize] from that leader,
     /// this method may trigger `set_leader_proposal`.
@@ -164,18 +165,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// * `msg` - The [Vote] message to add.
     /// * `verified` - A boolean indicating if the message has already been verified.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the vote was accepted, `false` if it was dropped (e.g., because
-    /// it references a different proposal than the leader's).
-    pub fn add(&mut self, msg: Vote<S, D>, verified: bool) -> bool {
+    pub fn add(&mut self, msg: Vote<S, D>, verified: bool) {
         match msg {
             Vote::Notarize(notarize) => {
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     // If leader proposal is set and the message is not for it, drop it
                     if leader_proposal != &notarize.proposal {
-                        return false;
+                        return;
                     }
                 } else if let Some(leader) = self.leader {
                     // If leader is set but leader proposal is not, set it
@@ -191,7 +187,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 } else {
                     self.pending_notarizes.push(notarize);
                 }
-                true
             }
             Vote::Nullify(nullify) => {
                 if verified {
@@ -199,13 +194,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 } else {
                     self.pending_nullifies.push(nullify);
                 }
-                true
             }
             Vote::Finalize(finalize) => {
                 // If leader proposal is set and the message is not for it, drop it
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     if leader_proposal != &finalize.proposal {
-                        return false;
+                        return;
                     }
                 }
 
@@ -215,7 +209,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 } else {
                     self.pending_finalizes.push(finalize);
                 }
-                true
             }
         }
     }
@@ -540,9 +533,9 @@ mod tests {
         ed25519::PublicKey,
         sha256::Digest as Sha256,
     };
+    use commonware_macros::test_async;
     use commonware_parallel::Sequential;
     use commonware_utils::{test_rng, Faults, N3f1, TestRng};
-    use futures::executor::block_on;
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -698,7 +691,7 @@ mod tests {
         set_leader(secp256r1::fixture);
     }
 
-    fn ready_and_verify_notarizes<S, F>(mut fixture: F)
+    async fn ready_and_verify_notarizes<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -729,7 +722,7 @@ mod tests {
         assert!(verifier.ready_notarizes());
         assert_eq!(verifier.pending_notarizes.len(), 4);
 
-        let (batch, failed_bulk) = block_on(verifier.verify_notarizes(&mut rng, &Sequential));
+        let (batch, failed_bulk) = verifier.verify_notarizes(&mut rng, &Sequential).await;
         assert_eq!(batch, 4);
         assert!(failed_bulk.is_empty());
         assert_eq!(verifier.verified_notarizes.len(), 4);
@@ -753,7 +746,7 @@ mod tests {
         }
         assert!(verifier2.ready_notarizes());
 
-        let (batch, failed_second) = block_on(verifier2.verify_notarizes(&mut rng, &Sequential));
+        let (batch, failed_second) = verifier2.verify_notarizes(&mut rng, &Sequential).await;
         assert_eq!(batch, quorum as usize);
         assert!(verifier2
             .verified_notarizes
@@ -762,16 +755,16 @@ mod tests {
         assert_eq!(failed_second, vec![faulty_vote.signer()]);
     }
 
-    #[test]
-    fn test_ready_and_verify_notarizes() {
-        ready_and_verify_notarizes(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        ready_and_verify_notarizes(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        ready_and_verify_notarizes(bls12381_threshold_std::fixture::<MinSig, _>);
-        ready_and_verify_notarizes(bls12381_threshold_std::fixture::<MinPk, _>);
-        ready_and_verify_notarizes(bls12381_multisig::fixture::<MinSig, _>);
-        ready_and_verify_notarizes(bls12381_multisig::fixture::<MinPk, _>);
-        ready_and_verify_notarizes(ed25519::fixture);
-        ready_and_verify_notarizes(secp256r1::fixture);
+    #[test_async]
+    async fn test_ready_and_verify_notarizes() {
+        ready_and_verify_notarizes(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        ready_and_verify_notarizes(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        ready_and_verify_notarizes(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        ready_and_verify_notarizes(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        ready_and_verify_notarizes(bls12381_multisig::fixture::<MinSig, _>).await;
+        ready_and_verify_notarizes(bls12381_multisig::fixture::<MinPk, _>).await;
+        ready_and_verify_notarizes(ed25519::fixture).await;
+        ready_and_verify_notarizes(secp256r1::fixture).await;
     }
 
     fn add_nullify<S, F>(mut fixture: F)
@@ -807,7 +800,7 @@ mod tests {
         add_nullify(secp256r1::fixture);
     }
 
-    fn ready_and_verify_nullifies<S, F>(mut fixture: F)
+    async fn ready_and_verify_nullifies<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -834,7 +827,7 @@ mod tests {
         assert!(verifier.ready_nullifies());
         assert_eq!(verifier.pending_nullifies.len(), 3);
 
-        let (batch, failed) = block_on(verifier.verify_nullifies(&mut rng, &Sequential));
+        let (batch, failed) = verifier.verify_nullifies(&mut rng, &Sequential).await;
         assert_eq!(batch, 3);
         assert!(failed.is_empty());
         assert_eq!(verifier.verified_nullifies.len(), 4);
@@ -842,16 +835,16 @@ mod tests {
         assert!(!verifier.ready_nullifies());
     }
 
-    #[test]
-    fn test_ready_and_verify_nullifies() {
-        ready_and_verify_nullifies(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        ready_and_verify_nullifies(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        ready_and_verify_nullifies(bls12381_threshold_std::fixture::<MinSig, _>);
-        ready_and_verify_nullifies(bls12381_threshold_std::fixture::<MinPk, _>);
-        ready_and_verify_nullifies(bls12381_multisig::fixture::<MinSig, _>);
-        ready_and_verify_nullifies(bls12381_multisig::fixture::<MinPk, _>);
-        ready_and_verify_nullifies(ed25519::fixture);
-        ready_and_verify_nullifies(secp256r1::fixture);
+    #[test_async]
+    async fn test_ready_and_verify_nullifies() {
+        ready_and_verify_nullifies(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        ready_and_verify_nullifies(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        ready_and_verify_nullifies(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        ready_and_verify_nullifies(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        ready_and_verify_nullifies(bls12381_multisig::fixture::<MinSig, _>).await;
+        ready_and_verify_nullifies(bls12381_multisig::fixture::<MinPk, _>).await;
+        ready_and_verify_nullifies(ed25519::fixture).await;
+        ready_and_verify_nullifies(secp256r1::fixture).await;
     }
 
     fn add_finalize<S, F>(mut fixture: F)
@@ -902,7 +895,7 @@ mod tests {
         add_finalize(secp256r1::fixture);
     }
 
-    fn ready_and_verify_finalizes<S, F>(mut fixture: F)
+    async fn ready_and_verify_finalizes<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -934,7 +927,7 @@ mod tests {
         verifier.add(Vote::Finalize(finalizes[3].clone()), false);
         assert!(verifier.ready_finalizes());
 
-        let (batch, failed) = block_on(verifier.verify_finalizes(&mut rng, &Sequential));
+        let (batch, failed) = verifier.verify_finalizes(&mut rng, &Sequential).await;
         assert_eq!(batch, 3);
         assert!(failed.is_empty());
         assert_eq!(verifier.verified_finalizes.len(), 4);
@@ -942,16 +935,16 @@ mod tests {
         assert!(!verifier.ready_finalizes());
     }
 
-    #[test]
-    fn test_ready_and_verify_finalizes() {
-        ready_and_verify_finalizes(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        ready_and_verify_finalizes(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        ready_and_verify_finalizes(bls12381_threshold_std::fixture::<MinSig, _>);
-        ready_and_verify_finalizes(bls12381_threshold_std::fixture::<MinPk, _>);
-        ready_and_verify_finalizes(bls12381_multisig::fixture::<MinSig, _>);
-        ready_and_verify_finalizes(bls12381_multisig::fixture::<MinPk, _>);
-        ready_and_verify_finalizes(ed25519::fixture);
-        ready_and_verify_finalizes(secp256r1::fixture);
+    #[test_async]
+    async fn test_ready_and_verify_finalizes() {
+        ready_and_verify_finalizes(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        ready_and_verify_finalizes(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        ready_and_verify_finalizes(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        ready_and_verify_finalizes(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        ready_and_verify_finalizes(bls12381_multisig::fixture::<MinSig, _>).await;
+        ready_and_verify_finalizes(bls12381_multisig::fixture::<MinPk, _>).await;
+        ready_and_verify_finalizes(ed25519::fixture).await;
+        ready_and_verify_finalizes(secp256r1::fixture).await;
     }
 
     fn leader_proposal_filters_messages<S, F>(mut fixture: F)
@@ -1070,7 +1063,7 @@ mod tests {
         set_leader_twice_panics(secp256r1::fixture);
     }
 
-    fn notarizes_wait_for_quorum<S, F>(mut fixture: F)
+    async fn notarizes_wait_for_quorum<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -1099,21 +1092,21 @@ mod tests {
         }
         assert!(verifier.ready_notarizes(), "Should be ready at quorum");
 
-        let (batch, _) = block_on(verifier.verify_notarizes(&mut rng, &Sequential));
+        let (batch, _) = verifier.verify_notarizes(&mut rng, &Sequential).await;
         assert_eq!(batch, quorum as usize);
         assert!(!verifier.ready_notarizes());
     }
 
-    #[test]
-    fn test_notarizes_wait_for_quorum() {
-        notarizes_wait_for_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        notarizes_wait_for_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        notarizes_wait_for_quorum(bls12381_threshold_std::fixture::<MinSig, _>);
-        notarizes_wait_for_quorum(bls12381_threshold_std::fixture::<MinPk, _>);
-        notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinSig, _>);
-        notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinPk, _>);
-        notarizes_wait_for_quorum(ed25519::fixture);
-        notarizes_wait_for_quorum(secp256r1::fixture);
+    #[test_async]
+    async fn test_notarizes_wait_for_quorum() {
+        notarizes_wait_for_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        notarizes_wait_for_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        notarizes_wait_for_quorum(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        notarizes_wait_for_quorum(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinSig, _>).await;
+        notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinPk, _>).await;
+        notarizes_wait_for_quorum(ed25519::fixture).await;
+        notarizes_wait_for_quorum(secp256r1::fixture).await;
     }
 
     fn ready_notarizes_without_leader<S, F>(mut fixture: F)
@@ -1233,7 +1226,7 @@ mod tests {
         verify_notarizes_empty(secp256r1::fixture);
     }
 
-    fn verify_nullifies_empty<S, F>(mut fixture: F)
+    async fn verify_nullifies_empty<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -1244,25 +1237,25 @@ mod tests {
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         assert!(verifier.pending_nullifies.is_empty());
         assert!(!verifier.ready_nullifies());
-        let (batch, failed) = block_on(verifier.verify_nullifies(&mut rng, &Sequential));
+        let (batch, failed) = verifier.verify_nullifies(&mut rng, &Sequential).await;
         assert_eq!(batch, 0);
         assert!(failed.is_empty());
         assert_eq!(verifier.verified_nullifies.len(), 0);
     }
 
-    #[test]
-    fn test_verify_nullifies_empty_pending() {
-        verify_nullifies_empty(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        verify_nullifies_empty(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        verify_nullifies_empty(bls12381_threshold_std::fixture::<MinSig, _>);
-        verify_nullifies_empty(bls12381_threshold_std::fixture::<MinPk, _>);
-        verify_nullifies_empty(bls12381_multisig::fixture::<MinSig, _>);
-        verify_nullifies_empty(bls12381_multisig::fixture::<MinPk, _>);
-        verify_nullifies_empty(ed25519::fixture);
-        verify_nullifies_empty(secp256r1::fixture);
+    #[test_async]
+    async fn test_verify_nullifies_empty_pending() {
+        verify_nullifies_empty(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        verify_nullifies_empty(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        verify_nullifies_empty(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        verify_nullifies_empty(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        verify_nullifies_empty(bls12381_multisig::fixture::<MinSig, _>).await;
+        verify_nullifies_empty(bls12381_multisig::fixture::<MinPk, _>).await;
+        verify_nullifies_empty(ed25519::fixture).await;
+        verify_nullifies_empty(secp256r1::fixture).await;
     }
 
-    fn verify_finalizes_empty<S, F>(mut fixture: F)
+    async fn verify_finalizes_empty<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -1274,25 +1267,25 @@ mod tests {
         verifier.set_leader(Participant::new(0));
         assert!(verifier.pending_finalizes.is_empty());
         assert!(!verifier.ready_finalizes());
-        let (batch, failed) = block_on(verifier.verify_finalizes(&mut rng, &Sequential));
+        let (batch, failed) = verifier.verify_finalizes(&mut rng, &Sequential).await;
         assert_eq!(batch, 0);
         assert!(failed.is_empty());
         assert_eq!(verifier.verified_finalizes.len(), 0);
     }
 
-    #[test]
-    fn test_verify_finalizes_empty_pending() {
-        verify_finalizes_empty(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        verify_finalizes_empty(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        verify_finalizes_empty(bls12381_threshold_std::fixture::<MinSig, _>);
-        verify_finalizes_empty(bls12381_threshold_std::fixture::<MinPk, _>);
-        verify_finalizes_empty(bls12381_multisig::fixture::<MinSig, _>);
-        verify_finalizes_empty(bls12381_multisig::fixture::<MinPk, _>);
-        verify_finalizes_empty(ed25519::fixture);
-        verify_finalizes_empty(secp256r1::fixture);
+    #[test_async]
+    async fn test_verify_finalizes_empty_pending() {
+        verify_finalizes_empty(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        verify_finalizes_empty(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        verify_finalizes_empty(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        verify_finalizes_empty(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        verify_finalizes_empty(bls12381_multisig::fixture::<MinSig, _>).await;
+        verify_finalizes_empty(bls12381_multisig::fixture::<MinPk, _>).await;
+        verify_finalizes_empty(ed25519::fixture).await;
+        verify_finalizes_empty(secp256r1::fixture).await;
     }
 
-    fn ready_notarizes_exact_quorum<S, F>(mut fixture: F)
+    async fn ready_notarizes_exact_quorum<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -1328,23 +1321,23 @@ mod tests {
             }
         }
 
-        let (batch, failed) = block_on(verifier.verify_notarizes(&mut rng, &Sequential));
+        let (batch, failed) = verifier.verify_notarizes(&mut rng, &Sequential).await;
         assert_eq!(batch, quorum as usize - 1);
         assert!(failed.is_empty());
         assert_eq!(verifier.verified_notarizes.len(), quorum as usize);
         assert!(!verifier.ready_notarizes());
     }
 
-    #[test]
-    fn test_ready_notarizes_exact_quorum() {
-        ready_notarizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        ready_notarizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        ready_notarizes_exact_quorum(bls12381_threshold_std::fixture::<MinSig, _>);
-        ready_notarizes_exact_quorum(bls12381_threshold_std::fixture::<MinPk, _>);
-        ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
-        ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
-        ready_notarizes_exact_quorum(ed25519::fixture);
-        ready_notarizes_exact_quorum(secp256r1::fixture);
+    #[test_async]
+    async fn test_ready_notarizes_exact_quorum() {
+        ready_notarizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        ready_notarizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        ready_notarizes_exact_quorum(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        ready_notarizes_exact_quorum(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinSig, _>).await;
+        ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinPk, _>).await;
+        ready_notarizes_exact_quorum(ed25519::fixture).await;
+        ready_notarizes_exact_quorum(secp256r1::fixture).await;
     }
 
     fn ready_nullifies_exact_quorum<S, F>(mut fixture: F)
