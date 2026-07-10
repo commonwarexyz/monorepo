@@ -7,6 +7,7 @@ pub mod aggregation_decode;
 pub mod bounds;
 pub mod byzzfuzz;
 pub mod disrupter;
+pub mod happens_before;
 pub mod id_mock;
 pub mod invariants;
 #[cfg(feature = "mocks")]
@@ -497,6 +498,15 @@ impl Arbitrary<'_> for FuzzInput {
 }
 
 pub(crate) type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Verifier>::PublicKey;
+type CertCfgOf<P> =
+    <<<P as simplex::Simplex>::Scheme as Verifier>::Certificate as commonware_codec::Read>::Cfg;
+/// Happens-before sink for a [`SniffingReceiver`]: receiving node id, shared
+/// event log, and the participant set used to resolve wire senders to node ids.
+type SniffSink<P> = Option<(
+    u32,
+    happens_before::capture::EventLog,
+    Arc<[PublicKeyOf<P>]>,
+)>;
 
 type ReporterOf<P> = reporter::Reporter<
     deterministic::Context,
@@ -511,6 +521,7 @@ type ReporterEntry<P> = (PublicKeyOf<P>, ReporterOf<P>);
 struct RunAudit {
     auditor_state: String,
     reporter_states: BTreeMap<String, types::ReporterReplicaStateData>,
+    happens_before: Option<happens_before::Summary>,
 }
 
 type NetworkChannels<P> = (
@@ -1081,6 +1092,27 @@ fn messaging_faults(
     }
 }
 
+/// The trace-collection stack: a shared registry with a filtered
+/// [CollectingLayer] over the given storage.
+fn warn_trace_dispatch(trace_store: TraceStorage) -> Dispatch {
+    let collecting_layer = CollectingLayer::new(trace_store).with_filter(filter_fn(|metadata| {
+        (metadata.is_span()
+            && metadata
+                .target()
+                .contains("commonware_consensus::simplex::actors::"))
+            || (metadata.is_event() && *metadata.level() == Level::WARN)
+            || (metadata.is_event()
+                && *metadata.level() == Level::DEBUG
+                && (metadata
+                    .target()
+                    .contains("commonware_consensus::simplex::actors::resolver")
+                    || metadata
+                        .target()
+                        .contains("commonware_consensus::simplex::actors::voter")))
+    }));
+    Dispatch::new(tracing_subscriber::registry().with(collecting_layer))
+}
+
 /// Collect WARN events from the whole protocol run and feed bounded tokens into
 /// state coverage.
 ///
@@ -1089,44 +1121,131 @@ fn messaging_faults(
 /// whole-network: tracing events do not carry the emitting validator identity
 /// without adding protocol instrumentation, and adversarial twin engines hitting
 /// rejection paths is useful reachability feedback.
-fn run_with_warn_trace_collection<T>(run: impl FnOnce() -> T) -> T {
+///
+/// The collector dispatch is passed to `run` so paths that install per-node
+/// subscribers (happens-before) can tee validator-task traces back into it.
+fn run_with_warn_trace_collection<T>(run: impl FnOnce(&Dispatch) -> T) -> T {
     let trace_store = TraceStorage::default();
-    let collecting_layer =
-        CollectingLayer::new(trace_store.clone()).with_filter(filter_fn(|metadata| {
-            (metadata.is_span()
-                && metadata
-                    .target()
-                    .contains("commonware_consensus::simplex::actors::"))
-                || (metadata.is_event() && *metadata.level() == Level::WARN)
-                || (metadata.is_event()
-                    && *metadata.level() == Level::DEBUG
-                    && (metadata
-                        .target()
-                        .contains("commonware_consensus::simplex::actors::resolver")
-                        || metadata
-                            .target()
-                            .contains("commonware_consensus::simplex::actors::voter")))
-        }));
-    let subscriber = tracing_subscriber::registry().with(collecting_layer);
-    let dispatch = Dispatch::new(subscriber);
+    let dispatch = warn_trace_dispatch(trace_store.clone());
 
-    let output = dispatcher::with_default(&dispatch, run);
+    let output = dispatcher::with_default(&dispatch, || run(&dispatch));
 
     let events = trace_store.get_all();
     state_cov::observe_trace_events(&events);
     output
 }
 
+/// The consensus channel a [`SniffingReceiver`] decodes.
+#[derive(Clone, Copy)]
+enum SniffChannel {
+    Vote,
+    Certificate,
+}
+
+/// p2p-boundary capture: wraps a validator's vote or certificate receiver,
+/// decodes each incoming message and records the wire RECEIVE into the
+/// happens-before log, attributed to the receiving node and tagged with the
+/// real sender's node id (resolved against the participant set, so the
+/// send-before-receive merge uses that exact sender's history). This is the
+/// arrival of a message, distinct from the node later PROCESSING it (a separate
+/// tracing event): a message can arrive and be dropped without being processed.
+/// Transparent (forwards the message unchanged); a `None` sink is a zero-decode
+/// pass-through for runs without happens-before capture.
+struct SniffingReceiver<P: simplex::Simplex, R> {
+    inner: R,
+    channel: SniffChannel,
+    cert_cfg: CertCfgOf<P>,
+    sink: SniffSink<P>,
+    _p: std::marker::PhantomData<fn() -> P>,
+}
+
+impl<P: simplex::Simplex, R> SniffingReceiver<P, R> {
+    fn new(inner: R, channel: SniffChannel, cert_cfg: CertCfgOf<P>, sink: SniffSink<P>) -> Self {
+        Self {
+            inner,
+            channel,
+            cert_cfg,
+            sink,
+            _p: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<P: simplex::Simplex, R> fmt::Debug for SniffingReceiver<P, R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SniffingReceiver").finish()
+    }
+}
+
+impl<P, R> commonware_p2p::Receiver for SniffingReceiver<P, R>
+where
+    P: simplex::Simplex,
+    R: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    type Error = R::Error;
+    type PublicKey = PublicKeyOf<P>;
+
+    async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
+        let (sender, payload) = self.inner.recv().await?;
+        if let Some((node, log, peers)) = &self.sink {
+            let event = match self.channel {
+                SniffChannel::Vote => Vote::<P::Scheme, Sha256Digest>::decode(payload.clone())
+                    .ok()
+                    .map(|vote| {
+                        let kind = match &vote {
+                            Vote::Notarize(_) => happens_before::EventKind::ReceiveNotarize,
+                            Vote::Nullify(_) => happens_before::EventKind::ReceiveNullify,
+                            Vote::Finalize(_) => happens_before::EventKind::ReceiveFinalize,
+                        };
+                        (vote.view().get(), kind)
+                    }),
+                SniffChannel::Certificate => Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
+                    payload.clone(),
+                    &self.cert_cfg,
+                )
+                .ok()
+                .map(|cert| {
+                    let kind = match &cert {
+                        Certificate::Notarization(_) => {
+                            happens_before::EventKind::ReceiveNotarization
+                        }
+                        Certificate::Nullification(_) => {
+                            happens_before::EventKind::ReceiveNullification
+                        }
+                        Certificate::Finalization(_) => {
+                            happens_before::EventKind::ReceiveFinalization
+                        }
+                    };
+                    (cert.view().get(), kind)
+                }),
+            };
+            if let Some((view, kind)) = event {
+                let from = peers.iter().position(|p| p == &sender).map(|i| i as u32);
+                log.record(happens_before::Event {
+                    node: *node,
+                    view,
+                    kind,
+                    sender: from,
+                });
+            }
+        }
+        Ok((sender, payload))
+    }
+}
+
 fn run_standard_once<P: simplex::Simplex>(
     mut input: FuzzInput,
     state_coverage: bool,
     collect_audit: bool,
+    happens_before: bool,
+    warn_dispatch: Option<Dispatch>,
 ) -> Option<RunAudit> {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
+    let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
-    executor.start(|mut context| async move {
+    executor.start(move |mut context| async move {
         if matches!(input.partition, Partition::Adaptive(_)) {
             input.partition = Partition::Adaptive(network_faults(
                 input.strategy,
@@ -1163,31 +1282,80 @@ fn run_standard_once<P: simplex::Simplex>(
         }
 
         // Spawn honest validators
+        let peers: Arc<[PublicKeyOf<P>]> = participants.clone().into();
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
+            // p2p-boundary sniffing: capture wire arrivals of votes and
+            // certificates (distinct from the node processing them, which the
+            // tracing source records). Pass-through when not capturing.
+            let pending = {
+                let (vote_sender, vote_receiver) = pending;
+                let sink = hb_log
+                    .as_ref()
+                    .map(|log| (i as u32, log.clone(), peers.clone()));
+                let cfg = schemes[i].certificate_codec_config();
+                (
+                    vote_sender,
+                    SniffingReceiver::<P, _>::new(vote_receiver, SniffChannel::Vote, cfg, sink),
+                )
+            };
+            let recovered = {
+                let (cert_sender, cert_receiver) = recovered;
+                let sink = hb_log
+                    .as_ref()
+                    .map(|log| (i as u32, log.clone(), peers.clone()));
+                let cfg = schemes[i].certificate_codec_config();
+                (
+                    cert_sender,
+                    SniffingReceiver::<P, _>::new(
+                        cert_receiver,
+                        SniffChannel::Certificate,
+                        cfg,
+                        sink,
+                    ),
+                )
+            };
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
-                ctx,
-                &oracle,
-                &participants,
-                schemes[i].clone(),
-                validator.clone(),
-                P::Elector::default(),
-                relay.clone(),
-                Duration::from_secs(1),
-                Duration::from_secs(2),
-                input.mailbox_size,
-                input.fetch_concurrent,
-                input.forwarding,
-                pending,
-                recovered,
-                resolver,
-                input.certify,
-                input.reporting,
-            );
+            let spawn = || {
+                spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                    ctx,
+                    &oracle,
+                    &participants,
+                    schemes[i].clone(),
+                    validator.clone(),
+                    P::Elector::default(),
+                    relay.clone(),
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    input.mailbox_size,
+                    input.fetch_concurrent,
+                    input.forwarding,
+                    pending,
+                    recovered,
+                    resolver,
+                    input.certify,
+                    input.reporting,
+                )
+            };
+            // Dispatch propagation: every task the engine spawns inherits this
+            // per-node subscriber, so its tracing events are attributed to node
+            // `i`. The subscriber shadows the whole-run trace collector for
+            // those tasks, so tee it back in when one is installed.
+            let reporter = match &hb_log {
+                Some(log) => {
+                    let mut subscriber =
+                        happens_before::capture::NodeSubscriber::new(i as u32, log.clone());
+                    if let Some(inner) = &warn_dispatch {
+                        subscriber = subscriber.with_inner(inner.clone());
+                    }
+                    let dispatch = Dispatch::new(subscriber);
+                    dispatcher::with_default(&dispatch, spawn)
+                }
+                None => spawn(),
+            };
             reporters.push((validator, reporter));
         }
 
@@ -1223,6 +1391,16 @@ fn run_standard_once<P: simplex::Simplex>(
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
+        let hb_summary = hb_log.as_ref().map(|log| log.summary());
+        if let Some(summary) = &hb_summary {
+            let mut tokens = summary.tokens();
+            if let Some(bucket) = summary.dispersion_bucket() {
+                tokens.insert(format!("hb:dispersion={bucket}"));
+            }
+            tokens.extend(summary.lsh_tokens());
+            state_cov::observe_tokens(tokens);
+        }
+
         if config.is_valid() {
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
@@ -1241,6 +1419,7 @@ fn run_standard_once<P: simplex::Simplex>(
             let audit = collect_audit.then(|| RunAudit {
                 auditor_state: context.auditor().state(),
                 reporter_states: reporter_states.unwrap_or_default(),
+                happens_before: hb_summary,
             });
             let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);
@@ -1251,15 +1430,26 @@ fn run_standard_once<P: simplex::Simplex>(
     })
 }
 
-fn run<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool) {
-    if state_coverage {
+fn run<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool, happens_before: bool) {
+    if state_coverage || happens_before {
         state_cov::reset();
     }
-    let execute = || run_standard_once::<P>(input, state_coverage, false);
-    if state_coverage {
-        let _ = run_with_warn_trace_collection(execute);
+    if happens_before {
+        if state_coverage {
+            // Per-node subscribers shadow the collector for validator tasks, so
+            // its dispatch is teed through them to keep trace-event tokens fed.
+            let _ = run_with_warn_trace_collection(|dispatch| {
+                run_standard_once::<P>(input, true, false, true, Some(dispatch.clone()))
+            });
+        } else {
+            let _ = run_standard_once::<P>(input, false, false, true, None);
+        }
+    } else if state_coverage {
+        let _ = run_with_warn_trace_collection(|_| {
+            run_standard_once::<P>(input, true, false, false, None)
+        });
     } else {
-        let _ = execute();
+        let _ = run_standard_once::<P>(input, false, false, false, None);
     }
 }
 
@@ -1871,7 +2061,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
     };
 
     if state_coverage {
-        run_with_warn_trace_collection(execute);
+        run_with_warn_trace_collection(|_| execute());
     } else {
         execute();
     }
@@ -1938,6 +2128,9 @@ pub trait Coverage {
     /// When `true`, the run projects its honest reporters through
     /// [`state_cov::observe_with_metrics`] so libFuzzer also tracks protocol-state novelty.
     const STATE: bool;
+    /// When `true`, per-node subscribers capture a happens-before summary of the run
+    /// (see [`happens_before`]) and fold its causal-pair tokens into the same table.
+    const HAPPENS_BEFORE: bool = false;
 }
 
 /// Only libFuzzer's default code-edge coverage; no protocol-state feedback (the
@@ -1951,6 +2144,23 @@ impl Coverage for CodeCoverage {
 pub struct StateCoverage;
 impl Coverage for StateCoverage {
     const STATE: bool = true;
+}
+
+/// Happens-before coverage only: per-node causal-interleaving novelty without the
+/// protocol-state signal (see [`happens_before`]). The baseline HB target.
+pub struct HappensBeforeCoverage;
+impl Coverage for HappensBeforeCoverage {
+    const STATE: bool = false;
+    const HAPPENS_BEFORE: bool = true;
+}
+
+/// Happens-before coverage layered on top of the protocol-state signal: both feed
+/// the same table so their contributions combine (see [`happens_before`] and
+/// [`state_cov`]).
+pub struct HappensBeforeStateCoverage;
+impl Coverage for HappensBeforeStateCoverage {
+    const STATE: bool = true;
+    const HAPPENS_BEFORE: bool = true;
 }
 
 /// **Standard mode** - the baseline harness.
@@ -2111,15 +2321,15 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
 
     let raw_bytes = input.raw_bytes.clone();
     let run_result = match M::MODE {
-        Mode::Standard => {
-            panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, C::STATE)))
-        }
+        Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            run::<P>(input, C::STATE, C::HAPPENS_BEFORE)
+        })),
         Mode::FaultyMessaging => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_faulty_messaging::<P>(input)
         })),
-        Mode::FaultyNet => {
-            panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input, C::STATE)))
-        }
+        Mode::FaultyNet => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            run::<P>(input, C::STATE, C::HAPPENS_BEFORE)
+        })),
         Mode::TwinsMutator => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twins_mutator::<P>(input, C::STATE)
         })),
@@ -2185,14 +2395,88 @@ mod tests {
     fn warn_trace_collection_does_not_perturb_standard_run() {
         let input = audit_input();
 
-        let unwrapped = run_standard_once::<simplex::SimplexId>(input.clone(), false, true)
-            .expect("valid connected run should produce audit data");
-        let wrapped = run_with_warn_trace_collection(|| {
-            run_standard_once::<simplex::SimplexId>(input, false, true)
+        let unwrapped =
+            run_standard_once::<simplex::SimplexId>(input.clone(), false, true, false, None)
+                .expect("valid connected run should produce audit data");
+        let wrapped = run_with_warn_trace_collection(|_| {
+            run_standard_once::<simplex::SimplexId>(input, false, true, false, None)
         })
         .expect("valid connected run should produce audit data");
 
         assert_eq!(unwrapped.auditor_state, wrapped.auditor_state);
         assert_eq!(unwrapped.reporter_states, wrapped.reporter_states);
+    }
+
+    #[test]
+    fn happens_before_capture_is_node_attributed_and_deterministic() {
+        let input = audit_input();
+
+        let a = run_standard_once::<simplex::SimplexId>(input.clone(), false, true, true, None)
+            .expect("valid connected run should produce audit data");
+        let b = run_standard_once::<simplex::SimplexId>(input, false, true, true, None)
+            .expect("valid connected run should produce audit data");
+
+        let summary = a.happens_before.as_ref().expect("hb capture requested");
+        // Dispatch propagation attributed events to each honest validator, and each
+        // recorded real causal history over a live run.
+        assert!(
+            summary.node_count() >= 2,
+            "expected multiple attributed nodes, got {}",
+            summary.node_count()
+        );
+        assert!(
+            !summary.tokens().is_empty(),
+            "expected non-empty happens-before token set"
+        );
+        // p2p-boundary sniffing captured wire arrivals of votes (which tracing
+        // cannot observe): notarize votes are exchanged on the way to finalization.
+        assert!(
+            summary.tokens().iter().any(|t| t.contains("recv_notarize")),
+            "expected p2p-sniffed vote-arrival tokens"
+        );
+        // Certificate arrival (p2p) and certificate processing (tracing) are
+        // captured as distinct events.
+        let toks = summary.tokens();
+        assert!(
+            toks.iter().any(|t| t.contains("recv_notarization")),
+            "expected p2p-sniffed certificate-arrival tokens"
+        );
+        assert!(
+            toks.iter().any(|t| t.contains("proc_")),
+            "expected tracing certificate-processing tokens"
+        );
+        // Same seed and inputs must yield an identical summary.
+        assert_eq!(a.happens_before, b.happens_before);
+    }
+
+    #[test]
+    fn happens_before_tee_preserves_warn_trace_collection() {
+        let input = audit_input();
+        let collect = |happens_before: bool| {
+            let store = TraceStorage::default();
+            let dispatch = warn_trace_dispatch(store.clone());
+            let warn_dispatch = happens_before.then(|| dispatch.clone());
+            let audit = dispatcher::with_default(&dispatch, || {
+                run_standard_once::<simplex::SimplexId>(
+                    input.clone(),
+                    false,
+                    true,
+                    happens_before,
+                    warn_dispatch,
+                )
+            })
+            .expect("valid connected run should produce audit data");
+            let events: Vec<_> = store.get_all().iter().map(|e| format!("{e:?}")).collect();
+            (audit, events)
+        };
+
+        let (_, plain) = collect(false);
+        let (audit, teed) = collect(true);
+        // Both signals coexist: the per-node subscribers captured happens-before
+        // events while the shadowed collector still received the identical
+        // trace-event stream (spans included) through the tee.
+        assert!(audit.happens_before.is_some());
+        assert!(!plain.is_empty(), "expected collected trace events");
+        assert_eq!(plain, teed);
     }
 }

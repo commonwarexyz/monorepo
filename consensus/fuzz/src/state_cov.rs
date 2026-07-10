@@ -232,7 +232,7 @@ pub fn observe_trace_events(events: &[RecordedEvent]) {
     observe_tokens(trace_event_tokens(events));
 }
 
-fn observe_tokens(tokens: impl IntoIterator<Item = String>) {
+pub fn observe_tokens(tokens: impl IntoIterator<Item = String>) {
     for token in tokens {
         let idx = (fnv1a_hash(token.as_bytes()) % STATE_COUNTERS as u64) as usize;
         // SAFETY: see `table`; `idx < STATE_COUNTERS` by construction.
