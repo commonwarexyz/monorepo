@@ -86,10 +86,7 @@ impl Tail {
         offset
     }
 
-    /// Append owned bytes, returning the logical offset of the first. Whole pages of `buf` become
-    /// retained without copying; only the bytes topping up the tip's page and the sub-page suffix
-    /// are copied. The copied suffix keeps the tip extendable and releases the caller's allocation
-    /// after the full pages flush.
+    /// Append owned bytes and return their first logical offset.
     pub(super) fn append_owned(&mut self, buf: IoBuf) -> u64 {
         let fill = self.tip.len().next_multiple_of(self.page_size) - self.tip.len();
         if self.tip.len() + buf.len() <= self.tip.capacity || buf.len() < fill + self.page_size {
@@ -103,6 +100,8 @@ impl Tail {
         self.spill_full_pages();
         debug_assert!(self.tip.is_empty());
 
+        // Retain the full-page middle without copying. Copy the suffix into the tip so later
+        // appends can extend it and the caller's allocation is released after flush.
         let full_bytes = (buf.len() - fill) / self.page_size * self.page_size;
         self.tip.offset += full_bytes as u64;
         self.full_pages.push(buf.slice(fill..fill + full_bytes));

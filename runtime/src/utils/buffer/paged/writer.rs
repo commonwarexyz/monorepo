@@ -83,13 +83,8 @@ impl PartialPage {
 ///
 /// # Cancellation
 ///
-/// Appends are synchronous: they extend the in-memory tail and cannot be cancelled.
-/// The async operations (`sync`, `start_sync`, `resize`, `seal`, `snapshot`, `replay`) are
-/// the only paths that touch the blob; dropping one mid-flight leaves the writer in a
-/// consistent, retryable state. A dropped operation may still have reached the blob (a
-/// flush's bytes, a shrink's truncate); the writer records such intents before awaiting
-/// them, and every later operation first settles them so the blob agrees with the writer's
-/// claim.
+/// Appends are synchronous and cannot be cancelled. Dropping an async operation leaves the
+/// writer usable; a later operation or reopen finishes incomplete work.
 pub struct Writer<B: Blob> {
     /// The underlying blob being wrapped.
     blob: B,
@@ -106,8 +101,7 @@ pub struct Writer<B: Blob> {
     /// A reference to the page cache that manages read caching for this blob.
     cache_ref: CacheRef,
 
-    /// The in-memory tail: appended bytes not yet published as written. Its start is the
-    /// authority for how many pages the blob holds (see [Self::current_page]).
+    /// The in-memory tail. Its start is where the writer begins serving bytes from memory.
     tail: Tail,
 }
 
@@ -154,8 +148,8 @@ impl<B: Blob> Writer<B> {
     /// next flush point. Rewinds the blob if necessary so it only contains checksum-validated
     /// data.
     ///
-    /// `capacity` is the preferred allocation size for the mutable tip. Appends may grow it
-    /// temporarily; callers bound pending data by their flush cadence.
+    /// `capacity` is the preferred allocation size for the mutable tip. It controls when full
+    /// pages leave the tip, but callers bound pending data by their flush cadence.
     pub async fn new(
         blob: B,
         original_blob_size: u64,
@@ -276,28 +270,23 @@ impl<B: Blob> Writer<B> {
         Ok((None, 0, invalid_data_found))
     }
 
-    /// Append all bytes in `buf` to the tip of the blob, returning the logical offset at which
-    /// the first byte was written.
+    /// Append bytes and return their first logical offset.
     pub fn append(&mut self, buf: &[u8]) -> u64 {
         self.tail.append(buf)
     }
 
-    /// Append owned bytes to the tip of the blob, returning the logical offset at which the
-    /// first byte was written.
+    /// Append owned bytes and return their first logical offset.
     pub fn append_owned(&mut self, buf: IoBuf) -> u64 {
         self.tail.append_owned(buf)
     }
 
-    /// Resolve an [PartialPage::Unverified] record by reading it back from the blob.
-    ///
-    /// A canceled shrink may have left either CRC slot authoritative on disk. Re-reading the
-    /// record lets later flushes write around the true authoritative slot, preserving the
-    /// dual-slot guarantee that a torn write never damages both slots of a committed page.
-    /// The state is updated only after the read returns, so a dropped verify changes nothing.
+    /// Resolve an unknown partial-page record.
     async fn verify_partial_page(&mut self) -> Result<(), Error> {
         if !matches!(self.partial_page_state, PartialPage::Unverified) {
             return Ok(());
         }
+        // A canceled shrink can leave either CRC slot authoritative. Read it before writing the
+        // page again so the next flush preserves that slot.
         let (_, record) = super::get_page_with_checksum_from_blob(
             &self.blob,
             self.current_page(),
@@ -308,10 +297,7 @@ impl<B: Blob> Writer<B> {
         Ok(())
     }
 
-    /// Writes prepared physical pages to the blob at the position described by `current_page`
-    /// and `partial_page_state`.
-    ///
-    /// Returns `true` if the writes were made durable, so no later sync is needed.
+    /// Write prepared physical pages and return whether they are durable.
     async fn write_physical_pages(
         &mut self,
         mut physical_pages: IoBufs,
@@ -517,14 +503,6 @@ impl<B: Blob> Writer<B> {
     }
 
     /// Prepare physical-page writes from the in-memory tail.
-    ///
-    /// Each physical page contains one logical page plus a CRC record.
-    ///
-    /// # Arguments
-    ///
-    /// * `old_crc_record` - The CRC record from a previously committed partial page, if any.
-    ///   When present, the first page's CRC record will preserve the old CRC in its original slot
-    ///   and place the new CRC in the other slot.
     fn to_physical_pages(&self, old_crc_record: Option<&Checksum>) -> (IoBufs, Option<Checksum>) {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
@@ -579,8 +557,7 @@ impl<B: Blob> Writer<B> {
         (write_buffer, Some(crc_record))
     }
 
-    /// Append full logical pages and their CRC records to `write_buffer` without copying payload
-    /// bytes. The first page preserves an existing partial-page record when needed.
+    /// Append full logical pages and CRC records without copying payload bytes.
     fn append_full_pages(
         &self,
         pages: &IoBuf,
