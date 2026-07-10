@@ -699,10 +699,11 @@ stability_scope!(BETA {
         ///
         /// # Recovery
         ///
-        /// A blob whose contents match the signature of a creation interrupted before its
+        /// Files shorter than the 8-byte header prelude are treated as new. Otherwise, a
+        /// blob whose contents match the signature of a creation interrupted before its
         /// header became durable (a crash can tear the header write at any point) is detected
-        /// on reopen and recreated as new: a V1 blob in that state never held synced data,
-        /// and a legacy V0 blob rotted into the same signature held at most all-zero payload
+        /// on reopen and recreated as new: a V1 blob in that state holds no synced data, and
+        /// a legacy V0 blob rotted into the same signature holds at most all-zero payload
         /// bytes. Contents that do not match fail with [Error::BlobCorrupt] instead.
         fn open_versioned(
             &self,
