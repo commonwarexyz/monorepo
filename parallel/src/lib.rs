@@ -979,9 +979,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             multiplier: usize,
             run: impl FnOnce(policy::Execution) -> Result<R, E>,
         ) -> Result<R, E> {
-            let parallelism = self.parallelism;
             let Some(policy) = &self.policy else {
-                let execution = if parallelism <= 1 {
+                let execution = if self.parallelism <= 1 {
                     policy::Execution::Serial
                 } else {
                     policy::Execution::Parallel
@@ -990,7 +989,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             };
 
             let work = len.saturating_mul(multiplier);
-            policy.try_run(Location::caller(), len, work, parallelism, run)
+            policy.try_run(Location::caller(), len, work, self.parallelism, run)
         }
     }
 
