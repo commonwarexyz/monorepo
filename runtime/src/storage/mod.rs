@@ -261,7 +261,7 @@ stability_scope!(BETA {
         /// the sync completes may persist bytes out of order. A file that is not a canonical
         /// prefix -- a lost byte followed by persisted ones, a CRC that does not match its
         /// own prelude -- stays loudly corrupt rather than healing, trading recovery
-        /// coverage for never accepting a state that could hold data.
+        /// coverage for avoiding broader acceptance that might erase nonzero data.
         pub(crate) fn interrupted_creation(raw: &[u8]) -> bool {
             // The file cannot extend past the region creation writes, and everything past
             // the parseable header must be zero padding.
