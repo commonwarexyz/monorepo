@@ -333,7 +333,13 @@ pub struct DeferredSync {
     pub blocked: oneshot::Receiver<()>,
 }
 
-/// Syncs deferred by a [DelayedSyncContext] or [DelayedSyncBlob], in the order started.
+/// Coordinates durability operations for a [DelayedSyncContext] or [DelayedSyncBlob].
+///
+/// Every started sync parks in a deferred queue (in start order) until a test
+/// releases it. [Self::arm] additionally installs a one-shot gate that blocks
+/// the next durability operation and counts operations from that point on
+/// ([Self::calls]). The gate is pushed onto the deferred queue when [Self::arm]
+/// is called, before any operation reaches it.
 #[derive(Clone, Default)]
 pub struct PendingSyncs {
     syncs: Arc<Mutex<Vec<DeferredSync>>>,

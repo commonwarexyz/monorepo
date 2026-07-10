@@ -8402,8 +8402,10 @@ mod tests {
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
-            // Wait until proposal verification and its journal sync have completed. This keeps the
-            // gate focused on the certification and finalize appends in the next iteration.
+            // Wait until the notarize for the target view is constructed. The gate is armed
+            // in the strictly later iteration that requests certification, by which point the
+            // notarize iteration's journal sync has completed, keeping the gate focused on
+            // the certification and finalize appends.
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
