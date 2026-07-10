@@ -638,9 +638,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
 
         // A stale pre-deferral checkpoint can lag an already-completed prune. If the watermark
-        // proves the missing boundary blob had been durable (or is absent for a legacy journal),
-        // retain the historical physical-boundary inference.
-        if watermark_hint.is_none_or(|watermark| watermark > boundary) {
+        // proves the missing boundary blob had been durable -- any item inside it below the
+        // watermark implies the blob was synced -- or is absent for a legacy journal, retain
+        // the historical physical-boundary inference.
+        let boundary_blob_start = super::blob_first_position(boundary_blob, items_per_blob)?;
+        if watermark_hint.is_none_or(|watermark| watermark > boundary_blob_start) {
             let recovered = super::blob_first_position(oldest, items_per_blob)?;
             warn!(
                 boundary,
@@ -3315,6 +3317,53 @@ mod tests {
         });
     }
 
+    /// A legacy (pre-deferral) checkpoint can lag a completed prune with a watermark inside
+    /// the missing boundary blob. That watermark proves the blob was durable, so its absence
+    /// is prune lag, not a vanished creation: recovery adopts the physical boundary and keeps
+    /// the surviving items.
+    #[test_traced]
+    fn test_fixed_recovery_lagged_legacy_boundary_adopts_physical() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Simulate the legacy crash state: a mid-blob boundary (7, in blob 1) with the
+            // watermark inside that blob, and a completed old-order prune to blob 2 that
+            // crashed before refreshing the checkpoint.
+            {
+                let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition)
+                    .await
+                    .unwrap();
+                checkpoint.set_boundary_hint(7);
+                checkpoint.set_watermark(Some(7));
+                checkpoint.sync().await.unwrap();
+            }
+            for blob in 0u64..2 {
+                context
+                    .remove(&blob_partition(&cfg), Some(&blob.to_be_bytes()))
+                    .await
+                    .unwrap();
+            }
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 10..15);
+            for position in 10..15 {
+                assert_eq!(journal.read(position).await.unwrap(), test_digest(position));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// A later never-synced directory entry may survive while earlier entries vanish. Its blob
     /// index must not be mistaken for a completed prune when the checkpoint still records the
     /// original boundary.
@@ -4436,6 +4485,15 @@ mod tests {
             );
             drop(journal);
 
+            // The ordering probe: the failed tail sync must have left the staged intent in
+            // place, proving the checkpoint did not finalize ahead of it.
+            {
+                let checkpoint = Checkpoint::open(context.child("probe"), &cfg.partition)
+                    .await
+                    .unwrap();
+                assert_eq!(checkpoint.clear_target(), Some(10));
+            }
+
             // The intent was staged but never finalized, so recovery completes the clear.
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
@@ -4480,6 +4538,15 @@ mod tests {
                 "staged-clear completion must sync the fresh tail before finalizing the \
                  checkpoint"
             );
+
+            // The ordering probe: the failed tail sync must have left the staged intent in
+            // place, proving the checkpoint did not finalize ahead of it.
+            {
+                let checkpoint = Checkpoint::open(context.child("probe"), &cfg.partition)
+                    .await
+                    .unwrap();
+                assert_eq!(checkpoint.clear_target(), Some(10));
+            }
 
             // The clean reopen completes the staged clear.
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())

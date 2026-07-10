@@ -1001,6 +1001,19 @@ pub(crate) mod tests {
         }
     }
 
+    /// Returns false (after logging) outside nextest: the [super::DIR_SYNC_CALLS] counter is
+    /// global to the process, so counter-based tests are only sound under nextest's
+    /// process-per-test isolation. Under plain `cargo test`, concurrent tests in the same
+    /// process race the counter.
+    #[cfg(unix)]
+    pub(crate) fn dir_sync_counting_isolated(test: &str) -> bool {
+        if std::env::var_os("NEXTEST").is_some() {
+            return true;
+        }
+        eprintln!("skipping {test}: requires nextest process-per-test isolation");
+        false
+    }
+
     /// Asserts the deferred-directory-fsync contract against a live backend: creation and
     /// plain writes perform no directory fsyncs; a handle's first durable operation covers
     /// parent and root exactly once. Relies on nextest's process-per-test isolation for the
@@ -1009,6 +1022,9 @@ pub(crate) mod tests {
     pub(crate) async fn assert_creation_defers_dir_syncs<S: crate::Storage>(storage: &S) {
         use std::sync::atomic::Ordering;
 
+        if !dir_sync_counting_isolated("assert_creation_defers_dir_syncs") {
+            return;
+        }
         let count = || super::DIR_SYNC_CALLS.load(Ordering::Acquire);
 
         // Creation and plain writes leave the directory entries unsynced.

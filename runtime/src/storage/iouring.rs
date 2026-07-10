@@ -1248,6 +1248,11 @@ mod tests {
     #[tokio::test]
     async fn test_first_start_sync_covers_dirs_before_handle() {
         use std::sync::atomic::Ordering;
+        if !crate::storage::tests::dir_sync_counting_isolated(
+            "test_first_start_sync_covers_dirs_before_handle",
+        ) {
+            return;
+        }
         let count = || crate::storage::DIR_SYNC_CALLS.load(Ordering::Acquire);
         let (storage, storage_directory) = create_test_storage();
 

@@ -511,6 +511,11 @@ mod tests {
     #[tokio::test]
     async fn test_dropped_start_sync_still_covers_dirs() {
         use std::sync::atomic::Ordering;
+        if !crate::storage::tests::dir_sync_counting_isolated(
+            "test_dropped_start_sync_still_covers_dirs",
+        ) {
+            return;
+        }
         let count = || crate::storage::DIR_SYNC_CALLS.load(Ordering::Acquire);
         let storage_directory =
             env::temp_dir().join(format!("test_start_sync_drop_{}", random_suffix()));
@@ -547,6 +552,11 @@ mod tests {
     #[tokio::test]
     async fn test_healed_blob_first_sync_covers_dirs() {
         use std::sync::atomic::Ordering;
+        if !crate::storage::tests::dir_sync_counting_isolated(
+            "test_healed_blob_first_sync_covers_dirs",
+        ) {
+            return;
+        }
         let count = || crate::storage::DIR_SYNC_CALLS.load(Ordering::Acquire);
         let storage_directory =
             env::temp_dir().join(format!("test_healed_dirs_{}", random_suffix()));
