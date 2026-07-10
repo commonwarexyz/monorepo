@@ -18,9 +18,9 @@ use rand::rngs::StdRng;
 use rand_core::CryptoRng;
 #[cfg(not(target_arch = "wasm32"))]
 use rand_core::SeedableRng;
-use std::{collections::HashSet, fmt::Debug, hash::Hash};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+use std::{collections::HashSet, fmt::Debug, hash::Hash};
 #[cfg(not(target_arch = "wasm32"))]
 use tracing::Span;
 

@@ -1498,9 +1498,7 @@ where
         let groups: Vec<_> = by_epoch
             .into_iter()
             .filter_map(|(epoch, indices)| {
-                self.provider
-                    .scoped(epoch)
-                    .map(|scoped| (scoped, indices))
+                self.provider.scoped(epoch).map(|scoped| (scoped, indices))
             })
             .collect();
 
@@ -1532,12 +1530,8 @@ where
                                     ),
                                 })
                                 .collect();
-                            let results = verify_certificates(
-                                &mut rng,
-                                &scoped,
-                                &certificates,
-                                &strategy,
-                            );
+                            let results =
+                                verify_certificates(&mut rng, &scoped, &certificates, &strategy);
                             for (index, result) in indices.into_iter().zip(results) {
                                 verified[index] = result;
                             }
