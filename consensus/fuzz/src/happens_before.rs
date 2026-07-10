@@ -9,6 +9,7 @@
 //! they were captured from the p2p boundary or from node-attributed tracing
 //! (dispatch propagation). Capture and libFuzzer wiring live elsewhere.
 
+use crate::utils::fnv1a_hash;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -94,7 +95,9 @@ impl EventKind {
 
     /// For a receive kind, the send kind that causally precedes it
     /// (send-before-receive). `None` for kinds that are not receives of a
-    /// broadcast we also observe as a send.
+    /// broadcast we also observe as a send. In particular ReceiveProposal has
+    /// no matching send: Propose is the leader's local automaton request, not
+    /// a wire broadcast (proposals reach peers embedded in notarize votes).
     const fn matching_send(self) -> Option<Self> {
         Some(match self {
             Self::ReceiveNotarize => Self::SendNotarize,
@@ -103,7 +106,6 @@ impl EventKind {
             Self::ReceiveNotarization => Self::SendNotarization,
             Self::ReceiveNullification => Self::SendNullification,
             Self::ReceiveFinalization => Self::SendFinalization,
-            Self::ReceiveProposal => Self::Propose,
             _ => return None,
         })
     }
@@ -119,7 +121,6 @@ impl EventKind {
                 | Self::SendNotarization
                 | Self::SendNullification
                 | Self::SendFinalization
-                | Self::Propose
         )
     }
 
@@ -300,7 +301,7 @@ impl Summary {
         }
         let mut sig = [u64::MAX; MINHASH_K];
         for t in &tokens {
-            let base = fnv1a_bytes(t.as_bytes());
+            let base = fnv1a_hash(t.as_bytes());
             for (k, s) in sig.iter_mut().enumerate() {
                 *s = (*s).min(mix(base, k as u64));
             }
@@ -374,16 +375,6 @@ const LSH_ROWS: usize = 4;
 const LSH_BUCKETS: u64 = 64;
 
 const _: () = assert!(MINHASH_K == LSH_BANDS * LSH_ROWS);
-
-/// FNV-1a over bytes.
-fn fnv1a_bytes(bytes: &[u8]) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
-    for &b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
 
 /// SplitMix64-style avalanche of a value combined with a salt (independent hash
 /// family for MinHash / band folding).
