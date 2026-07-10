@@ -679,7 +679,7 @@ mod tests {
         let partition_path = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_path).unwrap();
 
-        // Manually create a file whose magic bytes are foreign (not a zero-subset of any
+        // Manually create a file whose magic bytes are foreign (not a prefix of any
         // canonical header, so not a torn creation)
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
         std::fs::write(&bad_magic_path, b"XXXXXXXX").unwrap();

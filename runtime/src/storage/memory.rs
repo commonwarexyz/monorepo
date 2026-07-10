@@ -390,7 +390,7 @@ mod tests {
     async fn test_blob_magic_mismatch() {
         let storage = Storage::new(test_pool());
 
-        // Manually insert a blob whose magic bytes are foreign (not a zero-subset of any
+        // Manually insert a blob whose magic bytes are foreign (not a prefix of any
         // canonical header, so not a torn creation)
         {
             let mut partitions = storage.partitions.lock();

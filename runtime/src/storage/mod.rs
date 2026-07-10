@@ -786,8 +786,8 @@ pub(crate) mod tests {
                     // form a canonical V1 prefix -- version stamp 0 (the default), all-zero
                     // payload, and the tag byte lost -- is byte-identical to a V1 creation
                     // torn inside the magic, and heals. Only the blob's existence is lost:
-                    // every erased byte is zero. Any nonzero stamp, payload, or non-prefix
-                    // survivor stays loud (see the reject table).
+                    // every payload byte it held is zero. Any nonzero stamp, payload, or
+                    // non-prefix survivor stays loud (see the reject table).
                     let mut raw = v0_blob_bytes(0, &[0u8; 100]);
                     raw[3] = 0;
                     raw

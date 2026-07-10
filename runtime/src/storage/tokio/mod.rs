@@ -604,7 +604,7 @@ mod tests {
         );
 
         // Create the partition directory and a file whose magic bytes are foreign (not a
-        // zero-subset of any canonical header, so not a torn creation)
+        // prefix of any canonical header, so not a torn creation)
         let partition_path = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_path).unwrap();
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
