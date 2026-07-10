@@ -2054,11 +2054,10 @@ mod tests {
             executor.start(move |context| async move {
                 let mut handles = Vec::new();
                 for node in 0u32..2 {
-                    let subscriber =
-                        tracing_subscriber::registry().with(NodeCollector {
-                            node,
-                            sink: sink.clone(),
-                        });
+                    let subscriber = tracing_subscriber::registry().with(NodeCollector {
+                        node,
+                        sink: sink.clone(),
+                    });
                     let dispatch = tracing::Dispatch::new(subscriber);
                     let ctx = context.child("node");
                     // Spawn each node's task tree under its own subscriber.
@@ -2067,10 +2066,9 @@ mod tests {
                             tracing::info!("parent event");
                             // A CHILD task spawned from within this task must
                             // inherit the same subscriber (recursive propagation).
-                            let child =
-                                context.child("child").spawn(|_| async move {
-                                    tracing::info!("child event");
-                                });
+                            let child = context.child("child").spawn(|_| async move {
+                                tracing::info!("child event");
+                            });
                             child.await.unwrap();
                         })
                     });
