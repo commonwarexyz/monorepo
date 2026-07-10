@@ -554,6 +554,15 @@ mod tests {
         let result = storage.open("partition", b"torn").await;
         assert!(matches!(result, Err(crate::Error::BlobCorrupt(_, _, _))));
 
+        // A CRC byte corrupted to a nonzero wrong value on an otherwise intact header
+        // matches no candidate image and must stay loud (a synced empty blob is not a
+        // torn creation).
+        let mut corrupt = region.clone();
+        corrupt[13] = corrupt[13].wrapping_add(1).max(1);
+        std::fs::write(&path, &corrupt).unwrap();
+        let result = storage.open("partition", b"torn").await;
+        assert!(matches!(result, Err(crate::Error::BlobCorrupt(_, _, _))));
+
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 

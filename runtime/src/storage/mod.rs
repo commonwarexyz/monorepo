@@ -948,6 +948,19 @@ pub(crate) mod tests {
                 "larger creation offset",
                 v1_blob_bytes(8192, 5, b"")[..6000].to_vec(),
             ),
+            (
+                "documented residual: V0 blob with all-zero payload and rotted magic",
+                {
+                    // Out-of-model corruption (rot, not tearing) of a degenerate payload: the
+                    // bytes are a zero-subset of a canonical V1 image, indistinguishable from a
+                    // torn creation, so this heals. Real payload bytes are non-canonical and
+                    // keep genuine V0 blobs loud (see the reject table).
+                    let mut raw = v0_header(5).encode().to_vec();
+                    raw[3] = 0;
+                    raw.extend_from_slice(&[0u8; 100]);
+                    raw
+                },
+            ),
         ];
         for (label, raw) in cases {
             assert!(
