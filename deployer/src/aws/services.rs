@@ -58,7 +58,7 @@ pub const PYROSCOPE_IMAGE: &str = "grafana/pyroscope:1.12.0";
 pub const GRAFANA_IMAGE: &str = "grafana/grafana:11.5.2";
 
 /// Image for Tracer trace viewing
-pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:0.1.1";
+pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:0.1.2";
 
 #[derive(Clone, Copy)]
 struct ImageService {
