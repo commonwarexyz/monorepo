@@ -441,6 +441,68 @@ stability_scope!(BETA {
         }
     }
 
+    /// Directory entries a blob's first durable operation must fsync.
+    ///
+    /// Creation defers these fsyncs, so a new blob's existence becomes durable together
+    /// with its first synced contents (see the durability contract on
+    /// [crate::Storage::open_versioned]). Reopened blobs also start unsynced: the handle
+    /// cannot know whether the entries were ever fsynced (e.g. a creation or recovery
+    /// that crashed first).
+    #[cfg(unix)]
+    pub(crate) struct DirSync {
+        parent: std::path::PathBuf,
+        root: std::path::PathBuf,
+        synced: std::sync::atomic::AtomicBool,
+    }
+
+    /// Counts directory fsyncs so tests can assert when durability is established (sound
+    /// under nextest's process-per-test isolation).
+    #[cfg(all(test, unix))]
+    pub(crate) static DIR_SYNC_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    #[cfg(unix)]
+    impl DirSync {
+        pub(crate) const fn new(parent: std::path::PathBuf, root: std::path::PathBuf) -> Self {
+            Self {
+                parent,
+                root,
+                synced: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        /// Returns true once the directory entries are known durable, permitting
+        /// range-scoped durability fast paths that cannot cover them.
+        pub(crate) fn synced(&self) -> bool {
+            self.synced.load(std::sync::atomic::Ordering::Acquire)
+        }
+
+        /// Fsyncs the blob's parent directory and the storage root once per handle;
+        /// subsequent calls are no-ops. Racing first calls may both fsync, which is
+        /// harmless; if one racer fails while another succeeds, the flag reflects the
+        /// success. Blocking: call from a blocking context.
+        pub(crate) fn sync(&self) -> Result<(), crate::Error> {
+            if self.synced() {
+                return Ok(());
+            }
+            for dir in [&self.parent, &self.root] {
+                #[cfg(test)]
+                DIR_SYNC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                std::fs::File::open(dir)
+                    .and_then(|d| d.sync_all())
+                    .map_err(|e| {
+                        crate::Error::BlobSyncFailed(
+                            dir.to_string_lossy().to_string(),
+                            "directory".to_string(),
+                            e.into(),
+                        )
+                    })?;
+            }
+            self.synced.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        }
+    }
+
     /// Resolves a header that failed to parse: `Ok(None)` if the blob's raw contents are those
     /// of a creation that was interrupted before its header became durable (the caller
     /// recreates the blob), and the original parse error otherwise.
@@ -626,6 +688,40 @@ pub(crate) mod tests {
             Err(HeaderError::UnsupportedRuntimeVersion { expected, found })
             if expected == 0 && found == 99
         ));
+    }
+
+    /// A failed directory fsync leaves the once-flag unset, so a retry covers the
+    /// entries; success sets it and later calls are no-ops.
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_sync_failure_retries() {
+        let root = std::env::temp_dir().join(format!("test_dir_sync_retry_{}", std::process::id()));
+        let missing = root.join("missing");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // The parent does not exist: sync fails and the flag stays unset.
+        let dirs = super::DirSync::new(missing.clone(), root.clone());
+        assert!(dirs.sync().is_err());
+        assert!(!dirs.synced());
+
+        // Once the parent exists, a retry succeeds and later calls are no-ops.
+        std::fs::create_dir_all(&missing).unwrap();
+        dirs.sync().unwrap();
+        assert!(dirs.synced());
+        dirs.sync().unwrap();
+
+        // The second (root) fsync failing must also leave the flag unset, so a retry
+        // re-covers both directories.
+        let missing_root = root.join("missing_root");
+        let dirs = super::DirSync::new(root.clone(), missing_root.clone());
+        assert!(dirs.sync().is_err());
+        assert!(!dirs.synced());
+        std::fs::create_dir_all(&missing_root).unwrap();
+        dirs.sync().unwrap();
+        assert!(dirs.synced());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Every parse failure converts to a contextual error naming its cause.
@@ -901,6 +997,80 @@ pub(crate) mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<Header>
         }
+    }
+
+    /// Asserts the deferred-directory-fsync contract against a live backend: creation and
+    /// plain writes perform no directory fsyncs; a handle's first durable operation covers
+    /// parent and root exactly once. Relies on nextest's process-per-test isolation for the
+    /// global counter.
+    #[cfg(unix)]
+    pub(crate) async fn assert_creation_defers_dir_syncs<S: crate::Storage>(storage: &S) {
+        use std::sync::atomic::Ordering;
+
+        let count = || super::DIR_SYNC_CALLS.load(Ordering::Relaxed);
+
+        // Creation and plain writes leave the directory entries unsynced.
+        let before = count();
+        let (blob, _) = storage.open("partition", b"deferred").await.unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 0);
+
+        // The first sync covers parent and root; later syncs skip them.
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 2);
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 2);
+
+        // A fresh handle's first durable write_at_sync must route through the backend's
+        // full-sync path ahead of any range-scoped fast path (RWF_SYNC on tokio/Linux, the
+        // ring's sync write on iouring); afterward the once-flag (or the fast path) skips
+        // the directory work.
+        let (blob2, _) = storage.open("partition", b"deferred2").await.unwrap();
+        blob2.write_at_sync(0, b"x".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 4);
+        blob2.write_at_sync(1, b"y".to_vec()).await.unwrap();
+        assert_eq!(count() - before, 4);
+
+        // start_sync as the first durable operation covers them once resolved.
+        let (blob3, _) = storage.open("partition", b"deferred3").await.unwrap();
+        blob3.start_sync().await.await.unwrap();
+        assert_eq!(count() - before, 6);
+
+        // A reopened handle cannot know its entries are durable and re-syncs once.
+        drop(blob);
+        let (blob, _) = storage.open("partition", b"deferred").await.unwrap();
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 8);
+        drop(blob);
+
+        // An empty write_at_sync returns early: no durability is established and the
+        // directory work stays deferred.
+        let (blob4, _) = storage.open("partition", b"deferred4").await.unwrap();
+        blob4.write_at_sync(0, Vec::<u8>::new()).await.unwrap();
+        assert_eq!(count() - before, 8);
+
+        // Clones share the once-flag: coverage through one clone covers all.
+        let clone4 = blob4.clone();
+        clone4.sync().await.unwrap();
+        assert_eq!(count() - before, 10);
+        blob4.sync().await.unwrap();
+        assert_eq!(count() - before, 10);
+
+        // Racing first syncs both succeed; one or both pairs of directory fsyncs run
+        // (the documented harmless race) and the flag ends set.
+        let (blob5, _) = storage.open("partition", b"deferred5").await.unwrap();
+        let clone5 = blob5.clone();
+        let racing = count();
+        let (a, b) = futures::join!(blob5.sync(), clone5.sync());
+        a.unwrap();
+        b.unwrap();
+        let ran = count() - racing;
+        assert!(
+            (2..=4).contains(&ran),
+            "racing first syncs ran {ran} directory fsyncs"
+        );
+        blob5.sync().await.unwrap();
+        assert_eq!(count() - racing, ran);
     }
 
     /// Runs the full suite of tests on the provided storage implementation.

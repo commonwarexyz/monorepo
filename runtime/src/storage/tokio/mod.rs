@@ -131,10 +131,6 @@ impl crate::Storage for Storage {
             None => return Err(Error::PartitionCreationFailed(partition.into())),
         };
 
-        // Check if partition exists before creating
-        #[cfg(unix)]
-        let parent_existed = parent.exists();
-
         // Create the partition directory, if it does not exist
         fs::create_dir_all(parent)
             .await
@@ -175,19 +171,6 @@ impl crate::Storage for Storage {
                     .await
                     .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
 
-                // Sync the directories to ensure the directory entry is durable. This must
-                // also run when recreating a torn blob: the creation it is recovering from
-                // may have crashed before its own directory syncs completed. (Windows has
-                // no notion of syncing a directory entry; see
-                // https://github.com/commonwarexyz/monorepo/issues/2026.)
-                #[cfg(unix)]
-                {
-                    sync_dir(parent).await?;
-                    if !parent_existed {
-                        sync_dir(&self.cfg.storage_directory).await?;
-                    }
-                }
-
                 (info, data_offset)
             }
         };
@@ -197,9 +180,21 @@ impl crate::Storage for Storage {
             // Convert to a blocking std::fs::File
             let file = file.into_std().await;
 
+            // Creation deferred its directory fsyncs; the blob's first durable operation
+            // performs them (see [super::DirSync]).
+            let dirs =
+                super::DirSync::new(parent.to_path_buf(), self.cfg.storage_directory.clone());
+
             // Construct the blob
             Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset),
+                Self::Blob::new(
+                    partition.into(),
+                    name,
+                    file,
+                    self.pool.clone(),
+                    data_offset,
+                    dirs,
+                ),
                 info,
             ))
         }
@@ -490,6 +485,96 @@ mod tests {
                 "page {page} failed CRC validation at aligned boundary"
             );
         }
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_creation_defers_dir_syncs() {
+        let storage_directory =
+            env::temp_dir().join(format!("test_dir_sync_defer_{}", random_suffix()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+
+        crate::storage::tests::assert_creation_defers_dir_syncs(&storage).await;
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_dropped_start_sync_still_covers_dirs() {
+        use std::sync::atomic::Ordering;
+        let count = || crate::storage::DIR_SYNC_CALLS.load(Ordering::Relaxed);
+        let storage_directory =
+            env::temp_dir().join(format!("test_start_sync_drop_{}", random_suffix()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+
+        // start_sync's work is detached: dropping the handle does not cancel it, so the
+        // directory coverage still lands.
+        let (blob, _) = storage.open("partition", b"dropped").await.unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
+        let before = count();
+        drop(blob.start_sync().await);
+        for _ in 0..500u32 {
+            if count() - before == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(count() - before, 2);
+
+        // The flag is set by the detached work: the next sync adds no directory work.
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 2);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_healed_blob_first_sync_covers_dirs() {
+        use std::sync::atomic::Ordering;
+        let count = || crate::storage::DIR_SYNC_CALLS.load(Ordering::Relaxed);
+        let storage_directory =
+            env::temp_dir().join(format!("test_healed_dirs_{}", random_suffix()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+
+        // Leave a torn creation on disk, whose original creation never covered its
+        // directory entries.
+        let (blob, _) = storage.open("partition", b"torn_dirs").await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+        let path = storage_directory.join("partition").join(hex(b"torn_dirs"));
+        let region = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &region[..10]).unwrap();
+
+        // Healing recreates the blob without directory fsyncs; the handle's first
+        // durability request covers them.
+        let before = count();
+        let (blob, size) = storage.open("partition", b"torn_dirs").await.unwrap();
+        assert_eq!(size, 0);
+        assert_eq!(count() - before, 0);
+        blob.sync().await.unwrap();
+        assert_eq!(count() - before, 2);
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

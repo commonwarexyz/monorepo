@@ -654,6 +654,11 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
+    /// A blob whose creation was never followed by a durability request is the
+    /// exception: it may vanish entirely across a crash (see
+    /// [`Storage::open_versioned`]), so recovery must not depend on the
+    /// existence of a blob it never synced.
+    ///
     /// # Partition Names
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
@@ -685,7 +690,15 @@ stability_scope!(BETA {
         /// Multiple instances of the same blob can be opened concurrently, however,
         /// writing to the same blob concurrently may lead to undefined behavior.
         ///
-        /// An Ok result indicates the blob is durably created (or already exists).
+        /// # Durability
+        ///
+        /// Creation is NOT durable until the blob's first durability request completes:
+        /// [Blob::sync] returning, a non-empty [Blob::write_at_sync] returning, or the
+        /// handle returned by [Blob::start_sync] completing. A blob that is never synced
+        /// may not survive a crash, consistent with nothing having been promised. This
+        /// keeps directory fsyncs off the open path (the header write is still synced at
+        /// creation); backends without directory durability (e.g. Windows, see #2026) are
+        /// unchanged.
         ///
         /// # Versions
         ///
@@ -801,7 +814,9 @@ stability_scope!(BETA {
         /// This is not a durability barrier for previous operations. When it completes,
         /// only the bytes submitted to this call are guaranteed durable. Earlier unsynced
         /// [`Blob::write_at`] or [`Blob::resize`] calls require [`Blob::sync`] to become
-        /// durable.
+        /// durable. A handle's first non-empty call additionally covers the blob's
+        /// directory entries, as [`Blob::sync`] does (a call with no bytes returns early,
+        /// deferring that coverage and establishing no creation durability).
         fn write_at_sync(
             &self,
             offset: u64,
@@ -814,7 +829,9 @@ stability_scope!(BETA {
         /// If the length is less than the current length, the blob is resized.
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Ensure all pending data is durably persisted.
+        /// Ensure all pending data is durably persisted, including (on a handle's first
+        /// durability request) the blob's directory entries (see
+        /// [`Storage::open_versioned`]).
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Request that all pending data is durably persisted.
