@@ -65,6 +65,7 @@ struct Staged<S: Scheme<D>, D: Digest> {
     /// A nullify vote constructed on timeout, with the best certificate from
     /// the previous view (on retry) to help others enter the view.
     nullify: Option<(Nullify<S>, Option<Certificate<S, D>>)>,
+    certification: Option<(Rnd, bool, Notarization<S, D>)>,
     notarize: Option<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     /// A nullification certificate, with the parent certificate of our proposal
@@ -686,10 +687,9 @@ impl<
     /// Returns false if the view was already pruned (nothing to notify).
     async fn process_certified(
         &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
         round: Rnd,
         certified: Result<bool, oneshot::error::RecvError>,
-    ) -> bool {
+    ) -> (bool, Option<(bool, Notarization<S, D>)>) {
         match certified {
             Ok(certified) => {
                 if !certified {
@@ -697,17 +697,10 @@ impl<
                 }
                 let view = round.view();
                 let Some(notarization) = self.handle_certification(view, certified).await else {
-                    return false;
+                    return (false, None);
                 };
 
-                // Always forward certification outcomes to resolver.
-                // This can happen after a nullification for the same view because
-                // certification is asynchronous; finalization is the boundary that
-                // cancels in-flight certification and suppresses late reporting.
-                resolver.certified(round, certified);
-                if certified {
-                    self.reporter.report(Activity::Certification(notarization));
-                }
+                return (true, Some((certified, notarization)));
             }
             Err(err) => {
                 // Unlike propose/verify (where failing to act will lead to a timeout
@@ -720,7 +713,7 @@ impl<
                 debug!(?err, ?round, "failed to certify proposal");
             }
         };
-        true
+        (true, None)
     }
 
     /// Processes a message from the resolver or batcher.
@@ -804,6 +797,7 @@ impl<
         view: View,
         resolved: Resolved,
         nullify: Option<(Nullify<S>, Option<Certificate<S, D>>)>,
+        certification: Option<(Rnd, bool, Notarization<S, D>)>,
     ) -> Staged<S, D> {
         let notarize = self.prepare_notarize(batcher, view).await;
         let notarization = self.prepare_notarization(resolver, view, resolved).await;
@@ -812,6 +806,7 @@ impl<
         let finalization = self.prepare_finalization(resolver, view, resolved).await;
         Staged {
             nullify,
+            certification,
             notarize,
             notarization,
             nullification,
@@ -826,6 +821,7 @@ impl<
     /// so nothing reaches the network before it is durable.
     fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         staged: Staged<S, D>,
@@ -834,6 +830,17 @@ impl<
             self.dirty.is_none(),
             "journal must be synced before broadcast"
         );
+
+        if let Some((round, certified, notarization)) = staged.certification {
+            // Always forward certification outcomes to resolver. This can happen
+            // after a nullification for the same view because certification is
+            // asynchronous; finalization is the boundary that cancels in-flight
+            // certification and suppresses late reporting.
+            resolver.certified(round, certified);
+            if certified {
+                self.reporter.report(Activity::Certification(notarization));
+            }
+        }
 
         if let Some((nullify, entry)) = staged.nullify {
             debug!(round=?nullify.round(), "broadcasting nullify");
@@ -1101,6 +1108,7 @@ impl<
                 let start = self.state.current_view();
                 let mut resolved = Resolved::None;
                 let mut nullify = None;
+                let mut certification = None;
                 let view;
             },
             on_stopped => {
@@ -1141,13 +1149,15 @@ impl<
             Ok((round, span, certified)) = certify_wait else continue => {
                 // Handle response to our certification request.
                 view = round.view();
-                if !self
-                    .process_certified(&mut resolver, round, certified)
+                let (processed, certification_result) = self
+                    .process_certified(round, certified)
                     .instrument(span)
-                    .await
-                {
+                    .await;
+                if !processed {
                     continue;
                 }
+                certification = certification_result
+                    .map(|(success, notarization)| (round, success, notarization));
             },
             Some(msg) = self.mailbox_receiver.recv() else break => {
                 // Handle messages from resolver and batcher
@@ -1185,7 +1195,14 @@ impl<
                 async {
                     // Build and record everything that became available for `view`.
                     let staged = self
-                        .construct(&mut batcher, &mut resolver, view, resolved, nullify)
+                        .construct(
+                            &mut batcher,
+                            &mut resolver,
+                            view,
+                            resolved,
+                            nullify,
+                            certification,
+                        )
                         .await;
 
                     // Sync everything appended this iteration (during message
@@ -1196,7 +1213,12 @@ impl<
                     self.sync_journal().await;
 
                     // Broadcast everything we built (and report it to the application).
-                    self.notify(&mut vote_sender, &mut certificate_sender, staged);
+                    self.notify(
+                        &mut resolver,
+                        &mut vote_sender,
+                        &mut certificate_sender,
+                        staged,
+                    );
                 }
                 .instrument(span)
                 .await;

@@ -8430,16 +8430,19 @@ mod tests {
             let blocked = deferred.blocked;
             blocked.await.expect("gated section sync was dropped");
 
-            let mut certified = false;
+            let mut certified_before_sync = false;
             while let Some(msg) = resolver_receiver.recv().now_or_never().flatten() {
                 if let MailboxMessage::Certified { round, success, .. } = msg {
                     if round.view() == target_view {
                         assert!(success, "expected successful certification");
-                        certified = true;
+                        certified_before_sync = true;
                     }
                 }
             }
-            assert!(certified, "resolver did not observe successful certification");
+            assert!(
+                !certified_before_sync,
+                "resolver observed certification before the section sync completed"
+            );
 
             let mut finalize_constructed = false;
             while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
@@ -8481,6 +8484,26 @@ mod tests {
             }
 
             deferred.release.send(Ok(())).unwrap();
+
+            // The resolver should observe certification only after the section sync completes.
+            let mut certified = false;
+            let deadline = context.current() + Duration::from_secs(5);
+            while !certified {
+                select! {
+                    msg = resolver_receiver.recv() => match msg.unwrap() {
+                        MailboxMessage::Certified { round, success, .. }
+                            if round.view() == target_view =>
+                        {
+                            assert!(success, "expected successful certification");
+                            certified = true;
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep_until(deadline) => {
+                        panic!("timed out waiting for certification after section sync");
+                    },
+                }
+            }
 
             // The durable finalize should be broadcast, without another section sync.
             let deadline = context.current() + Duration::from_secs(5);
