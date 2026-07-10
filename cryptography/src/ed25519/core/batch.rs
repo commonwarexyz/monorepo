@@ -131,8 +131,9 @@ impl Verifier {
             .map(|_| Summary::random(&mut rng))
             .collect();
 
-        strategy.try_run(
+        strategy.try_run_n(
             total,
+            2,
             // Serial verification prepares the whole batch as one chunk (so
             // coalescing is global and no partition is needed) and runs the
             // multiscalar multiplication inline.
@@ -140,21 +141,14 @@ impl Verifier {
                 let prepared = Self::prepare_chunk(self.signatures.iter(), total, seeds[0])?;
                 Self::finish(&Sequential.manual(), vec![prepared], total)
             },
-            // Parallel verification checks the same global equation in
-            // phases: chunks of signatures are prepared (hashed, coalesced,
-            // and batch decompressed) as independent tasks, then a single
-            // multiscalar multiplication runs with per-window tasks. Both
-            // phases produce work items far smaller than the batch, so faster
-            // cores absorb more of them instead of the slowest core gating a
-            // monolithic shard.
-            || {
-                // Small batches check one owned equation per thread instead of
-                // paying the phased path's fixed costs (serial table builds
-                // or bucket folds in the final multiplication, and per-chunk
-                // overheads). Measured crossover on an M5 Pro: the phased
-                // path wins clearly by 1000 signatures and loses clearly at
-                // 100.
-                if total < Self::PHASED_THRESHOLD {
+            // The parallel arms trade fixed costs against parallelism
+            // inside the final multiplication: arm 0 checks one owned
+            // equation per thread (cheapest for small batches), and arm 1
+            // prepares chunks and runs a single global equation with
+            // per-window multiscalar tasks (cheapest for large batches).
+            // The strategy's policy learns which arm wins per input size.
+            |arm| {
+                if arm == 0 {
                     let order = Self::partition(&self.signatures);
                     let shard_count = manual.parallelism().min(total.max(1));
                     let shard_size = total.div_ceil(shard_count).max(1);
@@ -199,12 +193,6 @@ impl Verifier {
     /// applies within a chunk); window-level parallelism in the final
     /// multiplication keeps multiscalar amortization off this constant.
     const CHUNKS_PER_THREAD: usize = 4;
-
-    /// Parallel batches at least this large take the phased global path;
-    /// smaller ones fold combined per-thread equations, whose R terms ride
-    /// each shard's multiscalar multiplication more cheaply than the phased
-    /// path's fixed costs amortize.
-    const PHASED_THRESHOLD: usize = 512;
 
     /// Merge prepared chunks and check the global verification equation.
     fn finish<S: Strategy>(

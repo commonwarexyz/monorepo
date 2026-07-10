@@ -280,7 +280,10 @@ pub(crate) fn msm_global<S: Strategy>(
     if terms == 0 {
         return Extended::IDENTITY;
     }
-    if terms <= STRAUS_LIMIT {
+    // Straus's shared doubling chain is inherently serial, so it only serves
+    // single-threaded callers; parallel callers always take the windowed
+    // path, whose per-window tasks the pool can spread.
+    if terms <= STRAUS_LIMIT && manual.parallelism() <= 1 {
         return straus(wide, narrow_scalars, narrow_points);
     }
     let w = window_size_global(terms);
