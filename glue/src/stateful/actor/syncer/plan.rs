@@ -21,9 +21,10 @@ use commonware_storage::Context;
 /// [`Stateful`](crate::stateful::Stateful), so startup does not reopen the same
 /// metadata partition from multiple places.
 ///
-/// Once state sync completes, this node never performs peer state sync
-/// again. Future startups must recover from the later of that synced height
-/// and marshal's processed height instead.
+/// Once state sync completes, this plan never selects peer state sync again.
+/// Future startups recover from the later of that synced height and marshal's
+/// processed height instead, re-running peer state sync only when the
+/// databases recover behind that floor and the replay window has been pruned.
 pub struct SyncPlan<E, S, V>
 where
     E: Context,

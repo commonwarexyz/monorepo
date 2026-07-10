@@ -38,9 +38,9 @@
 //! [`SyncPlan::with_floor`]. The same plan then drives marshal (via
 //! [`SyncPlan::marshal_start`]) and stateful (via [`Config::plan`]), so both
 //! actors are guaranteed to agree on the startup decision. Once the durable
-//! complete height is set, the node never performs peer state sync again and
-//! must recover from the later of the stored height and marshal's processed
-//! height on future startups.
+//! complete height is set, the plan never selects peer state sync again and
+//! future startups recover from the later of the stored height and marshal's
+//! processed height instead.
 //!
 //! The actor supports two sync paths:
 //!
@@ -48,7 +48,10 @@
 //!   databases before the actor is spawned. New nodes initialize from
 //!   genesis; restarted nodes reconcile the database set against the later of
 //!   marshal's processed anchor and the stored state sync height, rewinding if
-//!   needed. If marshal is behind that stored height, the actor acknowledges old
+//!   needed. Databases that instead recover BEHIND that floor are caught up by
+//!   replaying retained finalized blocks, falling back to a one-time peer
+//!   state sync at the floor when the replay window has been pruned. If
+//!   marshal is behind that stored height, the actor acknowledges old
 //!   finalized blocks without applying them again until marshal catches up. The
 //!   actor then starts directly in normal processing mode while marshal continues
 //!   backfilling blocks from the network.

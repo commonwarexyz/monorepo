@@ -15,12 +15,12 @@ use std::num::{NonZeroU64, NonZeroUsize};
 ///
 /// Durable progress from a previous run takes precedence when it already
 /// supersedes the configured anchor. In the other direction, a [Start::Floor]
-/// ABOVE durable progress jumps ahead exactly like a runtime `SetFloor`
-/// (anchor on the floor block, prune below it — see
-/// [`core::Mailbox::set_floor`](crate::marshal::core::Mailbox::set_floor)),
-/// without waiting for the application to process the skipped blocks; the
-/// application layer is responsible for bringing its databases to the floor
-/// (rewind, replay, or state sync).
+/// ABOVE durable progress jumps ahead exactly like a runtime
+/// [`set_floor`](crate::marshal::core::Mailbox::set_floor): marshal anchors on
+/// the floor block, records the anchor's predecessor as processed, and prunes
+/// below the anchor without waiting for the application to process the
+/// skipped blocks. The application layer is responsible for bringing its
+/// databases to the floor (rewind, replay, or state sync).
 pub enum Start<S: Scheme, C: Digest, B> {
     /// Start from the height-zero genesis block.
     Genesis(B),

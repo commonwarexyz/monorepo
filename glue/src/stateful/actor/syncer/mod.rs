@@ -10,7 +10,7 @@ use commonware_consensus::{
     },
     simplex::types::Finalization,
     types::Height,
-    CertifiableBlock, Heightable, Roundable,
+    Heightable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner};
@@ -306,7 +306,7 @@ where
     ///
     /// Once this height is set, future startups skip peer state sync and initialize
     /// from the later of this height and marshal's processed height instead. The
-    /// completed height only moves forward; startup re-runs peer state sync past it
+    /// completed height only moves forward. Startup re-runs peer state sync past it
     /// only when the databases recover behind the marshal floor and rewind repair
     /// is impossible.
     pub(crate) async fn set_complete(&mut self, height: Height) {
@@ -385,26 +385,27 @@ where
 }
 
 /// The outcome of attempting to initialize databases from marshal on startup.
-pub(crate) enum MarshalStartup<E, A>
+pub(crate) enum MarshalStartup<E, A, S, V>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
+    S: Scheme,
+    V: Variant,
 {
     /// The databases are consistent with (or were rewound down to) the
-    /// marshal floor and processing can begin.
+    /// marshal floor, or can reach it by replaying retained finalized blocks
+    /// (see [StartupResult::replay_to]).
     Ready(StartupResult<E, A>),
 
     /// The databases recovered BEHIND the marshal floor and the retained
     /// finalized blocks cannot close the gap (the databases' committed state
     /// matches no retained block, so the replay window was pruned). The
-    /// caller must recover by running peer state sync to the floor.
-    DatabasesBehindFloor {
-        /// The marshal floor height the databases failed to reach.
-        floor: Height,
-    },
+    /// caller must recover by running peer state sync to the returned floor
+    /// finalization.
+    DatabasesBehindFloor(Finalization<S, V::Commitment>),
 }
 
-/// Initializes databases at marshal's current startup anchor.
+/// Initializes databases at marshal's current startup floor.
 ///
 /// This initialization route is used when startup should recover from marshal
 /// instead of running peer state sync. If marshal has not yet recorded a
@@ -413,63 +414,72 @@ where
 ///
 /// If the databases are found to be inconsistent with the marshal floor, this
 /// function will attempt to repair by rewinding the databases which are ahead.
-/// Databases that are instead BEHIND the floor cannot be repaired by rewind;
-/// [MarshalStartup::DatabasesBehindFloor] is returned so the caller can
-/// recover via peer state sync. If the databases are entirely inconsistent,
-/// this function will panic.
+/// Databases that are instead BEHIND the floor cannot be repaired by rewind:
+/// the caller must replay retained finalized blocks over them when the gap is
+/// intact ([StartupResult::replay_to]) and fall back to peer state sync when
+/// it is not ([MarshalStartup::DatabasesBehindFloor]). If the databases are
+/// entirely inconsistent, this function will panic.
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
-    sync_metadata: &mut StateSyncMetadata<E, V::Commitment>,
-) -> MarshalStartup<E, A>
+    sync_height: Option<Height>,
+) -> MarshalStartup<E, A, S, V>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    let sync_height = sync_metadata.sync_height();
     let processed_height = marshal.get_processed_height().await;
-    let skip_finalized_until = match (sync_height, processed_height) {
-        (Some(sync_height), Some(processed_height)) if processed_height < sync_height => {
-            Some(sync_height)
-        }
-        (Some(sync_height), None) => Some(sync_height),
-        _ => None,
-    };
-    let marshal_floor = sync_height
+    let floor_height = sync_height
         .into_iter()
         .chain(processed_height)
         .max()
         .unwrap_or_else(Height::zero);
-    let floor_block = {
-        let marshal_block = marshal
-            .get_block(Identifier::Height(marshal_floor))
-            .await
-            .expect("marshal must return floor block");
-        V::into_inner(marshal_block)
+    let floor_block = match marshal.get_block(Identifier::Height(floor_height)).await {
+        Some(block) => V::into_inner(block),
+        None => {
+            // A startup floor above durable progress (a marshal `Start::Floor`)
+            // anchors marshal on the floor block, records the anchor's
+            // predecessor as processed, and prunes everything below the
+            // anchor. The block above the computed floor is then the true
+            // floor.
+            let block = marshal
+                .get_block(Identifier::Height(floor_height.next()))
+                .await
+                .expect("marshal must retain a block at its floor");
+            V::into_inner(block)
+        }
     };
+    let floor_height = floor_block.height();
+
+    // Marshal redelivers finalized blocks above its durable processed height.
+    // Once startup completes (including replay or peer state sync selected
+    // below), blocks at or below the floor are already reflected in the
+    // databases and must be acknowledged without being applied again.
+    let skip_finalized_until =
+        (floor_height > processed_height.unwrap_or_else(Height::zero)).then_some(floor_height);
 
     let databases = A::Databases::init(context.child("db_set"), db_config).await;
-    let processed_targets = A::sync_targets(&floor_block);
+    let floor_targets = A::sync_targets(&floor_block);
 
     // In the case that the committed targets do not match the marshal floor, we may
     // have suffered a crash that left the set in an inconsistent state. Databases
     // AHEAD of the floor are repaired by rewinding back to it. Databases BEHIND the
     // floor cannot be repaired by rewind: if marshal still retains the block the
     // databases are committed at (and everything up to the floor), the caller can
-    // replay the gap locally; otherwise startup must fall back to peer state sync.
-    if databases.committed_targets().await != processed_targets {
-        if databases.behind_sync_targets(&processed_targets).await {
+    // replay the gap locally. Otherwise startup must fall back to peer state sync.
+    let committed_targets = databases.committed_targets().await;
+    if committed_targets != floor_targets {
+        if databases.behind_sync_targets(&floor_targets).await {
             // Walk down from the floor looking for the block whose targets
             // match the databases' committed state. Finding it means every
             // block in the gap is retained (heights between it and the floor
             // were visited on the way down), so a local replay can catch the
             // databases up. Hitting a pruned height first means the replay
             // window is gone.
-            let committed_targets = databases.committed_targets().await;
-            let mut height = marshal_floor;
+            let mut height = floor_height;
             let replay_anchor = loop {
                 let Some(previous) = height.previous() else {
                     break None;
@@ -485,52 +495,403 @@ where
             };
             let Some(anchor_block) = replay_anchor else {
                 warn!(
-                    floor = %marshal_floor,
+                    floor = %floor_height,
                     "databases behind marshal floor and replay window pruned; \
-                     peer state sync required"
+                     recovering via peer state sync"
                 );
-                return MarshalStartup::DatabasesBehindFloor {
-                    floor: marshal_floor,
-                };
+                let finalization = marshal
+                    .get_finalization(floor_height)
+                    .await
+                    .expect("marshal must retain a finalization at its floor");
+                return MarshalStartup::DatabasesBehindFloor(finalization);
             };
             warn!(
-                floor = %marshal_floor,
+                floor = %floor_height,
                 anchor = %anchor_block.height(),
                 "databases behind marshal floor; replaying retained blocks to catch up"
             );
-            let anchor = Anchor {
-                height: anchor_block.height(),
-                round: anchor_block.context().round(),
-                digest: anchor_block.digest(),
-            };
             return MarshalStartup::Ready(StartupResult {
-                sync: SyncResult { databases, anchor },
+                sync: SyncResult {
+                    databases,
+                    anchor: Anchor::from(&anchor_block),
+                },
                 skip_finalized_until,
-                replay_to: Some(marshal_floor),
+                replay_to: Some(floor_height),
             });
         }
-        databases.rewind_to_targets(processed_targets.clone()).await;
+        databases.rewind_to_targets(floor_targets.clone()).await;
         let rewound_targets = databases.committed_targets().await;
         assert!(
-            rewound_targets == processed_targets,
-            "databases must be consistent with marshal floor (height {marshal_floor}) after \
-             rewind: the rewound targets still disagree with the floor block's targets"
+            rewound_targets == floor_targets,
+            "databases must be consistent with marshal floor {floor_height} after rewind"
         );
     }
 
-    // Once startup has aligned databases with marshal, future boots should skip peer
-    // state sync and recover from the later of this anchor and marshal's durable
-    // processed height.
-    sync_metadata.set_complete(floor_block.height()).await;
-
-    let anchor = Anchor {
-        height: floor_block.height(),
-        round: floor_block.context().round(),
-        digest: floor_block.digest(),
-    };
     MarshalStartup::Ready(StartupResult {
-        sync: SyncResult { databases, anchor },
+        sync: SyncResult {
+            databases,
+            anchor: Anchor::from(&floor_block),
+        },
         skip_finalized_until,
         replay_to: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{init_databases_from_marshal, MarshalStartup};
+    use crate::stateful::tests::mocks::{TestApp, TestBlock, TestScheme, TestVariant};
+    use commonware_actor::Feedback;
+    use commonware_consensus::{
+        marshal::{
+            self,
+            core::Actor as MarshalActor,
+            resolver::handler::{self, Annotation, Key},
+            store::{Blocks, Certificates},
+            Update,
+        },
+        simplex::{
+            mocks::scheme as scheme_mocks,
+            types::{Finalization, Finalize, Proposal},
+        },
+        types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
+        Heightable as _, Reporter,
+    };
+    use commonware_cryptography::{
+        certificate::{mocks::Fixture, ConstantProvider},
+        ed25519,
+        sha256::Digest as Sha256Digest,
+        Digestible as _,
+    };
+    use commonware_parallel::Sequential;
+    use commonware_resolver::{Fetch, Resolver, TargetedResolver};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Clock as _, Runner as _, Supervisor as _,
+    };
+    use commonware_storage::archive::immutable;
+    use commonware_utils::{
+        acknowledgement::Exact, sync::Mutex, vec::NonEmptyVec, Acknowledgement as _, NZUsize,
+        NZU16, NZU64,
+    };
+    use std::{sync::Arc, time::Duration};
+
+    /// A resolver stub that drops every fetch. Startup tests only exercise
+    /// blocks marshal already stores locally.
+    #[derive(Clone)]
+    struct DroppingResolver;
+
+    impl Resolver for DroppingResolver {
+        type Key = Key<Sha256Digest>;
+        type Subscriber = Annotation;
+
+        fn fetch<F>(&mut self, _fetch: F) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
+        }
+
+        fn fetch_all<F>(&mut self, _fetches: Vec<F>) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
+        }
+
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    impl TargetedResolver for DroppingResolver {
+        type PublicKey = ed25519::PublicKey;
+
+        fn fetch_targeted(
+            &mut self,
+            _fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            _targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn fetch_all_targeted<F>(
+            &mut self,
+            _fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
+        }
+    }
+
+    /// A marshal reporter that acknowledges dispatched blocks up to a height
+    /// and holds later acknowledgements, so marshal stays alive without
+    /// advancing its processed height further.
+    #[derive(Clone)]
+    struct AckingReporter {
+        ack_until: Height,
+        held: Arc<Mutex<Vec<Exact>>>,
+    }
+
+    impl AckingReporter {
+        fn new(ack_until: Height) -> Self {
+            Self {
+                ack_until,
+                held: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl Reporter for AckingReporter {
+        type Activity = Update<TestBlock>;
+
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
+            if let Update::Block(block, acknowledgement) = activity {
+                if block.height() <= self.ack_until {
+                    acknowledgement.acknowledge();
+                } else {
+                    self.held.lock().push(acknowledgement);
+                }
+            }
+            Feedback::Ok
+        }
+    }
+
+    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
+        immutable::Config {
+            metadata_partition: format!("{partition}-metadata"),
+            freezer_table_partition: format!("{partition}-freezer-table"),
+            freezer_table_initial_size: 4,
+            freezer_table_resize_frequency: 2,
+            freezer_table_resize_chunk_size: 2,
+            freezer_key_partition: format!("{partition}-freezer-key"),
+            freezer_key_page_cache: page_cache,
+            freezer_value_partition: format!("{partition}-freezer-value"),
+            freezer_value_target_size: 128,
+            freezer_value_compression: None,
+            ordinal_partition: format!("{partition}-ordinal"),
+            items_per_section: NZU64!(4),
+            codec_config: (),
+            replay_buffer: NZUsize!(64),
+            freezer_key_write_buffer: NZUsize!(64),
+            freezer_value_write_buffer: NZUsize!(64),
+            ordinal_write_buffer: NZUsize!(64),
+        }
+    }
+
+    fn make_finalization(
+        fixture: &Fixture<TestScheme>,
+        block: &TestBlock,
+    ) -> Finalization<TestScheme, Sha256Digest> {
+        let height = block.height().get();
+        let proposal = Proposal::new(
+            Round::new(Epoch::zero(), View::new(height)),
+            View::new(height.saturating_sub(1)),
+            block.digest(),
+        );
+        let votes: Vec<_> = fixture
+            .schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+
+        Finalization::from_finalizes(&fixture.verifier, &votes, &Sequential)
+            .expect("finalization quorum")
+    }
+
+    /// Start a marshal actor over pre-seeded finalized blocks and
+    /// finalizations. The returned handler must be kept alive for the actor
+    /// to keep serving mailbox requests.
+    async fn start_marshal(
+        context: &deterministic::Context,
+        partition_prefix: &str,
+        start: marshal::Start<TestScheme, Sha256Digest, TestBlock>,
+        provider: ConstantProvider<TestScheme, Epoch>,
+        blocks: Vec<TestBlock>,
+        finalizations: Vec<(TestBlock, Finalization<TestScheme, Sha256Digest>)>,
+        reporter: AckingReporter,
+    ) -> (
+        marshal::core::Mailbox<TestScheme, TestVariant>,
+        handler::Handler<Sha256Digest>,
+    ) {
+        let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        let mut finalizations_by_height = immutable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(
+                page_cache.clone(),
+                &format!("{partition_prefix}-finalizations"),
+            ),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let mut finalized_blocks = immutable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config(page_cache.clone(), &format!("{partition_prefix}-blocks")),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+
+        for block in blocks {
+            Blocks::put(&mut finalized_blocks, block)
+                .await
+                .expect("failed to seed block");
+        }
+        Blocks::sync(&mut finalized_blocks)
+            .await
+            .expect("failed to sync seeded blocks");
+        for (block, finalization) in finalizations {
+            Certificates::put(
+                &mut finalizations_by_height,
+                block.height(),
+                block.digest(),
+                finalization,
+            )
+            .await
+            .expect("failed to seed finalization");
+        }
+        Certificates::sync(&mut finalizations_by_height)
+            .await
+            .expect("failed to sync seeded finalizations");
+
+        let (actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
+            context.child("marshal"),
+            finalizations_by_height,
+            finalized_blocks,
+            marshal::Config {
+                provider,
+                epocher: FixedEpocher::new(NZU64!(u64::MAX)),
+                start,
+                partition_prefix: format!("{partition_prefix}-marshal"),
+                mailbox_size: NZUsize!(16),
+                view_retention_timeout: ViewDelta::new(1),
+                prunable_items_per_section: NZU64!(4),
+                page_cache,
+                replay_buffer: NZUsize!(64),
+                key_write_buffer: NZUsize!(64),
+                value_write_buffer: NZUsize!(64),
+                block_codec_config: (),
+                max_repair: NZUsize!(4),
+                max_pending_acks: NZUsize!(8),
+                strategy: Sequential,
+            },
+        )
+        .await;
+        let (receiver, handler) = handler::init(context.child("resolver_handler"), NZUsize!(16));
+        actor.start_unbuffered(reporter, (receiver, DroppingResolver));
+        (mailbox, handler)
+    }
+
+    /// A marshal startup floor above durable progress (see
+    /// [`marshal::Start::Floor`]) anchors marshal on the floor block, records
+    /// the anchor's predecessor as processed, and prunes below the anchor.
+    /// Startup must recognize the retained anchor above the processed height
+    /// as the true floor and recover the databases via peer state sync at
+    /// that floor, because the replay window below it is gone.
+    #[test]
+    fn startup_floor_jump_recovers_via_state_sync_at_anchor() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+            let mut signing_context = context.child("signing");
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-floor-jump", 1);
+            let provider = ConstantProvider::new(fixture.schemes[0].clone());
+
+            // Marshal holds only the floor anchor: everything below it was
+            // pruned when the floor was installed.
+            let anchor_block = TestBlock::new(6, 6);
+            let finalization = make_finalization(&fixture, &anchor_block);
+            let (marshal, _handler) = start_marshal(
+                &context,
+                "startup-floor-jump",
+                marshal::Start::Floor(finalization.clone()),
+                provider,
+                vec![anchor_block.clone()],
+                vec![(anchor_block.clone(), finalization.clone())],
+                AckingReporter::new(Height::zero()),
+            )
+            .await;
+            assert_eq!(
+                marshal.get_processed_height().await,
+                Some(Height::new(5)),
+                "startup floor must record the anchor's predecessor as processed",
+            );
+
+            let startup = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
+                &context,
+                &marshal,
+                (),
+                None,
+            )
+            .await;
+            let MarshalStartup::DatabasesBehindFloor(floor) = startup else {
+                panic!("databases behind a pruned floor must fall back to peer state sync");
+            };
+            assert_eq!(
+                floor.proposal.payload,
+                anchor_block.digest(),
+                "peer state sync must target the retained floor anchor",
+            );
+            assert_eq!(floor.round(), finalization.round());
+        });
+    }
+
+    /// Databases that recover behind the marshal floor with every block in
+    /// the gap still retained are caught up by replaying those blocks, not by
+    /// peer state sync.
+    #[test]
+    fn databases_behind_retained_floor_replay_locally() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+            let mut signing_context = context.child("signing");
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"behind-retained", 1);
+            let provider = ConstantProvider::new(fixture.schemes[0].clone());
+
+            // Marshal retains finalized blocks through height 5 and the
+            // application acknowledged them all, while the databases recover
+            // at genesis (their committed targets match block 0).
+            let mut blocks = Vec::new();
+            let mut finalizations = Vec::new();
+            for height in 1..=5u64 {
+                let block = TestBlock::new(height, height as u8);
+                finalizations.push((block.clone(), make_finalization(&fixture, &block)));
+                blocks.push(block);
+            }
+            let (marshal, _handler) = start_marshal(
+                &context,
+                "behind-retained",
+                marshal::Start::Genesis(TestBlock::new(0, 0)),
+                provider,
+                blocks,
+                finalizations,
+                AckingReporter::new(Height::new(5)),
+            )
+            .await;
+            while marshal.get_processed_height().await != Some(Height::new(5)) {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let startup = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
+                &context,
+                &marshal,
+                (),
+                None,
+            )
+            .await;
+            let MarshalStartup::Ready(result) = startup else {
+                panic!("a retained replay window must not fall back to peer state sync");
+            };
+            assert_eq!(
+                result.replay_to,
+                Some(Height::new(5)),
+                "replay must extend to the marshal floor",
+            );
+            assert_eq!(
+                result.sync.anchor.height,
+                Height::zero(),
+                "the replay anchor must sit at the databases' committed height",
+            );
+            assert_eq!(result.skip_finalized_until, None);
+        });
+    }
 }

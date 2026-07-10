@@ -234,6 +234,10 @@ where
         self.target()
     }
 
+    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+        target.leaf_count > self.target().leaf_count
+    }
+
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.leaf_count).await?;
 
@@ -291,6 +295,10 @@ where
 
     fn sync_target(&self) -> Self::SyncTarget {
         self.target()
+    }
+
+    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+        target.leaf_count > self.target().leaf_count
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {

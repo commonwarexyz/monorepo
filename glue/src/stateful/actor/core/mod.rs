@@ -30,7 +30,6 @@ use commonware_utils::{channel::oneshot, sync::AsyncMutex};
 use futures::join;
 use rand_core::Rng;
 use std::{num::NonZeroUsize, sync::Arc};
-use tracing::warn;
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -154,9 +153,6 @@ where
     /// Finalized floor to state sync from, when the startup plan selected one.
     startup_floor: Option<Finalization<S, V::Commitment>>,
 
-    /// Whether an interrupted state sync must resume from a newly selected floor.
-    requires_state_sync_floor: bool,
-
     /// Durable state sync metadata extracted from the startup plan.
     sync_metadata: StateSyncMetadata<E, V::Commitment>,
 
@@ -189,10 +185,14 @@ where
             prune_config.assert_valid();
         }
 
-        let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         let startup_floor = config.plan.floor().cloned();
-        let requires_state_sync_floor = config.plan.requires_state_sync_floor();
+        assert!(
+            startup_floor.is_some() || !config.plan.requires_state_sync_floor(),
+            "interrupted state sync must resume from a newly selected floor"
+        );
         let sync_metadata = config.plan.into_sync_metadata();
+
+        let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -202,7 +202,6 @@ where
                 marshal: config.marshal,
                 db_config: config.db_config,
                 startup_floor,
-                requires_state_sync_floor,
                 sync_metadata,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
@@ -217,12 +216,9 @@ where
     }
 
     async fn run(mut self) {
-        if let Some(floor) = self.startup_floor.take() {
-            self.start_state_sync(floor).await;
-        } else if self.requires_state_sync_floor {
-            panic!("interrupted state sync must resume from a newly selected floor");
-        } else {
-            self.start_from_marshal().await;
+        match self.startup_floor.take() {
+            Some(floor) => self.start_state_sync(floor).await,
+            None => self.start_from_marshal().await,
         }
     }
 
@@ -264,15 +260,15 @@ where
     /// Starts the application by initializing the database set at marshal's current floor.
     ///
     /// If the databases recover BEHIND the marshal floor (an unclean shutdown
-    /// or metadata damage left a gap that rewind repair cannot close and whose
-    /// blocks marshal may have pruned), startup falls back to peer state sync
-    /// at the floor instead of crashing.
+    /// or a marshal startup floor above them), startup replays retained
+    /// finalized blocks to catch up and falls back to peer state sync when the
+    /// replay window has been pruned.
     async fn start_from_marshal(mut self) {
         let startup = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
             &self.marshal,
             self.db_config.clone(),
-            &mut self.sync_metadata,
+            self.sync_metadata.sync_height(),
         )
         .await;
         let syncer::StartupResult {
@@ -281,16 +277,7 @@ where
             replay_to,
         } = match startup {
             syncer::MarshalStartup::Ready(result) => result,
-            syncer::MarshalStartup::DatabasesBehindFloor { floor } => {
-                let finalization = self
-                    .marshal
-                    .get_finalization(floor)
-                    .await
-                    .expect("marshal must retain the finalization for its own floor");
-                warn!(
-                    %floor,
-                    "databases behind marshal floor; falling back to peer state sync"
-                );
+            syncer::MarshalStartup::DatabasesBehindFloor(finalization) => {
                 return self.start_state_sync(finalization).await;
             }
         };
@@ -313,9 +300,12 @@ where
 
         // The databases recovered behind the marshal floor: replay the
         // retained finalized blocks up to the floor before processing begins.
-        // Replay is crash-safe: each replayed block is durably finalized, so
-        // an interrupted replay resumes from a higher anchor on next startup.
+        // Replay is crash-safe because each replayed block is durably
+        // finalized, so an interrupted replay resumes from a higher anchor on
+        // the next startup.
+        let floor = replay_to.unwrap_or(anchor.height);
         if let Some(replay_to) = replay_to {
+            let context = self.context.as_present();
             let mut height = anchor.height;
             while height < replay_to {
                 height = height.next();
@@ -324,18 +314,18 @@ where
                     .get_block(Identifier::Height(height))
                     .await
                     .expect("blocks in the verified replay window must be retained");
-                let block = V::into_inner(block);
-                let context = self.context.as_present();
-                let (status, _prune) = processor.finalize(&context, block).await;
+                let (status, _prune) = processor.finalize(context, V::into_inner(block)).await;
                 assert!(
                     matches!(status, FinalizeStatus::Persisted { .. }),
                     "replayed block must persist"
                 );
             }
-            // The databases now match the floor; record completion so future
-            // boots recover from it directly.
-            self.sync_metadata.set_complete(replay_to).await;
         }
+
+        // Once the databases are aligned with the floor, record completion so
+        // future boots skip peer state sync and recover from the later of this
+        // floor and marshal's durable processed height.
+        self.sync_metadata.set_complete(floor).await;
 
         Processing {
             context: self.context,

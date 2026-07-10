@@ -222,18 +222,12 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Return the sync target for this database's current committed state.
     fn sync_target(&self) -> Self::SyncTarget;
 
-    /// Return true when the database's committed state is BEHIND `target`:
-    /// reaching it would require applying operations the database does not
-    /// have, so rewind repair cannot succeed and the caller must recover via
-    /// replay or peer state sync instead.
+    /// Return true when the database's committed state is BEHIND `target`.
     ///
-    /// Defaults to `false`, which preserves the legacy behavior of always
-    /// attempting rewind repair. Implementations whose sync targets carry an
-    /// ordered position should override this so startup can distinguish a
-    /// repairable (ahead) database from an unrepairable (behind) one.
-    fn behind_sync_target(&self, _target: &Self::SyncTarget) -> bool {
-        false
-    }
+    /// Reaching a behind target would require applying operations the database
+    /// does not have, so rewind repair cannot succeed and the caller must
+    /// recover via replay or peer state sync instead.
+    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool;
 
     /// Rewind committed state to `target`.
     ///
@@ -311,10 +305,8 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// target (see [`ManagedDb::behind_sync_target`]). A behind set cannot be
     /// repaired by rewind: recovery must replay the gap or run peer state
     /// sync.
-    fn behind_sync_targets(
-        &self,
-        targets: &Self::SyncTargets,
-    ) -> impl Future<Output = bool> + Send;
+    fn behind_sync_targets(&self, targets: &Self::SyncTargets)
+        -> impl Future<Output = bool> + Send;
 
     /// Rewind the set to the provided per-database targets.
     ///
@@ -748,7 +740,7 @@ macro_rules! impl_database_set {
                         $T::behind_sync_target(&*database, &targets.$idx)
                     },
                 )+);
-                false $(|| behind.$idx)+
+                $(behind.$idx)||+
             }
 
             async fn rewind_to_targets(&self, targets: Self::SyncTargets) {
@@ -1584,6 +1576,10 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {}
 
+        fn behind_sync_target(&self, _target: &Self::SyncTarget) -> bool {
+            false
+        }
+
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -1614,6 +1610,10 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.current_target
+        }
+
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > self.current_target
         }
 
         async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -1652,6 +1652,10 @@ mod tests {
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
+
+        fn behind_sync_target(&self, _target: &Self::SyncTarget) -> bool {
+            false
+        }
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
@@ -1753,6 +1757,10 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {}
 
+        fn behind_sync_target(&self, _target: &Self::SyncTarget) -> bool {
+            false
+        }
+
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -1841,6 +1849,10 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {}
 
+        fn behind_sync_target(&self, _target: &Self::SyncTarget) -> bool {
+            false
+        }
+
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -1871,6 +1883,10 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
+        }
+
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > self.final_target
         }
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -1907,6 +1923,10 @@ mod tests {
             self.final_target
         }
 
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > self.final_target
+        }
+
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -1937,6 +1957,10 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
+        }
+
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > self.final_target
         }
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -1971,6 +1995,10 @@ mod tests {
             0
         }
 
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > 0
+        }
+
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -2001,6 +2029,10 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
+        }
+
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > self.final_target
         }
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -2035,6 +2067,10 @@ mod tests {
             0
         }
 
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > 0
+        }
+
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -2065,6 +2101,10 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
+        }
+
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > self.final_target
         }
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -2099,6 +2139,10 @@ mod tests {
             self.final_target
         }
 
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > self.final_target
+        }
+
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -2129,6 +2173,10 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
+        }
+
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > self.final_target
         }
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -2163,6 +2211,10 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
+        }
+
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > self.final_target
         }
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -2304,6 +2356,10 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
+        }
+
+        fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+            *target > self.final_target
         }
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {

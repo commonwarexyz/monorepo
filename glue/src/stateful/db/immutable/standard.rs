@@ -320,8 +320,6 @@ where
     }
 
     fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
-        // The database is behind when the target's operation range ends past
-        // the committed bounds: rewind cannot apply operations it never had.
         *target.range.end() > self.bounds().end
     }
 
@@ -411,8 +409,6 @@ where
     }
 
     fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
-        // The database is behind when the target's operation range ends past
-        // the committed bounds: rewind cannot apply operations it never had.
         *target.range.end() > self.bounds().end
     }
 

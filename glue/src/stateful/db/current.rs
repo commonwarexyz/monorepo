@@ -544,6 +544,10 @@ where
         )
     }
 
+    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+        *target.range.end() > self.bounds().end
+    }
+
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
@@ -636,6 +640,10 @@ where
             self.ops_root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
+    }
+
+    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+        *target.range.end() > self.bounds().end
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
@@ -809,6 +817,10 @@ where
         )
     }
 
+    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+        *target.range.end() > self.bounds().end
+    }
+
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
@@ -906,6 +918,10 @@ where
             self.ops_root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
+    }
+
+    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+        *target.range.end() > self.bounds().end
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
