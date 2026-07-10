@@ -1,6 +1,6 @@
 use super::Header;
 #[commonware_macros::stability(BETA)]
-use crate::{BlobHeaderLayout, BlobInfo};
+use crate::BlobInfo;
 use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut};
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
@@ -69,7 +69,6 @@ impl crate::Storage for Storage {
         partition: &str,
         name: &[u8],
         versions: RangeInclusive<u16>,
-        layout: BlobHeaderLayout,
     ) -> Result<(Self::Blob, BlobInfo), crate::Error> {
         super::validate_partition_name(partition)?;
 
@@ -81,7 +80,7 @@ impl crate::Storage for Storage {
         // by an interrupted creation get a fresh header written.
         let existing = resolve_header(content, &versions, partition, name)?;
         let (info, data_offset) = existing.unwrap_or_else(|| {
-            let (region, info) = Header::create(&versions, layout);
+            let (region, info) = Header::create(&versions);
             content.clear();
             content.extend_from_slice(&region);
             (info, region.len() as u64)
@@ -276,8 +275,8 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BufferPoolConfig,
-        Storage as _,
+        storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BlobHeaderLayout,
+        BufferPoolConfig, Storage as _,
     };
 
     fn test_pool() -> BufferPool {
@@ -334,24 +333,33 @@ mod tests {
         let read_buf = blob.read_at(0, data.len()).await.unwrap();
         assert_eq!(read_buf.coalesce(), data);
 
-        // A V0 blob places data immediately after the 8-byte header
+        // A legacy V0 blob (fabricated raw: creation is always V1) places data immediately
+        // after the 8-byte header and stays fully readable and writable.
+        {
+            let mut partitions = storage.partitions.lock();
+            let partition = partitions.get_mut("partition").unwrap();
+            let raw = crate::storage::tests::v0_blob_bytes(0, data);
+            partition.insert(b"v0".to_vec(), raw);
+        }
         let (blob, info) = storage
-            .open_versioned("partition", b"v0", 0..=0, BlobHeaderLayout::V0)
+            .open_versioned("partition", b"v0", 0..=0)
             .await
             .unwrap();
-        assert_eq!(info.size, 0);
-        blob.write_at(0, data).await.unwrap();
+        assert_eq!(info.size, data.len() as u64);
+        let read_buf = blob.read_at(0, data.len()).await.unwrap();
+        assert_eq!(read_buf.coalesce(), data);
+        blob.write_at(data.len() as u64, b"!").await.unwrap();
         blob.sync().await.unwrap();
         {
             let partitions = storage.partitions.lock();
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"v0".to_vec()).unwrap();
-            assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + data.len());
+            assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + data.len() + 1);
             assert_eq!(
                 &raw_content[..Header::MAGIC_LENGTH],
                 &BlobHeaderLayout::V0.magic()
             );
-            assert_eq!(&raw_content[Header::PRELUDE_SIZE..], data);
+            assert_eq!(&raw_content[Header::PRELUDE_SIZE..], b"hello world!");
         }
 
         // Corrupted blob recovery (0 < raw_size < 8)
@@ -441,7 +449,7 @@ mod tests {
         // Manually insert a torn-creation leftover: a writeback-subset of a canonical V1
         // header region (the full state enumeration lives in the Header::interrupted_creation
         // unit tables)
-        let (region, _) = Header::create(&(0..=0), BlobHeaderLayout::V1);
+        let (region, _) = Header::create(&(0..=0));
         let mut torn_version = region;
         torn_version[5] = 0;
         let states = [torn_version];
@@ -455,18 +463,17 @@ mod tests {
 
             // Opening recreates the blob as new
             let (blob, info) = storage
-                .open_versioned("partition", &name, 0..=0, BlobHeaderLayout::V1)
+                .open_versioned("partition", &name, 0..=0)
                 .await
                 .unwrap();
             assert_eq!(info.size, 0);
-            assert_eq!(info.layout, BlobHeaderLayout::V1);
             blob.write_at(0, b"data".to_vec()).await.unwrap();
             blob.sync().await.unwrap();
             drop(blob);
 
             // The healed blob round-trips through a reopen with its data intact.
             let (blob, info) = storage
-                .open_versioned("partition", &name, 0..=0, BlobHeaderLayout::V1)
+                .open_versioned("partition", &name, 0..=0)
                 .await
                 .unwrap();
             assert_eq!(info.size, 4);

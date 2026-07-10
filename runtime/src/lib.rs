@@ -77,16 +77,16 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
-    /// Version of a [`Blob`]'s header layout, chosen at creation.
+    /// Version of a [`Blob`]'s on-disk header layout.
     ///
     /// This versions the runtime's on-disk container (where data begins), not the blob's
     /// contents: the application-owned blob version passed to [`Storage::open_versioned`] is a
     /// separate field and is unaffected by the layout.
     ///
-    /// The version applies only when a blob does not yet exist: reopening an existing blob always
-    /// honors the version recorded in its header, regardless of the version requested.
+    /// New blobs are always created with the latest layout; reopening an existing blob honors
+    /// the layout recorded in its header.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum BlobHeaderLayout {
+    pub(crate) enum BlobHeaderLayout {
         /// An 8-byte header; data begins immediately after it.
         V0,
         /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
@@ -134,8 +134,6 @@ stability_scope!(BETA {
         pub size: u64,
         /// The blob's version, as recorded in its header.
         pub blob_version: u16,
-        /// The blob's header layout, as recorded in its header.
-        pub layout: BlobHeaderLayout,
     }
 
     /// Errors that can occur when interacting with the runtime.
@@ -686,8 +684,8 @@ stability_scope!(BETA {
         type Blob: Blob;
 
         /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
-        /// in the versions range and the [`BlobHeaderLayout::V1`] creation layout. The blob
-        /// metadata is reduced to its logical size in the return value.
+        /// in the versions range. The blob metadata is reduced to its logical size in the
+        /// return value.
         fn open(
             &self,
             partition: &str,
@@ -695,12 +693,7 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
             async move {
                 let (blob, info) = self
-                    .open_versioned(
-                        partition,
-                        name,
-                        DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
-                        BlobHeaderLayout::V1,
-                    )
+                    .open_versioned(partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION)
                     .await?;
                 Ok((blob, info.size))
             }
@@ -721,8 +714,8 @@ stability_scope!(BETA {
         ///
         /// # Layout
         ///
-        /// `layout` selects the header layout when the blob is created; reopening an
-        /// existing blob honors the layout recorded in its header (see [`BlobHeaderLayout`]).
+        /// New blobs are created with the latest header layout; reopening an existing blob
+        /// honors the layout recorded in its header.
         ///
         /// # Recovery
         ///
@@ -735,7 +728,6 @@ stability_scope!(BETA {
             partition: &str,
             name: &[u8],
             versions: std::ops::RangeInclusive<u16>,
-            layout: BlobHeaderLayout,
         ) -> impl Future<Output = Result<(Self::Blob, BlobInfo), Error>> + Send;
 
         /// Remove a blob from a given partition.

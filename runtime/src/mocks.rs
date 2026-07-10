@@ -1,12 +1,12 @@
 //! Mock implementations of runtime primitives for testing.
 
+#[commonware_macros::stability(BETA)]
+use crate::BlobInfo;
 use crate::{
     telemetry::metrics::{Metric, Registered},
     Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
     Storage, Supervisor,
 };
-#[commonware_macros::stability(BETA)]
-use crate::{BlobHeaderLayout, BlobInfo};
 use bytes::{Bytes, BytesMut};
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -396,12 +396,8 @@ impl<E: Storage> Storage for DelayedSyncContext<E> {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
-        layout: BlobHeaderLayout,
     ) -> Result<(Self::Blob, BlobInfo), Error> {
-        let (inner, info) = self
-            .inner
-            .open_versioned(partition, name, versions, layout)
-            .await?;
+        let (inner, info) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             DelayedSyncBlob {
                 inner,
@@ -613,12 +609,8 @@ impl<E: Storage> Storage for SyncFaultContext<E> {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
-        layout: BlobHeaderLayout,
     ) -> Result<(Self::Blob, BlobInfo), Error> {
-        let (inner, info) = self
-            .inner
-            .open_versioned(partition, name, versions, layout)
-            .await?;
+        let (inner, info) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             SyncFaultBlob {
                 inner,
@@ -990,106 +982,5 @@ mod tests {
             let received = recv_handle.await.unwrap();
             assert_eq!(received.coalesce(), b"ABC");
         });
-    }
-}
-
-/// Context wrapper that creates every new blob with [BlobHeaderLayout::V0], simulating storage
-/// written before the v1 header layout existed. Reopens still honor whatever layout is on disk.
-#[derive(Clone)]
-pub struct ForceV0Context<E> {
-    pub inner: E,
-}
-
-impl<E: Supervisor> Supervisor for ForceV0Context<E> {
-    fn name(&self) -> Name {
-        self.inner.name()
-    }
-
-    fn child(&self, label: &'static str) -> Self {
-        Self {
-            inner: self.inner.child(label),
-        }
-    }
-
-    fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
-        Self {
-            inner: self.inner.with_attribute(key, value),
-        }
-    }
-}
-
-impl<E: Metrics> Metrics for ForceV0Context<E> {
-    fn register<N: Into<String>, H: Into<String>, M: Metric>(
-        &self,
-        name: N,
-        help: H,
-        metric: M,
-    ) -> Registered<M> {
-        self.inner.register(name, help, metric)
-    }
-
-    fn encode(&self) -> String {
-        self.inner.encode()
-    }
-}
-
-impl<E: Clock> Clock for ForceV0Context<E> {
-    fn current(&self) -> std::time::SystemTime {
-        self.inner.current()
-    }
-
-    fn sleep(&self, duration: std::time::Duration) -> impl Future<Output = ()> + Send + 'static {
-        self.inner.sleep(duration)
-    }
-
-    fn sleep_until(
-        &self,
-        deadline: std::time::SystemTime,
-    ) -> impl Future<Output = ()> + Send + 'static {
-        self.inner.sleep_until(deadline)
-    }
-}
-
-impl<E: Clock> GovernorClock for ForceV0Context<E> {
-    type Instant = std::time::SystemTime;
-
-    fn now(&self) -> Self::Instant {
-        self.current()
-    }
-}
-
-impl<E: Clock> ReasonablyRealtime for ForceV0Context<E> {}
-
-impl<E: BufferPooler> BufferPooler for ForceV0Context<E> {
-    fn network_buffer_pool(&self) -> &BufferPool {
-        self.inner.network_buffer_pool()
-    }
-
-    fn storage_buffer_pool(&self) -> &BufferPool {
-        self.inner.storage_buffer_pool()
-    }
-}
-
-impl<E: Storage> Storage for ForceV0Context<E> {
-    type Blob = E::Blob;
-
-    async fn open_versioned(
-        &self,
-        partition: &str,
-        name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-        _layout: BlobHeaderLayout,
-    ) -> Result<(Self::Blob, BlobInfo), Error> {
-        self.inner
-            .open_versioned(partition, name, versions, BlobHeaderLayout::V0)
-            .await
-    }
-
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
-    }
-
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.inner.scan(partition).await
     }
 }

@@ -320,16 +320,14 @@ stability_scope!(BETA {
         }
 
         /// Creates the header region for a new blob using the latest version from the range and
-        /// the given layout. Returns (encoded header region, info for the new blob); the data
-        /// offset is the region's length.
+        /// the latest header layout. Returns (encoded header region, info for the new blob);
+        /// the data offset is the region's length.
         ///
         /// Callers writing this region over an existing blob must truncate it to zero first, so
         /// a torn write cannot splice old bytes into a fully valid header with a wrong version:
         /// every partial state then remains classifiable as an interrupted creation.
-        pub(crate) fn create(
-            versions: &RangeInclusive<u16>,
-            layout: BlobHeaderLayout,
-        ) -> (Vec<u8>, BlobInfo) {
+        pub(crate) fn create(versions: &RangeInclusive<u16>) -> (Vec<u8>, BlobInfo) {
+            let layout = BlobHeaderLayout::V1;
             let blob_version = *versions.end();
             let header = Self {
                 magic: layout.magic(),
@@ -339,21 +337,15 @@ stability_scope!(BETA {
             let info = BlobInfo {
                 size: 0,
                 blob_version,
-                layout,
             };
-            match layout {
-                BlobHeaderLayout::V0 => (header.encode().into(), info),
-                BlobHeaderLayout::V1 => {
-                    let data_offset = Self::V1_DATA_OFFSET;
-                    let mut region = Vec::with_capacity(data_offset as usize);
-                    region.extend_from_slice(&header.encode());
-                    region.extend_from_slice(&(data_offset as u32).to_be_bytes());
-                    let crc = Crc32::checksum(&region);
-                    region.extend_from_slice(&crc.to_be_bytes());
-                    region.resize(data_offset as usize, 0);
-                    (region, info)
-                }
-            }
+            let data_offset = Self::V1_DATA_OFFSET;
+            let mut region = Vec::with_capacity(data_offset as usize);
+            region.extend_from_slice(&header.encode());
+            region.extend_from_slice(&(data_offset as u32).to_be_bytes());
+            let crc = Crc32::checksum(&region);
+            region.extend_from_slice(&crc.to_be_bytes());
+            region.resize(data_offset as usize, 0);
+            (region, info)
         }
 
         /// Parses and validates a blob's header from its first [Self::PARSE_LEN] bytes (or all
@@ -394,7 +386,6 @@ stability_scope!(BETA {
             let info = BlobInfo {
                 size: raw_len - data_offset,
                 blob_version: header.blob_version,
-                layout,
             };
             Ok((info, data_offset))
         }
@@ -558,6 +549,14 @@ pub(crate) mod tests {
         }
     }
 
+    /// Raw bytes of a legacy V0 blob: an 8-byte header followed immediately by `payload`, as a
+    /// pre-V1 writer laid them out.
+    pub(crate) fn v0_blob_bytes(blob_version: u16, payload: &[u8]) -> Vec<u8> {
+        let mut raw = v0_header(blob_version).encode().to_vec();
+        raw.extend_from_slice(payload);
+        raw
+    }
+
     /// Raw bytes of a V1 blob recording the given data offset, followed by `payload`, as a
     /// future writer choosing a larger creation offset would lay them out.
     pub(crate) fn v1_blob_bytes(data_offset: u64, blob_version: u16, payload: &[u8]) -> Vec<u8> {
@@ -577,23 +576,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_header_create_v0() {
-        let (region, info) = Header::create(&(42..=42), BlobHeaderLayout::V0);
-        assert_eq!(info.blob_version, 42);
-        assert_eq!(info.size, 0);
-        assert_eq!(region.len(), Header::PRELUDE_SIZE);
-        let decoded: Header = Header::decode(region.as_slice()).unwrap();
-        assert_eq!(decoded.magic, BlobHeaderLayout::V0.magic());
-        assert_eq!(
-            decoded.runtime_version,
-            BlobHeaderLayout::V0.runtime_version()
-        );
-        assert_eq!(decoded.blob_version, 42);
-    }
-
-    #[test]
     fn test_header_create_v1() {
-        let (region, info) = Header::create(&(0..=7), BlobHeaderLayout::V1);
+        let (region, info) = Header::create(&(0..=7));
         assert_eq!(info.blob_version, 7);
         assert_eq!(info.size, 0);
         assert_eq!(region.len(), Header::V1_DATA_OFFSET as usize);
@@ -611,7 +595,6 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(parsed.blob_version, 7);
-        assert_eq!(parsed.layout, BlobHeaderLayout::V1);
         assert_eq!(data_offset, Header::V1_DATA_OFFSET);
     }
 
@@ -619,7 +602,7 @@ pub(crate) mod tests {
     /// (the padding is asserted zero in [test_header_create_v1]).
     #[test]
     fn test_header_v1_fixture_bytes() {
-        let (region, _) = Header::create(&(3..=3), BlobHeaderLayout::V1);
+        let (region, _) = Header::create(&(3..=3));
         let expected = [
             b'C', b'W', b'I', b'1', // V1 magic
             0x00, 0x01, // runtime version 1
@@ -652,7 +635,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_header_extension_rejects_bad_crc() {
-        let (mut region, _) = Header::create(&(0..=0), BlobHeaderLayout::V1);
+        let (mut region, _) = Header::create(&(0..=0));
         region[Header::PARSE_LEN - 1] ^= 0x01;
         let result = Header::parse(
             &region[..Header::PARSE_LEN],
@@ -666,7 +649,7 @@ pub(crate) mod tests {
     fn test_header_extension_rejects_bad_offset() {
         // A non-power-of-two (or out-of-bounds) data offset is rejected even with a valid CRC.
         for bad_offset in [0u32, 8, 2048, 4097, 1 << 21] {
-            let (mut region, _) = Header::create(&(0..=0), BlobHeaderLayout::V1);
+            let (mut region, _) = Header::create(&(0..=0));
             region[Header::PRELUDE_SIZE..Header::PRELUDE_SIZE + 4]
                 .copy_from_slice(&bad_offset.to_be_bytes());
             let crc = commonware_cryptography::Crc32::checksum(&region[..Header::PRELUDE_SIZE + 4]);
@@ -681,7 +664,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_header_extension_rejects_truncated_region() {
-        let (region, _) = Header::create(&(0..=0), BlobHeaderLayout::V1);
+        let (region, _) = Header::create(&(0..=0));
         let result = Header::parse(
             &region[..Header::PARSE_LEN],
             Header::V1_DATA_OFFSET - 1,
@@ -1866,12 +1849,7 @@ pub(crate) mod tests {
     {
         // Create a blob with version 1
         let (blob, info) = storage
-            .open_versioned(
-                "test_version_mismatch",
-                b"blob",
-                1..=1,
-                BlobHeaderLayout::V0,
-            )
+            .open_versioned("test_version_mismatch", b"blob", 1..=1)
             .await
             .unwrap();
         assert_eq!(info.blob_version, 1);
@@ -1880,24 +1858,14 @@ pub(crate) mod tests {
 
         // Reopen with a range that includes version 1
         let (_, info) = storage
-            .open_versioned(
-                "test_version_mismatch",
-                b"blob",
-                0..=2,
-                BlobHeaderLayout::V0,
-            )
+            .open_versioned("test_version_mismatch", b"blob", 0..=2)
             .await
             .unwrap();
         assert_eq!(info.blob_version, 1);
 
         // Try to open with version range that excludes version 1
         let result = storage
-            .open_versioned(
-                "test_version_mismatch",
-                b"blob",
-                2..=3,
-                BlobHeaderLayout::V0,
-            )
+            .open_versioned("test_version_mismatch", b"blob", 2..=3)
             .await;
         assert!(
             matches!(
@@ -1909,7 +1877,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Test aligned-layout blob creation, reopen, and cross-layout behavior.
+    /// Test aligned-layout blob creation, reopen, and resize through logical offsets.
     async fn test_aligned_layout<S>(storage: &S)
     where
         S: Storage + Send + Sync,
@@ -1917,24 +1885,22 @@ pub(crate) mod tests {
     {
         // Create an aligned blob and write/read through logical offsets.
         let (blob, info) = storage
-            .open_versioned("test_aligned_layout", b"blob", 0..=0, BlobHeaderLayout::V1)
+            .open_versioned("test_aligned_layout", b"blob", 0..=0)
             .await
             .unwrap();
         assert_eq!(info.size, 0);
-        assert!(matches!(info.layout, BlobHeaderLayout::V1));
         blob.write_at(0, b"hello world".to_vec()).await.unwrap();
         blob.sync().await.unwrap();
         let read = blob.read_at(0, 11).await.unwrap().coalesce();
         assert_eq!(read.as_ref(), b"hello world");
         drop(blob);
 
-        // Reopen: the recorded layout wins, even when the caller requests V0.
+        // Reopen honors the recorded layout and logical size.
         let (blob, info) = storage
-            .open_versioned("test_aligned_layout", b"blob", 0..=0, BlobHeaderLayout::V0)
+            .open_versioned("test_aligned_layout", b"blob", 0..=0)
             .await
             .unwrap();
         assert_eq!(info.size, 11);
-        assert!(matches!(info.layout, BlobHeaderLayout::V1));
         let read = blob.read_at(6, 5).await.unwrap().coalesce();
         assert_eq!(read.as_ref(), b"world");
 
@@ -1943,41 +1909,13 @@ pub(crate) mod tests {
         blob.sync().await.unwrap();
         drop(blob);
         let (blob, info) = storage
-            .open_versioned("test_aligned_layout", b"blob", 0..=0, BlobHeaderLayout::V1)
+            .open_versioned("test_aligned_layout", b"blob", 0..=0)
             .await
             .unwrap();
         assert_eq!(info.size, 5);
         let read = blob.read_at(0, 5).await.unwrap().coalesce();
         assert_eq!(read.as_ref(), b"hello");
         drop(blob);
-
-        // A V0 blob reopened with a V1 request stays V0.
-        let (blob, info) = storage
-            .open_versioned(
-                "test_aligned_layout",
-                b"legacy",
-                0..=0,
-                BlobHeaderLayout::V0,
-            )
-            .await
-            .unwrap();
-        assert!(matches!(info.layout, BlobHeaderLayout::V0));
-        blob.write_at(0, b"data".to_vec()).await.unwrap();
-        blob.sync().await.unwrap();
-        drop(blob);
-        let (blob, info) = storage
-            .open_versioned(
-                "test_aligned_layout",
-                b"legacy",
-                0..=0,
-                BlobHeaderLayout::V1,
-            )
-            .await
-            .unwrap();
-        assert!(matches!(info.layout, BlobHeaderLayout::V0));
-        assert_eq!(info.size, 4);
-        let read = blob.read_at(0, 4).await.unwrap().coalesce();
-        assert_eq!(read.as_ref(), b"data");
     }
 
     /// Test that read_at with zero length returns an empty buffer.

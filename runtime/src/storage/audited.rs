@@ -1,6 +1,6 @@
-use crate::{deterministic::Auditor, Error, Handle, IoBufs, IoBufsMut};
 #[commonware_macros::stability(BETA)]
-use crate::{BlobHeaderLayout, BlobInfo};
+use crate::BlobInfo;
+use crate::{deterministic::Auditor, Error, Handle, IoBufs, IoBufsMut};
 use sha2::digest::Update;
 use std::sync::Arc;
 
@@ -29,17 +29,15 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
-        layout: BlobHeaderLayout,
     ) -> Result<(Self::Blob, BlobInfo), Error> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
             hasher.update(&versions.start().to_be_bytes());
             hasher.update(&versions.end().to_be_bytes());
-            hasher.update(&layout.runtime_version().to_be_bytes());
         });
         self.inner
-            .open_versioned(partition, name, versions, layout)
+            .open_versioned(partition, name, versions)
             .await
             .map(|(blob, info)| {
                 (

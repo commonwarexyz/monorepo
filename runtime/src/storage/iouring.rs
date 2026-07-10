@@ -21,13 +21,13 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::Header;
+#[commonware_macros::stability(BETA)]
+use crate::BlobInfo;
 use crate::{
     iouring::{self},
     telemetry::metrics::Register,
     utils, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
 };
-#[commonware_macros::stability(BETA)]
-use crate::{BlobHeaderLayout, BlobInfo};
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::sync::Mutex;
 use std::{
@@ -150,7 +150,6 @@ impl crate::Storage for Storage {
         partition: &str,
         name: &[u8],
         versions: RangeInclusive<u16>,
-        layout: BlobHeaderLayout,
     ) -> Result<(Blob, BlobInfo), Error> {
         super::validate_partition_name(partition)?;
 
@@ -188,7 +187,7 @@ impl crate::Storage for Storage {
             Some(resolved) => resolved,
             None => {
                 // Truncate to zero before writing, per the [Header::create] contract.
-                let (region, info) = Header::create(&versions, layout);
+                let (region, info) = Header::create(&versions);
                 let data_offset = region.len() as u64;
                 file.set_len(0)
                     .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
@@ -457,7 +456,7 @@ mod tests {
     use super::{Header, *};
     use crate::{
         storage::tests::run_storage_tests, telemetry::metrics::Registry, utils::thread, Blob as _,
-        BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
+        BlobHeaderLayout, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
     };
     use std::{
         env,

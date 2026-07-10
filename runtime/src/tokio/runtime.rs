@@ -4,6 +4,8 @@ use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwor
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+#[commonware_macros::stability(BETA)]
+use crate::BlobInfo;
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
@@ -26,8 +28,6 @@ use crate::{
     iouring,
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
-#[commonware_macros::stability(BETA)]
-use crate::{BlobHeaderLayout, BlobInfo};
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
@@ -808,11 +808,8 @@ impl crate::Storage for Context {
         partition: &str,
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
-        layout: BlobHeaderLayout,
     ) -> Result<(Self::Blob, BlobInfo), Error> {
-        self.storage
-            .open_versioned(partition, name, versions, layout)
-            .await
+        self.storage.open_versioned(partition, name, versions).await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
