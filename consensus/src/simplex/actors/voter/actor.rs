@@ -401,10 +401,10 @@ impl<
 
     /// Handle a timeout.
     ///
-    /// Builds and records a nullify vote for the current view (as many times as
-    /// required until we exit the view). Returns the vote for broadcast by
-    /// [Self::notify], along with the best certificate from the previous view
-    /// (on retry) to help others enter the view.
+    /// Builds a nullify vote for the current view (as many times as required
+    /// until we exit the view) and records it on the first attempt. Returns the
+    /// vote for broadcast by [Self::notify], along with the best certificate
+    /// from the previous view (on retry) to help others enter the view.
     #[allow(clippy::type_complexity)]
     async fn timeout(
         &mut self,
