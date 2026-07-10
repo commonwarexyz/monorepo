@@ -97,7 +97,6 @@ impl PartialPage {
             Self::Unverified => panic!("partial page record must be verified before use"),
         }
     }
-
 }
 
 /// Unique writer to a cache-wrapped [Blob].
@@ -1810,8 +1809,7 @@ mod tests {
             append.sync().await.unwrap();
 
             // 450 more bytes stage on top of the synced 50-byte partial page (protected CRC).
-            append
-                .append_owned(IoBuf::from(all[50..].to_vec()));
+            append.append_owned(IoBuf::from(all[50..].to_vec()));
             assert_eq!(append.size(), 500);
             let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
             assert_eq!(read_buf, &all[..]);
@@ -1832,8 +1830,7 @@ mod tests {
 
             // Repeating the owned append after recovery and syncing makes everything durable,
             // exercising the protected-CRC handling for the recovered partial page.
-            append
-                .append_owned(IoBuf::from(all[50..].to_vec()));
+            append.append_owned(IoBuf::from(all[50..].to_vec()));
             append.sync().await.unwrap();
             drop(append);
 
@@ -1867,8 +1864,7 @@ mod tests {
 
             let all: Vec<u8> = (0..430).map(|i| (i % 239) as u8).collect();
             append.append(&all[..30]);
-            append
-                .append_owned(IoBuf::from(all[30..].to_vec()));
+            append.append_owned(IoBuf::from(all[30..].to_vec()));
             assert_eq!(append.size(), 430);
             let read_buf = append.read_at(0, 430).await.unwrap().coalesce();
             assert_eq!(read_buf, &all[..]);
@@ -2826,14 +2822,12 @@ mod tests {
 
             // Exactly 4 pages: no remainder.
             let bulk: Vec<u8> = (0..412).map(|i| (i % 233) as u8).collect();
-            append
-                .append_owned(IoBuf::from(bulk.clone()));
+            append.append_owned(IoBuf::from(bulk.clone()));
             assert_eq!(append.size(), 412);
 
             // A small owned append takes the buffered path.
             let small: Vec<u8> = (0..10).map(|i| (i % 229) as u8).collect();
-            append
-                .append_owned(IoBuf::from(small.clone()));
+            append.append_owned(IoBuf::from(small.clone()));
             assert_eq!(append.size(), 422);
 
             let read_buf = append.read_at(0, 422).await.unwrap().coalesce();
@@ -2872,8 +2866,7 @@ mod tests {
             let mut direct = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            direct
-                .append_owned(IoBuf::from(data.clone()));
+            direct.append_owned(IoBuf::from(data.clone()));
             direct.sync().await.unwrap();
             drop(direct);
 
@@ -2975,8 +2968,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            append
-                .append(&vec![7; PAGE_SIZE.get() as usize]);
+            append.append(&vec![7; PAGE_SIZE.get() as usize]);
 
             // One pooled slot backs the page cache and one backs the mutable tip.
             assert!(
@@ -4018,8 +4010,7 @@ mod tests {
             let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            append
-                .append(&(11..=30).collect::<Vec<u8>>());
+            append.append(&(11..=30).collect::<Vec<u8>>());
             append.sync().await.unwrap();
             drop(append);
 
@@ -4067,8 +4058,7 @@ mod tests {
             let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            append
-                .append(&(31..=50).collect::<Vec<u8>>());
+            append.append(&(31..=50).collect::<Vec<u8>>());
             append.sync().await.unwrap();
             drop(append);
 
@@ -4140,8 +4130,7 @@ mod tests {
             let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            append
-                .append(&(11..=30).collect::<Vec<u8>>());
+            append.append(&(11..=30).collect::<Vec<u8>>());
             append.sync().await.unwrap();
             drop(append);
 
@@ -4150,8 +4139,7 @@ mod tests {
             let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            append
-                .append(&(31..=50).collect::<Vec<u8>>());
+            append.append(&(31..=50).collect::<Vec<u8>>());
             append.sync().await.unwrap();
             drop(append);
 
@@ -4199,8 +4187,7 @@ mod tests {
             let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            append
-                .append(&(51..=70).collect::<Vec<u8>>());
+            append.append(&(51..=70).collect::<Vec<u8>>());
             append.sync().await.unwrap();
             drop(append);
 
@@ -4292,8 +4279,7 @@ mod tests {
             let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            append
-                .append(&(21..=40).collect::<Vec<u8>>());
+            append.append(&(21..=40).collect::<Vec<u8>>());
             append.sync().await.unwrap();
             drop(append);
 
@@ -4357,8 +4343,7 @@ mod tests {
             let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            append
-                .append(&(51..=80).collect::<Vec<u8>>());
+            append.append(&(51..=80).collect::<Vec<u8>>());
             append.sync().await.unwrap();
             drop(append);
 
@@ -4391,8 +4376,7 @@ mod tests {
             let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            append
-                .append(&(81..=120).collect::<Vec<u8>>());
+            append.append(&(81..=120).collect::<Vec<u8>>());
             append.sync().await.unwrap();
             drop(append);
 
@@ -4488,8 +4472,7 @@ mod tests {
             let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            append
-                .append(&(11..=30).collect::<Vec<u8>>());
+            append.append(&(11..=30).collect::<Vec<u8>>());
             append.sync().await.unwrap();
             drop(append);
 
@@ -4608,8 +4591,7 @@ mod tests {
                 .await
                 .unwrap();
             // Add bytes 11 through 103 (93 more bytes)
-            append
-                .append(&(11..=PAGE_SIZE.get() as u8).collect::<Vec<u8>>());
+            append.append(&(11..=PAGE_SIZE.get() as u8).collect::<Vec<u8>>());
             append.sync().await.unwrap();
             drop(append);
 
@@ -4637,8 +4619,7 @@ mod tests {
                 .await
                 .unwrap();
             // Add bytes 104 through 113 (10 more bytes, now on page 1)
-            append
-                .append(&(104..=113).collect::<Vec<u8>>());
+            append.append(&(104..=113).collect::<Vec<u8>>());
             append.sync().await.unwrap();
             drop(append);
 
