@@ -461,7 +461,7 @@ where
                         // Store and forward to voter
                         work.entry(view)
                             .or_insert_with(|| self.new_round(view))
-                            .set_notarization(notarization.clone());
+                            .mark_notarized();
                         voter.recovered(Certificate::Notarization(notarization));
                     }
                     Certificate::Nullification(nullification) => {
@@ -478,7 +478,7 @@ where
                         // Store and forward to voter
                         work.entry(view)
                             .or_insert_with(|| self.new_round(view))
-                            .set_nullification(nullification.clone());
+                            .mark_nullified();
                         voter.recovered(Certificate::Nullification(nullification));
                     }
                     Certificate::Finalization(finalization) => {
@@ -495,7 +495,7 @@ where
                         // Store and forward to voter
                         work.entry(view)
                             .or_insert_with(|| self.new_round(view))
-                            .set_finalization(finalization.clone());
+                            .mark_finalized();
                         voter.recovered(Certificate::Finalization(finalization));
                     }
                 }

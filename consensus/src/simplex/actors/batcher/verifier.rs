@@ -12,10 +12,6 @@ use rand_core::{CryptoRng, SeedableRng};
 use std::sync::Arc;
 use tracing::Span;
 
-fn seeded_rng<R: CryptoRng>(rng: &mut R) -> StdRng {
-    StdRng::from_rng(rng)
-}
-
 /// `Verifier` is a utility for tracking and verifying consensus messages.
 ///
 /// For schemes where [`Verifier::is_batchable()`](commonware_cryptography::certificate::Verifier::is_batchable)
@@ -96,6 +92,11 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// Returns the shared signing scheme.
     pub(super) fn scheme(&self) -> Arc<S> {
         Arc::clone(&self.scheme)
+    }
+
+    /// Returns the number of verified votes required to assemble a certificate.
+    pub(super) const fn quorum(&self) -> usize {
+        self.quorum
     }
 
     /// Sets the leader's proposal and filters out any pending votes for other proposals.
@@ -229,7 +230,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
 
         let scheme = Arc::clone(&self.scheme);
-        let mut rng = seeded_rng(rng);
+        let mut rng = StdRng::from_rng(rng);
         let span = Span::current();
         let (verified, invalid) = strategy
             .spawn(move |strategy| {
@@ -336,7 +337,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         let round = nullifies[0].round;
 
         let scheme = Arc::clone(&self.scheme);
-        let mut rng = seeded_rng(rng);
+        let mut rng = StdRng::from_rng(rng);
         let span = Span::current();
         let (verified, invalid) = strategy
             .spawn(move |strategy| {
@@ -422,7 +423,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
 
         let scheme = Arc::clone(&self.scheme);
-        let mut rng = seeded_rng(rng);
+        let mut rng = StdRng::from_rng(rng);
         let span = Span::current();
         let (verified, invalid) = strategy
             .spawn(move |strategy| {
