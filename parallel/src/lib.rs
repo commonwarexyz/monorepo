@@ -871,6 +871,14 @@ commonware_macros::stability_scope!(BETA {
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
+    /// Errors that can occur when creating a [ThreadPool].
+    #[derive(Debug, thiserror::Error)]
+    pub enum Error {
+        /// The underlying [rayon] thread pool could not be built.
+        #[error("failed to build thread pool: {0}")]
+        Build(#[from] ThreadPoolBuildError),
+    }
+
     /// A clone-able wrapper around a [rayon]-compatible thread pool.
     pub type ThreadPool = Arc<RThreadPool>;
 
@@ -916,27 +924,43 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     #[derive(Debug, Clone)]
     pub struct Rayon {
         thread_pool: ThreadPool,
+        // The parallelism assumed for execution decisions (policy thread count, manual
+        // partitioning, and whether `spawn` runs inline). Defaults to the pool's thread count.
+        parallelism: NonZeroUsize,
         // `Some` enables adaptive serial-vs-parallel decisions; `None` (used by `manual`) runs the
-        // parallel body whenever the pool has more than one thread and allocates no policy state.
+        // parallel body whenever the parallelism exceeds one and allocates no policy state.
         policy: Option<policy::Policy>,
     }
 
     impl Rayon {
         /// Creates a [`Rayon`] strategy with a [`ThreadPool`] that is configured with the given
         /// number of threads.
-        pub fn new(num_threads: NonZeroUsize) -> Result<Self, ThreadPoolBuildError> {
-            ThreadPoolBuilder::new()
+        pub fn new(num_threads: NonZeroUsize) -> Result<Self, Error> {
+            let pool = ThreadPoolBuilder::new()
                 .num_threads(num_threads.get())
-                .build()
-                .map(|pool| Self::with_pool(Arc::new(pool)))
+                .build()?;
+            Ok(Self::with_pool(Arc::new(pool)))
         }
 
         /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`].
         pub fn with_pool(thread_pool: ThreadPool) -> Self {
+            let parallelism = NonZeroUsize::new(thread_pool.current_num_threads())
+                .unwrap_or(NonZeroUsize::MIN);
             Self {
                 thread_pool,
+                parallelism,
                 policy: Some(policy::Policy::default()),
             }
+        }
+
+        /// Overrides the parallelism assumed for execution decisions.
+        ///
+        /// By default a strategy assumes the parallelism of its thread pool. Override it when
+        /// the pool's thread count does not reflect the parallelism the strategy should plan
+        /// for (e.g. a runtime that executes every pool inline on a single thread).
+        pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
+            self.parallelism = parallelism;
+            self
         }
 
         #[track_caller]
@@ -961,7 +985,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             multiplier: usize,
             run: impl FnOnce(policy::Execution) -> Result<R, E>,
         ) -> Result<R, E> {
-            let threads = self.thread_pool.current_num_threads();
+            let threads = self.parallelism.get();
             let Some(policy) = &self.policy else {
                 let execution = if threads <= 1 {
                     policy::Execution::Serial
@@ -978,14 +1002,13 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
     impl Strategy for Rayon {
         fn manual(&self) -> Manual<Self> {
-            let parallelism = NonZeroUsize::new(self.thread_pool.current_num_threads())
-                .unwrap_or_else(|| NonZeroUsize::new(1).unwrap());
             Manual::new(
                 Self {
                     thread_pool: self.thread_pool.clone(),
+                    parallelism: self.parallelism,
                     policy: None,
                 },
-                parallelism,
+                self.parallelism,
             )
         }
 
@@ -994,7 +1017,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
         {
-            if self.thread_pool.current_num_threads() <= 1 {
+            if self.parallelism.get() <= 1 {
                 return Either::Left(future::ready(f(self.clone())));
             }
 
@@ -1341,6 +1364,28 @@ mod test {
             .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
             .now_or_never()
             .expect("spawn should complete on first poll via the yield loop");
+        assert_eq!(result, vec![1, 2]);
+    }
+
+    /// `Rayon::with_parallelism` overrides the pool's thread count for planning
+    /// decisions.
+    #[test]
+    fn with_parallelism_overrides_pool_thread_count() {
+        // The manual partitioning hint reports the override rather than the pool size.
+        let strategy = Rayon::new(NonZeroUsize::new(1).unwrap())
+            .unwrap()
+            .with_parallelism(NonZeroUsize::new(4).unwrap());
+        assert_eq!(strategy.manual().parallelism_hint(), 4);
+
+        // Planning as serial runs the spawned job inline: it completes on the first
+        // poll without being handed to the pool's workers.
+        let strategy = Rayon::new(NonZeroUsize::new(2).unwrap())
+            .unwrap()
+            .with_parallelism(NonZeroUsize::MIN);
+        let result = strategy
+            .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+            .now_or_never()
+            .expect("serial-planned spawn should run inline");
         assert_eq!(result, vec![1, 2]);
     }
 

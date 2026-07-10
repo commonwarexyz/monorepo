@@ -71,7 +71,7 @@ use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Error as ParallelError, Rayon, ThreadPool};
 use commonware_utils::{
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
@@ -87,7 +87,7 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng};
-use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
+use rayon::ThreadPoolBuilder;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
@@ -1171,37 +1171,48 @@ impl crate::Spawner for Context {
 // workers).
 commonware_utils::thread_local_cache!(static THREAD_POOL: ThreadPool);
 
-/// Spawning threads would be nondeterministic, so pools have no running workers: their
-/// builders are dropped and the executor thread registers itself as a pool member at
-/// creation. The pool still reports the requested concurrency, so strategies partition
-/// work as configured (and must produce identical results at any concurrency), but all of
-/// it executes on the executor thread: `install` runs the work-stealing loop on the caller
-/// and awaited `Strategy::spawn` jobs are driven by the spawn future's yield loop.
+/// Returns the single-threaded pool the executor thread registered with, created on
+/// first use.
 ///
-/// Rayon's current-thread registration is permanent and per-OS-thread, so every call after
-/// the first on a thread (including calls from a later runner on the same thread) returns
-/// the pool the thread registered with, sized by the first request.
-impl crate::ThreadPooler for Context {
-    fn create_thread_pool(
-        &self,
-        concurrency: NonZeroUsize,
-    ) -> Result<ThreadPool, ThreadPoolBuildError> {
-        let pool = Cached::take(
-            &THREAD_POOL,
-            || {
-                let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
-                if rayon::current_thread_index().is_none() {
-                    builder = builder.use_current_thread()
-                }
+/// All pool work executes inline on the executor thread, so a larger pool would only
+/// add permanently unstarted workers.
+fn shared_thread_pool() -> Result<ThreadPool, ParallelError> {
+    let pool = Cached::take(
+        &THREAD_POOL,
+        || {
+            let mut builder = ThreadPoolBuilder::new().num_threads(1);
+            if rayon::current_thread_index().is_none() {
+                builder = builder.use_current_thread()
+            }
 
-                // Dropping the builder leaves the worker permanently unstarted: no thread
-                // is spawned, and a worker loop hosted as a task the executor polls would
-                // block or abort the runtime.
-                builder.spawn_handler(|_| Ok(())).build().map(Arc::new)
-            },
-            |_| Ok(()),
-        )?;
-        Ok(Arc::clone(&pool))
+            // Dropping a builder leaves its worker permanently unstarted: no thread
+            // is spawned, and a worker loop hosted as a task the executor polls would
+            // block or abort the runtime.
+            builder
+                .spawn_handler(|_| Ok(()))
+                .build()
+                .map(Arc::new)
+                .map_err(ParallelError::from)
+        },
+        |_| Ok(()),
+    )?;
+    Ok(Arc::clone(&pool))
+}
+
+/// Spawning threads would be nondeterministic, so pools have no running workers: the
+/// executor thread registers itself as the sole pool member at creation and all work
+/// executes on it. `install` runs the work-stealing loop on the caller and awaited
+/// `Strategy::spawn` jobs are driven by the spawn future's yield loop.
+///
+/// Rayon's current-thread registration is permanent and per-OS-thread, so only one pool
+/// can ever execute work on the executor thread. Every request (including from a later
+/// runner on the same thread) returns a strategy on that single-threaded pool with its
+/// parallelism overridden to the requested concurrency, so strategies plan work as
+/// configured (and must produce identical results at any parallelism) while executing
+/// on the shared pool.
+impl crate::ThreadPooler for Context {
+    fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ParallelError> {
+        Ok(Rayon::with_pool(shared_thread_pool()?).with_parallelism(concurrency))
     }
 }
 

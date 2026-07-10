@@ -836,7 +836,6 @@ where
         let grafted_tree = Arc::clone(&current_db.grafted_tree);
         current_db
             .strategy
-            .clone()
             .spawn(move |strategy| {
                 let new_leaves = grafting::graft_chunk_digests::<H, _, N>(&strategy, graft_inputs);
                 let mut grafted_batch = grafted_parent.new_batch();

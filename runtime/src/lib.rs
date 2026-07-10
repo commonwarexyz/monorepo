@@ -47,11 +47,10 @@ stability_scope!(BETA {
     /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
     pub use bytes::{Buf, BufMut};
     use commonware_macros::select;
-    use commonware_parallel::{Rayon, ThreadPool};
+    use commonware_parallel::Rayon;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
     use iobuf::PoolError;
-    use rayon::ThreadPoolBuildError;
     use std::{
         future::Future,
         io::Error as IoError,
@@ -351,36 +350,21 @@ stability_scope!(BETA {
         fn stopped(&self) -> signal::Signal;
     }
 
-    /// Trait for creating [rayon]-compatible thread pools with each worker thread
-    /// placed on dedicated threads via [Spawner].
+    /// Trait for creating [Rayon] strategies backed by [rayon]-compatible thread pools
+    /// hosted on threads placed via [Spawner].
     pub trait ThreadPooler: Spawner {
-        /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
-        ///
-        /// # Arguments
-        /// - `concurrency`: The number of tasks to execute concurrently in the pool.
-        ///
-        /// # Returns
-        /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
-        /// be built.
-        fn create_thread_pool(
-            &self,
-            concurrency: NonZeroUsize,
-        ) -> Result<ThreadPool, ThreadPoolBuildError>;
-
         /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
         ///
         /// # Arguments
-        /// - `concurrency`: The number of tasks to execute concurrently in the pool.
+        /// - `concurrency`: The number of tasks to execute concurrently.
         ///
         /// # Returns
-        /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
-        /// built.
+        /// A `Result` containing the configured [Rayon] strategy or a [commonware_parallel::Error] if the
+        /// backing pool cannot be built.
         fn create_strategy(
             &self,
             concurrency: NonZeroUsize,
-        ) -> Result<Rayon, ThreadPoolBuildError> {
-            self.create_thread_pool(concurrency).map(Rayon::with_pool)
-        }
+        ) -> Result<Rayon, commonware_parallel::Error>;
     }
 
     /// Interface to register and encode metrics.
@@ -860,7 +844,6 @@ mod tests {
         future::{pending, ready},
         join, pin_mut, FutureExt,
     };
-    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use std::{
         collections::HashMap,
         net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -3892,42 +3875,30 @@ mod tests {
     }
 
     #[test]
-    fn test_create_thread_pool_tokio() {
+    fn test_create_strategy_tokio() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            // Create a thread pool with 4 threads
-            let pool = context
-                .child("pool")
-                .create_thread_pool(NZUsize!(4))
-                .unwrap();
+            // Create a strategy backed by a pool with 4 threads
+            let strategy = context.child("pool").create_strategy(NZUsize!(4)).unwrap();
+            assert_eq!(strategy.manual().parallelism_hint(), 4);
 
-            // Create a vector of numbers
-            let v: Vec<_> = (0..10000).collect();
-
-            // Use the thread pool to sum the numbers
-            pool.install(|| {
-                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
-            });
+            // Use the strategy to sum a vector of numbers
+            let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
+            assert_eq!(sum, 10000 * 9999 / 2);
         });
     }
 
     #[test]
-    fn test_create_thread_pool_deterministic() {
+    fn test_create_strategy_deterministic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Create a thread pool with 4 threads
-            let pool = context
-                .child("pool")
-                .create_thread_pool(NZUsize!(4))
-                .unwrap();
+            // Create a strategy backed by a pool with 4 threads
+            let strategy = context.child("pool").create_strategy(NZUsize!(4)).unwrap();
+            assert_eq!(strategy.manual().parallelism_hint(), 4);
 
-            // Create a vector of numbers
-            let v: Vec<_> = (0..10000).collect();
-
-            // Use the thread pool to sum the numbers
-            pool.install(|| {
-                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
-            });
+            // Use the strategy to sum a vector of numbers
+            let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
+            assert_eq!(sum, 10000 * 9999 / 2);
         });
     }
 
@@ -3972,10 +3943,11 @@ mod tests {
         });
     }
 
-    /// Later pools must reuse the pool the executor thread registered with: rayon permits
-    /// one registration per OS thread (and it is permanent), so work submitted to a fresh
-    /// pool could never execute. Covers a second pool within one runner and a pool created
-    /// by a later runner on the same thread.
+    /// Later strategies must execute on the pool the executor thread registered with:
+    /// rayon permits one registration per OS thread (and it is permanent), so work
+    /// submitted to a fresh pool could never execute. Each strategy still plans with its
+    /// own requested parallelism. Covers a second strategy within one runner and a
+    /// strategy created by a later runner on the same thread.
     #[test]
     fn test_deterministic_thread_pool_reused_across_pools_and_runners() {
         let executor = deterministic::Runner::default();
@@ -3985,6 +3957,7 @@ mod tests {
                 .create_strategy(NZUsize!(2))
                 .unwrap()
                 .manual();
+            assert_eq!(first.parallelism_hint(), 2);
             let output = first
                 .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
@@ -3995,6 +3968,7 @@ mod tests {
                 .create_strategy(NZUsize!(3))
                 .unwrap()
                 .manual();
+            assert_eq!(second.parallelism_hint(), 3);
             let output = second
                 .spawn(|strategy| strategy.map_collect_vec(0..3, |i| i + 1))
                 .await;
@@ -4012,6 +3986,25 @@ mod tests {
                 .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
             assert_eq!(output, vec![1, 2]);
+        });
+    }
+
+    /// Strategy requests at different concurrencies must each report their own
+    /// parallelism even though they share the single registered pool.
+    #[test]
+    fn test_deterministic_strategy_reports_requested_parallelism() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let first = context
+                .child("pool_a")
+                .create_strategy(NZUsize!(2))
+                .unwrap();
+            let second = context
+                .child("pool_b")
+                .create_strategy(NZUsize!(3))
+                .unwrap();
+            assert_eq!(first.manual().parallelism_hint(), 2);
+            assert_eq!(second.manual().parallelism_hint(), 3);
         });
     }
 

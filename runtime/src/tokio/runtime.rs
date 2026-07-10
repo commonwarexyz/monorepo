@@ -28,12 +28,12 @@ use crate::{
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Error as ParallelError, Rayon};
 use commonware_utils::{sync::Mutex, sys_rng, NZUsize};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
-use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
+use rayon::ThreadPoolBuilder;
 use std::{
     convert::Infallible,
     env,
@@ -637,11 +637,8 @@ impl crate::Spawner for Context {
 
 #[stability(BETA)]
 impl crate::ThreadPooler for Context {
-    fn create_thread_pool(
-        &self,
-        concurrency: NonZeroUsize,
-    ) -> Result<ThreadPool, ThreadPoolBuildError> {
-        ThreadPoolBuilder::new()
+    fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ParallelError> {
+        let pool = ThreadPoolBuilder::new()
             .num_threads(concurrency.get())
             .spawn_handler(move |thread| {
                 // Tasks spawned in a thread pool are expected to run longer than any single
@@ -651,8 +648,8 @@ impl crate::ThreadPooler for Context {
                     .spawn(move |_| async move { thread.run() });
                 Ok(())
             })
-            .build()
-            .map(Arc::new)
+            .build()?;
+        Ok(Rayon::with_pool(Arc::new(pool)))
     }
 }
 
