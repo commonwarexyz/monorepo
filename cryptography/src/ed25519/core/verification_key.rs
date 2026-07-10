@@ -1,11 +1,7 @@
-use super::{Error, Signature};
+use super::{msm, point, Error, Signature};
 use commonware_formatting::Hex;
 use core::convert::{TryFrom, TryInto};
-use curve25519_dalek::{
-    edwards::{CompressedEdwardsY, EdwardsPoint},
-    scalar::Scalar,
-    traits::IsIdentity,
-};
+use curve25519_dalek::scalar::Scalar;
 use sha2::{digest::Update, Sha512};
 
 /// A refinement type for `[u8; 32]` indicating that the bytes represent an
@@ -91,12 +87,24 @@ impl From<VerificationKeyBytes> for [u8; 32] {
 ///
 /// [ps]: https://zips.z.cash/protocol/protocol.pdf#concreteed25519
 /// [ZIP215]:  https://zips.z.cash/zip-0215
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone)]
 #[allow(non_snake_case)]
 pub struct VerificationKey {
     pub(super) A_bytes: VerificationKeyBytes,
-    pub(super) minus_A: EdwardsPoint,
+    /// The decompressed point in this crate's own representation, consumed by
+    /// signature verification's owned point arithmetic.
+    pub(super) A_own: point::Affine,
 }
+
+impl PartialEq for VerificationKey {
+    fn eq(&self, other: &Self) -> bool {
+        // The decompressed fields are derived deterministically from the
+        // encoding, so equality of the encodings is equality of the keys.
+        self.A_bytes == other.A_bytes
+    }
+}
+
+impl Eq for VerificationKey {}
 
 impl PartialOrd for VerificationKey {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
@@ -148,13 +156,11 @@ impl TryFrom<VerificationKeyBytes> for VerificationKey {
     fn try_from(bytes: VerificationKeyBytes) -> Result<Self, Self::Error> {
         // * `A_bytes` and `R_bytes` MUST be encodings of points `A` and `R` respectively on the
         //   twisted Edwards form of Curve25519, and non-canonical encodings MUST be accepted;
-        let A = CompressedEdwardsY(bytes.0)
-            .decompress()
-            .ok_or(Error::MalformedPublicKey)?;
+        let A_own = point::decompress(&bytes.0).ok_or(Error::MalformedPublicKey)?;
 
         Ok(Self {
             A_bytes: bytes,
-            minus_A: -A,
+            A_own,
         })
     }
 }
@@ -226,18 +232,18 @@ impl VerificationKey {
             .into_option()
             .ok_or(Error::InvalidSignature)?;
         // `R_bytes` MUST be an encoding of a point on the twisted Edwards form of Curve25519.
-        let R = CompressedEdwardsY(signature.R_bytes)
-            .decompress()
-            .ok_or(Error::InvalidSignature)?;
+        let R = point::decompress(&signature.R_bytes).ok_or(Error::InvalidSignature)?;
         // We checked the encoding of A_bytes when constructing `self`.
 
         //       [8][s]B = [8]R + [8][k]A
-        // <=>   [8]R = [8][s]B - [8][k]A
-        // <=>   0 = [8](R - ([s]B - [k]A))
-        // <=>   0 = [8](R - R')  where R' = [s]B - [k]A
-        let R_prime = EdwardsPoint::vartime_double_scalar_mul_basepoint(&k, &self.minus_A, &s);
+        // <=>   0 = [8]([s]B - [k]A - R)
+        let (_, basepoint_table) = msm::basepoint();
+        let check = msm::double_mul(&s, basepoint_table, &k, &msm::naf_table(&self.A_own.neg()))
+            .add(&R.neg().to_extended());
 
-        if (R - R_prime).mul_by_cofactor().is_identity() {
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        if check.mul_by_pow_2(3).compress() == identity {
             Ok(())
         } else {
             Err(Error::InvalidSignature)

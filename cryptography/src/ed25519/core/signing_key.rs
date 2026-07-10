@@ -1,4 +1,4 @@
-use super::{Error, Signature, VerificationKey, VerificationKeyBytes};
+use super::{point, Error, Signature, VerificationKey, VerificationKeyBytes};
 use commonware_formatting::Hex;
 use core::convert::TryFrom;
 use curve25519_dalek::{constants, scalar::Scalar};
@@ -113,9 +113,13 @@ impl From<[u8; 32]> for SigningKey {
             seed,
             s,
             prefix,
-            vk: VerificationKey {
-                minus_A: -A,
-                A_bytes: VerificationKeyBytes(A.compress().to_bytes()),
+            vk: {
+                let A_bytes = VerificationKeyBytes(A.compress().to_bytes());
+                VerificationKey {
+                    A_own: point::decompress(&A_bytes.0)
+                        .expect("a compressed public key decompresses"),
+                    A_bytes,
+                }
             },
         }
     }

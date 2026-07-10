@@ -21,13 +21,13 @@
 //!
 //! This batch verification implementation is adaptive in the sense that it
 //! detects multiple signatures created with the same verification key and
-//! automatically coalesces terms in the final verification equation. Signatures
-//! are sharded for parallel verification, so coalescing applies to signatures
-//! that land in the same shard. Sharding groups signatures by verification
-//! key on a best-effort basis, no matter how the batch was queued. In the
-//! limiting case where all signatures in the batch are made with the same
-//! verification key, coalesced batch verification runs twice as fast as
-//! ordinary batch verification.
+//! automatically coalesces terms in the final verification equation. Large
+//! batches are prepared in chunks for parallel verification, so coalescing
+//! applies to signatures that land in the same chunk. Chunking groups
+//! signatures by verification key on a best-effort basis, no matter how the
+//! batch was queued. In the limiting case where all signatures in the batch
+//! are made with the same verification key, coalesced batch verification
+//! runs twice as fast as ordinary batch verification.
 //!
 //! ![benchmark](https://www.zfnd.org/images/coalesced-batch-graph.png)
 //!
@@ -37,26 +37,33 @@
 //!
 //! [ZIP215]: https://github.com/zcash/zips/blob/master/zip-0215.rst
 
-use super::{Error, Signature, VerificationKey, VerificationKeyBytes};
+use super::{msm, point, Error, Signature, VerificationKey, VerificationKeyBytes};
 use crate::transcript::{Summary, Transcript};
 use ahash::RandomState;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Random;
-use commonware_parallel::Strategy;
+use commonware_parallel::{Manual, Sequential, Strategy};
 use commonware_utils::union_unique;
-use core::iter::once;
-use curve25519_dalek::{
-    constants::ED25519_BASEPOINT_POINT as B,
-    edwards::{CompressedEdwardsY, EdwardsPoint},
-    scalar::Scalar,
-    traits::{IsIdentity, VartimeMultiscalarMul},
-};
+use curve25519_dalek::scalar::Scalar;
 use hashbrown::HashMap;
 use rand_core::{CryptoRng, Rng};
 use sha2::{digest::Update, Sha512};
 
 const NOISE_BATCH_VERIFY: &[u8] = b"batch_verify";
+
+/// One chunk's contribution to the global verification equation.
+struct Prepared {
+    /// Partial coefficient of the basepoint: `-sum(z_i * s_i)`.
+    b_coeff: Scalar,
+    /// Per-signature 128-bit randomizers, in chunk order.
+    zs: Vec<u128>,
+    /// Decompressed R points, in chunk order.
+    rs: Vec<point::Affine>,
+    /// Coalesced verification-key terms: one `(sum(z_i * k_i), A)` per
+    /// distinct key in the chunk.
+    wide: Vec<(Scalar, point::Affine)>,
+}
 
 // Shim to generate a u128 without importing `rand`.
 fn gen_u128<R: Rng + CryptoRng>(mut rng: R) -> u128 {
@@ -119,40 +126,169 @@ impl Verifier {
         // can borrow them.
         let manual = strategy.manual();
         let total = self.signatures.len();
-        let shard_count = manual.parallelism().min(total.max(1));
-        let seeds: Vec<Summary> = (0..shard_count)
+        let chunk_count = (manual.parallelism() * Self::CHUNKS_PER_THREAD).min(total.max(1));
+        let seeds: Vec<Summary> = (0..chunk_count)
             .map(|_| Summary::random(&mut rng))
             .collect();
 
         strategy.try_run(
             total,
-            // Serial verification checks the whole batch as one equation, so
-            // coalescing is global and no partition is needed.
-            || Self::verify_shard(self.signatures.iter(), total, seeds[0]),
-            // Parallel verification partitions the batch so signatures
-            // sharing a verification key coalesce within their shard, then
-            // checks one equation per shard.
+            // Serial verification prepares the whole batch as one chunk (so
+            // coalescing is global and no partition is needed) and runs the
+            // multiscalar multiplication inline.
             || {
+                let prepared = Self::prepare_chunk(self.signatures.iter(), total, seeds[0])?;
+                Self::finish(&Sequential.manual(), vec![prepared], total)
+            },
+            // Parallel verification checks the same global equation in
+            // phases: chunks of signatures are prepared (hashed, coalesced,
+            // and batch decompressed) as independent tasks, then a single
+            // multiscalar multiplication runs with per-window tasks. Both
+            // phases produce work items far smaller than the batch, so faster
+            // cores absorb more of them instead of the slowest core gating a
+            // monolithic shard.
+            || {
+                // Small batches check one owned equation per thread instead of
+                // paying the phased path's fixed costs (serial table builds
+                // or bucket folds in the final multiplication, and per-chunk
+                // overheads). Measured crossover on an M5 Pro: the phased
+                // path wins clearly by 1000 signatures and loses clearly at
+                // 100.
+                if total < Self::PHASED_THRESHOLD {
+                    let order = Self::partition(&self.signatures);
+                    let shard_count = manual.parallelism().min(total.max(1));
+                    let shard_size = total.div_ceil(shard_count).max(1);
+                    let shards: Vec<_> = order
+                        .chunks(shard_size)
+                        .zip(seeds.iter().copied())
+                        .collect();
+                    return manual.try_fold(
+                        shards,
+                        || (),
+                        |_, (shard, seed)| {
+                            let prepared = Self::prepare_chunk(
+                                shard.iter().map(|&idx| &self.signatures[idx]),
+                                shard.len(),
+                                seed,
+                            )?;
+                            Self::finish(&Sequential.manual(), vec![prepared], shard.len())
+                        },
+                        |_, _| (),
+                    );
+                }
                 let order = Self::partition(&self.signatures);
-                let shard_size = total.div_ceil(shard_count).max(1);
-                let shards: Vec<_> = order
-                    .chunks(shard_size)
+                let chunk_size = total.div_ceil(chunk_count).max(1);
+                let chunks: Vec<_> = order
+                    .chunks(chunk_size)
                     .zip(seeds.iter().copied())
                     .collect();
-                manual.try_fold(
-                    shards,
-                    || (),
-                    |_, (shard, seed)| {
-                        Self::verify_shard(
-                            shard.iter().map(|&idx| &self.signatures[idx]),
-                            shard.len(),
-                            seed,
-                        )
-                    },
-                    |_, _| (),
-                )
+                let outputs = manual.try_map_collect_vec(chunks, |(chunk, seed)| {
+                    Self::prepare_chunk(
+                        chunk.iter().map(|&idx| &self.signatures[idx]),
+                        chunk.len(),
+                        seed,
+                    )
+                })?;
+                Self::finish(&manual, outputs, total)
             },
         )
+    }
+
+    /// Chunks of work per pool thread in the parallel path. Finer chunks let
+    /// faster cores absorb more of the batch at the cost of coalescing (which
+    /// applies within a chunk); window-level parallelism in the final
+    /// multiplication keeps multiscalar amortization off this constant.
+    const CHUNKS_PER_THREAD: usize = 4;
+
+    /// Parallel batches at least this large take the phased global path;
+    /// smaller ones fold combined per-thread equations, whose R terms ride
+    /// each shard's multiscalar multiplication more cheaply than the phased
+    /// path's fixed costs amortize.
+    const PHASED_THRESHOLD: usize = 512;
+
+    /// Merge prepared chunks and check the global verification equation.
+    fn finish<S: Strategy>(
+        manual: &Manual<S>,
+        outputs: Vec<Prepared>,
+        total: usize,
+    ) -> Result<(), Error> {
+        let mut b_coeff = Scalar::ZERO;
+        let mut zs = Vec::with_capacity(total);
+        let mut rs = Vec::with_capacity(total);
+        let mut wide = Vec::with_capacity(total + 1);
+        for output in outputs {
+            b_coeff += output.b_coeff;
+            zs.extend(output.zs);
+            rs.extend(output.rs);
+            wide.extend(output.wide);
+        }
+        wide.push((b_coeff, msm::basepoint().0));
+
+        let check = msm::msm_global(manual, &wide, &zs, &rs);
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        if check.mul_by_pow_2(3).compress() == identity {
+            Ok(())
+        } else {
+            Err(Error::InvalidSignature)
+        }
+    }
+
+    /// Prepare one chunk of the global verification equation: check the s
+    /// values, draw randomizers, hash the payloads, coalesce coefficients per
+    /// distinct verification key, and batch-decompress the R points together
+    /// with the chunk's distinct verification keys.
+    #[allow(non_snake_case)]
+    fn prepare_chunk<'a>(
+        items: impl Iterator<Item = &'a (VerificationKey, Vec<u8>, Signature)>,
+        n: usize,
+        seed: Summary,
+    ) -> Result<Prepared, Error> {
+        let mut rng = Transcript::resume(seed).noise(NOISE_BATCH_VERIFY);
+        let items: Vec<_> = items.collect();
+
+        // Check the s values and draw the randomizers.
+        let mut zs: Vec<u128> = Vec::with_capacity(n);
+        let mut b_coeff = Scalar::ZERO;
+        for (_, _, sig) in &items {
+            let s = Scalar::from_canonical_bytes(sig.s_bytes)
+                .into_option()
+                .ok_or(Error::InvalidSignature)?;
+            let z = gen_u128(&mut rng);
+            b_coeff -= Scalar::from(z) * s;
+            zs.push(z);
+        }
+
+        // Hash the payloads and coalesce the A coefficients per distinct
+        // verification key.
+        let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
+            HashMap::with_capacity_and_hasher(n, RandomState::default());
+        let mut wide: Vec<(Scalar, point::Affine)> = Vec::with_capacity(n);
+        for ((vk, payload, sig), z) in items.iter().zip(zs.iter()) {
+            let k = Scalar::from_hash(
+                Sha512::default()
+                    .chain(&sig.R_bytes[..])
+                    .chain(vk.as_bytes())
+                    .chain(payload),
+            );
+            let index = *key_indices.entry(&vk.A_bytes).or_insert_with(|| {
+                wide.push((Scalar::ZERO, vk.A_own));
+                wide.len() - 1
+            });
+            wide[index].0 += Scalar::from(*z) * k;
+        }
+
+        // Batch-decompress the chunk's R points through the interleaved
+        // kernel (the verification keys are decompressed at parse).
+        let rs = point::decompress_batch(items.iter().map(|(_, _, sig)| sig.R_bytes))
+            .ok_or(Error::InvalidSignature)?;
+
+        Ok(Prepared {
+            b_coeff,
+            zs,
+            rs,
+            wide,
+        })
     }
 
     /// Build an iteration order that groups signatures by the first byte of
@@ -181,91 +317,6 @@ impl Verifier {
             offsets[bucket] += 1;
         }
         order
-    }
-
-    /// Verify `n` signatures as a single verification equation, drawing a
-    /// randomizer for each signature from `seed`.
-    #[allow(non_snake_case)]
-    fn verify_shard<'a>(
-        items: impl Iterator<Item = &'a (VerificationKey, Vec<u8>, Signature)>,
-        n: usize,
-        seed: Summary,
-    ) -> Result<(), Error> {
-        let mut rng = Transcript::resume(seed).noise(NOISE_BATCH_VERIFY);
-
-        // The batch verification equation is
-        //
-        // [-sum(z_i * s_i)]B + sum([z_i]R_i) + sum([z_i * k_i]A_i) = 0.
-        //
-        // where for each signature i,
-        // - A_i is the verification key;
-        // - R_i is the signature's R value;
-        // - s_i is the signature's s value;
-        // - k_i is the hash of the message and other data, computed
-        //   here so the per-signature SHA-512 work runs under the
-        //   caller's strategy;
-        // - z_i is a random 128-bit Scalar.
-        //
-        // Normally n signatures would require a multiscalar multiplication of
-        // size 2*n + 1, together with 2*n point decompressions (to obtain A_i
-        // and R_i). However, by grouping the entries by verification key, we
-        // can "coalesce" all z_i * k_i terms for each distinct verification
-        // key into a single coefficient.
-        //
-        // For n signatures from m verification keys, this approach instead
-        // requires a multiscalar multiplication of size n + m + 1 together with
-        // only n point decompressions because verification keys are decompressed
-        // before they are queued. When m = n, so all signatures are from
-        // distinct verification keys, this saves n decompressions relative to
-        // the usual method. However, when m = 1 and all signatures are from a
-        // single verification key, this is nearly twice as fast.
-
-        // Group the signatures by verification key. hashbrown's map with the
-        // ahash hasher stands in for ahash::AHashMap, which wraps
-        // std::collections::HashMap and is unavailable in no_std builds.
-        let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
-            HashMap::with_capacity_and_hasher(n, RandomState::default());
-        let mut A_coeffs: Vec<Scalar> = Vec::with_capacity(n);
-        let mut As = Vec::with_capacity(n);
-        let mut R_coeffs = Vec::with_capacity(n);
-        let mut Rs = Vec::with_capacity(n);
-        let mut B_coeff = Scalar::ZERO;
-
-        for (vk, payload, sig) in items {
-            let k = Scalar::from_hash(
-                Sha512::default()
-                    .chain(&sig.R_bytes[..])
-                    .chain(vk.as_bytes())
-                    .chain(payload),
-            );
-            let R = CompressedEdwardsY(sig.R_bytes)
-                .decompress()
-                .ok_or(Error::InvalidSignature)?;
-            let s = Scalar::from_canonical_bytes(sig.s_bytes)
-                .into_option()
-                .ok_or(Error::InvalidSignature)?;
-            let z = Scalar::from(gen_u128(&mut rng));
-            B_coeff -= z * s;
-            Rs.push(R);
-            R_coeffs.push(z);
-            let index = *key_indices.entry(&vk.A_bytes).or_insert_with(|| {
-                As.push(-vk.minus_A);
-                A_coeffs.push(Scalar::ZERO);
-                As.len() - 1
-            });
-            A_coeffs[index] += z * k;
-        }
-
-        let check = EdwardsPoint::vartime_multiscalar_mul(
-            once(&B_coeff).chain(A_coeffs.iter()).chain(R_coeffs.iter()),
-            once(&B).chain(As.iter()).chain(Rs.iter()),
-        );
-
-        if check.mul_by_cofactor().is_identity() {
-            Ok(())
-        } else {
-            Err(Error::InvalidSignature)
-        }
     }
 }
 
@@ -341,6 +392,125 @@ mod tests {
 
         items[5].2[0] ^= 1;
         assert!(!verify(&items));
+    }
+
+    #[test]
+    fn test_verify_large_batch_split_path() {
+        // 60 signers x 10 messages exceeds PHASED_THRESHOLD, exercising the
+        // batched decompression and the phased global equation in both arms.
+        let mut items = signatures(60, 10);
+        assert!(verify(&items));
+
+        items[137].2[0] ^= 1;
+        assert!(!verify(&items));
+    }
+
+    #[test]
+    fn test_verify_mid_batch_sharded_path() {
+        // 25 signers x 4 messages sits between SPLIT_THRESHOLD and
+        // PHASED_THRESHOLD: the serial arm takes the global equation while
+        // the parallel arm folds combined per-thread equations.
+        let mut items = signatures(25, 4);
+        assert!(verify(&items));
+
+        items[57].2[0] ^= 1;
+        assert!(!verify(&items));
+    }
+
+    #[test]
+    fn test_verify_large_batch_rejects_invalid_r() {
+        // An off-curve R encoding must fail the whole batch on the split path.
+        let mut items = signatures(40, 4);
+        let mut raw: [u8; 64] = items[100].1.into();
+        raw[0] ^= 3;
+        raw[5] ^= 0xaa;
+        let bad_r: [u8; 32] = raw[..32].try_into().unwrap();
+        assert!(point::decompress(&bad_r).is_none());
+        items[100].1 = Signature::from(raw);
+        assert!(!verify(&items));
+    }
+
+    #[test]
+    fn test_verify_rejects_non_canonical_s() {
+        // A malleated signature (R, s + l) satisfies the group equation but
+        // must be rejected on every routing path, exactly like individual
+        // verification (ZIP215 requires s < l).
+        let mut rng = test_rng();
+        let sk = SigningKey::new(&mut rng);
+        let msg = [7u8; 32];
+        let mut raw: [u8; 64] = sk.sign(&msg).into();
+        // Add the group order l to the canonical s half, little-endian.
+        const ORDER: [u8; 32] = [
+            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9,
+            0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x10,
+        ];
+        let mut carry = 0u16;
+        for (byte, order) in raw[32..].iter_mut().zip(ORDER) {
+            let v = *byte as u16 + order as u16 + carry;
+            *byte = v as u8;
+            carry = v >> 8;
+        }
+        assert_eq!(carry, 0);
+        let malleated = Signature::from(raw);
+
+        // Batch sizes routing through the combined path, the mid-band
+        // sharded parallel path, and the phased path.
+        for pad in [0usize, 99, 599] {
+            let honest = signatures(pad.max(1), 1);
+            for parallel in [false, true] {
+                let mut verifier = Verifier::new(pad + 1);
+                for (hvk, hsig, hmsg) in honest.iter().take(pad) {
+                    verifier.queue(*hvk, *hsig, None, hmsg);
+                }
+                verifier.queue(sk.verification_key(), malleated, None, &msg);
+                let result = if parallel {
+                    verifier.verify(test_rng(), &Rayon::new(NZUsize!(4)).unwrap())
+                } else {
+                    verifier.verify(test_rng(), &Sequential)
+                };
+                assert!(result.is_err(), "pad={pad} parallel={parallel}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_verify_small_order_zip215() {
+        // A small-order verification key and R with s = 0 satisfy the
+        // cofactored equation for any message (a ZIP215 acceptance), and must
+        // verify identically on the combined and split paths.
+        let torsion = curve25519_dalek::constants::EIGHT_TORSION[1];
+        let bytes = torsion.compress().0;
+        let vk = VerificationKey::try_from(VerificationKeyBytes(bytes)).unwrap();
+        let mut raw = [0u8; 64];
+        raw[..32].copy_from_slice(&bytes);
+        let forged = Signature::from(raw);
+
+        // Combined path (small batch).
+        let mut verifier = Verifier::default();
+        verifier.queue(vk, forged, None, b"zip215");
+        assert!(verifier.verify(test_rng(), &Sequential).is_ok());
+
+        // Split path (padded past SPLIT_THRESHOLD).
+        let honest = signatures(40, 4);
+        let mut verifier = Verifier::new(honest.len() + 1);
+        for (hvk, hsig, msg) in &honest {
+            verifier.queue(*hvk, *hsig, None, msg);
+        }
+        verifier.queue(vk, forged, None, b"zip215");
+        assert!(verifier.verify(test_rng(), &Sequential).is_ok());
+
+        // A nonzero s with a small-order key must still be rejected.
+        let mut raw = [0u8; 64];
+        raw[..32].copy_from_slice(&bytes);
+        raw[32] = 1;
+        let invalid = Signature::from(raw);
+        let mut verifier = Verifier::new(honest.len() + 1);
+        for (hvk, hsig, msg) in &honest {
+            verifier.queue(*hvk, *hsig, None, msg);
+        }
+        verifier.queue(vk, invalid, None, b"zip215");
+        assert!(verifier.verify(test_rng(), &Sequential).is_err());
     }
 
     #[test]
