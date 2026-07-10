@@ -7,15 +7,9 @@ use std::ops::{Bound, RangeBounds};
 /// The buffer always represents data at the "tip" of the logical blob, starting at `offset` and
 /// extending for `len` bytes.
 ///
-/// # Allocation Semantics
-///
-/// - Backing storage starts detached in [Self::new] and is allocated on first write.
-/// - Logical data length is tracked separately from backing view length.
-/// - To flush, callers write a [Self::slice] view of the buffered bytes to the blob and call
-///   [Self::advance] only after the write succeeds. The buffer keeps the bytes until then, so
-///   a dropped or failed write loses nothing and a retry re-flushes them.
-/// - Subsequent writes are copy-on-write: [Self::writable] recovers mutable ownership when
-///   backing is unique, otherwise allocates from the pool and copies existing bytes.
+/// Callers write a [Self::slice] and call [Self::advance] only after it succeeds. A dropped
+/// write therefore leaves the bytes available for retry. Later writes reuse unique backing or
+/// copy into a pooled allocation when a slice is shared.
 pub(super) struct Buffer {
     /// The data to be written to the blob.
     ///
@@ -25,7 +19,7 @@ pub(super) struct Buffer {
     /// Number of logical buffered bytes in `data`.
     len: usize,
 
-    /// The offset in the blob where the buffered data starts.
+    /// The offset where the buffered data starts.
     ///
     /// This represents the logical position in the blob where `data[0]` would be written. The
     /// buffer is maintained at the "tip" to support efficient size calculation and appends.

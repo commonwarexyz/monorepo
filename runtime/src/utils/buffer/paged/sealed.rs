@@ -15,7 +15,9 @@
 //! any lock; they share the underlying [`Blob`] handle (which provides its own synchronization)
 //! and the page cache.
 
-use super::{read::PageReader, view::View, CacheRef, Replay, CHECKSUM_SIZE};
+use super::{
+    read::PageReader, tail::View as TailView, view::View, CacheRef, Replay, CHECKSUM_SIZE,
+};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
@@ -105,12 +107,16 @@ impl<B: Blob> Sealed<B> {
             cache_ref: &self.inner.cache_ref,
             id: self.inner.id,
             size: self.inner.size,
-            tail_offset: self.partial_offset(),
-            tail: self
-                .inner
-                .partial_page
-                .as_ref()
-                .map_or(&[][..], |p| p.as_ref()),
+            tail: TailView {
+                start: self.partial_offset(),
+                full_pages: &[],
+                tip_offset: self.partial_offset(),
+                tip: self
+                    .inner
+                    .partial_page
+                    .as_ref()
+                    .map_or(&[][..], |p| p.as_ref()),
+            },
         }
     }
 
@@ -179,7 +185,7 @@ impl<B: Blob> Sealed<B> {
 
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
     ///
-    /// Sealed values have no write buffer to flush, so unlike [`super::Writer::replay`] this method
+    /// Sealed values have no in-memory tail to flush, so unlike [`super::Writer::replay`] this method
     /// is not async.
     pub fn replay(&self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
         let logical_page_size = self.inner.cache_ref.page_size();
@@ -279,7 +285,7 @@ mod tests {
                 .unwrap();
             writer.append(b"hello world");
 
-            // A snapshot captures the buffered bytes as an owned, frozen read handle.
+            // A snapshot captures the tail bytes as an owned, frozen read handle.
             let reader = writer.snapshot().await.unwrap();
             let reader_clone = reader.clone();
             assert_eq!(reader.size(), 11);

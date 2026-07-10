@@ -46,23 +46,11 @@ enum Status {
     Pending(Completion),
 }
 
-/// Tracks whether blob mutations still need a sync and whether a resize still needs to be
-/// applied.
+/// Tracks durability and a resize that may need retrying.
 ///
-/// Callers rely on four properties:
-/// 1. Every operation that mutates the blob first waits for an in-flight sync, so a started
-///    sync's coverage is never disturbed by later writes.
-/// 2. [SyncState::start_sync] while a sync is in flight returns that sync's handle (completed
-///    syncs resolve immediately), so re-requesting a sync is a cheap way to observe
-///    outstanding work.
-/// 3. A failure is never lost: every handle cloned from the shared completion reports it, and
-///    an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
-///    which also marks the state dirty since the mutations still need durability.
-/// 4. A dropped [SyncState::resize] is never lost: the intended length is recorded before the
-///    resize is awaited, and every later operation re-issues it (see [SyncState::settle])
-///    before touching the blob. Callers may therefore adopt a resize in memory before awaiting
-///    it. A resize that returns an error keeps the intent recorded, but errors are fatal:
-///    callers must not keep using the writer after one.
+/// Blob mutations wait for an in-flight sync. A resize is recorded before awaiting it, so the
+/// next blob operation retries a dropped resize. A later blob operation reports an unobserved
+/// sync failure.
 struct SyncState {
     /// Durability of already-issued mutations.
     status: Status,
@@ -116,16 +104,12 @@ impl SyncState {
     }
 
     /// Re-issue a resize whose completion was never observed.
-    ///
-    /// [crate::Blob::resize] sets an absolute size, so re-issuing is a no-op if the dropped
-    /// resize actually completed.
     async fn settle(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
         let Some(len) = self.pending_resize else {
             return Ok(());
         };
         self.wait_for_pending().await?;
-        // Mark dirty so the re-issued resize is covered by the next sync even if the state
-        // was clean (a resize dropped while waiting on an in-flight sync leaves it clean).
+        // The retried resize must be covered by the next sync.
         self.mark_dirty();
         blob.resize(len).await?;
         self.pending_resize = None;
@@ -176,10 +160,7 @@ impl SyncState {
 
     /// Resize the blob and require a later sync.
     async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
-        // A grow must not replace an incomplete shrink. Growing zero-fills the new bytes, so
-        // the bytes the shrink would have removed must not survive it: finish the shrink
-        // first. A resize to an equal or smaller size removes at least as much as the
-        // incomplete one would have, so it can simply take its place.
+        // Finish a pending shrink before growing, so removed bytes cannot return as zeros.
         if matches!(self.pending_resize, Some(incomplete) if incomplete < len) {
             self.settle(blob).await?;
         }
@@ -365,23 +346,10 @@ mod tests {
         }
     }
 
-    /// Parks one blob operation mid-flight so a test can cancel it at a precise point.
+    /// Parks one blob call so a test can drop a future at that I/O boundary.
     ///
-    /// Cancellation tests follow the same three steps:
-    ///
-    /// 1. Wrap the blob in [GatedWriteBlob] or [GatedResizeBlob] and hand the wrapper to the
-    ///    writer under test. The gate starts unarmed, so setup traffic passes straight
-    ///    through to the wrapped blob.
-    /// 2. Call [Self::cancel] with the operation to interrupt, e.g.
-    ///    `gate.cancel(writer.resize(3))`. This arms the gate, polls the operation until it
-    ///    parks at the gated blob call, then drops it, exactly as if the caller had dropped
-    ///    the future at that await point.
-    /// 3. Assert on what the canceled operation left behind: the writer's in-memory claims,
-    ///    the wrapped blob's contents, and whether a retry or a later sync recovers.
-    ///
-    /// Two knobs refine where the cancellation lands: [GatePosition] chooses which side of
-    /// the blob call the future parks on (i.e. whether the canceled operation reached the
-    /// disk), and [Self::set_skip] chooses which of several gated calls parks.
+    /// Use [Self::cancel] to arm the gate, poll the operation until it parks, and drop it.
+    /// [GatePosition] selects the side of the blob call; [Self::set_skip] selects the call.
     #[derive(Clone, Default)]
     pub struct Gate {
         started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -392,9 +360,7 @@ mod tests {
     impl Gate {
         /// Arm the gate for the next gated operation.
         ///
-        /// Returns two channel ends for the driver: `started` fires when an operation
-        /// reaches the gate (proof it parked there rather than somewhere earlier), and
-        /// `release` un-parks the operation when used or dropped.
+        /// Returns a signal that fires when the operation parks and a handle that releases it.
         fn arm(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
@@ -403,18 +369,12 @@ mod tests {
             (started_rx, release_tx)
         }
 
-        /// Let the next `n` gated operations pass through an armed gate before it parks one.
-        ///
-        /// Used when the operation under test makes several gated blob calls and the test
-        /// wants to cancel at a specific one, e.g. `set_skip(2)` parks the third call.
+        /// Let the next `n` gated calls pass before parking one.
         pub fn set_skip(&self, n: usize) {
             *self.skip.lock() = n;
         }
 
-        /// The gate point. Gated wrappers call this inside the operation they gate: if the
-        /// gate is armed (and the skip budget is spent) this signals `started` and parks
-        /// until released; otherwise it returns immediately. Arming is one-shot, so only
-        /// one gated operation parks.
+        /// Park once when armed, after any configured skipped calls.
         pub async fn pass_once(&self) {
             {
                 let mut skip = self.skip.lock();
@@ -433,13 +393,7 @@ mod tests {
             }
         }
 
-        /// Cancel `fut` at the gate: arm the gate, poll `fut` once so it runs up to the gated
-        /// blob call and parks there, confirm via `started` that it reached the gate, then
-        /// drop it. Dropping the parked future is the cancellation; the writer sees an
-        /// operation abandoned exactly at that blob call.
-        ///
-        /// Polls only once, so every await before the gate must complete within that poll
-        /// (true on the deterministic runtime).
+        /// Cancel `fut` after it reaches the gate.
         pub async fn cancel<F: futures::Future>(&self, fut: F) {
             let (started, _release) = self.arm();
             futures::pin_mut!(fut);

@@ -14,12 +14,8 @@ use Durability::{Durable, NonDurable};
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
 /// updating data.
 ///
-/// # Allocation Semantics
-///
-/// - [Self::new] starts with a detached tip buffer and allocates backing on first buffered write.
-/// - Subsequent writes reuse that backing, copy-on-write allocation only occurs when buffered data
-///   is shared (for example, after handing out immutable views) or a merge needs more capacity.
-/// - Sparse writes merged into tip extend logical length and zero-fill any gap in-buffer.
+/// Writes reuse their tip allocation. A shared view or a larger merge copies into a pooled
+/// allocation; sparse writes zero-fill gaps.
 ///
 /// # Cancellation
 ///
@@ -27,13 +23,8 @@ use Durability::{Durable, NonDurable};
 ///
 /// # Access
 ///
-/// [Write] is a single-owner buffered handle that owns mutation ordering and durability
-/// bookkeeping for the wrapped [Blob]. Raw [Blob] handles cloned before wrapping observe only
-/// flushed data and may not see the latest buffered writes until [Self::sync], [Self::resize], or
-/// an overlapping [Self::write_at] flushes them. Those raw handles must not be used to write,
-/// resize, or otherwise mutate the blob while a [Write] exists. External mutations bypass the
-/// buffer state and [Self::sync] may use [Blob::write_at_sync], which is not a durability barrier
-/// for those external mutations.
+/// Raw [Blob] handles see only flushed bytes. They must not mutate the blob while [Write] exists:
+/// external mutations bypass its buffer and durability tracking.
 ///
 /// # Example
 ///

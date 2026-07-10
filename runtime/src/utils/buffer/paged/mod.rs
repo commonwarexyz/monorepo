@@ -30,6 +30,7 @@ use commonware_cryptography::{crc32, Crc32};
 mod cache;
 mod read;
 mod sealed;
+mod tail;
 mod view;
 mod writer;
 
@@ -80,48 +81,6 @@ fn validate_read_ranges(
         "buf must hold one slot per range totaling its length"
     );
     Ok(())
-}
-
-/// Partition a batch of variable-length range reads into bytes copied from the in-memory tail
-/// and ranges that need cache/blob reads.
-///
-/// `buf` holds one slot per range, back to back (validated by [validate_read_ranges]). `tail`
-/// holds the logical bytes at `[tail_offset, tail_offset + tail.len())`; for [Writer] this is the
-/// tip buffer, for [Sealed] the partial last page. Ranges entirely within `tail` are copied into
-/// place. Ranges fully or partially below `tail_offset` are returned as `(dest_slice, offset)`
-/// pairs for the caller to read from the page cache or blob. `split_at_mut` yields disjoint
-/// per-range slots, so returned slices never alias.
-fn split_read_ranges<'a>(
-    mut buf: &'a mut [u8],
-    ranges: impl ExactSizeIterator<Item = (u64, usize)>,
-    tail_offset: u64,
-    tail: &[u8],
-) -> Vec<(&'a mut [u8], u64)> {
-    let mut cache_ranges = Vec::with_capacity(ranges.len());
-    for (offset, len) in ranges {
-        let (slot, rest) = buf.split_at_mut(len);
-        buf = rest;
-        if len == 0 {
-            continue;
-        }
-        let end = offset + len as u64;
-        if end <= tail_offset {
-            // Entirely below the tail bytes, so this needs a cache/blob read.
-            cache_ranges.push((slot, offset));
-        } else if offset >= tail_offset {
-            // Entirely within the tail bytes.
-            let src = (offset - tail_offset) as usize;
-            slot.copy_from_slice(&tail[src..src + len]);
-        } else {
-            // Straddles the boundary: copy the suffix from the tail bytes, record the prefix
-            // for a cache/blob read.
-            let prefix_len = (tail_offset - offset) as usize;
-            let (prefix, suffix) = slot.split_at_mut(prefix_len);
-            suffix.copy_from_slice(&tail[..len - prefix_len]);
-            cache_ranges.push((prefix, offset));
-        }
-    }
-    cache_ranges
 }
 
 /// Read the designated page from the underlying blob and return its logical bytes as a vector if it
@@ -364,7 +323,7 @@ impl Checksum {
     ///
     /// Because `len` decides which slot is authoritative, rewriting only this field flips a slot's
     /// authority without disturbing its already-durable CRC: writing a non-zero `len` commits a
-    /// previously staged slot, while writing 0 retires one.
+    /// prepared slot, while writing 0 retires one.
     fn slot_len_bytes(len: u16) -> [u8; CHECKSUM_SLOT_LEN_SIZE] {
         let mut bytes = [0; CHECKSUM_SLOT_LEN_SIZE];
         let mut buf = bytes.as_mut_slice();

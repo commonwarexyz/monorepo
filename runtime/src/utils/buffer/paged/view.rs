@@ -1,30 +1,28 @@
 //! Shared view for the paged buffer's read-capable types.
 //!
 //! [`Writer`](super::Writer) and [`Sealed`](super::Sealed) read the same way: logical bytes in
-//! `[tail_offset, size)` come from an in-memory tail slice (the writer's tip buffer or the sealed
-//! blob's partial last page), and bytes in `[0, tail_offset)` come from the page cache, falling back
-//! to a blob read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in
-//! exactly one place.
+//! `[tail.start, size)` come from an in-memory tail view (the writer's tail, or the sealed
+//! blob's partial last page), and bytes below come from the page cache, falling back to a blob
+//! read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in exactly
+//! one place.
 
-use super::CacheRef;
+use super::{tail::View as TailView, CacheRef};
 use crate::{Blob, Error, IoBufMut, IoBufs};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::num::NonZeroUsize;
 
 /// A borrowed view over a paged blob.
 pub struct View<'a, B: Blob> {
-    /// Underlying blob, used for bytes below `tail_offset` not resident in the cache.
+    /// Underlying blob, used for bytes below the tail not resident in the cache.
     pub(super) blob: &'a B,
-    /// Page cache used for bytes below `tail_offset`.
+    /// Page cache used for bytes below the tail.
     pub(super) cache_ref: &'a CacheRef,
     /// Page-cache id of the originating blob.
     pub(super) id: u64,
     /// Size of the blob, in bytes.
     pub(super) size: u64,
-    /// Offset at which the in-memory `tail` bytes begin.
-    pub(super) tail_offset: u64,
-    /// Logical bytes at `[tail_offset, size)`. May be empty.
-    pub(super) tail: &'a [u8],
+    /// The in-memory tail, serving bytes at `[tail.start, size)`.
+    pub(super) tail: TailView<'a>,
 }
 
 impl<B: Blob> Clone for View<'_, B> {
@@ -36,15 +34,41 @@ impl<B: Blob> Clone for View<'_, B> {
 impl<B: Blob> Copy for View<'_, B> {}
 
 impl<B: Blob> View<'_, B> {
-    /// Copy any in-memory tail overlap into `buf`, returning the remaining prefix length.
-    fn copy_tail_overlap(&self, buf: &mut [u8], offset: u64) -> usize {
-        let tail_start = self.tail_offset.max(offset);
-        let prefix_len = (tail_start - offset) as usize;
-        let tail_offset = (tail_start - self.tail_offset) as usize;
-        let tail_len = buf.len() - prefix_len;
-        let (_, tail_buf) = buf.split_at_mut(prefix_len);
-        tail_buf.copy_from_slice(&self.tail[tail_offset..tail_offset + tail_len]);
-        prefix_len
+    /// Split validated read ranges into tail copies (performed inline) and ranges needing a
+    /// cache or blob read (returned with their slots).
+    ///
+    /// `buf` holds one slot per range, back to back. Ranges entirely within the tail are
+    /// copied from memory; a range straddling the boundary is copied above it and returned
+    /// below it.
+    fn split_read_ranges<'b>(
+        &self,
+        mut buf: &'b mut [u8],
+        ranges: impl ExactSizeIterator<Item = (u64, usize)>,
+    ) -> Vec<(&'b mut [u8], u64)> {
+        let mut cache_ranges = Vec::with_capacity(ranges.len());
+        for (offset, len) in ranges {
+            let (slot, rest) = buf.split_at_mut(len);
+            buf = rest;
+            if len == 0 {
+                continue;
+            }
+            let end = offset + len as u64;
+            if end <= self.tail.start {
+                // Entirely below the tail, so this needs a cache/blob read.
+                cache_ranges.push((slot, offset));
+            } else if offset >= self.tail.start {
+                // Entirely within the tail.
+                self.tail.copy(slot, offset);
+            } else {
+                // Straddles the boundary: copy the suffix from the tail, record the prefix for
+                // a cache/blob read.
+                let prefix_len = (self.tail.start - offset) as usize;
+                let (prefix, suffix) = slot.split_at_mut(prefix_len);
+                self.tail.copy(suffix, self.tail.start);
+                cache_ranges.push((prefix, offset));
+            }
+        }
+        cache_ranges
     }
 
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
@@ -61,13 +85,12 @@ impl<B: Blob> View<'_, B> {
             return true;
         }
 
-        if end_offset <= self.tail_offset {
+        if end_offset <= self.tail.start {
             return self.cache_ref.read_cached(self.id, buf, offset) == buf.len();
         }
 
-        // Copy the suffix overlapping the tail, then serve any prefix below `tail_offset` from the
-        // cache.
-        let dst_start = self.copy_tail_overlap(buf, offset);
+        // Copy the suffix overlapping the tail, then serve any prefix below it from the cache.
+        let dst_start = self.tail.copy_overlap(buf, offset);
 
         if dst_start == 0 {
             return true;
@@ -87,12 +110,12 @@ impl<B: Blob> View<'_, B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Copy any suffix from the in-memory tail, leaving the prefix below `tail_offset` to be
-        // served from the page cache or blob.
-        let remaining = if end_offset <= self.tail_offset {
+        // Copy any suffix from the tail, leaving the prefix below it to be served from the
+        // page cache or blob.
+        let remaining = if end_offset <= self.tail.start {
             buf.len()
         } else {
-            self.copy_tail_overlap(buf, offset)
+            self.tail.copy_overlap(buf, offset)
         };
 
         if remaining == 0 {
@@ -170,7 +193,7 @@ impl<B: Blob> View<'_, B> {
             return Ok(0);
         }
 
-        let mut cache_ranges = super::split_read_ranges(buf, ranges(), self.tail_offset, self.tail);
+        let mut cache_ranges = self.split_read_ranges(buf, ranges());
 
         // Fast path: try the page cache for all ranges in a single lock acquisition.
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
@@ -210,7 +233,7 @@ impl<B: Blob> View<'_, B> {
             return Vec::new();
         }
 
-        let mut cache_ranges = super::split_read_ranges(buf, ranges(), self.tail_offset, self.tail);
+        let mut cache_ranges = self.split_read_ranges(buf, ranges());
         if cache_ranges.is_empty() {
             return Vec::new();
         }
@@ -230,8 +253,7 @@ impl<B: Blob> View<'_, B> {
             return Vec::new();
         }
 
-        let mut cache_ranges =
-            super::split_read_ranges(buf, ranges.iter().copied(), self.tail_offset, self.tail);
+        let mut cache_ranges = self.split_read_ranges(buf, ranges.iter().copied());
         if cache_ranges.is_empty() {
             return Vec::new();
         }

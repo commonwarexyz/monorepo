@@ -106,8 +106,7 @@ impl Drop for PageFetchGuard {
 /// items. Hints are best-effort, never truth: [Clock::get_at] only resolves a slot that still
 /// holds the page's key live, so entries staled by eviction, invalidation, or hint collisions
 /// read as misses and fall back to the [Clock]'s own lookup. Hints need no maintenance on
-/// eviction or invalidation, and their memory is fixed at construction, so no blob offset can
-/// grow them.
+/// eviction or invalidation, and their memory is fixed at construction.
 struct Cache {
     /// Maps each (blob id, page number) to its logical page buffer.
     cache: Clock<(u64, u64), IoBufMut>,
