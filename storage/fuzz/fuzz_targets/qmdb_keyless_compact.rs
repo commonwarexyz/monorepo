@@ -3,6 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::{Rayon, Sequential, Strategy};
+use commonware_runtime::Strategizer;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
 };
@@ -193,12 +194,18 @@ struct SyncedCommit<D> {
     metadata: Option<Vec<u8>>,
 }
 
-fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy: S) {
+fn fuzz_family<F: Family, S: Strategy>(
+    input: &FuzzInput,
+    suffix: &str,
+    strategy: impl FnOnce(&deterministic::Context) -> S,
+) {
+    deterministic::Runner::default();
     let cfg =
         deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
     let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| async move {
+        let strategy = strategy(&context);
         let cfg = test_config(suffix, &context, strategy.clone());
         let mut db: Db<F, S> = Db::init(context.child("storage"), cfg.clone())
             .await
@@ -248,7 +255,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor);
+                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor).await;
 
                     match expect_err {
                         None => {
@@ -277,11 +284,13 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     let parent = db
                         .new_batch()
                         .append(vec![0u8; 1])
-                        .merkleize(&db, None, floor);
+                        .merkleize(&db, None, floor)
+                        .await;
                     let child = parent
                         .new_batch::<Sha256>()
                         .append(vec![1u8; 1])
-                        .merkleize(&db, None, floor);
+                        .merkleize(&db, None, floor)
+                        .await;
                     let expected_root = child.root();
                     db.apply_batch(child)
                         .expect("Chained commit should not fail");
@@ -293,11 +302,13 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     let batch_a = db
                         .new_batch()
                         .append(vec![2u8; 1])
-                        .merkleize(&db, None, floor);
+                        .merkleize(&db, None, floor)
+                        .await;
                     let batch_b = db
                         .new_batch()
                         .append(vec![3u8; 1])
-                        .merkleize(&db, None, floor);
+                        .merkleize(&db, None, floor)
+                        .await;
                     db.apply_batch(batch_a).expect("Commit should not fail");
                     assert!(
                         matches!(db.apply_batch(batch_b), Err(Error::StaleBatch { .. })),
@@ -412,6 +423,9 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
             resolver: source.clone(),
             target: target.clone(),
             db_config: client_cfg.clone(),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
         })
         .await
         .expect("Compact sync should not fail");
@@ -433,8 +447,12 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz_family::<mmr::Family, Sequential>(&input, "fuzz-mmr-sequential", Sequential);
-    fuzz_family::<mmb::Family, Sequential>(&input, "fuzz-mmb-sequential", Sequential);
-    fuzz_family::<mmr::Family, Rayon>(&input, "fuzz-mmr-rayon", Rayon::new(NZUsize!(2)).unwrap());
-    fuzz_family::<mmb::Family, Rayon>(&input, "fuzz-mmb-rayon", Rayon::new(NZUsize!(2)).unwrap());
+    fuzz_family::<mmr::Family, Sequential>(&input, "fuzz-mmr-sequential", |_| Sequential);
+    fuzz_family::<mmb::Family, Sequential>(&input, "fuzz-mmb-sequential", |_| Sequential);
+    fuzz_family::<mmr::Family, Rayon>(&input, "fuzz-mmr-rayon", |context| {
+        context.strategy(NZUsize!(2))
+    });
+    fuzz_family::<mmb::Family, Rayon>(&input, "fuzz-mmb-rayon", |context| {
+        context.strategy(NZUsize!(2))
+    });
 });

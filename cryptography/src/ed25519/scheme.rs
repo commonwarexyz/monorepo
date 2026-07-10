@@ -15,7 +15,7 @@ use core::{
     hash::Hash,
     ops::Deref,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
 use zeroize::Zeroizing;
@@ -59,7 +59,7 @@ impl PrivateKey {
 }
 
 impl Random for PrivateKey {
-    fn random(rng: impl CryptoRngCore) -> Self {
+    fn random(rng: impl CryptoRng) -> Self {
         let key = ed_core::SigningKey::new(rng);
         Self {
             key: Secret::new(key),
@@ -341,7 +341,7 @@ impl BatchVerifier for Batch {
         self.add_inner(Some(namespace), message, public_key, signature)
     }
 
-    fn verify<R: CryptoRngCore>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
+    fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
         self.verifier.verify(rng, strategy).is_ok()
     }
 }
@@ -523,7 +523,7 @@ mod tests {
     #[should_panic]
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
-        let private_key_2 = PrivateKey::random(&mut test_rng());
+        let private_key_2 = PrivateKey::random(test_rng());
         let bad_signature = private_key_2.sign_inner(None, &message);
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
@@ -787,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_private_key_redacted() {
-        let private_key = PrivateKey::random(&mut test_rng());
+        let private_key = PrivateKey::random(test_rng());
         let debug = format!("{:?}", private_key);
         let display = format!("{}", private_key);
         assert!(debug.contains("REDACTED"));
@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn test_from_private_key_to_public_key() {
-        let private_key = PrivateKey::random(&mut test_rng());
+        let private_key = PrivateKey::random(test_rng());
         assert_eq!(private_key.public_key(), PublicKey::from(private_key));
     }
 

@@ -172,12 +172,10 @@ mod tests {
             &[0xFF],
             &[0xFF, 0xFF],
         ];
-        for window in ordered_keys.windows(2) {
-            assert!(
-                window[0] < window[1],
-                "test keys must be in lexicographic order"
-            );
-        }
+        assert!(
+            ordered_keys.is_sorted_by(|a, b| a < b),
+            "test keys must be in lexicographic order"
+        );
 
         let mut prev = 0;
         for key in ordered_keys {

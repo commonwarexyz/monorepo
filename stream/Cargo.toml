@@ -21,7 +21,6 @@ commonware-macros = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-rand.workspace = true
 rand_core.workspace = true
 thiserror.workspace = true
 x25519-dalek.workspace = true
@@ -34,6 +33,7 @@ features = ["std", "getrandom"]
 
 [dev-dependencies]
 criterion.workspace = true
+rand.workspace = true
 
 [lib]
 bench = false

@@ -1,7 +1,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize, Read};
+use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize, FixedSize, Read};
+use commonware_coding::Config as CodingConfig;
 use commonware_consensus::{
     simplex::{
         scheme::{
@@ -15,7 +16,10 @@ use commonware_consensus::{
             VoteTracker,
         },
     },
-    types::View,
+    types::{
+        coding::Commitment, Epoch, EpochDelta, EpochInfo, EpochPhase, Epocher, FixedEpocher,
+        Height, HeightDelta, Round, View, ViewDelta,
+    },
     Epochable, Viewable,
 };
 use commonware_consensus_fuzz::id_mock;
@@ -27,13 +31,16 @@ use commonware_cryptography::{
     ed25519::PublicKey,
     sha256,
 };
+use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
+use commonware_utils::{sequence::U64, TestRng};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 use std::{
     collections::hash_map::DefaultHasher,
     fmt::Debug,
     hash::{Hash, Hasher},
+    num::NonZeroU64,
+    ops::Deref,
 };
 
 type Ed25519Scheme = ed25519::Scheme;
@@ -95,6 +102,7 @@ enum ArbitraryKind {
     Backfiller,
     Response,
     Activity,
+    Commitment,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -165,6 +173,20 @@ enum FuzzInput {
         kind: ArbitraryKind,
         participants: u8,
         data: Vec<u8>,
+    },
+    CoreTypes {
+        epoch: u64,
+        height: u64,
+        view: u64,
+        delta: u64,
+        range_span: u8,
+        epoch_length: u64,
+    },
+    CommitmentSurface {
+        seed: u64,
+        data: Vec<u8>,
+        minimum_shards: u16,
+        extra_shards: u16,
     },
 }
 
@@ -263,7 +285,7 @@ where
     let view = activity.view();
     let epoch = activity.epoch();
     let verified = activity.verified();
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = TestRng::new(0);
     assert!(activity.verify(&mut rng, scheme, &Sequential));
     assert_hash(&activity);
     let encoded = activity.encode();
@@ -486,7 +508,7 @@ where
         vec![notarization],
         vec![nullification],
     );
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = TestRng::new(0);
     assert!(response.verify(&mut rng, &schemes[0], &Sequential));
     assert_backfiller_roundtrip(&schemes[0], Backfiller::Response(response), 2);
 
@@ -902,6 +924,178 @@ fn arbitrary_case(kind: ArbitraryKind, participants: u8, data: Vec<u8>) {
             );
         }
         ArbitraryKind::Activity => assert_arbitrary_activity(&data, participants, selector),
+        ArbitraryKind::Commitment => assert_arbitrary_byte_roundtrip::<Commitment>(&mut u, &()),
+    }
+}
+
+fn assert_epoch_info(info: &EpochInfo, height: Height, epoch_length: NonZeroU64) {
+    assert_eq!(info.height(), height);
+
+    let expected_epoch = height.get() / epoch_length.get();
+    assert_eq!(info.epoch().get(), expected_epoch);
+
+    let expected_first = expected_epoch
+        .checked_mul(epoch_length.get())
+        .expect("containing returned valid bounds");
+    let expected_last = expected_first
+        .checked_add(epoch_length.get() - 1)
+        .expect("containing returned valid bounds");
+
+    assert_eq!(info.first().get(), expected_first);
+    assert_eq!(info.last().get(), expected_last);
+    assert_eq!(info.length().get(), epoch_length.get());
+    assert_eq!(info.relative().get(), height.get() - expected_first);
+}
+
+fn consensus_types(
+    epoch: u64,
+    height: u64,
+    view: u64,
+    delta: u64,
+    range_span: u8,
+    epoch_length: u64,
+) {
+    let epoch = Epoch::new(epoch);
+    let height = Height::new(height);
+    let view = View::new(view);
+    assert_eq!(epoch.is_zero(), epoch.get() == 0);
+    if epoch.get() != u64::MAX {
+        assert_eq!(epoch.next().get(), epoch.get() + 1);
+    }
+    assert_eq!(epoch.previous().map(Epoch::get), epoch.get().checked_sub(1));
+    let epoch_delta = EpochDelta::new(delta);
+    assert_eq!(
+        epoch.checked_sub(epoch_delta).map(Epoch::get),
+        epoch.get().checked_sub(delta)
+    );
+    assert_eq!(u64::from(U64::from(epoch)), epoch.get());
+
+    let view_delta = ViewDelta::new(delta);
+    assert_eq!(
+        view.saturating_add(view_delta).get(),
+        view.get().saturating_add(delta)
+    );
+    assert!(ViewDelta::zero().is_zero());
+
+    let round = Round::new(epoch, view);
+    assert_eq!(<Round as Epochable>::epoch(&round), epoch);
+    assert_eq!(<Round as Viewable>::view(&round), view);
+    assert_eq!(Round::from((epoch, view)), round);
+    let (round_epoch, round_view): (Epoch, View) = round.into();
+    assert_eq!((round_epoch, round_view), (epoch, view));
+
+    let epoch_length = NonZeroU64::new((epoch_length % 16) + 3).unwrap();
+    let epocher = FixedEpocher::new(epoch_length);
+    if let Some(info) = epocher.containing(height) {
+        assert_epoch_info(&info, height, epoch_length);
+    }
+
+    let epoch_offsets = [
+        u64::from(range_span) % epoch_length.get(),
+        epoch_length.get() / 2,
+        epoch_length.get() - 1,
+    ];
+    for offset in epoch_offsets {
+        let epoch_height = Height::new(offset);
+        let info = epocher
+            .containing(epoch_height)
+            .expect("offset within first epoch bounds");
+        assert_epoch_info(&info, epoch_height, epoch_length);
+
+        let relative = info.relative().get();
+        let midpoint = info.length().get() / 2;
+        let expected_phase = if relative < midpoint {
+            EpochPhase::Early
+        } else if relative == midpoint {
+            EpochPhase::Midpoint
+        } else {
+            EpochPhase::Late
+        };
+        assert_eq!(info.phase(), expected_phase);
+    }
+    let expected_bounds = epoch
+        .get()
+        .checked_mul(epoch_length.get())
+        .and_then(|first| {
+            first
+                .checked_add(epoch_length.get() - 1)
+                .map(|last| (first, last))
+        });
+    let first = epocher.first(epoch);
+    let last = epocher.last(epoch);
+    assert_eq!(
+        first.map(Height::get),
+        expected_bounds.map(|(first, _)| first)
+    );
+    assert_eq!(last.map(Height::get), expected_bounds.map(|(_, last)| last));
+
+    let range_span = u64::from(range_span);
+    let view_end = view.saturating_add(ViewDelta::new(range_span));
+    let mut views = View::range(view, view_end);
+    assert_eq!(views.len(), (view_end.get() - view.get()) as usize);
+    let expected_view_back = if view < view_end {
+        view_end.previous()
+    } else {
+        None
+    };
+    assert_eq!(views.next_back(), expected_view_back);
+
+    let height_end = height.saturating_add(HeightDelta::new(range_span));
+    let mut heights = Height::range(height, height_end);
+    let expected_heights = (height_end.get() - height.get()) as usize;
+    assert_eq!(
+        heights.size_hint(),
+        (expected_heights, Some(expected_heights))
+    );
+    assert_eq!(heights.len(), expected_heights);
+    let expected_height_back = if height < height_end {
+        height_end.previous()
+    } else {
+        None
+    };
+    assert_eq!(heights.next_back(), expected_height_back);
+}
+
+fn commitment_surface(seed: u64, data: &[u8], minimum_shards: u16, extra_shards: u16) {
+    let mut rng = TestRng::new(seed);
+    let commitment = Commitment::random(&mut rng);
+    assert_eq!(commitment.as_ref().len(), Commitment::SIZE);
+    let decoded = Commitment::decode(commitment.as_ref()).expect("random commitment should decode");
+    assert_eq!(decoded.as_ref(), commitment.as_ref());
+    assert_eq!(Deref::deref(&commitment).len(), Commitment::SIZE);
+    let _ = format!("{commitment}");
+    let _ = format!("{commitment:?}");
+    assert_eq!(Commitment::default().as_ref().len(), Commitment::SIZE);
+
+    let short_len = data.len() % Commitment::SIZE;
+    assert!(Commitment::decode(&data[..short_len]).is_err());
+
+    let mut buffer = [0u8; Commitment::SIZE];
+    for (i, byte) in buffer.iter_mut().enumerate() {
+        *byte = data.get(i).copied().unwrap_or_default();
+    }
+    let minimum_shards = minimum_shards % 4;
+    let extra_shards = extra_shards % 4;
+    let config_offset = Commitment::SIZE - CodingConfig::SIZE;
+    buffer[config_offset..config_offset + u16::SIZE].copy_from_slice(&minimum_shards.to_be_bytes());
+    buffer[config_offset + u16::SIZE..config_offset + CodingConfig::SIZE]
+        .copy_from_slice(&extra_shards.to_be_bytes());
+    let decoded = Commitment::decode(&buffer[..]);
+    let valid = minimum_shards != 0 && extra_shards != 0;
+    assert_eq!(decoded.is_ok(), valid);
+    if let Ok(decoded) = decoded {
+        assert_eq!(decoded.as_ref(), &buffer[..]);
+    }
+
+    let mut arbitrary = [0u8; Commitment::SIZE + 16];
+    for (i, byte) in arbitrary.iter_mut().enumerate() {
+        *byte = data.get(i).copied().unwrap_or_default();
+    }
+    let mut u = arbitrary::Unstructured::new(&arbitrary);
+    if let Ok(commitment) = Commitment::arbitrary(&mut u) {
+        let decoded =
+            Commitment::decode(commitment.as_ref()).expect("arbitrary commitment should decode");
+        assert_eq!(decoded.as_ref(), commitment.as_ref());
     }
 }
 
@@ -913,7 +1107,7 @@ fn structured_case(
     signer: u8,
     proposal: Proposal<sha256::Digest>,
 ) {
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut rng = TestRng::new(seed);
     let n = structured_participants(participants);
     match scheme {
         StructuredScheme::Ed25519 => {
@@ -1009,6 +1203,20 @@ fn fuzz(input: FuzzInput) {
             participants,
             data,
         } => arbitrary_case(kind, participants, data),
+        FuzzInput::CoreTypes {
+            epoch,
+            height,
+            view,
+            delta,
+            range_span,
+            epoch_length,
+        } => consensus_types(epoch, height, view, delta, range_span, epoch_length),
+        FuzzInput::CommitmentSurface {
+            seed,
+            data,
+            minimum_shards,
+            extra_shards,
+        } => commitment_surface(seed, &data, minimum_shards, extra_shards),
     }
 }
 

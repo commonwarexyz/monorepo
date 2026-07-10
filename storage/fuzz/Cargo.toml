@@ -19,6 +19,7 @@ commonware-utils.workspace = true
 futures.workspace = true
 libfuzzer-sys.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 
 [[bin]]
 name = "qmdb_unordered_operations"

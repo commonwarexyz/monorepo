@@ -23,9 +23,8 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::{Additive, Random};
 use commonware_parallel::Sequential;
-use commonware_utils::{ordered::Set, Faults, N3f1, Participant, TryCollect};
+use commonware_utils::{ordered::Set, Faults, N3f1, Participant, TestRng, TryCollect};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::BTreeSet, num::NonZeroU32, sync::Arc};
 
 const NAMESPACE: &[u8] = b"fuzz-bls12381-threshold-certificate";
@@ -122,7 +121,7 @@ fn run<V: Variant>(seed: u64, n: u32, ops: &[Op])
 where
     V::Signature: for<'a> Arbitrary<'a> + Additive,
 {
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut rng = TestRng::new(seed);
 
     // Build a valid committee: ed25519 identities plus a threshold polynomial.
     let identity_keys: Vec<_> = (0..n)

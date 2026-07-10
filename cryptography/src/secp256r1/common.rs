@@ -9,8 +9,11 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use p256::ecdsa::{SigningKey, VerifyingKey};
-use rand_core::CryptoRngCore;
+use p256::{
+    ecdsa::{SigningKey, VerifyingKey},
+    elliptic_curve::Generate,
+};
+use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 pub const CURVE_NAME: &str = "secp256r1";
@@ -48,8 +51,8 @@ impl PrivateKeyInner {
 }
 
 impl Random for PrivateKeyInner {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
-        Self::new(SigningKey::random(&mut rng))
+    fn random(mut rng: impl CryptoRng) -> Self {
+        Self::new(SigningKey::generate_from_rng(&mut rng))
     }
 }
 
@@ -110,7 +113,7 @@ pub struct PublicKeyInner {
 
 impl PublicKeyInner {
     pub fn new(key: VerifyingKey) -> Self {
-        let encoded = key.to_encoded_point(true);
+        let encoded = key.to_sec1_point(true);
         let raw: [u8; PUBLIC_KEY_LENGTH] = encoded.as_bytes().try_into().unwrap();
         Self { raw, key }
     }
@@ -123,7 +126,7 @@ impl PublicKeyInner {
     /// in memory, extracting the uncompressed form directly is faster.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub fn to_uncompressed(&self) -> [u8; 65] {
-        let encoded = self.key.to_encoded_point(false);
+        let encoded = self.key.to_sec1_point(false);
         encoded.as_bytes().try_into().unwrap()
     }
 }
@@ -208,7 +211,7 @@ macro_rules! impl_private_key_wrapper {
         impl crate::PrivateKey for $name {}
 
         impl commonware_math::algebra::Random for $name {
-            fn random(rng: impl rand_core::CryptoRngCore) -> Self {
+            fn random(rng: impl rand_core::CryptoRng) -> Self {
                 Self(PrivateKeyInner::random(rng))
             }
         }
@@ -585,9 +588,9 @@ pub(crate) mod tests {
     pub fn parse_signature(r: &str, s: &str) -> p256::ecdsa::Signature {
         let vec_r = commonware_formatting::from_hex(r).unwrap();
         let vec_s = commonware_formatting::from_hex(s).unwrap();
-        let f1 = p256::FieldBytes::from_slice(&vec_r);
-        let f2 = p256::FieldBytes::from_slice(&vec_s);
-        p256::ecdsa::Signature::from_scalars(*f1, *f2).unwrap()
+        let f1 = p256::FieldBytes::try_from(vec_r.as_slice()).unwrap();
+        let f2 = p256::FieldBytes::try_from(vec_s.as_slice()).unwrap();
+        p256::ecdsa::Signature::from_scalars(f1, f2).unwrap()
     }
 
     pub fn vector_sig_verification_1_raw() -> (PublicKeyInner, p256::ecdsa::Signature, Vec<u8>, bool)

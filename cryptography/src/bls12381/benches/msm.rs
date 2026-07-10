@@ -1,8 +1,8 @@
 use commonware_cryptography::bls12381::primitives::group::{Scalar, G1, G2};
 use commonware_math::algebra::{CryptoGroup, Random, Space};
 use commonware_parallel::{Rayon, Sequential};
+use commonware_utils::test_rng;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
 use std::{hint::black_box, num::NonZeroUsize};
 
 fn bench_msm(c: &mut Criterion) {
@@ -15,7 +15,7 @@ fn bench_msm(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        let mut rng = StdRng::seed_from_u64(0);
+                        let mut rng = test_rng();
                         let points: Vec<G1> = (0..n)
                             .map(|_| G1::generator() * &Scalar::random(&mut rng))
                             .collect();
@@ -35,7 +35,7 @@ fn bench_msm(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        let mut rng = StdRng::seed_from_u64(0);
+                        let mut rng = test_rng();
                         let points: Vec<G1> = (0..n)
                             .map(|_| G1::generator() * &Scalar::random(&mut rng))
                             .collect();
@@ -55,7 +55,7 @@ fn bench_msm(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        let mut rng = StdRng::seed_from_u64(0);
+                        let mut rng = test_rng();
                         let points: Vec<G2> = (0..n)
                             .map(|_| G2::generator() * &Scalar::random(&mut rng))
                             .collect();
@@ -75,7 +75,7 @@ fn bench_msm(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        let mut rng = StdRng::seed_from_u64(0);
+                        let mut rng = test_rng();
                         let points: Vec<G2> = (0..n)
                             .map(|_| G2::generator() * &Scalar::random(&mut rng))
                             .collect();

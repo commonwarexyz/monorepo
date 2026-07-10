@@ -16,7 +16,7 @@ use commonware_runtime::{
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{channel::ring, concurrency::Limiter, net::SubnetMask, IpAddrExt, NZUsize};
 use futures::{Sink, StreamExt};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::HashSet,
     fmt,
@@ -69,7 +69,7 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signer> {
     context: ContextCell<E>,
 
     address: SocketAddr,
@@ -87,7 +87,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>, updates: Updates) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(

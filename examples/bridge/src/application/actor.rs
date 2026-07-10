@@ -20,12 +20,12 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{Metrics, Sink, Spawner, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use rand::Rng;
-use rand_core::CryptoRngCore;
+use rand::RngExt as _;
+use rand_core::CryptoRng;
 use tracing::{debug, info};
 
 /// Application actor.
-pub struct Application<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> {
+pub struct Application<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: (Sender<Si>, Receiver<St>),
     this_network: <MinSig as Variant>::Public,
@@ -34,9 +34,7 @@ pub struct Application<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink
     mailbox: ActorReceiver<Message<H::Digest>>,
 }
 
-impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
-    Application<R, H, Si, St>
-{
+impl<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
     pub fn new(context: R, config: Config<H, Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -62,10 +60,10 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
             match message {
                 Message::Propose { round, response } => {
                     // Either propose a random message (prefix=0) or include a consensus certificate (prefix=1)
-                    let block = match self.context.gen_bool(0.5) {
+                    let block = match self.context.random_bool(0.5) {
                         true => {
                             // Generate a random message
-                            BlockFormat::<H::Digest>::Random(self.context.gen())
+                            BlockFormat::<H::Digest>::Random(self.context.random())
                         }
                         false => {
                             // Fetch a certificate from the indexer for the other network

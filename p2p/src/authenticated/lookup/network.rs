@@ -15,17 +15,14 @@ use commonware_runtime::{
 };
 use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::union;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed in a stream.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<
-    E: Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Metrics,
-    C: Signer,
-> {
+pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,
 
@@ -37,10 +34,8 @@ pub struct Network<
     listener: listener::Updates,
 }
 
-impl<
-        E: Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
-        C: Signer,
-    > Network<E, C>
+impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, C: Signer>
+    Network<E, C>
 {
     /// Create a new instance of an `authenticated` network.
     ///

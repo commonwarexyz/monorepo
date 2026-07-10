@@ -5,7 +5,7 @@ use commonware_utils::{
     sync::{Mutex, Once},
     FuzzRng,
 };
-use rand::Rng;
+use rand::RngExt as _;
 use std::{
     collections::{BTreeSet, VecDeque},
     num::NonZeroUsize,
@@ -106,7 +106,7 @@ impl<'a> Arbitrary<'a> for CoalesceFuzzInput {
 }
 
 fn gen_kind(rng: &mut FuzzRng) -> Kind {
-    if rng.gen_bool(0.5) {
+    if rng.random_bool(0.5) {
         Kind::Retain
     } else {
         Kind::Reject
@@ -115,63 +115,63 @@ fn gen_kind(rng: &mut FuzzRng) -> Kind {
 
 fn gen_enqueue_input(rng: &mut FuzzRng) -> EnqueueInput {
     EnqueueInput {
-        sender: rng.gen_range(0..MAX_SENDERS),
+        sender: rng.random_range(0..MAX_SENDERS),
         kind: gen_kind(rng),
     }
 }
 
 fn gen_operation(rng: &mut FuzzRng) -> Operation {
-    match rng.gen_range(0..=MAX_OPERATION_INDEX) {
+    match rng.random_range(0..=MAX_OPERATION_INDEX) {
         0 => Operation::Enqueue(gen_enqueue_input(rng)),
         1 => {
-            let len = rng.gen_range(1..=MAX_BATCH_MESSAGES);
+            let len = rng.random_range(1..=MAX_BATCH_MESSAGES);
             let messages = (0..len).map(|_| gen_enqueue_input(rng)).collect();
             Operation::Batch(messages)
         }
         2 => Operation::TryRecv {
-            limit: rng.gen_range(0..=MAX_DRAIN),
+            limit: rng.random_range(0..=MAX_DRAIN),
         },
         3 => Operation::Recv {
-            limit: rng.gen_range(0..=MAX_DRAIN),
+            limit: rng.random_range(0..=MAX_DRAIN),
         },
         4 => {
-            let len = rng.gen_range(0..=MAX_BATCH_MESSAGES);
+            let len = rng.random_range(0..=MAX_BATCH_MESSAGES);
             let extra = (0..len).map(|_| gen_enqueue_input(rng)).collect();
             Operation::ParkedRecv {
-                sender: rng.gen_range(0..MAX_SENDERS),
+                sender: rng.random_range(0..MAX_SENDERS),
                 extra,
             }
         }
         5 => Operation::CloneSender {
-            index: rng.gen_range(0..=MAX_SENDER_INDEX),
+            index: rng.random_range(0..=MAX_SENDER_INDEX),
         },
         6 => Operation::DropSender {
-            index: rng.gen_range(0..=MAX_SENDER_INDEX),
+            index: rng.random_range(0..=MAX_SENDER_INDEX),
         },
         7 => Operation::DropReceiver {
-            index: rng.gen_range(0..=MAX_SENDER_INDEX),
+            index: rng.random_range(0..=MAX_SENDER_INDEX),
         },
         8 => Operation::DropReceiverWithOverflow {
-            sender: rng.gen_range(0..MAX_SENDERS),
+            sender: rng.random_range(0..MAX_SENDERS),
         },
         _ => unreachable!(),
     }
 }
 
 fn gen_operations(rng: &mut FuzzRng) -> Vec<Operation> {
-    let len = rng.gen_range(1..=MAX_OPERATIONS);
+    let len = rng.random_range(1..=MAX_OPERATIONS);
     (0..len).map(|_| gen_operation(rng)).collect()
 }
 
 fn gen_coalesce_input(rng: &mut FuzzRng) -> CoalesceInput {
     CoalesceInput {
-        sender: rng.gen_range(0..MAX_SENDERS),
-        coalesce: rng.gen_bool(0.5),
+        sender: rng.random_range(0..MAX_SENDERS),
+        coalesce: rng.random_bool(0.5),
     }
 }
 
 fn gen_coalesce_inputs(rng: &mut FuzzRng) -> Vec<CoalesceInput> {
-    let len = rng.gen_range(1..=MAX_OPERATIONS);
+    let len = rng.random_range(1..=MAX_OPERATIONS);
     (0..len).map(|_| gen_coalesce_input(rng)).collect()
 }
 

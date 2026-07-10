@@ -12,7 +12,7 @@ use core::{
     num::NonZeroU32,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 
@@ -219,14 +219,14 @@ impl<K: Read> Read for Poly<K> {
 impl<K: Random> Poly<K> {
     // Returns a new polynomial of the given degree where each coefficient is
     // sampled at random from the provided RNG.
-    pub fn new(mut rng: impl CryptoRngCore, degree: u32) -> Self {
+    pub fn new(mut rng: impl CryptoRng, degree: u32) -> Self {
         Self::from_iter_unchecked((0..=degree).map(|_| K::random(&mut rng)))
     }
 
     /// Returns a new scalar polynomial with a particular value for the constant coefficient.
     ///
     /// This does the same thing as [`Poly::new`] otherwise.
-    pub fn new_with_constant(mut rng: impl CryptoRngCore, degree: u32, constant: K) -> Self {
+    pub fn new_with_constant(mut rng: impl CryptoRng, degree: u32, constant: K) -> Self {
         Self::from_iter_unchecked(
             iter::once(constant).chain((0..=degree).skip(1).map(|_| K::random(&mut rng))),
         )

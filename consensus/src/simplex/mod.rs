@@ -311,8 +311,10 @@
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
 //! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
 //! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
-//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
-//! on restart (especially in the case of unclean shutdown).
+//! Before sending a message, any pending `Journal` appends are synced to prevent inadvertent Byzantine
+//! behavior on restart (especially in the case of unclean shutdown). All appends made in the same event
+//! loop iteration are coalesced into a single sync that runs after messages are constructed and before
+//! any are broadcast (even if there is nothing to broadcast).
 //!
 //! ## Automaton Failure Semantics
 //!
@@ -331,9 +333,9 @@
 //! Returning `false` from `verify` means the proposal is permanently invalid and causes a local
 //! nullify. Returning `false` from `certify` means the notarized payload is permanently
 //! uncertifiable for that round and also causes a local nullify. Closing `certify` does not provide
-//! a fast-skip signal and can halt progress because certification requests are not retried. The safe
-//! way to stop working on certification is to keep the request pending until Simplex drops it after
-//! finalizing the block or a descendant.
+//! a fast-skip signal and can halt progress because certification requests are not retried during
+//! the same run. The safe way to stop working on certification is to keep the request pending until
+//! Simplex drops it after finalizing the block or a descendant.
 
 pub mod elector;
 pub mod scheme;
@@ -451,15 +453,18 @@ mod tests {
         utils::mocks::inert_channel,
         Manager as _, Recipients, Sender as _, TrackedPeers,
     };
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks, Clock,
-        IoBuf, Metrics as _, Quota, Runner, Spawner, Supervisor as _,
+        IoBuf, Metrics as _, Quota, Runner, Spawner, Strategizer as _, Supervisor as _,
     };
-    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{
+        ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, TestRng, NZU16,
+    };
     use engine::Engine;
     use futures::future::join_all;
-    use rand::{rngs::StdRng, Rng as _, SeedableRng};
+    use rand::{rngs::StdRng, RngExt as _, SeedableRng};
+    use rand_core::CryptoRng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -490,24 +495,32 @@ mod tests {
     //
     // Supported forms:
     //   test_for_all_fixtures!(callee);                  // callee::<_, _, Elector>(fixture)
+    //   test_for_all_fixtures!(callee, arg);             // callee::<_, _, Elector, _>(fixture, arg)
+    //   test_for_all_fixtures!(callee, arg, level = "INFO"); // arg with a trace-level override
     //   test_for_all_fixtures!(callee, seeds = N);       // loops callee::<_, _, Elector>(seed, fixture)
     //   test_for_all_fixtures!(callee, level = "INFO");  // overrides the trace level
     macro_rules! test_for_all_fixtures {
         ($callee:ident) => {
-            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee));
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee [] []));
         };
         ($callee:ident, level = $level:literal) => {
-            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee));
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee [] []));
         };
         ($callee:ident, seeds = $n:expr) => {
             for_each_fixture!(test_for_all_fixtures!(@seeded $n, $callee));
         };
-        (@emit [$traced:meta] $callee:ident, $suffix:ident, $elector:ty, $fixture:expr) => {
+        ($callee:ident, $arg:expr, level = $level:literal) => {
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee [, _] [, $arg]));
+        };
+        ($callee:ident, $arg:expr) => {
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee [, _] [, $arg]));
+        };
+        (@emit [$traced:meta] $callee:ident [$($generics:tt)*] [$($args:tt)*], $suffix:ident, $elector:ty, $fixture:expr) => {
             paste::paste! {
                 #[test_group("slow")]
                 #[$traced]
                 fn [<test_ $callee _ $suffix>]() {
-                    $callee::<_, _, $elector>($fixture);
+                    $callee::<_, _, $elector $($generics)*>($fixture $($args)*);
                 }
             }
         };
@@ -787,11 +800,14 @@ mod tests {
             .count() as u32
     }
 
-    fn all_online<S, F, L>(mut fixture: F)
-    where
+    fn all_online<S, F, L, T>(
+        mut fixture: F,
+        strategy: impl FnOnce(&mut deterministic::Context) -> T + Send + 'static,
+    ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
+        T: Strategy,
     {
         // Create context
         let n = 5;
@@ -808,6 +824,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let strategy = strategy(&mut context);
             let mut oracle =
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
@@ -863,7 +880,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
-                    strategy: Sequential,
+                    strategy: strategy.clone(),
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
@@ -989,7 +1006,7 @@ mod tests {
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             for finalizer in finalizers.iter() {
                                 if nullifies.contains(finalizer) {
                                     panic!("should not nullify and finalize at same view");
@@ -1019,7 +1036,15 @@ mod tests {
         });
     }
 
-    test_for_all_fixtures!(all_online);
+    test_for_all_fixtures!(all_online, |_| Sequential);
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_all_online_rayon_bls12381_threshold_vrf_min_pk() {
+        all_online::<_, _, Random, _>(bls12381_threshold_vrf::fixture::<MinPk, _>, |context| {
+            context.strategy(NZUsize!(2))
+        });
+    }
 
     fn non_genesis_floor_joiner_catches_tip<S, F, L>(mut fixture: F)
     where
@@ -1563,7 +1588,7 @@ mod tests {
     fn unclean_shutdown<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1585,12 +1610,12 @@ mod tests {
             schemes,
             ..
         } = fixture(&mut rng, &namespace, n);
+        let reporter_seed: [u8; 32] = rng.random();
 
         // Create block relay, shared across restarts.
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, S::PublicKey>::new());
 
         loop {
-            let rng = rng.clone();
             let participants = participants.clone();
             let schemes = schemes.clone();
             let shutdowns = shutdowns.clone();
@@ -1633,7 +1658,8 @@ mod tests {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                     };
-                    let reporter = mocks::reporter::Reporter::new(rng.clone(), reporter_config);
+                    let reporter_rng = StdRng::from_seed(reporter_seed);
+                    let reporter = mocks::reporter::Reporter::new(reporter_rng, reporter_config);
                     reporters.insert(validator.clone(), reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
@@ -1687,7 +1713,7 @@ mod tests {
 
                 // Store all finalizer handles
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < required_containers {
@@ -1698,7 +1724,7 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    context.gen_range(Duration::from_millis(100)..Duration::from_millis(2_000));
+                    context.random_range(Duration::from_millis(100)..Duration::from_millis(2_000));
                 let result = select! {
                     _ = context.sleep(wait) => {
                         // Collect reporters to check faults
@@ -1714,7 +1740,7 @@ mod tests {
                         // Check reporters for faults activity
                         let supervised = supervised.lock();
                         for reporters in supervised.iter() {
-                            for (_, reporter) in reporters.iter() {
+                            for reporter in reporters.values() {
                                 reporter.assert_no_faults();
                             }
                         }
@@ -2139,7 +2165,7 @@ mod tests {
                 {
                     let notarizes = reporter.notarizes.lock();
                     for (view, payloads) in notarizes.iter() {
-                        for (_, participants) in payloads.iter() {
+                        for participants in payloads.values() {
                             if participants.contains(offline) {
                                 panic!("view: {view}");
                             }
@@ -2157,7 +2183,7 @@ mod tests {
                 {
                     let finalizes = reporter.finalizes.lock();
                     for (view, payloads) in finalizes.iter() {
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             if finalizers.contains(offline) {
                                 panic!("view: {view}");
                             }
@@ -3093,7 +3119,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
+                    for faults in faulter.values() {
                         for fault in faults.iter() {
                             match fault {
                                 Activity::ConflictingNotarize(_) => {
@@ -3882,7 +3908,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Abort a validator
-            let idx = context.gen_range(1..engines.len()); // skip byzantine validator
+            let idx = context.random_range(1..engines.len()); // skip byzantine validator
             let validator = &participants[idx];
             let handle = engines.remove(idx);
             handle.abort();
@@ -4283,7 +4309,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
+                    for faults in faulter.values() {
                         for fault in faults.iter() {
                             match fault {
                                 Activity::NullifyFinalize(_) => {
@@ -4908,7 +4934,7 @@ mod tests {
 
                 // Check finalizes
                 let finalizes = reporter.finalizes.lock();
-                for (_, payloads) in finalizes.iter() {
+                for payloads in finalizes.values() {
                     let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
                     // For attributable schemes, we should see peer activities
@@ -5554,7 +5580,7 @@ mod tests {
 
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5566,7 +5592,7 @@ mod tests {
                 target = target.saturating_add(interval);
 
                 // Select a random engine to shutdown
-                let idx = context.gen_range(0..engine_handlers.len());
+                let idx = context.random_range(0..engine_handlers.len());
                 let validator = &participants[idx];
                 let handle = engine_handlers.remove(&idx).unwrap();
                 handle.abort();
@@ -5576,7 +5602,7 @@ mod tests {
 
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5644,7 +5670,7 @@ mod tests {
 
                 // Wait for all engines to hit required containers
                 let mut finalizers = Vec::new();
-                for (_, reporter) in reporters.iter_mut() {
+                for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").spawn(move |_| async move {
                         while latest < target {
@@ -5658,7 +5684,7 @@ mod tests {
 
             // Check reporters for correct activity
             let latest_complete = target.saturating_sub(activity_timeout);
-            for (_, reporter) in reporters.iter() {
+            for reporter in reporters.values() {
                 // Ensure no faults
                 reporter.assert_no_faults();
 
@@ -5718,7 +5744,7 @@ mod tests {
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
-                        for (_, finalizers) in payloads.iter() {
+                        for finalizers in payloads.values() {
                             for finalizer in finalizers.iter() {
                                 if nullifies.contains(finalizer) {
                                     panic!("should not nullify and finalize at same view");
@@ -5813,7 +5839,7 @@ mod tests {
     }
 
     fn twins_campaign<S, F, L>(
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRng,
         campaign: TwinsCampaign,
         link: Link,
         mut fixture: F,
@@ -5854,8 +5880,7 @@ mod tests {
             let trailing_finalizations = campaign.trailing_finalizations;
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
-            let cfg = deterministic::Config::new()
-                .with_rng(Box::new(StdRng::from_rng(&mut *rng).unwrap()));
+            let cfg = deterministic::Config::new().with_rng(Box::new(StdRng::from_rng(&mut *rng)));
             let executor = deterministic::Runner::new(cfg);
             executor.start(|mut context| async move {
                 let Fixture {
@@ -6210,7 +6235,7 @@ mod tests {
                 // Ensure faults are attributable to twins.
                 for reporter in reporters.iter().skip(honest_start) {
                     let faults = reporter.faults.lock();
-                    for (faulter, _) in faults.iter() {
+                    for faulter in faults.keys() {
                         assert!(
                             twin_identities.contains(faulter),
                             "fault from non-twin participant"

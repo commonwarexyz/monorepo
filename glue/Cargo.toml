@@ -28,7 +28,7 @@ commonware-storage.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
 prometheus-client.workspace = true
-rand.workspace = true
+rand = { workspace = true, optional = true, features = ["alloc"] }
 rand_core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -44,10 +44,11 @@ commonware-p2p.workspace = true
 commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-storage.workspace = true
+rand = { workspace = true, features = ["alloc"] }
 tracing-subscriber.workspace = true
 
 [features]
-test-utils = []
+test-utils = [ "dep:rand" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-consensus/arbitrary",

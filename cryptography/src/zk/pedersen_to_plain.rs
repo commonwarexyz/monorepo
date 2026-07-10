@@ -101,7 +101,7 @@ use commonware_math::{
     algebra::{CryptoGroup, Field, Random, Space},
     synthetic::Synthetic,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// Generators used by the proof system.
 ///
@@ -288,7 +288,7 @@ where
 /// This is a low-level constructor and assumes that `claim` and `witness`
 /// correspond. It does not check that relationship for you.
 pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     transcript: &mut Transcript,
     setup: &Setup<G>,
     claim: &Claim<G>,
@@ -343,7 +343,7 @@ where
 ///
 /// Returns `true` if the proof is valid for the current transcript state.
 pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode + PartialEq>(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     transcript: &mut Transcript,
     setup: &Setup<Synthetic<F, G>>,
     claim: &Claim<G>,
@@ -491,7 +491,7 @@ pub mod fuzz {
             self.honest
         }
 
-        fn verify(self, rng: &mut impl CryptoRngCore) -> bool {
+        fn verify(self, rng: &mut impl CryptoRng) -> bool {
             let ns = if self.bad_namespace {
                 BAD_NAMESPACE
             } else {

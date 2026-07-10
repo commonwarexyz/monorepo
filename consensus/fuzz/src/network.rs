@@ -18,8 +18,8 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{simulated::SplitTarget, Message, Receiver};
 use commonware_utils::sync::Mutex;
-use rand::Rng;
-use rand_core::CryptoRngCore;
+use rand::RngExt as _;
+use rand_core::CryptoRng;
 use std::{collections::HashSet, sync::Arc};
 
 /// Shared cell holding the currently-active honest-message drop rate (0..=90).
@@ -34,13 +34,13 @@ pub fn drop_rate_cell() -> DropRateCell {
 
 /// A filtering split-router that routes messages by origin public key, with a
 /// shared cell controlling the per-view honest-message drop rate.
-pub struct Router<P: PublicKey, E: CryptoRngCore + Send + 'static> {
+pub struct Router<P: PublicKey, E: CryptoRng + Send + 'static> {
     byzantine: Arc<HashSet<P>>,
     drop_rate: DropRateCell,
     context: Arc<Mutex<E>>,
 }
 
-impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Router<P, E> {
+impl<P: PublicKey, E: CryptoRng + Send + 'static> Router<P, E> {
     pub fn new(
         context: E,
         byzantine: impl IntoIterator<Item = P>,
@@ -69,12 +69,12 @@ impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Router<P, E> {
 
     fn should_drop_honest_message(&self, rate: u8) -> bool {
         let mut context = self.context.lock();
-        let sample = context.gen_range(0..100u8);
+        let sample = context.random_range(0..100u8);
         sample < rate
     }
 }
 
-impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Clone for Router<P, E> {
+impl<P: PublicKey, E: CryptoRng + Send + 'static> Clone for Router<P, E> {
     fn clone(&self) -> Self {
         Self {
             byzantine: self.byzantine.clone(),

@@ -275,7 +275,7 @@ mod tests {
         IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{channel::mpsc, hostname, ordered::Set, NZUsize, TryCollect, NZU32};
-    use rand_core::{CryptoRngCore, RngCore};
+    use rand_core::{CryptoRng, Rng};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -312,7 +312,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
+        context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
         max_message_size: u32,
         base_port: u16,
         n: usize,

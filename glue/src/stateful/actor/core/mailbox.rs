@@ -13,7 +13,7 @@ use commonware_cryptography::Digestible;
 use commonware_runtime::{telemetry::traces::TracedExt as _, Clock, Metrics, Spawner};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
 use futures::Stream;
-use rand::Rng;
+use rand_core::Rng;
 use std::{collections::VecDeque, pin::Pin};
 use tracing::{info_span, Span};
 

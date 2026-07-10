@@ -217,7 +217,7 @@ where
     let metrics = db::Metrics::new(context);
     let mut current_db = db::Db {
         any,
-        grafted_tree,
+        grafted_tree: Arc::new(grafted_tree),
         metadata,
         strategy,
         root,

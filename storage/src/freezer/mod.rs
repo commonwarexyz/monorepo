@@ -289,7 +289,7 @@ mod tests {
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics as _, Runner, Storage, Supervisor as _};
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
-    use rand::{Rng, RngCore};
+    use rand::{Rng, RngExt as _};
     use std::num::NonZeroU16;
 
     fn test_key(key: &str) -> FixedBytes<64> {
@@ -1234,7 +1234,7 @@ mod tests {
                 pairs.push((key, value));
 
                 // Randomly sync to test resizing
-                if context.gen_bool(0.1) {
+                if context.random_bool(0.1) {
                     freezer.sync().await.expect("Failed to sync");
                 }
             }

@@ -128,7 +128,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// This request is single-shot for the given `(context, payload)`. Once the returned
         /// channel resolves or closes, consensus treats verification as concluded and will not
-        /// retry the same request.
+        /// retry the same request. After a restart, however, consensus may request verification
+        /// for the same `(context, payload)` again if the result was not durably recorded before
+        /// shutdown.
         ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently invalid for this context.
@@ -161,7 +163,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
         /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
-        /// certification as concluded and will not retry the same request.
+        /// certification as concluded and will not retry the same request. After a restart,
+        /// however, consensus may request certification for the same `(round, payload)` again
+        /// if the result was not durably recorded before shutdown.
         ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently uncertifiable for that
@@ -251,7 +255,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use crate::marshal::ancestry::Ancestry;
     use commonware_cryptography::certificate::Scheme;
     use commonware_runtime::{Clock, Metrics, Spawner};
-    use rand::Rng;
+    use rand_core::Rng;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.

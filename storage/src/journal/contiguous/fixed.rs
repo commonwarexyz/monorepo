@@ -1176,7 +1176,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
-        crate::journal::assert_positions_increasing(positions);
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
         for &pos in positions {
             self.validate_readable(pos)?;
         }
@@ -1246,7 +1249,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     /// position: `Some(item)` for sync hits and `None` for positions that require I/O, fail to
     /// decode, or fall outside `bounds()`.
     pub(super) fn probe_items(&self, positions: &[u64]) -> Vec<Option<A>> {
-        crate::journal::assert_positions_increasing(positions);
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
         let mut out: Vec<Option<A>> = (0..positions.len()).map(|_| None).collect();
 
         // Sorted positions put pruned ones in a prefix and out-of-range ones in a suffix, so

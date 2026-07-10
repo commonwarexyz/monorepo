@@ -39,7 +39,7 @@ use commonware_runtime::{
     Storage as RuntimeStorage,
 };
 use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::num::{NonZeroU32, NonZeroUsize};
 use tracing::{debug, info, warn};
 
@@ -114,7 +114,7 @@ pub struct Config<C: Signer, P, B> {
 
 pub struct Actor<E, P, B, H, C, V>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
@@ -140,7 +140,7 @@ where
 
 impl<E, P, B, H, C, V> Actor<E, P, B, H, C, V>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,

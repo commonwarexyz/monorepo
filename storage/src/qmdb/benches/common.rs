@@ -3,7 +3,7 @@
 
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, Strategizer};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{self, full::Config as MerkleConfig, Family},
@@ -27,8 +27,8 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
-use rand::{distributions::Distribution, rngs::StdRng, RngCore, SeedableRng};
+use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+use rand::{distr::Distribution, Rng};
 use rand_distr::Zipf;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
@@ -99,7 +99,7 @@ const PARTITION_IMM: &str = "bench-immutable";
 
 fn merkle_cfg(
     suffix: &str,
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     page_cache: CacheRef,
     items_per_blob: NonZeroU64,
 ) -> MerkleConfig<Rayon> {
@@ -108,7 +108,7 @@ fn merkle_cfg(
         metadata_partition: format!("metadata-{suffix}"),
         items_per_blob,
         write_buffer: WRITE_BUFFER_SIZE,
-        strategy: ctx.create_strategy(THREADS).unwrap(),
+        strategy: ctx.strategy(THREADS),
         page_cache,
     }
 }
@@ -138,12 +138,12 @@ fn var_log_cfg<C>(
     }
 }
 
-pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap, Rayon> {
+pub fn any_fix_cfg(ctx: &(impl BufferPooler + Strategizer)) -> AnyFixedConfig<EightCap, Rayon> {
     any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE)
 }
 
 pub fn any_fix_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
 ) -> AnyFixedConfig<EightCap, Rayon> {
@@ -157,7 +157,7 @@ pub fn any_fix_cfg_with(
 }
 
 pub fn imm_fix_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> ImmutableFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -169,14 +169,12 @@ pub fn imm_fix_cfg_with(
     }
 }
 
-pub fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
-) -> CurrentFixedConfig<EightCap, Rayon> {
+pub fn cur_fix_cfg(ctx: &(impl BufferPooler + Strategizer)) -> CurrentFixedConfig<EightCap, Rayon> {
     cur_fix_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_fix_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> CurrentFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -190,13 +188,13 @@ pub fn cur_fix_cfg_with(
 }
 
 pub fn any_var_digest_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
     any_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn any_var_digest_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -209,13 +207,13 @@ pub fn any_var_digest_cfg_with(
 }
 
 pub fn cur_var_digest_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
     cur_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_var_digest_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -232,13 +230,13 @@ pub fn cur_var_digest_cfg_with(
 type VarVecCfg = ((), (commonware_codec::RangeCfg<usize>, ()));
 
 pub fn any_var_vec_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
     any_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn any_var_vec_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -256,13 +254,13 @@ pub fn any_var_vec_cfg_with(
 }
 
 pub fn cur_var_vec_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
     cur_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_var_vec_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -281,13 +279,13 @@ pub fn cur_var_vec_cfg_with(
 }
 
 pub fn keyless_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
     keyless_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn keyless_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -590,12 +588,12 @@ pub async fn gen_random_kv<F, M>(
     prune_frequency: Option<u32>,
     key_zipf_exponent: Option<f64>,
     keyspace: Option<u64>,
-    make_value: impl Fn(&mut StdRng) -> M::Value,
+    make_value: impl Fn(&mut TestRng) -> M::Value,
 ) where
     F: Family,
     M: DbAny<F, Key = Digest>,
 {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
 
     // Count commits across both phases so `prune_frequency` can prune to the inactivity floor every
     // N commits, bounding on-disk growth instead of accumulating the whole (re-appended) log until
@@ -639,7 +637,8 @@ pub async fn gen_random_kv<F, M>(
         // Sample over the full keyspace (which may exceed the seeded set, so some samples hit unseeded
         // keys and insert them). `Zipf::new` samples a rank in `[1, space]`; map it to a 0-based index.
         let space = keyspace.unwrap_or(num_elements);
-        let zipf = key_zipf_exponent.map(|s| Zipf::new(space, s).expect("valid zipf parameters"));
+        let zipf =
+            key_zipf_exponent.map(|s| Zipf::new(space as f64, s).expect("valid zipf parameters"));
         let mut batch = db.new_batch();
         for _ in 0u64..num_operations {
             let idx = match &zipf {
@@ -647,13 +646,13 @@ pub async fn gen_random_kv<F, M>(
                 None => rng.next_u64() % space,
             };
             let rand_key = Sha256::hash(&idx.to_be_bytes());
-            if rng.next_u32() % DELETE_FREQUENCY == 0 {
+            if rng.next_u32().is_multiple_of(DELETE_FREQUENCY) {
                 batch = batch.write(rand_key, None);
                 continue;
             }
             batch = batch.write(rand_key, Some(make_value(&mut rng)));
             if let Some(freq) = commit_frequency {
-                if rng.next_u32() % freq == 0 {
+                if rng.next_u32().is_multiple_of(freq) {
                     let merkleized = batch.merkleize(db, None).await.unwrap();
                     db.apply_batch(merkleized).await.unwrap();
                     db.commit().await.unwrap();
@@ -673,7 +672,7 @@ pub async fn gen_random_kv<F, M>(
 }
 
 /// Generate a fixed-size digest value.
-pub fn make_fixed_value(rng: &mut StdRng) -> Digest {
+pub fn make_fixed_value(rng: &mut TestRng) -> Digest {
     Sha256::hash(&rng.next_u32().to_be_bytes())
 }
 
@@ -682,7 +681,7 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
     db: &mut C,
     num_keys: u64,
 ) {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
     let mut batch = db.new_batch();
     for i in 0u64..num_keys {
         let k = Sha256::hash(&i.to_be_bytes());
@@ -698,7 +697,7 @@ pub fn write_random_updates<B, Db>(
     mut batch: B,
     num_updates: u64,
     num_keys: u64,
-    rng: &mut StdRng,
+    rng: &mut TestRng,
 ) -> B
 where
     B: UnmerkleizedBatch<Db, K = Digest, V = Digest>,
@@ -713,7 +712,7 @@ where
 }
 
 /// Generate a variable-size `Vec<u8>` value (1-256 bytes).
-pub fn make_var_value(rng: &mut StdRng) -> Vec<u8> {
+pub fn make_var_value(rng: &mut TestRng) -> Vec<u8> {
     let len = (rng.next_u32() as usize) % VARIABLE_VALUE_MAX_LEN + 1;
     vec![rng.next_u32() as u8; len]
 }

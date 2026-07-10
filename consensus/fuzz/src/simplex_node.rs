@@ -26,7 +26,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Clock, Runner, Supervisor};
 use commonware_utils::{channel::mpsc::Receiver, NZUsize};
 use futures::FutureExt;
-use rand::Rng;
+use rand::RngExt as _;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     num::NonZeroUsize,
@@ -370,7 +370,7 @@ where
     }
 
     fn choose_progress_branch(&mut self) -> ProgressBranch {
-        match self.context.gen_range(0..100u8) {
+        match self.context.random_range(0..100u8) {
             0..=9 => ProgressBranch::NullificationCertificate,
             10..=19 => ProgressBranch::NullifyVotes,
             20..=39 => ProgressBranch::NotarizationCertificateAndFinalizationCertificate,
@@ -382,7 +382,7 @@ where
     }
 
     fn choose_requested_certificate_mode(&mut self) -> RequestedCertificateMode {
-        match self.context.gen_range(0..=3u8) {
+        match self.context.random_range(0..=3u8) {
             0 => RequestedCertificateMode::Notarization,
             1 => RequestedCertificateMode::Finalization,
             2 => RequestedCertificateMode::Nullification,
@@ -391,7 +391,7 @@ where
     }
 
     fn choose_valid_certificate_kind(&mut self) -> ValidCertificateKind {
-        match self.context.gen_range(0..3usize) {
+        match self.context.random_range(0..3usize) {
             0 => ValidCertificateKind::Notarization,
             1 => ValidCertificateKind::Finalization,
             _ => ValidCertificateKind::Nullification,
@@ -399,7 +399,7 @@ where
     }
 
     fn choose_epoch_flavor(&mut self) -> EpochFlavor {
-        match self.context.gen_range(0..100u8) {
+        match self.context.random_range(0..100u8) {
             0..=79 => EpochFlavor::Current,
             80..=99 => EpochFlavor::WrongEpoch,
             _ => unreachable!(),
@@ -407,7 +407,7 @@ where
     }
 
     fn choose_resolver_response_branch(&mut self) -> ResolverResponseBranch {
-        match self.context.gen_range(0..100u8) {
+        match self.context.random_range(0..100u8) {
             0..=63 => ResolverResponseBranch::Certificate,
             64..=79 => ResolverResponseBranch::MutatedCertificate,
             80..=99 => ResolverResponseBranch::DefaultResponse,
@@ -416,7 +416,7 @@ where
     }
 
     fn choose_vote_preference(&mut self) -> VotePreference {
-        match self.context.gen_range(0..2u8) {
+        match self.context.random_range(0..2u8) {
             0 => VotePreference::PreferHonest,
             1 => VotePreference::ByzantineOnly,
             _ => unreachable!(),
@@ -424,7 +424,7 @@ where
     }
 
     fn choose_notarize_vote_policy(&mut self) -> NotarizeVotePolicy {
-        match self.context.gen_range(0..100u8) {
+        match self.context.random_range(0..100u8) {
             0..=93 => NotarizeVotePolicy::Valid,
             94..=96 => NotarizeVotePolicy::Malformed,
             97..=99 => NotarizeVotePolicy::WrongEpoch,
@@ -433,7 +433,7 @@ where
     }
 
     fn choose_broadcast_and_notarize_branch(&mut self) -> BroadcastAndNotarizeBranch {
-        match self.context.gen_range(0..100u8) {
+        match self.context.random_range(0..100u8) {
             0..=2 => BroadcastAndNotarizeBranch::TryValidPath,
             3..=99 => BroadcastAndNotarizeBranch::FuzzedPath,
             _ => unreachable!(),
@@ -441,7 +441,7 @@ where
     }
 
     fn choose_notarization_certificate_branch(&mut self) -> NotarizationCertificateBranch {
-        match self.context.gen_range(0..100u8) {
+        match self.context.random_range(0..100u8) {
             0..=89 => NotarizationCertificateBranch::Normal,
             90..=93 => NotarizationCertificateBranch::Malformed,
             94..=96 => NotarizationCertificateBranch::WrongEpochNullification,
@@ -451,7 +451,7 @@ where
     }
 
     fn choose_nullification_certificate_branch(&mut self) -> NullificationCertificateBranch {
-        match self.context.gen_range(0..100u8) {
+        match self.context.random_range(0..100u8) {
             0..=86 => NullificationCertificateBranch::Normal,
             87..=89 => NullificationCertificateBranch::TriggerLocalFloor,
             90..=93 => NullificationCertificateBranch::Malformed,
@@ -462,7 +462,7 @@ where
     }
 
     fn choose_finalization_certificate_branch(&mut self) -> FinalizationCertificateBranch {
-        match self.context.gen_range(0..100u8) {
+        match self.context.random_range(0..100u8) {
             0..=95 => FinalizationCertificateBranch::Normal,
             96..=99 => FinalizationCertificateBranch::InvalidFinalization,
             _ => unreachable!(),
@@ -474,7 +474,7 @@ where
             !self.certificate_senders.is_empty(),
             "expected certificate senders"
         );
-        self.context.gen_range(0..self.certificate_senders.len())
+        self.context.random_range(0..self.certificate_senders.len())
     }
 
     // Picks a proposal for the next fuzz event. It may reuse a recent proposal
@@ -1063,7 +1063,7 @@ where
         let Some(sender) = self.byzantine_participants.get(signer_idx).cloned() else {
             return false;
         };
-        let rand = self.context.gen::<u64>();
+        let rand = self.context.random::<u64>();
         let contents = (proposal.round, parent_payload, rand).encode();
         self.relay
             .broadcast(&sender, Recipients::All, (proposal.payload, contents));

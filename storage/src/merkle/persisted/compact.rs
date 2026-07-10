@@ -62,16 +62,21 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 }
 
 /// A Merkle structure that retains only the state required to continue appending.
+///
+/// The [`Mem`] is held as an [`Arc`] behind the lock so `snapshot` can hand a zero-copy,
+/// immutable view to jobs running off the calling task. Mutations go through
+/// [`Arc::make_mut`]: they are in-place while no snapshot is alive and copy-on-write
+/// otherwise, so a snapshot never observes later mutations.
 pub struct Merkle<F: Family, D: Digest, S: Strategy> {
-    inner: RwLock<Mem<F, D>>,
+    inner: RwLock<Arc<Mem<F, D>>>,
     strategy: S,
 }
 
 impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     /// Create an empty `Merkle`.
-    pub const fn new(strategy: S) -> Self {
+    pub fn new(strategy: S) -> Self {
         Self {
-            inner: RwLock::new(Mem::new()),
+            inner: RwLock::new(Arc::new(Mem::new())),
             strategy,
         }
     }
@@ -84,7 +89,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     ) -> Result<Self, Error<F>> {
         let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
         Ok(Self {
-            inner: RwLock::new(mem),
+            inner: RwLock::new(Arc::new(mem)),
             strategy,
         })
     }
@@ -119,13 +124,13 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         pinned_nodes: Vec<D>,
     ) -> Result<(), Error<F>> {
         let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
-        *self.inner.write() = mem;
+        *self.inner.write() = Arc::new(mem);
         Ok(())
     }
 
     /// Discard all retained nodes except the pinned frontier.
     pub(crate) fn prune_to_frontier(&self) {
-        self.inner.write().prune_all();
+        Arc::make_mut(&mut *self.inner.write()).prune_all();
     }
 
     /// Return the root digest of the current state.
@@ -156,6 +161,15 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         f(&inner)
     }
 
+    /// Return a zero-copy, immutable snapshot of the in-memory [`Mem`].
+    ///
+    /// The snapshot never observes later mutations: mutators copy-on-write while a snapshot is
+    /// alive. Use this to move committed node fallback into a job running off the calling task;
+    /// prefer [`Merkle::with_mem`] when a borrow suffices.
+    pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
+        Arc::clone(&self.inner.read())
+    }
+
     /// Create a new speculative batch with this structure as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, D, S> {
         let inner = self.inner.read();
@@ -170,7 +184,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
 
     /// Apply a merkleized batch to the in-memory structure.
     pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D, S>) -> Result<(), Error<F>> {
-        self.inner.get_mut().apply_batch(batch)
+        Arc::make_mut(self.inner.get_mut()).apply_batch(batch)
     }
 }
 

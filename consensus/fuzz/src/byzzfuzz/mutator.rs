@@ -12,7 +12,7 @@ use commonware_consensus::{
     Viewable,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use rand::Rng;
+use rand::{Rng, RngExt as _};
 use std::sync::Arc;
 
 /// ByzzFuzz-local mutator used only by the ByzzFuzz injector. Scheduling
@@ -78,7 +78,7 @@ fn nearby_value(rng: &mut impl Rng, value: u64) -> u64 {
         available[len] = candidate;
         len += 1;
     }
-    available[rng.gen_range(0..len)]
+    available[rng.random_range(0..len)]
 }
 
 fn context_value(
@@ -88,7 +88,7 @@ fn context_value(
     last_notarized_view: u64,
     last_nullified_view: u64,
 ) -> u64 {
-    match rng.gen_range(0..4) {
+    match rng.random_range(0..4) {
         0 => last_vote_view,
         1 => last_finalized_view,
         2 => last_notarized_view,
@@ -150,7 +150,7 @@ fn nearby_parent_for_context(
     }
 
     let max_parent = proposal_view - 1;
-    let base = match rng.gen_range(0..4) {
+    let base = match rng.random_range(0..4) {
         0 => max_parent,
         1 => last_finalized_view.min(max_parent),
         2 => last_notarized_view.min(max_parent),
@@ -162,8 +162,8 @@ fn nearby_parent_for_context(
 fn tweak_payload(rng: &mut impl Rng, payload: Sha256Digest) -> Sha256Digest {
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(payload.as_ref());
-    let idx = rng.gen_range(0..bytes.len());
-    let bit = rng.gen_range(0..8);
+    let idx = rng.random_range(0..bytes.len());
+    let bit = rng.random_range(0..8);
     bytes[idx] ^= 1 << bit;
     Sha256Digest::from(bytes)
 }
@@ -248,8 +248,8 @@ impl Strategy for ByzzFuzzMutator {
         // Identity mutations (== original proposal) are degenerate -- the
         // injector would re-sign and resend the same vote content. Reject
         // them and fall back to local edits.
-        if rng.gen_bool(0.6) {
-            let candidate = match rng.gen_range(0..4) {
+        if rng.random_bool(0.6) {
+            let candidate = match rng.random_range(0..4) {
                 0 => self
                     .pool
                     .random_payload(rng)
@@ -273,7 +273,7 @@ impl Strategy for ByzzFuzzMutator {
                 }
             }
         }
-        match rng.gen_range(0..5) {
+        match rng.random_range(0..5) {
             0 => proposal_with_view(
                 proposal,
                 nearby_context_value_except(
@@ -339,7 +339,7 @@ impl Strategy for ByzzFuzzMutator {
         );
 
         // Bias toward an observed nullify target before local view edits.
-        if rng.gen_bool(0.5) {
+        if rng.random_bool(0.5) {
             if let Some(v) = self.pool.random_nullify_target_view(rng) {
                 if v != last_vote_view {
                     return v;

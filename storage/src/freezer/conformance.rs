@@ -5,7 +5,7 @@ use commonware_conformance::{conformance_tests, Conformance};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use core::num::{NonZeroU16, NonZeroUsize};
-use rand::Rng;
+use rand::RngExt as _;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);

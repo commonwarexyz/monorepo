@@ -19,7 +19,7 @@ use crate::{
         batch_chain::Bounds,
         bitmap::Shared,
         current::{
-            db::{compute_db_root, compute_grafted_leaves},
+            db::{compute_db_root, read_graft_inputs},
             grafting,
         },
         operation::Key,
@@ -821,28 +821,38 @@ where
         (idx, chunk)
     });
 
-    let new_leaves = compute_grafted_leaves::<F, H, S, N>(
-        &ops_tree_adapter,
-        chunks_to_update,
-        &current_db.strategy,
-    )
-    .await?;
-
-    // Build grafted MMR from parent batch.
-    let grafted_batch = {
-        let mut grafted_batch = grafted_parent.new_batch();
-        let old_grafted_leaves = *grafted_parent.leaves() as usize;
-        for &(chunk_idx, digest) in &new_leaves {
-            if chunk_idx < old_grafted_leaves {
-                grafted_batch = grafted_batch
-                    .update_leaf_digest(Location::<F>::new(chunk_idx as u64), digest)
-                    .expect("update_leaf_digest failed");
-            } else {
-                grafted_batch = grafted_batch.add_leaf_digest(digest);
-            }
-        }
-        let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
-        grafted_batch.merkleize(&current_db.grafted_tree, &grafted_hasher)
+    // Prefetch each chunk's covering ops-tree node, then run graft hashing and the grafted
+    // MMR build/merkleize as one job on the strategy (against a snapshot of the committed
+    // grafted tree) instead of occupying the calling task. An empty graft set hashes
+    // nothing, so it merkleizes inline rather than paying for a job handoff.
+    let graft_inputs = read_graft_inputs::<F, _, N>(&ops_tree_adapter, chunks_to_update).await?;
+    let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
+    let grafted_batch = if graft_inputs.is_empty() {
+        grafted_parent
+            .new_batch()
+            .merkleize(&current_db.grafted_tree, &grafted_hasher)
+    } else {
+        let grafted_parent = Arc::clone(grafted_parent);
+        let grafted_tree = Arc::clone(&current_db.grafted_tree);
+        current_db
+            .strategy
+            .clone()
+            .spawn(move |strategy| {
+                let new_leaves = grafting::graft_chunk_digests::<H, _, N>(&strategy, graft_inputs);
+                let mut grafted_batch = grafted_parent.new_batch();
+                let old_grafted_leaves = *grafted_parent.leaves() as usize;
+                for (chunk_idx, digest) in new_leaves {
+                    if chunk_idx < old_grafted_leaves {
+                        grafted_batch = grafted_batch
+                            .update_leaf_digest(Location::<F>::new(chunk_idx as u64), digest)
+                            .expect("update_leaf_digest failed");
+                    } else {
+                        grafted_batch = grafted_batch.add_leaf_digest(digest);
+                    }
+                }
+                grafted_batch.merkleize(&grafted_tree, &grafted_hasher)
+            })
+            .await
     };
 
     // Build the layered bitmap (parent + overlay) before computing the canonical root, so that

@@ -26,7 +26,7 @@ use commonware_actor::Feedback;
 use commonware_cryptography::{certificate, Digest};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::Mutex;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::sync::Arc;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
@@ -35,7 +35,7 @@ use std::sync::Arc;
 /// activities. It prevents signature forgery attacks on non-attributable schemes while ensuring
 /// all activities are cryptographically valid before reporting.
 pub struct AttributableReporter<
-    E: CryptoRngCore + Send + 'static,
+    E: CryptoRng + Send + 'static,
     S: certificate::Scheme,
     D: Digest,
     T: Strategy,
@@ -54,7 +54,7 @@ pub struct AttributableReporter<
 }
 
 impl<
-        E: CryptoRngCore + Send + 'static,
+        E: CryptoRng + Send + 'static,
         S: certificate::Scheme + Clone,
         D: Digest,
         T: Strategy,
@@ -73,7 +73,7 @@ impl<
 }
 
 impl<
-        E: CryptoRngCore + Send + 'static,
+        E: CryptoRng + Send + 'static,
         S: certificate::Scheme,
         D: Digest,
         T: Strategy,
@@ -93,7 +93,7 @@ impl<
 }
 
 impl<
-        E: CryptoRngCore + Send + 'static,
+        E: CryptoRng + Send + 'static,
         S: Scheme<D>,
         D: Digest,
         T: Strategy,

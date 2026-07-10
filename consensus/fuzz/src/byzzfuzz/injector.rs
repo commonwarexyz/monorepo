@@ -39,7 +39,7 @@ use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
 use commonware_utils::channel::mpsc::UnboundedReceiver;
 use rand::Rng;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::sync::Arc;
 
 /// Re-signs votes via [`Notarize::sign`] / [`Finalize::sign`] /
@@ -49,7 +49,7 @@ pub struct ByzzFuzzInjector<S, St, E>
 where
     S: Scheme<Sha256Digest>,
     St: Strategy + 'static,
-    E: Clock + Spawner + CryptoRngCore,
+    E: Clock + Spawner + CryptoRng,
 {
     context: E,
     scheme: S,
@@ -60,7 +60,7 @@ impl<S, St, E> ByzzFuzzInjector<S, St, E>
 where
     S: Scheme<Sha256Digest>,
     St: Strategy + 'static,
-    E: Clock + Spawner + CryptoRngCore,
+    E: Clock + Spawner + CryptoRng,
 {
     pub fn new(context: E, scheme: S, strategy: St) -> Self {
         Self {
