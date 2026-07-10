@@ -39,6 +39,7 @@ pub struct Round<
     /// Votes received from network (may not be verified yet).
     /// Used for duplicate detection and conflict reporting.
     pending_votes: VoteTracker<S, D>,
+
     /// Whether we've already sent the leader's proposal to the voter.
     proposal_sent: bool,
 

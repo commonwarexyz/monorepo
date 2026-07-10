@@ -33,9 +33,6 @@ use tracing::Span;
 /// [secp256r1]: crate::simplex::scheme::secp256r1
 pub struct Verifier<S: Scheme<D>, D: Digest> {
     /// Signing scheme used to verify votes and assemble certificates.
-    ///
-    /// Held in an [Arc] so verification jobs can capture the scheme without
-    /// copying the participant set.
     scheme: Arc<S>,
 
     /// Required quorum size.
@@ -70,23 +67,24 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// * `scheme` - Scheme handle used to verify and aggregate votes.
     /// * `quorum` - Number of votes (2f+1) required to reach a quorum.
     pub fn new(scheme: impl Into<Arc<S>>, quorum: u32) -> Self {
+        let quorum = quorum as usize;
         Self {
             scheme: scheme.into(),
 
             // Store quorum as usize to simplify comparisons against queue lengths.
-            quorum: quorum as usize,
+            quorum,
 
             leader: None,
             leader_proposal: None,
 
             notarizes: Vec::new(),
-            verified_notarizes: Vec::new(),
+            verified_notarizes: Vec::with_capacity(quorum),
 
             nullifies: Vec::new(),
-            verified_nullifies: Vec::new(),
+            verified_nullifies: Vec::with_capacity(quorum),
 
             finalizes: Vec::new(),
-            verified_finalizes: Vec::new(),
+            verified_finalizes: Vec::with_capacity(quorum),
         }
     }
 

@@ -106,12 +106,12 @@ where
         );
         let verify_latency = context.histogram(
             "verify_latency",
-            "latency of signature verification (including strategy job scheduling)",
+            "latency of signature verification",
             Buckets::CRYPTOGRAPHY,
         );
         let recover_latency = context.histogram(
             "recover_latency",
-            "certificate recover latency (including strategy job scheduling)",
+            "certificate recover latency",
             Buckets::CRYPTOGRAPHY,
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
@@ -440,7 +440,6 @@ where
                     epoch = self.epoch.traced(),
                     view = view.traced()
                 );
-
                 let _guard = span.entered();
 
                 match message {
@@ -605,6 +604,7 @@ where
                     if let Some((batch, failed)) = verified {
                         timer.observe(self.context.as_ref());
 
+                        // Process verified votes.
                         trace!(%updated_view, batch, "batch verified votes");
                         self.verified.inc_by(batch as u64);
                         self.batch_size.observe(batch as f64);
@@ -619,7 +619,6 @@ where
                                 );
                             }
                         }
-
                     } else {
                         trace!(
                             current = %current.view,

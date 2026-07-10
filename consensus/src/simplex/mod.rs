@@ -493,6 +493,7 @@ mod tests {
     //
     // Supported forms:
     //   test_for_all_fixtures!(callee);                  // callee::<_, _, Elector>(fixture)
+    //   test_for_all_fixtures!(callee, arg);             // callee::<_, _, Elector, _>(fixture, arg)
     //   test_for_all_fixtures!(callee, seeds = N);       // loops callee::<_, _, Elector>(seed, fixture)
     //   test_for_all_fixtures!(callee, level = "INFO");  // overrides the trace level
     macro_rules! test_for_all_fixtures {
@@ -504,6 +505,18 @@ mod tests {
         };
         ($callee:ident, seeds = $n:expr) => {
             for_each_fixture!(test_for_all_fixtures!(@seeded $n, $callee));
+        };
+        ($callee:ident, $arg:expr) => {
+            for_each_fixture!(test_for_all_fixtures!(@emit_arg [$arg] $callee));
+        };
+        (@emit_arg [$arg:expr] $callee:ident, $suffix:ident, $elector:ty, $fixture:expr) => {
+            paste::paste! {
+                #[test_group("slow")]
+                #[test_traced]
+                fn [<test_ $callee _ $suffix>]() {
+                    $callee::<_, _, $elector, _>($fixture, $arg);
+                }
+            }
         };
         (@emit [$traced:meta] $callee:ident, $suffix:ident, $elector:ty, $fixture:expr) => {
             paste::paste! {
@@ -790,16 +803,7 @@ mod tests {
             .count() as u32
     }
 
-    fn all_online<S, F, L>(fixture: F)
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
-    {
-        all_online_with_strategy::<S, F, L, _>(fixture, |_| Sequential);
-    }
-
-    fn all_online_with_strategy<S, F, L, T>(
+    fn all_online<S, F, L, T>(
         mut fixture: F,
         strategy: impl FnOnce(&mut deterministic::Context) -> T + Send + 'static,
     ) where
@@ -1035,15 +1039,14 @@ mod tests {
         });
     }
 
-    test_for_all_fixtures!(all_online);
+    test_for_all_fixtures!(all_online, |_| Sequential);
 
     #[test_group("slow")]
     #[test_traced]
     fn test_all_online_rayon_bls12381_threshold_vrf_min_pk() {
-        all_online_with_strategy::<_, _, Random, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
-            |context| context.strategy(NZUsize!(2)),
-        );
+        all_online::<_, _, Random, _>(bls12381_threshold_vrf::fixture::<MinPk, _>, |context| {
+            context.strategy(NZUsize!(2))
+        });
     }
 
     fn non_genesis_floor_joiner_catches_tip<S, F, L>(mut fixture: F)
