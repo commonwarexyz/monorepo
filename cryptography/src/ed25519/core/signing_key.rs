@@ -115,9 +115,11 @@ impl From<[u8; 32]> for SigningKey {
             prefix,
             vk: {
                 let A_bytes = VerificationKeyBytes(A.compress().to_bytes());
+                let A_own =
+                    point::decompress(&A_bytes.0).expect("a compressed public key decompresses");
                 VerificationKey {
-                    A_own: point::decompress(&A_bytes.0)
-                        .expect("a compressed public key decompresses"),
+                    A2_own: A_own.to_extended().mul_by_pow_2(127).to_affine(),
+                    A_own,
                     A_bytes,
                 }
             },

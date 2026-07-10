@@ -94,6 +94,9 @@ pub struct VerificationKey {
     /// The decompressed point in this crate's own representation, consumed by
     /// signature verification's owned point arithmetic.
     pub(super) A_own: point::Affine,
+    /// `[2^127]A`, precomputed so verification can split its scalar at bit
+    /// 127 and halve the shared doubling chain.
+    pub(super) A2_own: point::Affine,
 }
 
 impl PartialEq for VerificationKey {
@@ -157,10 +160,12 @@ impl TryFrom<VerificationKeyBytes> for VerificationKey {
         // * `A_bytes` and `R_bytes` MUST be encodings of points `A` and `R` respectively on the
         //   twisted Edwards form of Curve25519, and non-canonical encodings MUST be accepted;
         let A_own = point::decompress(&bytes.0).ok_or(Error::MalformedPublicKey)?;
+        let A2_own = A_own.to_extended().mul_by_pow_2(127).to_affine();
 
         Ok(Self {
             A_bytes: bytes,
             A_own,
+            A2_own,
         })
     }
 }
@@ -237,9 +242,16 @@ impl VerificationKey {
 
         //       [8][s]B = [8]R + [8][k]A
         // <=>   0 = [8]([s]B - [k]A - R)
-        let (_, basepoint_table) = msm::basepoint();
-        let check = msm::double_mul(&s, basepoint_table, &k, &msm::naf_table(&self.A_own.neg()))
-            .add(&R.neg().to_extended());
+        let (_, b_table, b2_table) = msm::basepoint();
+        let check = msm::double_mul(
+            &s,
+            b_table,
+            b2_table,
+            &k,
+            &msm::naf_table(&self.A_own.neg()),
+            &msm::naf_table(&self.A2_own.neg()),
+        )
+        .add(&R.neg().to_extended());
 
         let mut identity = [0u8; 32];
         identity[0] = 1;

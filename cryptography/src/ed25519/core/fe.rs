@@ -8,7 +8,7 @@
 //! The representation, formulas, and bounds discipline mirror
 //! curve25519-dalek's serial u64 backend: a field element is five u64 limbs of
 //! 51 bits each, limbs may grow to at most 2^54 - 1 between reductions, and
-//! [`Fe::mul`] / [`Fe::square`] require inputs below 2^54. [`Fe::add`] does not
+//! [`Fe::mul`] / [`Fe::square`] require inputs below 2^54. Addition does not
 //! reduce, so callers must not chain more than three additions into a
 //! multiplication, matching the point formulas in [`super::point`].
 //!

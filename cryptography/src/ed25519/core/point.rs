@@ -223,6 +223,15 @@ impl Extended {
         p.double().to_extended()
     }
 
+    /// Dehomogenize to affine coordinates (one field inversion).
+    pub(crate) fn to_affine(self) -> Affine {
+        let zinv = self.z.invert();
+        Affine {
+            x: self.x.mul(&zinv),
+            y: self.y.mul(&zinv),
+        }
+    }
+
     /// Canonical compressed encoding (y with the sign of x in the high bit).
     pub(crate) fn compress(&self) -> [u8; 32] {
         let zinv = self.z.invert();

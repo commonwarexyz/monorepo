@@ -15,31 +15,58 @@ use once_cell::race::OnceBox;
 
 /// The basepoint in this crate's representation, with its table of cached
 /// odd multiples, built on first use.
-pub(crate) fn basepoint() -> &'static (Affine, [CachedExtended; 8]) {
-    static BASEPOINT: OnceBox<(Affine, [CachedExtended; 8])> = OnceBox::new();
+pub(crate) fn basepoint() -> &'static (Affine, [CachedExtended; 8], [CachedExtended; 8]) {
+    static BASEPOINT: OnceBox<(Affine, [CachedExtended; 8], [CachedExtended; 8])> = OnceBox::new();
     BASEPOINT.get_or_init(|| {
         let b =
             point::decompress(&ED25519_BASEPOINT_COMPRESSED.0).expect("the basepoint decompresses");
-        Box::new((b, naf_table(&b)))
+        let b2 = b.to_extended().mul_by_pow_2(127).to_affine();
+        Box::new((b, naf_table(&b), naf_table(&b2)))
     })
 }
 
-/// Compute `[a]P + [b]Q` from cached odd-multiple tables, in variable time.
+/// The low 127 bits and high 126 bits of a scalar, as padded little-endian
+/// limbs for [`naf5`]: `value = low + 2^127 * high`.
+fn half_limbs(s: &Scalar) -> ([u64; 5], [u64; 5]) {
+    let [w0, w1, w2, w3, _] = wide_limbs(s);
+    (
+        [w0, w1 & ((1 << 63) - 1), 0, 0, 0],
+        [
+            (w1 >> 63) | (w2 << 1),
+            (w2 >> 63) | (w3 << 1),
+            w3 >> 63,
+            0,
+            0,
+        ],
+    )
+}
+
+/// Compute `[a]P + [b]Q` from cached odd-multiple tables for `P`, `[2^127]P`,
+/// `Q`, and `[2^127]Q`, in variable time.
+///
+/// Splitting each scalar at bit 127 against the precomputed `2^127` multiples
+/// halves the shared doubling chain relative to full-width evaluation.
 pub(crate) fn double_mul(
     a: &Scalar,
     p_table: &[CachedExtended; 8],
+    p2_table: &[CachedExtended; 8],
     b: &Scalar,
     q_table: &[CachedExtended; 8],
+    q2_table: &[CachedExtended; 8],
 ) -> Extended {
-    let mut a_naf = [0i8; 254];
-    naf5(&wide_limbs(a), &mut a_naf);
-    let mut b_naf = [0i8; 254];
-    naf5(&wide_limbs(b), &mut b_naf);
+    let (a_lo, a_hi) = half_limbs(a);
+    let (b_lo, b_hi) = half_limbs(b);
+    let mut nafs = [[0i8; 128]; 4];
+    for (naf, limbs) in nafs.iter_mut().zip([a_lo, a_hi, b_lo, b_hi]) {
+        naf5(&limbs, naf);
+    }
     let mut acc = Extended::IDENTITY;
-    for i in (0..254).rev() {
+    for i in (0..128).rev() {
         acc = acc.mul_by_pow_2(1);
-        acc = add_naf_digit(acc, p_table, a_naf[i]);
-        acc = add_naf_digit(acc, q_table, b_naf[i]);
+        acc = add_naf_digit(acc, p_table, nafs[0][i]);
+        acc = add_naf_digit(acc, p2_table, nafs[1][i]);
+        acc = add_naf_digit(acc, q_table, nafs[2][i]);
+        acc = add_naf_digit(acc, q2_table, nafs[3][i]);
     }
     acc
 }
