@@ -1325,7 +1325,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // watermark before any state moves backward, so a crash anywhere in this sequence leaves
         // offsets at or behind the data, a shape init repairs by rebuilding offsets from the
         // data. Truncating data first would leave a window where a crash strands a short blob
-        // below a watermark that recovery trusts, permanently hiding the missing items.
+        // below a watermark that recovery trusts, permanently hiding the missing items. (The
+        // offsets-side rewind may sync offsets content that references never-synced data blobs;
+        // if those vanish across a crash, align_empty bounds any adopted size by the watermark.)
         self.offsets.rewind(size).await?;
 
         if discard_blob == self.blobs.tail_blob_index() {
@@ -1880,12 +1882,21 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let offsets_bounds = offsets.pruning_boundary()..offsets.size();
 
         let Some(&blob) = pending.keys().next() else {
-            // No data blobs at all: a fresh partition, or a crash after pruning the data blobs
-            // but before pruning the offsets journal. Clear (rather than prune) the offsets so
-            // bounds collapse even when the size is mid-blob.
-            let size = offsets_bounds.end;
-            if !offsets_bounds.is_empty() {
-                warn!("crash repair: clearing offsets to {size} (prune-all crash)");
+            // No data blobs at all: a fresh partition, a crash after pruning the data blobs
+            // but before pruning the offsets journal, or never-synced data blobs that vanished
+            // across a crash (creation defers directory durability to the first sync) while
+            // offsets content survived. The durable watermark discriminates: a completed prune
+            // implies the pruned items were committed, which advanced the watermark, while
+            // offsets content past the watermark proves nothing about the data. Never adopt a
+            // size beyond it. Clear (rather than prune) the offsets so bounds collapse even
+            // when the size is mid-blob.
+            let watermark = offsets.recovery_watermark();
+            let size = offsets_bounds.end.min(watermark).max(offsets_bounds.start);
+            if offsets_bounds != (size..size) {
+                warn!(
+                    watermark,
+                    "crash repair: clearing offsets to {size} (no data blobs)"
+                );
                 offsets.clear_to_size(size).await?;
             }
             return Ok(size..size);
@@ -7080,6 +7091,60 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Never-synced data blobs can vanish across a crash (creation defers directory
+    /// durability to the first sync) while surviving offsets content references them (e.g.
+    /// rewind syncs a sealed offsets blob). Recovery must not adopt the surviving offsets
+    /// size as a pruned journal: the durable watermark bounds any adopted size.
+    #[test_traced]
+    fn test_variable_vanished_unsynced_data_does_not_fabricate_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "vanished-unsynced-data".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Never sync: every data and offsets blob is an unsynced creation.
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..25u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            // Rewind the offsets side only (a crash between the offsets and data rewinds):
+            // rewinding into a sealed offsets blob syncs it, durably persisting entries
+            // that reference never-synced data blobs.
+            journal.test_rewind_offsets(5).await.unwrap();
+            drop(journal);
+
+            // Simulate the crash outcome: every never-synced data blob vanishes while the
+            // offsets partition survives.
+            for blob in 0u64..3 {
+                context
+                    .remove(&cfg.data_partition(), Some(&blob.to_be_bytes()))
+                    .await
+                    .unwrap();
+            }
+
+            // Recovery must not fabricate a pruned journal from the surviving offsets
+            // content: the watermark is 0, since nothing was ever committed.
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..0);
+
+            // The recovered journal is fully usable.
+            journal.append(&42).await.unwrap();
+            journal.sync().await.unwrap();
+            assert_eq!(journal.read(0).await.unwrap(), 42);
             journal.destroy().await.unwrap();
         });
     }
