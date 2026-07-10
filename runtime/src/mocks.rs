@@ -340,6 +340,88 @@ pub struct PendingSyncs {
     gate: Arc<Mutex<SyncGateState>>,
 }
 
+/// Forwards [Supervisor], [Clock], [GovernorClock], [ReasonablyRealtime],
+/// [Metrics], and [BufferPooler] to the wrapped context for test context
+/// wrappers with one extra field (named by the second argument).
+macro_rules! forward_context {
+    ($wrapper:ident, $field:ident) => {
+        impl<E: Supervisor> Supervisor for $wrapper<E> {
+            fn name(&self) -> Name {
+                self.inner.name()
+            }
+
+            fn child(&self, label: &'static str) -> Self {
+                Self {
+                    inner: self.inner.child(label),
+                    $field: self.$field.clone(),
+                }
+            }
+
+            fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+                Self {
+                    inner: self.inner.with_attribute(key, value),
+                    $field: self.$field,
+                }
+            }
+        }
+
+        impl<E: Clock> Clock for $wrapper<E> {
+            fn current(&self) -> std::time::SystemTime {
+                self.inner.current()
+            }
+
+            fn sleep(
+                &self,
+                duration: std::time::Duration,
+            ) -> impl Future<Output = ()> + Send + 'static {
+                self.inner.sleep(duration)
+            }
+
+            fn sleep_until(
+                &self,
+                deadline: std::time::SystemTime,
+            ) -> impl Future<Output = ()> + Send + 'static {
+                self.inner.sleep_until(deadline)
+            }
+        }
+
+        impl<E: Clock> GovernorClock for $wrapper<E> {
+            type Instant = std::time::SystemTime;
+
+            fn now(&self) -> Self::Instant {
+                self.current()
+            }
+        }
+
+        impl<E: Clock> ReasonablyRealtime for $wrapper<E> {}
+
+        impl<E: Metrics> Metrics for $wrapper<E> {
+            fn register<N: Into<String>, H: Into<String>, M: Metric>(
+                &self,
+                name: N,
+                help: H,
+                metric: M,
+            ) -> Registered<M> {
+                self.inner.register(name, help, metric)
+            }
+
+            fn encode(&self) -> String {
+                self.inner.encode()
+            }
+        }
+
+        impl<E: BufferPooler> BufferPooler for $wrapper<E> {
+            fn network_buffer_pool(&self) -> &BufferPool {
+                self.inner.network_buffer_pool()
+            }
+
+            fn storage_buffer_pool(&self) -> &BufferPool {
+                self.inner.storage_buffer_pool()
+            }
+        }
+    };
+}
+
 /// Context wrapper whose blobs defer [Blob::start_sync] and can gate blocking syncs in tests.
 #[derive(Clone)]
 pub struct DelayedSyncContext<E> {
@@ -347,25 +429,7 @@ pub struct DelayedSyncContext<E> {
     pub pending: PendingSyncs,
 }
 
-impl<E: Supervisor> Supervisor for DelayedSyncContext<E> {
-    fn name(&self) -> Name {
-        self.inner.name()
-    }
-
-    fn child(&self, label: &'static str) -> Self {
-        Self {
-            inner: self.inner.child(label),
-            pending: self.pending.clone(),
-        }
-    }
-
-    fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
-        Self {
-            inner: self.inner.with_attribute(key, value),
-            pending: self.pending,
-        }
-    }
-}
+forward_context!(DelayedSyncContext, pending);
 
 impl<E: Spawner> Spawner for DelayedSyncContext<E> {
     fn shared(mut self, blocking: bool) -> Self {
@@ -394,58 +458,6 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
 
     fn stopped(&self) -> Signal {
         self.inner.stopped()
-    }
-}
-
-impl<E: Clock> Clock for DelayedSyncContext<E> {
-    fn current(&self) -> std::time::SystemTime {
-        self.inner.current()
-    }
-
-    fn sleep(&self, duration: std::time::Duration) -> impl Future<Output = ()> + Send + 'static {
-        self.inner.sleep(duration)
-    }
-
-    fn sleep_until(
-        &self,
-        deadline: std::time::SystemTime,
-    ) -> impl Future<Output = ()> + Send + 'static {
-        self.inner.sleep_until(deadline)
-    }
-}
-
-impl<E: Clock> GovernorClock for DelayedSyncContext<E> {
-    type Instant = std::time::SystemTime;
-
-    fn now(&self) -> Self::Instant {
-        self.current()
-    }
-}
-
-impl<E: Clock> ReasonablyRealtime for DelayedSyncContext<E> {}
-
-impl<E: Metrics> Metrics for DelayedSyncContext<E> {
-    fn register<N: Into<String>, H: Into<String>, M: Metric>(
-        &self,
-        name: N,
-        help: H,
-        metric: M,
-    ) -> Registered<M> {
-        self.inner.register(name, help, metric)
-    }
-
-    fn encode(&self) -> String {
-        self.inner.encode()
-    }
-}
-
-impl<E: BufferPooler> BufferPooler for DelayedSyncContext<E> {
-    fn network_buffer_pool(&self) -> &BufferPool {
-        self.inner.network_buffer_pool()
-    }
-
-    fn storage_buffer_pool(&self) -> &BufferPool {
-        self.inner.storage_buffer_pool()
     }
 }
 
@@ -558,15 +570,11 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        let pending = self.pending.clone();
         let inner = self.inner.clone();
-        if pending.tracking() {
-            return Handle::from_future(async move {
-                pending.wait().await?;
-                inner.sync().await
-            });
-        }
-        let waiter = pending.defer();
+        let waiter = self
+            .pending
+            .observe()
+            .unwrap_or_else(|| self.pending.defer());
         Handle::from_future(async move {
             waiter.wait().await?;
             inner.sync().await
@@ -638,20 +646,18 @@ impl PendingSyncs {
         self.syncs.lock()
     }
 
-    /// Begins one-shot tracking of durability operations and blocks the first one.
+    /// Begins counting durability operations and blocks the next one behind a
+    /// one-shot gate (pushed onto the deferred queue so tests can release it).
+    ///
+    /// Once the gate is consumed, started syncs park in the deferred queue as
+    /// usual while [Self::calls] keeps counting.
     pub fn arm(&self) {
-        let (release, release_rx) = oneshot::channel();
-        let (entered, blocked) = oneshot::channel();
         let mut state = self.gate.lock();
         assert!(!state.tracking, "sync gate already armed");
         assert!(state.waiter.is_none(), "sync gate already has a waiter");
         state.tracking = true;
         state.calls = 0;
-        state.waiter = Some(SyncWaiter {
-            entered,
-            release: release_rx,
-        });
-        self.syncs.lock().push(DeferredSync { release, blocked });
+        state.waiter = Some(self.defer());
     }
 
     /// Returns the number of durability operations observed since [Self::arm].
@@ -673,19 +679,22 @@ impl PendingSyncs {
         }
     }
 
+    /// Records a durability operation if the gate is armed, returning the
+    /// one-shot gate waiter if it has not been consumed yet.
+    fn observe(&self) -> Option<SyncWaiter> {
+        let mut state = self.gate.lock();
+        if !state.tracking {
+            return None;
+        }
+        state.calls += 1;
+        state.waiter.take()
+    }
+
     async fn wait(&self) -> Result<(), Error> {
-        let waiter = {
-            let mut state = self.gate.lock();
-            if !state.tracking {
-                return Ok(());
-            }
-            state.calls += 1;
-            state.waiter.take()
-        };
-        let Some(waiter) = waiter else {
-            return Ok(());
-        };
-        waiter.wait().await
+        match self.observe() {
+            Some(waiter) => waiter.wait().await,
+            None => Ok(()),
+        }
     }
 }
 
@@ -696,77 +705,7 @@ pub struct SyncFaultContext<E> {
     pub fail_partition: String,
 }
 
-impl<E: Supervisor> Supervisor for SyncFaultContext<E> {
-    fn name(&self) -> Name {
-        self.inner.name()
-    }
-
-    fn child(&self, label: &'static str) -> Self {
-        Self {
-            inner: self.inner.child(label),
-            fail_partition: self.fail_partition.clone(),
-        }
-    }
-
-    fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
-        Self {
-            inner: self.inner.with_attribute(key, value),
-            fail_partition: self.fail_partition,
-        }
-    }
-}
-
-impl<E: Metrics> Metrics for SyncFaultContext<E> {
-    fn register<N: Into<String>, H: Into<String>, M: Metric>(
-        &self,
-        name: N,
-        help: H,
-        metric: M,
-    ) -> Registered<M> {
-        self.inner.register(name, help, metric)
-    }
-
-    fn encode(&self) -> String {
-        self.inner.encode()
-    }
-}
-
-impl<E: Clock> Clock for SyncFaultContext<E> {
-    fn current(&self) -> std::time::SystemTime {
-        self.inner.current()
-    }
-
-    fn sleep(&self, duration: std::time::Duration) -> impl Future<Output = ()> + Send + 'static {
-        self.inner.sleep(duration)
-    }
-
-    fn sleep_until(
-        &self,
-        deadline: std::time::SystemTime,
-    ) -> impl Future<Output = ()> + Send + 'static {
-        self.inner.sleep_until(deadline)
-    }
-}
-
-impl<E: Clock> GovernorClock for SyncFaultContext<E> {
-    type Instant = std::time::SystemTime;
-
-    fn now(&self) -> Self::Instant {
-        self.current()
-    }
-}
-
-impl<E: Clock> ReasonablyRealtime for SyncFaultContext<E> {}
-
-impl<E: BufferPooler> BufferPooler for SyncFaultContext<E> {
-    fn network_buffer_pool(&self) -> &BufferPool {
-        self.inner.network_buffer_pool()
-    }
-
-    fn storage_buffer_pool(&self) -> &BufferPool {
-        self.inner.storage_buffer_pool()
-    }
-}
+forward_context!(SyncFaultContext, fail_partition);
 
 impl<E: Storage> Storage for SyncFaultContext<E> {
     type Blob = SyncFaultBlob<E::Blob>;

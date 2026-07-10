@@ -8281,7 +8281,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let epoch = Epoch::new(333);
             let target_view = View::new(3);
@@ -8554,14 +8554,9 @@ mod tests {
                 mocks::application::Application::new(context.child("app_restarted"), app_cfg);
             app_actor.start();
 
-            let replay_reporter_cfg = mocks::reporter::Config {
-                participants: participants.clone().try_into().unwrap(),
-                scheme: schemes[0].clone(),
-                elector: elector.clone(),
-            };
             let replay_reporter = mocks::reporter::Reporter::new(
                 context.child("reporter_restarted"),
-                replay_reporter_cfg,
+                reporter_cfg,
             );
 
             let voter_cfg = Config {

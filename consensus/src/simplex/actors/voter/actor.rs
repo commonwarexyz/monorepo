@@ -64,10 +64,6 @@ enum Resolved {
 struct Staged<S: Scheme<D>, D: Digest> {
     notarize: Option<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
-    certification: Option<(Rnd, bool, Notarization<S, D>)>,
-    /// A nullify vote constructed on timeout, with the best certificate from
-    /// the previous view (on retry) to help others enter the view.
-    nullify: Option<(Nullify<S>, Option<Certificate<S, D>>)>,
     /// A nullification certificate, with the parent certificate of our proposal
     /// (the "floor") if we were the leader of the nullified view.
     nullification: Option<(Nullification<S>, Option<Certificate<S, D>>)>,
@@ -684,36 +680,35 @@ impl<
 
     /// Processes the automaton's response to a certification request.
     ///
-    /// Returns false if the view was already pruned (nothing to notify).
+    /// Returns whether the round was still active (false if it was already
+    /// pruned) and, if the result was recorded, the certification outcome to
+    /// stage for [Self::notify].
     async fn process_certified(
         &mut self,
         round: Rnd,
         certified: Result<bool, oneshot::error::RecvError>,
     ) -> (bool, Option<(bool, Notarization<S, D>)>) {
-        match certified {
-            Ok(certified) => {
-                if !certified {
-                    warn!(?round, "proposal failed certification");
-                }
-                let view = round.view();
-                let Some(notarization) = self.handle_certification(view, certified).await else {
-                    return (false, None);
-                };
-
-                return (true, Some((certified, notarization)));
-            }
+        // Unlike propose/verify (where failing to act will lead to a timeout
+        // and subsequent nullification), failing to certify can lead to a halt
+        // because we'll never exit the view without a notarization + certification.
+        //
+        // We do not assume failure here because we recover on restart: a synced
+        // certification result is replayed from the journal and a missing one
+        // causes certification to be re-requested.
+        let certified = match certified {
+            Ok(certified) => certified,
             Err(err) => {
-                // Unlike propose/verify (where failing to act will lead to a timeout
-                // and subsequent nullification), failing to certify can lead to a halt
-                // because we'll never exit the view without a notarization + certification.
-                //
-                // We do not assume failure here because we recover on restart: a synced
-                // certification result is replayed from the journal and a missing one
-                // causes certification to be re-requested.
                 debug!(?err, ?round, "failed to certify proposal");
+                return (true, None);
             }
         };
-        (true, None)
+        if !certified {
+            warn!(?round, "proposal failed certification");
+        }
+        let Some(notarization) = self.handle_certification(round.view(), certified).await else {
+            return (false, None);
+        };
+        (true, Some((certified, notarization)))
     }
 
     /// Processes a message from the resolver or batcher.
@@ -789,15 +784,12 @@ impl<
     ///
     /// We don't need to iterate over all views to check for new actions because messages we receive
     /// only affect a single view.
-    #[allow(clippy::type_complexity)]
     async fn construct(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
         resolved: Resolved,
-        nullify: Option<(Nullify<S>, Option<Certificate<S, D>>)>,
-        certification: Option<(Rnd, bool, Notarization<S, D>)>,
     ) -> Staged<S, D> {
         let notarize = self.prepare_notarize(batcher, view).await;
         let notarization = self.prepare_notarization(resolver, view, resolved).await;
@@ -807,8 +799,6 @@ impl<
         Staged {
             notarize,
             notarization,
-            certification,
-            nullify,
             nullification,
             finalize,
             finalization,
@@ -819,27 +809,30 @@ impl<
     ///
     /// Callers must sync pending journal appends first (via [Self::sync_journal])
     /// so nothing reaches the network before it is durable.
+    #[allow(clippy::type_complexity)]
     fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         staged: Staged<S, D>,
+        nullify: Option<(Nullify<S>, Option<Certificate<S, D>>)>,
+        certification: Option<(bool, Notarization<S, D>)>,
     ) {
         assert!(!self.dirty, "journal must be synced before broadcast");
 
-        if let Some((round, certified, notarization)) = staged.certification {
+        if let Some((certified, notarization)) = certification {
             // Always forward certification outcomes to resolver. This can happen
             // after a nullification for the same view because certification is
             // asynchronous; finalization is the boundary that cancels in-flight
             // certification and suppresses late reporting.
-            resolver.certified(round, certified);
+            resolver.certified(notarization.round(), certified);
             if certified {
                 self.reporter.report(Activity::Certification(notarization));
             }
         }
 
-        if let Some((nullify, entry)) = staged.nullify {
+        if let Some((nullify, entry)) = nullify {
             debug!(round=?nullify.round(), "broadcasting nullify");
             self.broadcast_vote(vote_sender, Vote::Nullify(nullify));
 
@@ -1153,8 +1146,7 @@ impl<
                 if !processed {
                     continue;
                 }
-                certification = certification_result
-                    .map(|(success, notarization)| (round, success, notarization));
+                certification = certification_result;
             },
             Some(msg) = self.mailbox_receiver.recv() else break => {
                 // Handle messages from resolver and batcher
@@ -1192,14 +1184,7 @@ impl<
                 async {
                     // Build and record everything that became available for `view`.
                     let staged = self
-                        .construct(
-                            &mut batcher,
-                            &mut resolver,
-                            view,
-                            resolved,
-                            nullify,
-                            certification,
-                        )
+                        .construct(&mut batcher, &mut resolver, view, resolved)
                         .await;
 
                     // Sync everything appended this iteration (during message
@@ -1215,6 +1200,8 @@ impl<
                         &mut vote_sender,
                         &mut certificate_sender,
                         staged,
+                        nullify,
+                        certification,
                     );
                 }
                 .instrument(span)
