@@ -622,6 +622,20 @@ pub mod capture {
                 self.record_u64(field, value as u64);
             }
         }
+        // Without this, str values fall through to `record_debug` and pick up
+        // surrounding quotes (breaking message matching and numeric parsing).
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "message" {
+                self.message = value.to_string();
+            } else {
+                if is_view_field(field.name()) && self.view.is_none() {
+                    self.view = value.trim().parse().ok();
+                } else if field.name() == "received" && self.received.is_none() {
+                    self.received = value.trim().parse().ok();
+                }
+                let _ = write!(self.blob, "{value} ");
+            }
+        }
         fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
             let s = format!("{value:?}");
             if field.name() == "message" {
@@ -679,6 +693,18 @@ mod capture_tests {
             .any(|t| t.contains("recv_proposal") && t.contains("send_notarize")));
         // node 0 (recv/send) diverges from node 1 (timeout only) -> dispersion > 0.
         assert!(summary.dispersion() > 0.0);
+    }
+
+    #[test]
+    fn string_valued_fields_record_unquoted() {
+        // A str-typed view field must parse as a number, not as a Debug-quoted
+        // literal (the record_str fallback would render `"3"`).
+        let log = EventLog::new();
+        let d = Dispatch::new(NodeSubscriber::new(0, log.clone()));
+        dispatcher::with_default(&d, || {
+            tracing::info!(target: T, view = "3", "timing out view");
+        });
+        assert_eq!(log.summary().node_count(), 1);
     }
 
     #[test]
