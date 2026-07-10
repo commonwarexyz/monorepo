@@ -101,7 +101,7 @@ commonware_macros::stability_scope!(BETA {
     #[derive(Clone, Debug)]
     pub struct Manual<S> {
         strategy: S,
-        parallelism: NonZeroUsize,
+        parallelism: usize,
     }
 
     impl<S> Manual<S> {
@@ -109,13 +109,13 @@ commonware_macros::stability_scope!(BETA {
         pub const fn new(strategy: S, parallelism: NonZeroUsize) -> Self {
             Self {
                 strategy,
-                parallelism,
+                parallelism: parallelism.get(),
             }
         }
 
-        /// Return the number of threads available for manually partitioned work.
-        pub const fn parallelism_hint(&self) -> usize {
-            self.parallelism.get()
+        /// Returns the parallelism to use for manually partitioned work.
+        pub const fn parallelism(&self) -> usize {
+            self.parallelism
         }
     }
 
@@ -586,7 +586,10 @@ commonware_macros::stability_scope!(BETA {
 
     impl<S: Strategy> Strategy for Manual<S> {
         fn manual(&self) -> Manual<Self> {
-            Manual::new(self.clone(), self.parallelism)
+            Manual {
+                strategy: self.clone(),
+                parallelism: self.parallelism,
+            }
         }
 
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
@@ -876,10 +879,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
     /// A parallel execution strategy backed by a rayon thread pool.
     ///
-    /// This strategy adaptively executes collection operations serially or across multiple
-    /// threads. It records wall-clock estimates by callsite, input-size and work-size buckets, and
-    /// thread count so small inputs can avoid rayon scheduling overhead without disabling
-    /// parallelism for larger inputs.
+    /// This strategy adaptively executes collection operations serially or through its backing
+    /// pool. It records wall-clock estimates by callsite, input-size and work-size buckets, and
+    /// planning parallelism so small inputs can avoid rayon scheduling overhead without disabling
+    /// parallel execution for larger inputs.
     ///
     /// # Thread Pool Ownership
     ///
@@ -916,8 +919,11 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     #[derive(Debug, Clone)]
     pub struct Rayon {
         thread_pool: ThreadPool,
+        // The parallelism assumed for policy decisions and manual partitioning. Defaults to the
+        // pool's thread count.
+        parallelism: usize,
         // `Some` enables adaptive serial-vs-parallel decisions; `None` (used by `manual`) runs the
-        // parallel body whenever the pool has more than one thread and allocates no policy state.
+        // parallel body whenever the parallelism exceeds one and allocates no policy state.
         policy: Option<policy::Policy>,
     }
 
@@ -933,10 +939,22 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
         /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`].
         pub fn with_pool(thread_pool: ThreadPool) -> Self {
+            let parallelism = thread_pool.current_num_threads().max(1);
             Self {
                 thread_pool,
+                parallelism,
                 policy: Some(policy::Policy::default()),
             }
+        }
+
+        /// Overrides the parallelism assumed for planning decisions.
+        ///
+        /// This does not resize the backing pool. By default a strategy plans with the pool's
+        /// thread count; override it when the strategy should expose a different parallelism
+        /// (e.g. a runtime that executes strategy work inline on a single thread).
+        pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
+            self.parallelism = parallelism.get();
+            self
         }
 
         #[track_caller]
@@ -961,9 +979,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             multiplier: usize,
             run: impl FnOnce(policy::Execution) -> Result<R, E>,
         ) -> Result<R, E> {
-            let threads = self.thread_pool.current_num_threads();
             let Some(policy) = &self.policy else {
-                let execution = if threads <= 1 {
+                let execution = if self.parallelism <= 1 {
                     policy::Execution::Serial
                 } else {
                     policy::Execution::Parallel
@@ -972,21 +989,20 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             };
 
             let work = len.saturating_mul(multiplier);
-            policy.try_run(Location::caller(), len, work, threads, run)
+            policy.try_run(Location::caller(), len, work, self.parallelism, run)
         }
     }
 
     impl Strategy for Rayon {
         fn manual(&self) -> Manual<Self> {
-            let parallelism = NonZeroUsize::new(self.thread_pool.current_num_threads())
-                .unwrap_or_else(|| NonZeroUsize::new(1).unwrap());
-            Manual::new(
-                Self {
+            Manual {
+                strategy: Self {
                     thread_pool: self.thread_pool.clone(),
+                    parallelism: self.parallelism,
                     policy: None,
                 },
-                parallelism,
-            )
+                parallelism: self.parallelism,
+            }
         }
 
         fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
@@ -1008,12 +1024,11 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 let _ = tx.send(result);
             });
             Either::Right(async move {
-                // When the polling thread is itself a member of the pool (e.g. a single-threaded
-                // runtime that registers its executor thread as a worker), waiting on the channel
-                // could park the only thread able to run the job. Execute pending pool work
-                // inline until the job completes or another worker takes over. `yield_now`
-                // returns `None` when this thread is not a pool member, so other runtimes fall
-                // through to the channel immediately.
+                // When the polling thread is itself a member of the pool, waiting on the channel
+                // could park the only worker able to run the job. Execute pending pool work inline
+                // until the job completes or another worker takes over. `yield_now` returns `None`
+                // when this thread is not a pool member, so external callers fall through to the
+                // channel immediately.
                 loop {
                     if let Ok(Some(result)) = rx.try_recv() {
                         return match result {
@@ -1345,6 +1360,16 @@ mod test {
     }
 
     #[test]
+    fn with_parallelism_overrides_planning_parallelism() {
+        let strategy = Rayon::new(NonZeroUsize::new(1).unwrap())
+            .unwrap()
+            .with_parallelism(NonZeroUsize::new(4).unwrap());
+        let strategy = strategy.manual();
+        assert_eq!(strategy.parallelism(), 4);
+        assert_eq!(strategy.run(2, || "serial", || "parallel"), "parallel");
+    }
+
+    #[test]
     fn adaptive_policy_is_shared_by_clones() {
         let strategy = parallel_strategy();
         let clone = strategy.clone();
@@ -1525,7 +1550,10 @@ mod test {
             .use_current_thread()
             .build()
             .unwrap();
-        let strategy = Rayon::with_pool(Arc::new(pool));
+        let strategy =
+            Rayon::with_pool(Arc::new(pool)).with_parallelism(NonZeroUsize::new(4).unwrap());
+
+        assert_eq!(strategy.manual().parallelism(), 4);
 
         let result = strategy.spawn(|_| 7).now_or_never();
 

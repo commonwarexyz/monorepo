@@ -15,7 +15,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::boxed;
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Quota, Supervisor as _, ThreadPooler};
+use commonware_runtime::{tokio, Quota, Strategizer, Supervisor as _};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
 use std::{
@@ -118,7 +118,7 @@ pub async fn run<S, L>(
     };
     let marshal = marshal_resolver::init(context.child("resolver"), resolver_cfg, marshal);
 
-    let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+    let strategy = context.strategy(NZUsize!(2));
     let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
         context.child("engine"),
         engine::Config {

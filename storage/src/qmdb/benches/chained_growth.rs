@@ -13,7 +13,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Supervisor as _, ThreadPooler,
+    BufferPooler, Strategizer, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
@@ -52,13 +52,13 @@ type CurUFix256Mmb =
 type CurOFix256Mmb =
     OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE, Rayon>;
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config<Rayon> {
+fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Config<Rayon> {
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
-        strategy: ctx.create_strategy(THREADS).unwrap(),
+        strategy: ctx.strategy(THREADS),
         page_cache: pc,
     }
 }
@@ -77,7 +77,7 @@ fn pc(ctx: &impl BufferPooler) -> CacheRef {
 }
 
 fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     let pc = pc(ctx);
     commonware_storage::qmdb::current::FixedConfig {

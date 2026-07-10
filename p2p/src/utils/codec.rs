@@ -217,7 +217,7 @@ where
     /// limit. With a multi-worker strategy this lets the receive loop continue draining the network
     /// buffer while decodes proceed on pool workers; inline strategies decode on the receive loop.
     async fn run(mut self) {
-        let decode_queue_capacity = self.strategy.manual().parallelism_hint();
+        let decode_queue_capacity = self.strategy.manual().parallelism();
         let mut decode_pool = Pool::default();
         let mut receiver_closed = false;
 

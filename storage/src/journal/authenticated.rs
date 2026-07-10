@@ -781,7 +781,7 @@ where
             || journal.try_read_many_sync(positions),
             || {
                 let manual = strategy.manual();
-                let shard = positions.len().div_ceil(manual.parallelism_hint());
+                let shard = positions.len().div_ceil(manual.parallelism());
                 let shards = manual
                     .map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
                         journal.try_read_many_sync(shard)
@@ -945,7 +945,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Supervisor as _, ThreadPooler as _,
+        BufferPooler, Runner as _, Strategizer as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::StreamExt as _;
@@ -1070,7 +1070,7 @@ mod tests {
             // exercises the sharded sync path. The tiny test page cache pushes most
             // positions through the batched miss fallback while the write buffer serves
             // the tail synchronously.
-            let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+            let strategy = context.strategy(NZUsize!(2));
             let merkle_cfg = merkle_config_with("shard", &context, strategy);
             let journal_cfg = journal_config("shard", &context);
             type RayonJournal = Journal<

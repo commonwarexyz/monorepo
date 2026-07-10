@@ -146,8 +146,8 @@ fn bisect<V: Variant>(
 
     // Single chunk: skip aggregate verification if caller already checked it.
     let manual = strategy.manual();
-    let par_hint = manual.parallelism_hint();
-    let chunk_size = entries.len().div_ceil(par_hint);
+    let parallelism = manual.parallelism();
+    let chunk_size = entries.len().div_ceil(parallelism);
     if entries.len() <= chunk_size {
         let mut out = SegmentTree::<V>::build(entries).verify(hm, aggregate_invalid);
         out.sort_unstable();

@@ -3,7 +3,7 @@
 
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, Strategizer};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{self, full::Config as MerkleConfig, Family},
@@ -99,7 +99,7 @@ const PARTITION_IMM: &str = "bench-immutable";
 
 fn merkle_cfg(
     suffix: &str,
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     page_cache: CacheRef,
     items_per_blob: NonZeroU64,
 ) -> MerkleConfig<Rayon> {
@@ -108,7 +108,7 @@ fn merkle_cfg(
         metadata_partition: format!("metadata-{suffix}"),
         items_per_blob,
         write_buffer: WRITE_BUFFER_SIZE,
-        strategy: ctx.create_strategy(THREADS).unwrap(),
+        strategy: ctx.strategy(THREADS),
         page_cache,
     }
 }
@@ -138,12 +138,12 @@ fn var_log_cfg<C>(
     }
 }
 
-pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap, Rayon> {
+pub fn any_fix_cfg(ctx: &(impl BufferPooler + Strategizer)) -> AnyFixedConfig<EightCap, Rayon> {
     any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE)
 }
 
 pub fn any_fix_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
 ) -> AnyFixedConfig<EightCap, Rayon> {
@@ -157,7 +157,7 @@ pub fn any_fix_cfg_with(
 }
 
 pub fn imm_fix_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> ImmutableFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -169,14 +169,12 @@ pub fn imm_fix_cfg_with(
     }
 }
 
-pub fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
-) -> CurrentFixedConfig<EightCap, Rayon> {
+pub fn cur_fix_cfg(ctx: &(impl BufferPooler + Strategizer)) -> CurrentFixedConfig<EightCap, Rayon> {
     cur_fix_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_fix_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> CurrentFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -190,13 +188,13 @@ pub fn cur_fix_cfg_with(
 }
 
 pub fn any_var_digest_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
     any_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn any_var_digest_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -209,13 +207,13 @@ pub fn any_var_digest_cfg_with(
 }
 
 pub fn cur_var_digest_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
     cur_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_var_digest_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -232,13 +230,13 @@ pub fn cur_var_digest_cfg_with(
 type VarVecCfg = ((), (commonware_codec::RangeCfg<usize>, ()));
 
 pub fn any_var_vec_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
     any_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn any_var_vec_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -256,13 +254,13 @@ pub fn any_var_vec_cfg_with(
 }
 
 pub fn cur_var_vec_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
     cur_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_var_vec_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -281,13 +279,13 @@ pub fn cur_var_vec_cfg_with(
 }
 
 pub fn keyless_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
     keyless_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn keyless_cfg_with(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     items_per_blob: NonZeroU64,
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);

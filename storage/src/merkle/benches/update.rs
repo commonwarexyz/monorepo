@@ -3,7 +3,7 @@ use commonware_math::algebra::Random as _;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
-    ThreadPooler,
+    Strategizer,
 };
 use commonware_storage::merkle::{self, mem::Mem, Bagging::ForwardFold, Family, Location};
 use commonware_utils::{test_rng, NZUsize};
@@ -43,7 +43,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                             let strategy = match mode {
                                 Mode::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
-                                    Some(ctx.create_strategy(THREADS).unwrap())
+                                    Some(ctx.strategy(THREADS))
                                 }
                                 Mode::BatchedSerial => None,
                             };

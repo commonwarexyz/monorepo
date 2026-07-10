@@ -139,7 +139,7 @@ pub(crate) mod test {
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
         deterministic::{self, Context},
-        Clock as _, Metrics as _, Runner as _, Supervisor as _, ThreadPooler as _,
+        Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, TestRng, NZU64};
     use core::num::NonZeroUsize;
@@ -188,7 +188,7 @@ pub(crate) mod test {
             // it) and at least 4096 keys. The tiny test page cache pushes most keys through
             // the batched miss fallback, and TwoCap produces translated-key collisions.
             type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
-            let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+            let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
             let mut db = ParTest::init(context, cfg).await.unwrap();
 
@@ -240,7 +240,7 @@ pub(crate) mod test {
                 TwoCap,
                 Rayon,
             >;
-            let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+            let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("cancel", &context, strategy);
             let mut db = ParTest::init(context.child("db"), cfg).await.unwrap();
 

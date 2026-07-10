@@ -234,7 +234,7 @@ where
             || self.resolve_cached(keys, &map, 0),
             || {
                 let manual = strategy.manual();
-                let chunk = keys.len().div_ceil(manual.parallelism_hint());
+                let chunk = keys.len().div_ceil(manual.parallelism());
                 let shards = manual.map_collect_vec(
                     keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
                     |(ci, shard_keys)| self.resolve_cached(shard_keys, &map, ci * chunk),

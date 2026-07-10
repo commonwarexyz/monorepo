@@ -17,7 +17,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Supervisor as _, ThreadPooler,
+    BufferPooler, Strategizer, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -285,13 +285,13 @@ const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
 const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config<Rayon> {
+fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Config<Rayon> {
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
-        strategy: ctx.create_strategy(THREADS).unwrap(),
+        strategy: ctx.strategy(THREADS),
         page_cache: pc,
     }
 }
@@ -319,7 +319,7 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
 // -- DB constructors (eliminates repeated config boilerplate in match arms) --
 
 fn any_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
@@ -332,7 +332,7 @@ fn any_fix_cfg(
 }
 
 fn any_var_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
@@ -345,7 +345,7 @@ fn any_var_cfg(
 }
 
 fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
@@ -359,7 +359,7 @@ fn cur_fix_cfg(
 }
 
 fn cur_var_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);

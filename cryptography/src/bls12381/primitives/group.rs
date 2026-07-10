@@ -1141,7 +1141,7 @@ impl G1 {
         }
         let npoints = points_filtered.len();
         let manual = strategy.manual();
-        let ncpus = manual.parallelism_hint();
+        let ncpus = manual.parallelism();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
@@ -1562,7 +1562,7 @@ impl G2 {
         }
         let npoints = points_filtered.len();
         let manual = strategy.manual();
-        let ncpus = manual.parallelism_hint();
+        let ncpus = manual.parallelism();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);

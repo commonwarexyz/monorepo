@@ -4,8 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
-    ThreadPooler as _,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Strategizer as _, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
@@ -507,9 +506,9 @@ fuzz_target!(|input: FuzzInput| {
     fuzz_family::<mmr::Family, Sequential>(&input, "fuzz-mmr-sequential", |_| Sequential);
     fuzz_family::<mmb::Family, Sequential>(&input, "fuzz-mmb-sequential", |_| Sequential);
     fuzz_family::<mmr::Family, Rayon>(&input, "fuzz-mmr-rayon", |context| {
-        context.create_strategy(NZUsize!(2)).unwrap()
+        context.strategy(NZUsize!(2))
     });
     fuzz_family::<mmb::Family, Rayon>(&input, "fuzz-mmb-rayon", |context| {
-        context.create_strategy(NZUsize!(2)).unwrap()
+        context.strategy(NZUsize!(2))
     });
 });

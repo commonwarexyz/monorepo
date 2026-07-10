@@ -74,7 +74,7 @@ mod test {
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner as _,
-        Supervisor as _, ThreadPooler as _,
+        Strategizer as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -122,7 +122,7 @@ mod test {
     }
 
     async fn open_rayon_db<F: Family>(context: deterministic::Context) -> TestRayonDb<F> {
-        let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+        let strategy = context.strategy(NZUsize!(2));
         let cfg = db_config("rayon", &context, strategy);
         TestRayonDb::init(context, cfg).await.unwrap()
     }
