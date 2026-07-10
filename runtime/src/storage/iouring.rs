@@ -37,6 +37,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
 /// Parses an existing blob's header, returning `None` if the blob is new or its contents are
 /// those of a creation that was interrupted before its header became durable (the caller
 /// recreates the blob), and an error if the header is corrupt or unacceptable.
