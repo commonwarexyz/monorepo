@@ -1079,6 +1079,22 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let items_per_blob = cfg.items_per_section.get();
         let data_partition = cfg.data_partition();
         let data_context = context.child("data");
+        let offsets_partition = cfg.offsets_partition();
+
+        // A valid variable journal initializes and durably checkpoints its offsets journal before
+        // opening data blobs. Remember whether any offsets state existed so complete external
+        // loss of both offsets data and metadata is not mistaken for selective loss of unsynced
+        // data blob entries.
+        let mut offsets_state_present = false;
+        for partition in [
+            offsets_partition.clone(),
+            format!("{offsets_partition}-blobs"),
+            format!("{offsets_partition}-metadata"),
+        ] {
+            offsets_state_present |= !Partition::<E>::scan_names(&context, &partition)
+                .await?
+                .is_empty();
+        }
 
         // If a prior `init_at_size`/`clear_to_size` crashed mid-reset, the offsets journal
         // carries a staged clear. `init_cleared` discards the data partition before finishing
@@ -1086,7 +1102,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let mut offsets = fixed::Journal::<E, u64>::init_cleared(
             context.child("offsets"),
             fixed::Config {
-                partition: cfg.offsets_partition(),
+                partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
                 page_cache: cfg.page_cache.clone(),
                 write_buffer: cfg.write_buffer,
@@ -1102,6 +1118,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             cfg.write_buffer,
         );
         let mut pending = partition.open_all().await?;
+        if !offsets_state_present && pending.keys().next().is_some_and(|&oldest| oldest > 0) {
+            return Err(Error::Corruption(
+                "data blobs exist but all offsets state is missing".into(),
+            ));
+        }
 
         // Validate and align the offsets journal to match the data blobs.
         let bounds = Self::align(
@@ -1566,11 +1587,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         let new_boundary = blob_first_position(min_blob, items_per_blob)?;
 
-        // Prune data before offsets so a crash leaves offsets behind, which init repairs by
-        // pruning offsets to match.
+        // Commit the offsets boundary first. If a crash interrupts the data removal, init treats
+        // offsets ahead of data as an interrupted prune and finishes it. This distinguishes a
+        // deliberate prune from selective loss of never-synced data blob entries.
+        self.offsets.prune(new_boundary).await?;
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
-        self.offsets.prune(new_boundary).await?;
 
         if let Some(dirty_from) = self.dirty_from_blob {
             self.dirty_from_blob = Some(dirty_from.max(min_blob));
@@ -1753,10 +1775,29 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // Align pruning state at the blob level. After alignment, the offsets journal starts in
         // the oldest data blob; a mid-blob offsets start (from `init_at_size`) is valid within
         // the same blob.
-        let oldest_blob = *pending.keys().next().expect("pending is non-empty");
+        let mut oldest_blob = *pending.keys().next().expect("pending is non-empty");
         let data_oldest_pos = blob_first_position(oldest_blob, items_per_blob)?;
         {
             let offsets_bounds = offsets.pruning_boundary()..offsets.size();
+            let offsets_start_blob = position_to_blob(offsets_bounds.start, items_per_blob);
+
+            // With no durable data beyond the pruning boundary, an older unsynced blob may have
+            // vanished while a newer one survived. Discard the unreachable suffix rather than
+            // turning its physical index into a fabricated prune boundary.
+            if offsets_start_blob < oldest_blob
+                && offsets.recovery_watermark() <= offsets_bounds.start
+            {
+                warn!(
+                    oldest_blob,
+                    boundary = offsets_bounds.start,
+                    "crash repair: discarding data after vanished unsynced prefix"
+                );
+                while let Some((&newest, _)) = pending.last_key_value() {
+                    drop(pending.remove(&newest));
+                    partition.remove(newest).await?;
+                }
+                return Self::align_empty(partition, pending, offsets, items_per_blob).await;
+            }
 
             // The offsets journal ending before the oldest retained data blob represents an
             // impossible state under normal crash/prune sequences, indicating external corruption.
@@ -1766,7 +1807,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                     offsets_bounds.end
                 )));
             }
-            let offsets_start_blob = position_to_blob(offsets_bounds.start, items_per_blob);
             match offsets_start_blob.cmp(&oldest_blob) {
                 std::cmp::Ordering::Less => {
                     warn!("crash repair: pruning offsets journal to {data_oldest_pos}");
@@ -1774,12 +1814,39 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 }
                 std::cmp::Ordering::Equal => {}
                 std::cmp::Ordering::Greater => {
-                    // Prune always removes data before offsets, so offsets should never be
-                    // ahead by a blob.
-                    return Err(Error::Corruption(format!(
-                        "offsets start blob {offsets_start_blob} ahead of \
-                         oldest data blob {oldest_blob}"
-                    )));
+                    let observed_data_end = blob_first_position(newest_blob, items_per_blob)?
+                        .checked_add(items_in_newest)
+                        .ok_or(Error::OffsetOverflow)?;
+                    if offsets_bounds.start > observed_data_end {
+                        return Err(Error::Corruption(format!(
+                            "offsets pruning boundary {} exceeds data end {observed_data_end}",
+                            offsets_bounds.start
+                        )));
+                    }
+
+                    // The offsets boundary commits a prune before data blobs are removed. Finish
+                    // an interrupted prune by deleting data below it.
+                    while let Some((&oldest, _)) = pending.first_key_value() {
+                        if oldest >= offsets_start_blob {
+                            break;
+                        }
+                        warn!(oldest, "crash repair: completing interrupted data prune");
+                        drop(pending.remove(&oldest));
+                        partition.remove(oldest).await?;
+                    }
+                    let Some(&reconciled_oldest) = pending.keys().next() else {
+                        return Self::align_empty(partition, pending, offsets, items_per_blob)
+                            .await;
+                    };
+                    if reconciled_oldest > offsets_start_blob {
+                        while let Some((&newest, _)) = pending.last_key_value() {
+                            drop(pending.remove(&newest));
+                            partition.remove(newest).await?;
+                        }
+                        return Self::align_empty(partition, pending, offsets, items_per_blob)
+                            .await;
+                    }
+                    oldest_blob = reconciled_oldest;
                 }
             }
         }
@@ -1880,6 +1947,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         items_per_blob: u64,
     ) -> Result<Range<u64>, Error> {
         let offsets_bounds = offsets.pruning_boundary()..offsets.size();
+        let watermark = offsets.recovery_watermark();
 
         let Some(&blob) = pending.keys().next() else {
             // No data blobs at all: a fresh partition, a crash after pruning the data blobs
@@ -1890,7 +1958,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             // offsets content past the watermark proves nothing about the data. Never adopt a
             // size beyond it. Clear (rather than prune) the offsets so bounds collapse even
             // when the size is mid-blob.
-            let watermark = offsets.recovery_watermark();
             let size = offsets_bounds.end.min(watermark).max(offsets_bounds.start);
             if offsets_bounds != (size..size) {
                 warn!(
@@ -1905,6 +1972,24 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // The journal restarts at the empty blob's first position, or at the offsets journal's
         // mid-blob boundary within it.
         let blob_start = blob_first_position(blob, items_per_blob)?;
+
+        // The only surviving data entry may itself be a later, never-synced empty tail. Without
+        // a watermark beyond the current boundary, it cannot prove that earlier blobs were
+        // pruned rather than selectively lost.
+        if blob_start > offsets_bounds.start && watermark <= offsets_bounds.start {
+            warn!(
+                blob,
+                "crash repair: removing empty tail after vanished prefix"
+            );
+            pending.remove(&blob);
+            partition.remove(blob).await?;
+            let size = offsets_bounds.start;
+            if offsets_bounds != (size..size) {
+                offsets.clear_to_size(size).await?;
+            }
+            return Ok(size..size);
+        }
+
         let target = blob_start.max(offsets_bounds.start);
 
         // Nothing to repair when the blob is the tail of an already-aligned empty journal.
@@ -3445,12 +3530,10 @@ mod tests {
         });
     }
 
-    /// Test recovery detects corruption when offsets journal pruned ahead of data blobs.
-    ///
-    /// Simulates an impossible state (offsets journal pruned more than data blobs) which
-    /// should never happen due to write ordering. Verifies that init() returns corruption error.
+    /// The offsets boundary commits a prune before data removal. Recovery completes the data
+    /// removal when a crash leaves offsets ahead.
     #[test_traced]
-    fn test_variable_recovery_offsets_ahead_corruption() {
+    fn test_variable_recovery_completes_offsets_ahead_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
@@ -3472,16 +3555,21 @@ mod tests {
                 variable.append(&(i * 100)).await.unwrap();
             }
 
-            // Prune offsets journal ahead of data blobs (impossible state)
+            // Persist the offsets prune, then remove only part of the data prefix.
             variable.test_prune_offsets(20).await.unwrap(); // Prune to position 20
             variable.test_prune_data(1).await.unwrap(); // Only prune data blobs to blob 1 (position 10)
 
             variable.sync().await.unwrap();
             drop(variable);
 
-            // === Verify corruption detected ===
-            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 20..40);
+            for i in 20..40u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -7143,6 +7231,93 @@ mod tests {
 
             // The recovered journal is fully usable.
             journal.append(&42).await.unwrap();
+            journal.sync().await.unwrap();
+            assert_eq!(journal.read(0).await.unwrap(), 42);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Selective directory-entry loss can leave a populated later blob without its unsynced
+    /// prefix. Recovery must discard that unreachable suffix rather than advancing the pruning
+    /// boundary to its blob index.
+    #[test_traced]
+    fn test_variable_vanished_unsynced_prefix_does_not_fabricate_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "vanished-unsynced-prefix".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..25u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.test_rewind_offsets(5).await.unwrap();
+            drop(journal);
+
+            // Blobs 0 and 1 vanish while populated blob 2 survives.
+            for blob in 0u64..2 {
+                context
+                    .remove(&cfg.data_partition(), Some(&blob.to_be_bytes()))
+                    .await
+                    .unwrap();
+            }
+
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..0);
+            assert_eq!(journal.append(&42).await.unwrap(), 0);
+            journal.sync().await.unwrap();
+            assert_eq!(journal.read(0).await.unwrap(), 42);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The only surviving entry may be the empty tail created at an exact blob boundary. It also
+    /// cannot prove that the missing prefix was pruned.
+    #[test_traced]
+    fn test_variable_surviving_unsynced_empty_tail_does_not_fabricate_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "surviving-unsynced-empty-tail".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.test_rewind_offsets(5).await.unwrap();
+            drop(journal);
+
+            // Only empty rollover tail 2 survives.
+            for blob in 0u64..2 {
+                context
+                    .remove(&cfg.data_partition(), Some(&blob.to_be_bytes()))
+                    .await
+                    .unwrap();
+            }
+
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..0);
+            assert_eq!(journal.append(&42).await.unwrap(), 0);
             journal.sync().await.unwrap();
             assert_eq!(journal.read(0).await.unwrap(), 42);
             journal.destroy().await.unwrap();

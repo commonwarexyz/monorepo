@@ -486,8 +486,6 @@ stability_scope!(BETA {
                 return Ok(());
             }
             for dir in [&self.parent, &self.root] {
-                #[cfg(test)]
-                DIR_SYNC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 std::fs::File::open(dir)
                     .and_then(|d| d.sync_all())
                     .map_err(|e| {
@@ -499,6 +497,10 @@ stability_scope!(BETA {
                     })?;
             }
             self.synced.store(true, std::sync::atomic::Ordering::Release);
+            // Publish completed calls after the success flag so tests observing this counter
+            // cannot race the final directory fsync or the flag update.
+            #[cfg(test)]
+            DIR_SYNC_CALLS.fetch_add(2, std::sync::atomic::Ordering::Release);
             Ok(())
         }
     }
@@ -1007,7 +1009,7 @@ pub(crate) mod tests {
     pub(crate) async fn assert_creation_defers_dir_syncs<S: crate::Storage>(storage: &S) {
         use std::sync::atomic::Ordering;
 
-        let count = || super::DIR_SYNC_CALLS.load(Ordering::Relaxed);
+        let count = || super::DIR_SYNC_CALLS.load(Ordering::Acquire);
 
         // Creation and plain writes leave the directory entries unsynced.
         let before = count();

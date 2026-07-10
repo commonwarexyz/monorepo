@@ -1248,7 +1248,7 @@ mod tests {
     #[tokio::test]
     async fn test_first_start_sync_covers_dirs_before_handle() {
         use std::sync::atomic::Ordering;
-        let count = || crate::storage::DIR_SYNC_CALLS.load(Ordering::Relaxed);
+        let count = || crate::storage::DIR_SYNC_CALLS.load(Ordering::Acquire);
         let (storage, storage_directory) = create_test_storage();
 
         // The first start_sync performs the full sync before returning its handle, so a
