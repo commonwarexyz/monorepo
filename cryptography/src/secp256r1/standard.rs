@@ -52,7 +52,7 @@ impl PrivateKey {
             Cow::Owned(union_unique(namespace, msg))
         });
         let signature: p256::ecdsa::Signature = self.0.key.expose(|key| key.sign(&payload));
-        let signature = signature.normalize_s().unwrap_or(signature);
+        let signature = signature.normalize_s();
         Signature::try_from(signature).expect("freshly signed signature is valid")
     }
 }
@@ -341,7 +341,7 @@ mod tests {
             .unwrap(),
         );
         let signature = private_key.sign_inner(None, message);
-        assert_eq!(signature.to_vec(), exp_sig.normalize_s().unwrap().to_vec());
+        assert_eq!(signature.to_vec(), exp_sig.normalize_s().to_vec());
 
         let (message, exp_sig) = (
             b"test",
@@ -555,9 +555,7 @@ mod tests {
                 assert!(Signature::decode(sig.as_ref()).is_err());
                 assert!(Signature::decode(Bytes::from(sig)).is_err());
 
-                if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
-                    ecdsa_signature = normalized_sig;
-                }
+                ecdsa_signature = ecdsa_signature.normalize_s();
             }
             let signature = Signature::try_from(ecdsa_signature).unwrap();
             public_key.verify_inner(None, &message, &signature)

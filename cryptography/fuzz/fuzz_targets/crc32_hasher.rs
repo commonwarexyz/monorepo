@@ -8,8 +8,8 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Random;
 use crc::{Crc, CRC_32_ISCSI};
+use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 
 /// Reference CRC32C implementation from the `crc` crate.
 const CRC32C_REF: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
@@ -171,7 +171,7 @@ fn fuzz_arbitrary_and_convert(data: &[u8], bytes: [u8; 4], seed: u64) {
     assert_eq!(from_bytes.as_ref(), &bytes);
 
     // `Random`.
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut rng = TestRng::new(seed);
     let random = Digest::random(&mut rng);
     assert_eq!(random.len(), 4);
 }

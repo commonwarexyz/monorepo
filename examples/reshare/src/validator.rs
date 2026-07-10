@@ -15,7 +15,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::boxed;
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Quota, Supervisor as _, ThreadPooler};
+use commonware_runtime::{tokio, Quota, Strategizer, Supervisor as _};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
 use std::{
@@ -118,7 +118,7 @@ pub async fn run<S, L>(
     };
     let marshal = marshal_resolver::init(context.child("resolver"), resolver_cfg, marshal);
 
-    let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+    let strategy = context.strategy(NZUsize!(2));
     let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
         context.child("engine"),
         engine::Config {
@@ -185,10 +185,10 @@ mod test {
     };
     use commonware_utils::{
         channel::{mpsc, oneshot},
-        test_rng_seeded, union, N3f1, TryCollect,
+        union, N3f1, TestRng, TryCollect,
     };
-    use rand::seq::SliceRandom;
-    use rand_core::CryptoRngCore;
+    use rand::seq::IndexedRandom;
+    use rand_core::CryptoRng;
     use std::{
         collections::{btree_map::Entry, BTreeMap, HashSet},
         future::Future,
@@ -276,7 +276,7 @@ mod test {
     }
 
     impl Team {
-        fn reshare(mut rng: impl CryptoRngCore, total: u32, per_round: &[u32]) -> Self {
+        fn reshare(mut rng: impl CryptoRng, total: u32, per_round: &[u32]) -> Self {
             let mut participants = (0..total)
                 .map(|i| {
                     let sk = PrivateKey::from_seed(i as u64);
@@ -399,7 +399,7 @@ mod test {
                     namespace: union(namespace::APPLICATION, b"_ENGINE"),
                     output: self.output.clone(),
                     share: share.clone(),
-                    partition_prefix: format!("validator_{}", &pk),
+                    partition_prefix: format!("validator_{}", pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),
                     strategy: Sequential,
@@ -597,7 +597,7 @@ mod test {
     }
 
     fn test_output(seed: u64) -> Output<MinSig, PublicKey> {
-        Team::reshare(test_rng_seeded(seed), 4, &[4])
+        Team::reshare(TestRng::new(seed), 4, &[4])
             .output
             .expect("reshare output exists")
     }
@@ -813,7 +813,7 @@ mod test {
                             team.participants.keys().cloned().collect();
                         let crash_count = (*count).min(all_participants.len());
                         let to_crash: Vec<PublicKey> = all_participants
-                            .choose_multiple(&mut ctx, crash_count)
+                            .sample(&mut ctx, crash_count)
                             .cloned()
                             .collect();
                         for pk in to_crash {

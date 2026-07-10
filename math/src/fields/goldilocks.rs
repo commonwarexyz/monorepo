@@ -1,7 +1,7 @@
 use crate::algebra::{Additive, Field, FieldNTT, Multiplicative, Object, Random, Ring};
 use commonware_codec::{FixedSize, Read, Write};
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// The modulus P := 2^64 - 2^32 + 1.
 ///
@@ -283,7 +283,7 @@ impl F {
 impl Object for F {}
 
 impl Random for F {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         // this fails only about once every 2^32 attempts
         loop {
             let x = rng.next_u64();

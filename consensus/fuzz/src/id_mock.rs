@@ -19,7 +19,7 @@ use core::{
     fmt::{Display, Formatter},
     ops::Deref,
 };
-use rand::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 use std::{collections::HashSet, sync::Arc};
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
@@ -274,7 +274,7 @@ impl Scheme {
 /// produced by any scheme can be verified by any other.
 pub fn fixture<R>(_: &mut R, namespace: &[u8], n: u32) -> (Vec<PublicKey>, Vec<Scheme>)
 where
-    R: RngCore + CryptoRng,
+    R: CryptoRng,
 {
     assert!(n > 0);
 
@@ -311,7 +311,7 @@ impl certificate::Verifier for Scheme {
         _strategy: &impl Strategy,
     ) -> bool
     where
-        R: rand_core::CryptoRngCore,
+        R: rand_core::CryptoRng,
         D: Digest,
         M: Faults,
     {
@@ -389,7 +389,7 @@ impl certificate::Scheme for Scheme {
         _strategy: &impl Strategy,
     ) -> bool
     where
-        R: rand_core::CryptoRngCore,
+        R: rand_core::CryptoRng,
         D: Digest,
     {
         if self.participants.key(attestation.signer).is_none() {

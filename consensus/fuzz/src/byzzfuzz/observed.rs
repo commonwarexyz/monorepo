@@ -14,6 +14,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{sha256::Digest as Sha256Digest, PublicKey};
 use commonware_utils::sync::Mutex;
+use rand::RngExt as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -109,7 +110,7 @@ impl ObservedState {
         if payloads.is_empty() {
             return None;
         }
-        let idx = rng.gen_range(0..payloads.len());
+        let idx = rng.random_range(0..payloads.len());
         payloads.iter().nth(idx).copied()
     }
 
@@ -118,7 +119,7 @@ impl ObservedState {
         if parent_views.is_empty() {
             return None;
         }
-        let idx = rng.gen_range(0..parent_views.len());
+        let idx = rng.random_range(0..parent_views.len());
         parent_views.iter().nth(idx).copied()
     }
 
@@ -144,7 +145,7 @@ impl ObservedState {
         if bucket.is_empty() {
             return None;
         }
-        Some(bucket[rng.gen_range(0..bucket.len())].clone())
+        Some(bucket[rng.random_range(0..bucket.len())].clone())
     }
 
     pub fn random_proposal(&self, rng: &mut impl rand::Rng) -> Option<Proposal<Sha256Digest>> {
@@ -153,7 +154,7 @@ impl ObservedState {
         if total == 0 {
             return None;
         }
-        let mut pick = rng.gen_range(0..total);
+        let mut pick = rng.random_range(0..total);
         for bucket in proposals.values() {
             if pick < bucket.len() {
                 return Some(bucket[pick].clone());
@@ -171,7 +172,7 @@ impl ObservedState {
         if views.is_empty() {
             return None;
         }
-        let idx = rng.gen_range(0..views.len());
+        let idx = rng.random_range(0..views.len());
         views.iter().nth(idx).copied()
     }
 }

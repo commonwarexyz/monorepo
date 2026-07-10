@@ -134,17 +134,18 @@ pub(crate) mod test {
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics as _, Runner as _, Supervisor as _, ThreadPooler as _,
+        Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
     };
-    use commonware_utils::{test_rng_seeded, NZUsize, NZU64};
+    use commonware_utils::{NZUsize, TestRng, NZU64};
     use core::num::NonZeroUsize;
-    use rand::RngCore;
-    use std::collections::HashMap;
+    use futures::FutureExt as _;
+    use rand::Rng;
+    use std::{collections::HashMap, time::Duration};
 
     /// A generic type alias for an Any database parameterized by merkle family.
     type AnyTestGeneric<F> = crate::qmdb::any::db::Db<
@@ -187,11 +188,11 @@ pub(crate) mod test {
             // it) and at least 4096 keys. The tiny test page cache pushes most keys through
             // the batched miss fallback, and TwoCap produces translated-key collisions.
             type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
-            let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+            let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
             let mut db = ParTest::init(context, cfg).await.unwrap();
 
-            let mut rng = test_rng_seeded(7);
+            let mut rng = TestRng::new(7);
             let mut keys = Vec::with_capacity(4300);
             let mut batch = db.new_batch();
             for _ in 0..4200 {
@@ -219,6 +220,105 @@ pub(crate) mod test {
         });
     }
 
+    /// A merkleize future dropped mid-flight leaves the database fully usable.
+    ///
+    /// With a parallel strategy, merkleize's hashing job may keep running detached against its
+    /// snapshot of committed Merkle state after the future is dropped. Later mutations must not
+    /// observe it (they copy-on-write instead), and its discarded result must not corrupt
+    /// anything. Runs on the tokio runtime for the same reason as
+    /// [`test_get_many_fused_sharded_matches_get`].
+    #[test_traced]
+    fn test_merkleize_cancellation_leaves_db_usable() {
+        let executor = commonware_runtime::tokio::Runner::default();
+        executor.start(|context| async move {
+            type ParTest = Db<
+                mmr::Family,
+                commonware_runtime::tokio::Context,
+                Digest,
+                Digest,
+                Sha256,
+                TwoCap,
+                Rayon,
+            >;
+            let strategy = context.strategy(NZUsize!(2));
+            let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("cancel", &context, strategy);
+            let mut db = ParTest::init(context.child("db"), cfg).await.unwrap();
+
+            // Populate and commit so later snapshots carry committed nodes.
+            let mut rng = TestRng::new(11);
+            let mut keys = Vec::with_capacity(1024);
+            let mut batch = db.new_batch();
+            for _ in 0..1024 {
+                let key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                keys.push((key, value));
+                batch = batch.write(key, Some(value));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Drop one merkleize after a single poll and race another against a timer, so the
+            // future is abandoned at whatever stage it reached (possibly mid-hashing-job).
+            for delay in [None, Some(Duration::from_millis(1))] {
+                // Fork the abandoned batch off a two-deep unapplied chain: the hashing job
+                // reaches the grandparent only through Weak references, so dropping the chain
+                // below exercises a mid-job truncation (any resulting panic is caught and
+                // discarded by `Strategy::spawn`).
+                let grandparent = db
+                    .new_batch()
+                    .write(Digest::random(&mut rng), Some(Digest::random(&mut rng)))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                let parent = grandparent
+                    .new_batch::<Sha256>()
+                    .write(Digest::random(&mut rng), Some(Digest::random(&mut rng)))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                let mut abandoned = parent.new_batch::<Sha256>();
+                for _ in 0..4200 {
+                    abandoned =
+                        abandoned.write(Digest::random(&mut rng), Some(Digest::random(&mut rng)));
+                }
+                let fut = abandoned.merkleize(&db, None);
+                match delay {
+                    None => {
+                        let _ = fut.now_or_never();
+                    }
+                    Some(delay) => {
+                        select! {
+                            _ = fut => {},
+                            _ = context.sleep(delay) => {},
+                        }
+                    }
+                }
+                drop(parent);
+                drop(grandparent);
+
+                // The database remains fully usable: mutate, merkleize, apply, and read back.
+                let (key, _) = keys[0];
+                let value = Digest::random(&mut rng);
+                let merkleized = db
+                    .new_batch()
+                    .write(key, Some(value))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+                assert_eq!(db.get(&key).await.unwrap(), Some(value));
+                keys[0].1 = value;
+                for (key, value) in &keys[1..] {
+                    assert_eq!(db.get(key).await.unwrap(), Some(*value));
+                }
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Create n random operations using the default seed (0). Some portion of
     /// the updates are deletes. create_test_ops(n) is a prefix of
     /// create_test_ops(n') for n < n'.
@@ -232,7 +332,7 @@ pub(crate) mod test {
         n: usize,
         seed: u64,
     ) -> Vec<Operation<mmr::Family, Digest, Digest>> {
-        let mut rng = test_rng_seeded(seed);
+        let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -407,7 +507,7 @@ pub(crate) mod test {
             // and creates of fresh keys. `make` re-derives the set from a seed so both paths and
             // both depths see identical mutations.
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
-                let mut rng = test_rng_seeded(salt);
+                let mut rng = TestRng::new(salt);
                 let mut out = Vec::new();
                 for _ in 0..600 {
                     let r = rng.next_u32() % 100;

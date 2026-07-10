@@ -21,7 +21,7 @@ use commonware_utils::{
     sync::TracedAsyncRwLock,
 };
 use futures::future;
-use rand::Rng;
+use rand_core::Rng;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},

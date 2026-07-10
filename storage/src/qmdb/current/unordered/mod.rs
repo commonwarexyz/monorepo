@@ -46,7 +46,7 @@ pub mod tests {
         NZU64,
     };
     use core::future::Future;
-    use rand::RngCore;
+    use rand::Rng;
 
     /// Concrete db type used in the shared proof tests, generic over journal (`C`) and value
     /// encoding (`V`).

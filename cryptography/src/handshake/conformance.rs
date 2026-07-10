@@ -9,7 +9,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_math::algebra::Random;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_HANDSHAKE_CONFORMANCE_TESTS";
@@ -57,7 +57,7 @@ impl Conformance for Handshake {
         let (mut listener_tx, mut listener_rx) = listen_end(listener_state, dialer_ack).unwrap();
 
         // Generate a random message to send to the listener from the dialer.
-        let mut random_msg = vec![0u8; rng.gen_range(0..256)];
+        let mut random_msg = vec![0u8; rng.random_range(0..256)];
         rng.fill(&mut random_msg[..]);
         log.extend(random_msg.encode());
 
@@ -70,7 +70,7 @@ impl Conformance for Handshake {
         log.extend(received_msg.encode());
 
         // Generate a random message to send to the dialer from the listener.
-        let mut random_msg = vec![0u8; rng.gen_range(0..256)];
+        let mut random_msg = vec![0u8; rng.random_range(0..256)];
         rng.fill(&mut random_msg[..]);
         log.extend(random_msg.encode());
 

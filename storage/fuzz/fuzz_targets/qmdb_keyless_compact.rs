@@ -248,7 +248,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor);
+                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor).await;
 
                     match expect_err {
                         None => {
@@ -277,11 +277,13 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     let parent = db
                         .new_batch()
                         .append(vec![0u8; 1])
-                        .merkleize(&db, None, floor);
+                        .merkleize(&db, None, floor)
+                        .await;
                     let child = parent
                         .new_batch::<Sha256>()
                         .append(vec![1u8; 1])
-                        .merkleize(&db, None, floor);
+                        .merkleize(&db, None, floor)
+                        .await;
                     let expected_root = child.root();
                     db.apply_batch(child)
                         .expect("Chained commit should not fail");
@@ -293,11 +295,13 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     let batch_a = db
                         .new_batch()
                         .append(vec![2u8; 1])
-                        .merkleize(&db, None, floor);
+                        .merkleize(&db, None, floor)
+                        .await;
                     let batch_b = db
                         .new_batch()
                         .append(vec![3u8; 1])
-                        .merkleize(&db, None, floor);
+                        .merkleize(&db, None, floor)
+                        .await;
                     db.apply_batch(batch_a).expect("Commit should not fail");
                     assert!(
                         matches!(db.apply_batch(batch_b), Err(Error::StaleBatch { .. })),
@@ -412,6 +416,9 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
             resolver: source.clone(),
             target: target.clone(),
             db_config: client_cfg.clone(),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
         })
         .await
         .expect("Compact sync should not fail");

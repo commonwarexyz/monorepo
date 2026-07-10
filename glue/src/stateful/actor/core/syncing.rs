@@ -21,16 +21,15 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select_loop;
-use commonware_runtime::{
-    telemetry::metrics::GaugeExt, Clock, ContextCell, Metrics, Spawner, Storage,
-};
+use commonware_runtime::{telemetry::metrics::GaugeExt, ContextCell, Spawner};
+use commonware_storage::Context;
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     sync::AsyncMutex,
     Acknowledgement,
 };
-use rand::Rng;
+use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{debug, error, info_span, Instrument as _, Span};
 
@@ -52,7 +51,7 @@ enum FinalizedHandoff<B> {
 
 pub(super) struct Syncing<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -104,7 +103,7 @@ where
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,

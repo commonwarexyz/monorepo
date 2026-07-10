@@ -17,7 +17,6 @@ commonware-parallel = { workspace = true, features = ["std"] }
 commonware-storage.workspace = true
 commonware-utils.workspace = true
 libfuzzer-sys.workspace = true
-rand_chacha.workspace = true
 
 [dependencies.commonware-coding]
 path = ".."

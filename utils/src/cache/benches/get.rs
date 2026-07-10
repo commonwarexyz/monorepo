@@ -1,6 +1,6 @@
-use commonware_utils::cache::Clock;
+use commonware_utils::{cache::Clock, TestRng};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::RngExt as _;
 use std::{hint::black_box, num::NonZeroUsize};
 
 /// Benchmarks the cache-hit read path: a full cache, all lookups present.
@@ -10,9 +10,9 @@ fn bench_get(c: &mut Criterion) {
         for i in 0..capacity as u64 {
             cache.put(i, i);
         }
-        let mut rng = StdRng::seed_from_u64(capacity as u64);
+        let mut rng = TestRng::new(capacity as u64);
         let keys: Vec<u64> = (0..1024)
-            .map(|_| rng.gen_range(0..capacity as u64))
+            .map(|_| rng.random_range(0..capacity as u64))
             .collect();
         c.bench_function(&format!("{}/capacity={capacity}", module_path!()), |b| {
             b.iter(|| {

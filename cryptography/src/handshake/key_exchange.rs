@@ -1,6 +1,6 @@
 use crate::Secret;
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// A shared secret derived from X25519 key exchange.
 pub struct SharedSecret {
@@ -64,9 +64,9 @@ pub struct SecretKey {
 
 impl SecretKey {
     /// Generates a new random ephemeral secret key.
-    pub fn new(rng: impl CryptoRngCore) -> Self {
+    pub fn new(mut rng: impl CryptoRng) -> Self {
         Self {
-            inner: Secret::new(x25519_dalek::EphemeralSecret::random_from_rng(rng)),
+            inner: Secret::new(x25519_dalek::EphemeralSecret::random_from_rng(&mut rng)),
         }
     }
 

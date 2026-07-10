@@ -1,6 +1,6 @@
 //! Utility functions for `std::time`.
 
-use rand::Rng;
+use rand::{Rng, RngExt as _};
 use std::time::{Duration, SystemTime};
 
 /// Number of nanoseconds in a second.
@@ -194,7 +194,7 @@ impl SystemTimeExt for SystemTime {
     }
 
     fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime {
-        *self + rng.gen_range(Duration::default()..=jitter * 2)
+        *self + rng.random_range(Duration::default()..=jitter * 2)
     }
 
     fn limit() -> SystemTime {

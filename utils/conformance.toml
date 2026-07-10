@@ -60,7 +60,7 @@ hash = "325e95b11c01813a05e248096ac421c3224dd0ca5b9af362291bd568b473a4fc"
 
 ["commonware_utils::rng::tests::conformance::FuzzRngConformance"]
 n_cases = 1024
-hash = "d0183ff92294532c435ef0bdb5735f25d16ec633adc7324f885d8b8117389134"
+hash = "98c11adc87998940c19bf9c9ce8554ce91409e81375078b99f511fbb64cf3e79"
 
 ["commonware_utils::sequence::fixed_bytes::tests::conformance::CodecConformance<FixedBytes<16>>"]
 n_cases = 65536

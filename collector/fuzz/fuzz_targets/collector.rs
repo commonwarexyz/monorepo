@@ -24,7 +24,7 @@ use commonware_utils::{
     FuzzRng,
 };
 use libfuzzer_sys::fuzz_target;
-use rand::Rng;
+use rand::{Rng, RngExt as _};
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroUsize,
@@ -168,9 +168,9 @@ struct FuzzHandler {
 impl FuzzHandler {
     fn new(respond: bool, rng: &mut impl Rng) -> Self {
         let mut response_map = HashMap::new();
-        for _ in 0..rng.gen_range(0..10) {
-            let id = rng.gen();
-            let result_len = rng.gen_range(0..100);
+        for _ in 0..rng.random_range(0..10) {
+            let id = rng.random();
+            let result_len = rng.random_range(0..100);
             let mut result = vec![0u8; result_len];
             rng.fill(&mut result[..]);
             response_map.insert(id, FuzzResponse { id, result });
@@ -621,7 +621,7 @@ fn fuzz(input: FuzzInput) {
     executor.start(|mut context| async move {
         let mut private_keys = Vec::new();
         for _ in 0..3 {
-            private_keys.push(PrivateKey::from_seed(context.gen()));
+            private_keys.push(PrivateKey::from_seed(context.random()));
         }
         let public_keys = Arc::new(
             private_keys
@@ -668,14 +668,15 @@ fn fuzz(input: FuzzInput) {
                             RecipientsType::All => Recipients::All,
                             RecipientsType::One => {
                                 let peer =
-                                    public_keys[context.gen_range(0..public_keys.len())].clone();
+                                    public_keys[context.random_range(0..public_keys.len())].clone();
                                 Recipients::One(peer)
                             }
                             RecipientsType::Some => {
-                                let count = context.gen_range(0..=public_keys.len());
+                                let count = context.random_range(0..=public_keys.len());
                                 let peers = (0..count)
                                     .map(|_| {
-                                        public_keys[context.gen_range(0..public_keys.len())].clone()
+                                        public_keys[context.random_range(0..public_keys.len())]
+                                            .clone()
                                     })
                                     .collect();
                                 Recipients::Some(peers)

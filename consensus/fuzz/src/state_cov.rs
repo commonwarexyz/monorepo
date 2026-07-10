@@ -31,7 +31,7 @@ use commonware_consensus::simplex::{
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_runtime::telemetry::traces::collector::RecordedEvent;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use sancov::Counters;
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::Level;
@@ -48,7 +48,7 @@ pub fn encode_reporter_states<E, S, L>(
     max_participants: usize,
 ) -> BTreeMap<String, ReporterReplicaStateData>
 where
-    E: CryptoRngCore,
+    E: CryptoRng,
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
 {

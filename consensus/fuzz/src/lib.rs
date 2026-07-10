@@ -1472,7 +1472,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
             // compromised-assignment from the case are consumed: twin indices come from
             // `case.compromised` and the byzantine set is forwarded to
             // `check_vote_invariants_with_byzantine`.
-            let mode = if rand::Rng::gen_bool(&mut context, 0.5) {
+            let mode = if rand::RngExt::random_bool(&mut context, 0.5) {
                 twins::Mode::Sampled
             } else {
                 twins::Mode::Sustained
@@ -1491,7 +1491,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
             if cases.is_empty() {
                 return;
             }
-            let case_idx = rand::Rng::gen_range(&mut context, 0..cases.len());
+            let case_idx = rand::RngExt::random_range(&mut context, 0..cases.len());
             let case = cases.into_iter().nth(case_idx).unwrap();
             let scenario = case.scenario.clone();
             let compromised: std::collections::HashSet<usize> =

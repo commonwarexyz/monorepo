@@ -58,7 +58,7 @@ impl F {
 }
 
 impl Random for F {
-    fn random(mut rng: impl rand_core::CryptoRngCore) -> Self {
+    fn random(mut rng: impl rand_core::CryptoRng) -> Self {
         // Rejection-sample a uniform element of `[0, r)`. Each candidate is
         // `F::BITS` random bits (the width of `r`), so it lands in `[0, 2^BITS)`
         // and is accepted with probability `r / 2^BITS > 0.9`: ~1.1 draws on

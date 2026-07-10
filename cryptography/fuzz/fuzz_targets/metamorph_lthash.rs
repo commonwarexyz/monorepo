@@ -2,8 +2,10 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::lthash::LtHash;
+use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::RngExt as _;
+use rand_core::CryptoRng;
 
 #[derive(Debug, Arbitrary)]
 enum MutationType {
@@ -37,15 +39,15 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn generate_random_bytes(rng: &mut StdRng, min_len: usize, max_len: usize) -> Vec<u8> {
-    let len = rng.gen_range(min_len..=max_len);
+fn generate_random_bytes(rng: &mut impl CryptoRng, min_len: usize, max_len: usize) -> Vec<u8> {
+    let len = rng.random_range(min_len..=max_len);
     let mut bytes = vec![0u8; len];
     rng.fill(&mut bytes[..]);
     bytes
 }
 
 fn fuzz(input: FuzzInput) {
-    let mut rng = StdRng::seed_from_u64(input.seed);
+    let mut rng = TestRng::new(input.seed);
 
     let mut lthash = LtHash::default();
 
@@ -146,7 +148,7 @@ fn fuzz(input: FuzzInput) {
             // Shuffle elements
             let mut shuffled_elements = elements.clone();
             for i in (1..shuffled_elements.len()).rev() {
-                let j = rng.gen_range(0..=i);
+                let j = rng.random_range(0..=i);
                 shuffled_elements.swap(i, j);
             }
 

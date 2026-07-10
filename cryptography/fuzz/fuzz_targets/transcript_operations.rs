@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::transcript::Transcript;
 use libfuzzer_sys::fuzz_target;
-use rand::RngCore;
+use rand::RngExt as _;
 
 const LABELS: &[&[u8]] = &[
     b"test", b"fork", b"label", b"A", b"B", b"C", b"data", b"noise",
@@ -55,7 +55,7 @@ fn fuzz(input: FuzzInput) {
                 let label = LABELS[label_index as usize % LABELS.len()];
                 let mut rng = transcript.noise(label);
                 let mut _output = vec![0u8; output_size as usize];
-                rng.fill_bytes(&mut _output);
+                rng.fill(&mut _output[..]);
             }
 
             TranscriptOperation::Resume => {

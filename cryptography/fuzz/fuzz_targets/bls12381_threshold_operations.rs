@@ -9,9 +9,8 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig, PartialSignature, Variant},
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{N3f1, Participant};
+use commonware_utils::{test_rng, N3f1, Participant};
 use libfuzzer_sys::fuzz_target;
-use rand::thread_rng;
 use std::num::{NonZeroU32, NonZeroUsize};
 
 mod common;
@@ -260,6 +259,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 }
 
 fn fuzz(op: FuzzOperation) {
+    let mut rng = test_rng();
     match op {
         FuzzOperation::SignProofOfPossessionMinPk {
             public,
@@ -324,7 +324,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_signer::<_, MinPk, _>(
-                    &mut thread_rng(),
+                    &mut rng,
                     &public,
                     index,
                     &entries_refs,
@@ -354,7 +354,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_signer::<_, MinSig, _>(
-                    &mut thread_rng(),
+                    &mut rng,
                     &public,
                     index,
                     &entries_refs,
@@ -378,7 +378,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_message::<_, MinPk, _>(
-                    &mut thread_rng(),
+                    &mut rng,
                     &public,
                     &namespace,
                     &message,
@@ -403,7 +403,7 @@ fn fuzz(op: FuzzOperation) {
                     })
                     .collect();
                 let _ = threshold::batch_verify_same_message::<_, MinSig, _>(
-                    &mut thread_rng(),
+                    &mut rng,
                     &public,
                     &namespace,
                     &message,
@@ -511,8 +511,7 @@ fn fuzz(op: FuzzOperation) {
             hms,
             signatures,
         } => {
-            let _ =
-                MinSig::batch_verify(&mut thread_rng(), &publics, &hms, &signatures, &Sequential);
+            let _ = MinSig::batch_verify(&mut rng, &publics, &hms, &signatures, &Sequential);
         }
 
         FuzzOperation::SerializePartialSignature { partial } => {

@@ -57,7 +57,7 @@ mod tests {
             },
             Plan,
         },
-        types::{Participant, Round, View},
+        types::{Epoch, Participant, Round, View},
         Viewable,
     };
     use commonware_actor::{mailbox, Feedback};
@@ -78,10 +78,10 @@ mod tests {
     use commonware_runtime::{
         deterministic,
         telemetry::traces::{collector::TraceStorage, TracedExt as _},
-        Clock, Metrics as _, Quota, Runner, Supervisor as _,
+        tokio, Clock, Metrics as _, Quota, Runner, Strategizer as _, Supervisor as _,
     };
-    use commonware_utils::{ordered::Set, sync::Mutex, NZUsize};
-    use std::{num::NonZeroU32, sync::Arc, time::Duration};
+    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, NZUsize, TestRng};
+    use std::{marker::PhantomData, num::NonZeroU32, sync::Arc, time::Duration};
     use tracing::{Level, Span};
 
     type Broadcasts = Arc<Mutex<Vec<(Sha256Digest, Round, Vec<PublicKey>)>>>;
@@ -243,6 +243,103 @@ mod tests {
             .collect();
         Finalization::from_finalizes(&schemes[0], &votes, &Sequential)
             .expect("finalization requires a quorum of votes")
+    }
+
+    /// A blocker that drops all block requests.
+    #[derive(Clone)]
+    struct NoopBlocker;
+
+    impl commonware_p2p::Blocker for NoopBlocker {
+        type PublicKey = PublicKey;
+
+        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    /// A reporter that drops all activity.
+    struct NoopReporter<S>(PhantomData<S>);
+
+    impl<S> Clone for NoopReporter<S> {
+        fn clone(&self) -> Self {
+            Self(PhantomData)
+        }
+    }
+
+    impl<S: Scheme<Sha256Digest>> crate::Reporter for NoopReporter<S> {
+        type Activity = Activity<S, Sha256Digest>;
+
+        fn report(&mut self, _: Self::Activity) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    /// Drives a full quorum of network votes through a [Round]'s batch-verify and
+    /// certificate-recovery offloads using `strategy`.
+    async fn verify_and_construct<S, F>(mut fixture: F, strategy: impl Strategy)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            verifier,
+            ..
+        } = fixture(&mut rng, b"batcher_test", 5);
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+        );
+
+        // Route a quorum of notarizes through the round as network votes.
+        let proposal = Proposal::new(round_id, View::new(0), Sha256::hash(b"payload"));
+        round.set_leader(Participant::from_usize(0));
+        for (i, scheme) in schemes.iter().enumerate() {
+            let notarize = Notarize::sign(scheme, proposal.clone()).unwrap();
+            assert!(round.add_network(participants[i].clone(), Vote::Notarize(notarize)));
+        }
+
+        // Batch verify the pending votes on the strategy's pool.
+        assert!(round.ready_notarizes());
+        let (batch, invalid) = round.verify_notarizes(&mut rng, &strategy).await;
+        assert_eq!(batch, schemes.len());
+        assert!(invalid.is_empty());
+
+        // Recover the certificate on the strategy's pool.
+        let notarization = round
+            .try_construct_notarization(&strategy)
+            .await
+            .expect("verified quorum must construct a notarization");
+        assert_eq!(notarization.proposal, proposal);
+        assert!(notarization.verify(&mut rng, &verifier, &Sequential));
+
+        // Construction is one-shot per round.
+        assert!(round.try_construct_notarization(&strategy).await.is_none());
+    }
+
+    /// Deterministic-runtime tests drive `Strategy::spawn` inline: the deterministic runtime's
+    /// shared pool is single-threaded, so `Rayon::spawn` short-circuits to the calling thread.
+    /// This test runs the batcher's offload paths on the tokio runtime with a two-worker pool,
+    /// so jobs execute on pool threads and completion must wake the awaiting task across threads.
+    #[test_traced]
+    fn test_offload_on_multithreaded_pool() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context.strategy(NZUsize!(2));
+            verify_and_construct(
+                bls12381_threshold_vrf::fixture::<MinPk, _>,
+                strategy.clone(),
+            )
+            .await;
+            verify_and_construct(bls12381_multisig::fixture::<MinSig, _>, strategy.clone()).await;
+            verify_and_construct(ed25519::fixture, strategy.clone()).await;
+            verify_and_construct(secp256r1::fixture, strategy).await;
+        });
     }
 
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)

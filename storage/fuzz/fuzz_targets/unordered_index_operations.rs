@@ -8,7 +8,7 @@ use commonware_storage::{
 };
 use commonware_utils::FuzzRng;
 use libfuzzer_sys::fuzz_target;
-use rand::RngCore;
+use rand::Rng;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum TranslatorChoice {

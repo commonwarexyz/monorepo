@@ -296,7 +296,7 @@ jobs:
           - name: x86_64
             os: ubuntu-latest
           - name: arm64
-            os: macos-latest
+            os: ubuntu-24.04-arm
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4

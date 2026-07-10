@@ -131,7 +131,7 @@ mod tests {
         deterministic, telemetry::metrics::has_metric_value, Metrics as _, Runner, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
-    use rand::Rng;
+    use rand::RngExt as _;
     use std::{collections::BTreeMap, num::NonZeroU16};
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 65536;

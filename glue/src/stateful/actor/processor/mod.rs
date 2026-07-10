@@ -44,7 +44,7 @@ use commonware_runtime::{
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::{stream, Stream, StreamExt};
-use rand::Rng;
+use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::Future,

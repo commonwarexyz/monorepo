@@ -36,7 +36,7 @@ use commonware_macros::select;
 use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor};
 use commonware_utils::{channel::mpsc::Receiver as ViewReceiver, sync::Mutex, FuzzRng};
 use futures::future::join_all;
-use rand::Rng;
+use rand::RngExt as _;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
 
 type ByzzReporter<P> =
@@ -49,7 +49,7 @@ type ByzzReporter<P> =
 /// the byzantine validator overlaps the disabled certifier with the existing
 /// adversary instead of adding a new failure to the run.
 fn sample_byzzfuzz_certify(context: &mut deterministic::Context) -> CertifyChoice {
-    match context.gen_range(0..10u32) {
+    match context.random_range(0..10u32) {
         0..=5 => CertifyChoice::Always,
         6..=7 => CertifyChoice::SingleCancel {
             target_idx: BYZANTINE_IDX as u8,
@@ -98,22 +98,22 @@ where
     input.certify = sample_byzzfuzz_certify(context);
 
     // Sample `(c, d, r)` here rather than threading it through `FuzzInput` type.
-    let use_required_bound = context.gen_bool(0.5);
+    let use_required_bound = context.random_bool(0.5);
     let r_bound = if use_required_bound {
         input.required_containers
     } else {
-        let multiplier = context.gen_range(2..=100);
+        let multiplier = context.random_range(2..=100);
         input.required_containers.saturating_mul(multiplier)
     };
 
     let r_max = r_bound.max(input.required_containers);
-    let r = context.gen_range(1..=r_max);
+    let r = context.random_range(1..=r_max);
     let max_per_fault_type = (r / FAULT_INJECTION_RATIO).max(1);
-    let mut c = context.gen_range(0..=max_per_fault_type);
-    let mut d = context.gen_range(0..=max_per_fault_type);
+    let mut c = context.random_range(0..=max_per_fault_type);
+    let mut d = context.random_range(0..=max_per_fault_type);
     // At least one fault type must be active; otherwise the run is a no-op.
     if c == 0 && d == 0 {
-        if context.gen_bool(0.5) {
+        if context.random_bool(0.5) {
             c = 1;
         } else {
             d = 1;
@@ -127,7 +127,7 @@ where
         crate::setup_network::<P>(context, input).await;
 
     let proc_faults = byzz.process_faults(&participants, context);
-    let r_post_gst = context.gen_range(1..=r_max);
+    let r_post_gst = context.random_range(1..=r_max);
 
     log::push(format!(
         "{log_label} schedule: byzantine_idx={} required_containers={} (c,d,r)={:?} certify={:?} network_faults={:?} proc_faults={:?}",

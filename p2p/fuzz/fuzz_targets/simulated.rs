@@ -14,7 +14,7 @@ use commonware_utils::{
     NZUsize,
 };
 use libfuzzer_sys::fuzz_target;
-use rand::Rng;
+use rand::RngExt as _;
 use std::{
     collections::{hash_map, HashMap, HashSet, VecDeque},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -160,7 +160,7 @@ fn fuzz(input: FuzzInput) {
         // Generate peer identities
         let mut peer_pks = Vec::new();
         for _ in 0..num_peers {
-            let private_key = ed25519::PrivateKey::from_seed(context.gen());
+            let private_key = ed25519::PrivateKey::from_seed(context.random());
             peer_pks.push(private_key.public_key());
         }
 

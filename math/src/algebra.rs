@@ -10,7 +10,7 @@ use core::{
     iter,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// Yield all the bits in a u64, from lowest to highest.
 fn yield_bits_le(x: u64) -> impl Iterator<Item = bool> {
@@ -405,7 +405,7 @@ pub trait HashToGroup: CryptoGroup {
     ///
     /// If you have a more efficient implementation, or want more collision security,
     /// override this method.
-    fn rand_to_group(mut rng: impl CryptoRngCore) -> Self {
+    fn rand_to_group(mut rng: impl CryptoRng) -> Self {
         let mut bytes = [0u8; 32];
         rng.fill_bytes(&mut bytes);
         Self::hash_to_group(&[], &bytes)
@@ -421,7 +421,7 @@ pub trait HashToGroup: CryptoGroup {
 /// object as the sampler.
 pub trait Random {
     /// Sample an object uniformly at random.
-    fn random(rng: impl CryptoRngCore) -> Self;
+    fn random(rng: impl CryptoRng) -> Self;
 }
 
 #[cfg(any(test, feature = "arbitrary"))]

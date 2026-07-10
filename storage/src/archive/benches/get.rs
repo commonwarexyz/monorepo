@@ -7,9 +7,10 @@ use commonware_runtime::{
     Runner,
 };
 use commonware_storage::archive::{Archive as ArchiveTrait, Identifier};
+use commonware_utils::TestRng;
 use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the archive.
@@ -24,19 +25,19 @@ const READS: [usize; 1] = [1_000];
 const READS: [usize; 3] = [1_000, 10_000, 50_000];
 
 fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
     let mut selected_keys = Vec::with_capacity(reads);
     for _ in 0..reads {
-        selected_keys.push(keys[rng.gen_range(0..ITEMS as usize)].clone());
+        selected_keys.push(keys[rng.random_range(0..ITEMS as usize)].clone());
     }
     selected_keys
 }
 
 fn select_indices(reads: usize) -> Vec<u64> {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
     let mut selected_indices = Vec::with_capacity(reads);
     for _ in 0..reads {
-        selected_indices.push(rng.gen_range(0..ITEMS));
+        selected_indices.push(rng.random_range(0..ITEMS));
     }
     selected_indices
 }

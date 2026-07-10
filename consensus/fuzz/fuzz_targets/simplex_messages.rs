@@ -28,8 +28,8 @@ use commonware_cryptography::{
     sha256,
 };
 use commonware_parallel::Sequential;
+use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 use std::{
     collections::hash_map::DefaultHasher,
     fmt::Debug,
@@ -263,7 +263,7 @@ where
     let view = activity.view();
     let epoch = activity.epoch();
     let verified = activity.verified();
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = TestRng::new(0);
     assert!(activity.verify(&mut rng, scheme, &Sequential));
     assert_hash(&activity);
     let encoded = activity.encode();
@@ -486,7 +486,7 @@ where
         vec![notarization],
         vec![nullification],
     );
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = TestRng::new(0);
     assert!(response.verify(&mut rng, &schemes[0], &Sequential));
     assert_backfiller_roundtrip(&schemes[0], Backfiller::Response(response), 2);
 
@@ -913,7 +913,7 @@ fn structured_case(
     signer: u8,
     proposal: Proposal<sha256::Digest>,
 ) {
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut rng = TestRng::new(seed);
     let n = structured_participants(participants);
     match scheme {
         StructuredScheme::Ed25519 => {

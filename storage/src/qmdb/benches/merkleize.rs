@@ -17,7 +17,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Supervisor as _, ThreadPooler,
+    BufferPooler, Strategizer, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -25,9 +25,8 @@ use commonware_storage::{
     qmdb::any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
 use std::{
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -286,13 +285,13 @@ const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
 const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(ctx: &(impl BufferPooler + ThreadPooler), pc: CacheRef) -> full::Config<Rayon> {
+fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Config<Rayon> {
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
-        strategy: ctx.create_strategy(THREADS).unwrap(),
+        strategy: ctx.strategy(THREADS),
         page_cache: pc,
     }
 }
@@ -320,7 +319,7 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
 // -- DB constructors (eliminates repeated config boilerplate in match arms) --
 
 fn any_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
@@ -333,7 +332,7 @@ fn any_fix_cfg(
 }
 
 fn any_var_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
@@ -346,7 +345,7 @@ fn any_var_cfg(
 }
 
 fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
@@ -360,7 +359,7 @@ fn cur_fix_cfg(
 }
 
 fn cur_var_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + Strategizer),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
     let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
@@ -393,7 +392,7 @@ async fn run_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>
         db.sync().await.unwrap();
     }
     let num_updates = num_keys / 10;
-    let mut rng = StdRng::seed_from_u64(99);
+    let mut rng = TestRng::new(99);
     let mut total = Duration::ZERO;
     for _ in 0..iters {
         let start = Instant::now();
@@ -419,7 +418,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
 ) -> Duration {
     seed_db(&mut db, num_keys).await;
     let num_updates = num_keys / 10;
-    let mut rng = StdRng::seed_from_u64(99);
+    let mut rng = TestRng::new(99);
 
     for _ in 0..churn_batches {
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
@@ -463,7 +462,7 @@ async fn run_chained_bench<
         db.sync().await.unwrap();
     }
     let num_updates = num_keys / 10;
-    let mut rng = StdRng::seed_from_u64(99);
+    let mut rng = TestRng::new(99);
     let mut total = Duration::ZERO;
     for _ in 0..iters {
         // Build and merkleize parent (not timed).

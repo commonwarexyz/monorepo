@@ -1,8 +1,9 @@
 use commonware_cryptography::{sha256, Hasher, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
+use commonware_utils::test_rng;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::seq::IndexedRandom;
 
 const SAMPLE_SIZE: usize = 100;
 
@@ -11,7 +12,7 @@ fn bench_prove_multi(c: &mut Criterion) {
         // Populate Binary Merkle Tree
         let mut builder = Builder::<Sha256>::new(n);
         let mut queries = Vec::with_capacity(n);
-        let mut sampler = StdRng::seed_from_u64(0);
+        let mut sampler = test_rng();
         for pos in 0..n {
             let element = sha256::Digest::random(&mut sampler);
             builder.add(&element);
@@ -26,10 +27,8 @@ fn bench_prove_multi(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
-                        let samples: Vec<_> = queries
-                            .choose_multiple(&mut sampler, SAMPLE_SIZE)
-                            .cloned()
-                            .collect();
+                        let samples: Vec<_> =
+                            queries.sample(&mut sampler, SAMPLE_SIZE).cloned().collect();
                         let positions: Vec<u32> = samples.iter().map(|(pos, _)| *pos).collect();
                         let proof = tree.multi_proof(&positions).unwrap();
                         (samples, proof)

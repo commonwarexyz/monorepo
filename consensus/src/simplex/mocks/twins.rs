@@ -77,7 +77,7 @@ use crate::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::ordered::Set;
-use rand::{seq::SliceRandom, Rng};
+use rand::{seq::SliceRandom, Rng, RngExt as _};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -1207,7 +1207,7 @@ fn sample_unique_indices(rng: &mut impl Rng, total: u128, samples: usize) -> Vec
     let mut sampled = Vec::with_capacity(samples);
     let mut seen = HashSet::with_capacity(samples);
     for idx in (total - samples as u128)..total {
-        let candidate = rng.gen_range(0..=idx);
+        let candidate = rng.random_range(0..=idx);
         if seen.insert(candidate) {
             sampled.push(candidate);
         } else {
@@ -1232,7 +1232,7 @@ mod tests {
         types::Epoch,
     };
     use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
-    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded};
+    use commonware_utils::{ordered::Set, test_rng, TestRng};
     use std::collections::HashSet;
 
     fn round(_: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
@@ -1890,7 +1890,7 @@ mod tests {
     fn unique_index_sampling_handles_near_full_ranges() {
         let total = 100_000u128;
         let samples = 99_999usize;
-        let mut rng = test_rng_seeded(9);
+        let mut rng = TestRng::new(9);
         let sampled = sample_unique_indices(&mut rng, total, samples);
         assert_eq!(sampled.len(), samples);
         assert_eq!(

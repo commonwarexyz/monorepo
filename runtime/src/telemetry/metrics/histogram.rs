@@ -2,7 +2,7 @@
 
 use super::{raw, Histogram, MetricsExt as _};
 use crate::{Clock, Metrics};
-use std::{sync::Arc, time::SystemTime};
+use std::{future::Future, sync::Arc, time::SystemTime};
 
 /// Convenience methods for Prometheus histograms.
 pub trait HistogramExt {
@@ -80,10 +80,14 @@ impl Timed {
         }
     }
 
-    /// Time an operation, recording only if it returns `Some`.
-    pub fn time_some<C: Clock, T, F: FnOnce() -> Option<T>>(&self, clock: &C, f: F) -> Option<T> {
+    /// Time an operation, recording a sample only if it resolves to `Some`.
+    pub async fn time_some<C: Clock, T>(
+        &self,
+        clock: &C,
+        op: impl Future<Output = Option<T>>,
+    ) -> Option<T> {
         let start = clock.current();
-        let result = f();
+        let result = op.await;
         if result.is_some() {
             self.histogram.observe_between(start, clock.current());
         }

@@ -64,18 +64,18 @@ use crate::{
         Panicker,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Name, Panicked,
-    Spawner as _, Supervisor as _, METRICS_PREFIX,
+    METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::{
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
-    SystemTimeExt,
+    Cached, SystemTimeExt,
 };
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
@@ -86,12 +86,12 @@ use futures::{
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
-use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
-use rand_core::CryptoRngCore;
+use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
+    convert::Infallible,
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -183,7 +183,7 @@ impl Auditor {
 }
 
 /// A dynamic RNG that can safely be sent between threads.
-pub type BoxDynRng = Box<dyn CryptoRngCore + Send + 'static>;
+pub type BoxDynRng = Box<dyn CryptoRng + Send + 'static>;
 
 /// Configuration for the `deterministic` runtime.
 pub struct Config {
@@ -1164,26 +1164,44 @@ impl crate::Spawner for Context {
     }
 }
 
-impl crate::ThreadPooler for Context {
-    fn create_thread_pool(
-        &self,
-        concurrency: NonZeroUsize,
-    ) -> Result<ThreadPool, ThreadPoolBuildError> {
-        let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
+// Rayon permits one permanent registry registration per OS thread. Cache the pool that
+// registered the executor thread so later requests and runners reuse it.
+commonware_utils::thread_local_cache!(static THREAD_POOL: ThreadPool);
 
-        if rayon::current_thread_index().is_none() {
-            builder = builder.use_current_thread()
-        }
+/// Returns the single-threaded pool the executor thread registered with, created on first use.
+///
+/// All pool work executes inline on the executor thread, so a larger pool would only
+/// add permanently unstarted workers.
+fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
+    let pool = Cached::take(
+        &THREAD_POOL,
+        || {
+            ThreadPoolBuilder::new()
+                .num_threads(1)
+                .use_current_thread()
+                .build()
+                .map(Arc::new)
+        },
+        |_| Ok(()),
+    )?;
+    Ok(Arc::clone(&pool))
+}
 
-        builder
-            .spawn_handler(move |thread| {
-                self.child("rayon_thread")
-                    .dedicated()
-                    .spawn(move |_| async move { thread.run() });
-                Ok(())
-            })
-            .build()
-            .map(Arc::new)
+/// Spawning threads would be nondeterministic, so the pool has no background workers. The
+/// executor thread registers itself as its sole member and all work executes inline.
+///
+/// Rayon's current-thread registration is permanent and per-OS-thread, so only one pool
+/// can ever execute work on the executor thread. Every request (including from a later
+/// runner on the same thread) returns a strategy on that single-threaded pool with its
+/// planning parallelism set independently. This controls adaptive decisions and manual
+/// partitioning hints while Rayon executes on the sole registered thread. The returned
+/// strategy is therefore tied to the executor thread.
+impl crate::Strategizer for Context {
+    fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
+        Rayon::with_pool(
+            shared_thread_pool().expect("failed to create deterministic Rayon thread pool"),
+        )
+        .with_parallelism(parallelism)
     }
 }
 
@@ -1480,44 +1498,38 @@ impl crate::Resolver for Context {
     }
 }
 
-impl RngCore for Context {
-    fn next_u32(&mut self) -> u32 {
+impl TryRng for Context {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
         let result = executor.rng.lock().next_u32();
-        result
+        Ok(result)
     }
 
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
         let result = executor.rng.lock().next_u64();
-        result
+        Ok(result)
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         let executor = self.executor();
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
         executor.rng.lock().fill_bytes(dest);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        let executor = self.executor();
-        executor.auditor.event(b"rand", |hasher| {
-            hasher.update(b"try_fill_bytes");
-        });
-        let result = executor.rng.lock().try_fill_bytes(dest);
-        result
+        Ok(())
     }
 }
 
-impl CryptoRng for Context {}
+impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
@@ -1555,7 +1567,10 @@ mod tests {
     use super::*;
     #[cfg(feature = "external")]
     use crate::FutureExt;
-    use crate::{deterministic, reschedule, Blob, Metrics as _, Resolver, Runner as _, Storage};
+    use crate::{
+        deterministic, reschedule, Blob, Metrics as _, Resolver, Runner as _, Spawner as _,
+        Storage, Supervisor as _,
+    };
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;

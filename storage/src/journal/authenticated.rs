@@ -300,9 +300,33 @@ where
         }
     }
 
-    /// Borrow the committed Mem through the read lock.
-    pub(crate) fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, H::Digest>) -> R) -> R {
-        self.merkle.with_mem(f)
+    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound
+    /// job submitted through [`Strategy::spawn`].
+    ///
+    /// The job hashes against an immutable snapshot of the committed Merkle state, so a
+    /// parallel strategy hosts the batch's dominant CPU phase on its own pool instead of
+    /// occupying the calling task. If the caller is cancelled mid-job, the job still runs to
+    /// completion against its snapshot and the result is discarded (a panic inside the job is
+    /// caught by [`Strategy::spawn`] and only propagates to a caller that awaits it).
+    pub(crate) async fn merkleize(
+        &self,
+        batch: UnmerkleizedBatch<F, H, C::Item, S>,
+        items: Vec<C::Item>,
+        inactive_peaks: usize,
+    ) -> Result<(MerkleizedBatchArc<F, H, C::Item, S>, H::Digest), merkle::Error<F>>
+    where
+        C::Item: 'static,
+    {
+        let mem = self.merkle.snapshot();
+        let hasher = self.hasher.clone();
+        let strategy = self.strategy().clone();
+        strategy
+            .spawn(move |_| {
+                let merkleized = batch.add_many(items).merkleize(&mem);
+                let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
+                Ok((merkleized, root))
+            })
+            .await
     }
 
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.
@@ -640,9 +664,14 @@ where
     /// Destroy the authenticated journal, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
+        // `try_join!` contains an await boundary, so destructure first to avoid
+        // stack growth from retaining the entire `self` in the future.
+        let Self {
+            journal, merkle, ..
+        } = self;
         try_join!(
-            self.journal.destroy().map_err(Error::Journal),
-            self.merkle.destroy().map_err(Error::Merkle),
+            journal.destroy().map_err(Error::Journal),
+            merkle.destroy().map_err(Error::Merkle),
         )?;
 
         Ok(())
@@ -741,7 +770,10 @@ where
         // acquisition per blob a shard touches). The sortedness assert keeps contract
         // violations deterministic: past it, a non-increasing batch would only trip per-shard
         // validation when an inversion lands inside a single shard.
-        crate::journal::assert_positions_increasing(positions);
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
         let strategy = self.strategy();
         let journal = &self.journal;
         let mut items = strategy.run(
@@ -749,7 +781,7 @@ where
             || journal.try_read_many_sync(positions),
             || {
                 let manual = strategy.manual();
-                let shard = positions.len().div_ceil(manual.parallelism_hint());
+                let shard = positions.len().div_ceil(manual.parallelism());
                 let shards = manual
                     .map_collect_vec(positions.chunks(shard).collect::<Vec<_>>(), |shard| {
                         journal.try_read_many_sync(shard)
@@ -913,7 +945,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Supervisor as _, ThreadPooler as _,
+        BufferPooler, Runner as _, Strategizer as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::StreamExt as _;
@@ -1038,7 +1070,7 @@ mod tests {
             // exercises the sharded sync path. The tiny test page cache pushes most
             // positions through the batched miss fallback while the write buffer serves
             // the tail synchronously.
-            let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+            let strategy = context.strategy(NZUsize!(2));
             let merkle_cfg = merkle_config_with("shard", &context, strategy);
             let journal_cfg = journal_config("shard", &context);
             type RayonJournal = Journal<

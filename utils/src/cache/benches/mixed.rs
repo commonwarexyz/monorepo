@@ -1,6 +1,6 @@
-use commonware_utils::cache::Clock;
+use commonware_utils::{cache::Clock, TestRng};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::RngExt as _;
 use std::{hint::black_box, num::NonZeroUsize};
 
 /// Benchmarks a read-heavy mix under churn: 8 hits per miss insert, so resident
@@ -12,14 +12,14 @@ fn bench_mixed(c: &mut Criterion) {
         for i in 0..capacity as u64 {
             cache.put(i, i);
         }
-        let mut rng = StdRng::seed_from_u64(capacity as u64);
+        let mut rng = TestRng::new(capacity as u64);
         // Each round reads 8 keys biased to the resident range, then inserts one
         // key from far outside it (a guaranteed miss that evicts).
         let rounds: Vec<([u64; 8], u64)> = (0..1024)
             .map(|round| {
                 let mut reads = [0u64; 8];
                 for slot in &mut reads {
-                    *slot = rng.gen_range(0..capacity as u64);
+                    *slot = rng.random_range(0..capacity as u64);
                 }
                 (reads, u64::MAX - round)
             })

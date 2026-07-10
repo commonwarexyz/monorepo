@@ -8,10 +8,9 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{ordered::Set, Faults, N3f1, NZUsize, TryCollect};
+use commonware_utils::{ordered::Set, test_rng, Faults, N3f1, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{collections::BTreeMap, hint::black_box};
 
 type V = MinSig;
@@ -23,7 +22,7 @@ struct Bench {
 }
 
 impl Bench {
-    fn new(mut rng: impl CryptoRngCore, reshare: bool, n: u32) -> Self {
+    fn new(mut rng: impl CryptoRng, reshare: bool, n: u32) -> Self {
         let private_keys = (0..n)
             .map(|_| PrivateKey::random(&mut rng))
             .collect::<Vec<_>>();
@@ -121,7 +120,7 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
     } else {
         "_recovery"
     };
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     for &n in CONTRIBUTORS {
         let t = N3f1::quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
@@ -140,7 +139,7 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
                     b.iter_batched(
                         || bench.pre_finalize(),
                         |(player, logs)| {
-                            let mut finalize_rng = StdRng::seed_from_u64(0);
+                            let mut finalize_rng = test_rng();
                             if concurrency > 1 {
                                 black_box(
                                     player

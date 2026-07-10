@@ -20,7 +20,7 @@ use crate::{
 };
 use commonware_consensus::types::View;
 use commonware_cryptography::PublicKey;
-use rand::{seq::SliceRandom, Rng};
+use rand::{seq::SliceRandom, Rng, RngExt as _};
 
 fn receiver_candidates<P: PublicKey>(participants: &[P]) -> Vec<P> {
     participants
@@ -33,7 +33,7 @@ fn receiver_candidates<P: PublicKey>(participants: &[P]) -> Vec<P> {
 
 fn sample_receivers<P: PublicKey>(candidates: &[P], rng: &mut impl Rng) -> Vec<P> {
     let nonempty_subsets = (1u32 << candidates.len()) - 1;
-    let mask = rng.gen_range(1..=nonempty_subsets);
+    let mask = rng.random_range(1..=nonempty_subsets);
     (0..candidates.len())
         .filter(|i| (mask >> i) & 1 == 1)
         .map(|i| candidates[i].clone())
@@ -43,7 +43,7 @@ fn sample_receivers<P: PublicKey>(candidates: &[P], rng: &mut impl Rng) -> Vec<P
 fn sample_action(scope: MessageScope, rng: &mut impl Rng) -> ProcessAction {
     match scope {
         MessageScope::Certificate(_) => ProcessAction::Omit,
-        _ if rng.gen_bool(0.25) => ProcessAction::Omit,
+        _ if rng.random_bool(0.25) => ProcessAction::Omit,
         _ => ProcessAction::MutateVote,
     }
 }
@@ -81,7 +81,7 @@ impl ByzzFuzz {
             .take(take)
             .map(|view| {
                 // 14 non-trivial partitions live at N4[1..15].
-                let idx = rng.gen_range(1..15);
+                let idx = rng.random_range(1..15);
                 NetworkFault {
                     view: View::new(view),
                     partition: SetPartition::n4(idx),
@@ -113,7 +113,7 @@ impl ByzzFuzz {
         }
         (0..self.c)
             .map(|_| {
-                let view = rng.gen_range(1..=self.r);
+                let view = rng.random_range(1..=self.r);
                 let scope = scope::sample(rng);
                 ProcessFault {
                     view,

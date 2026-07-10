@@ -19,9 +19,8 @@ use commonware_runtime::{
     BufferPooler, Supervisor as _,
 };
 use commonware_storage::merkle::{self, full, Bagging::ForwardFold, Family};
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{test_rng, NZUsize, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
 use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::{Duration, Instant},
@@ -63,7 +62,7 @@ fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
             b.to_async(&runner).iter_custom(move |iters| async move {
                 let ctx = context::get::<Context>();
                 let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-                let mut rng = StdRng::seed_from_u64(0);
+                let mut rng = test_rng();
                 let mut total = Duration::ZERO;
 
                 // `iters` is the number of flushes to time. Rebuild a fresh structure every

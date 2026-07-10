@@ -12,7 +12,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
 };
 use commonware_utils::ordered::Quorum;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -220,7 +220,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
 /// (`0..faults`); only correct nodes (`faults..n`) are checked for equivocation.
 pub fn check_vote_invariants<E, S, L>(faults: usize, reporters: &[Reporter<E, S, L, Sha256Digest>])
 where
-    E: CryptoRngCore,
+    E: CryptoRng,
     S: Scheme<Sha256Digest>,
     S::PublicKey: Eq + Hash + Clone,
     L: Elector<S>,
@@ -231,7 +231,7 @@ where
 
 pub fn check_no_invalid_reports<E, S, L>(reporters: &[Reporter<E, S, L, Sha256Digest>])
 where
-    E: CryptoRngCore,
+    E: CryptoRng,
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
 {
@@ -244,7 +244,7 @@ pub fn check_no_invalid_reports_if_no_faults<E, S, L>(
     faults: u32,
     reporters: &[Reporter<E, S, L, Sha256Digest>],
 ) where
-    E: CryptoRngCore,
+    E: CryptoRng,
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
 {
@@ -262,7 +262,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     byzantine: &HashSet<usize>,
     reporters: &[Reporter<E, S, L, Sha256Digest>],
 ) where
-    E: CryptoRngCore,
+    E: CryptoRng,
     S: Scheme<Sha256Digest>,
     S::PublicKey: Eq + Hash + Clone,
     L: Elector<S>,
@@ -373,7 +373,7 @@ pub fn extract<E, S, L>(
     max_participants: usize,
 ) -> Vec<ReplicaState>
 where
-    E: CryptoRngCore,
+    E: CryptoRng,
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
 {

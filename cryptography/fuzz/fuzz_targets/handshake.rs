@@ -12,6 +12,7 @@ use commonware_cryptography::{
     transcript::Transcript,
     Signer,
 };
+use commonware_utils::FuzzRng;
 use libfuzzer_sys::fuzz_target;
 use std::ops::Range;
 
@@ -102,52 +103,6 @@ where
     let mut buf = Bytes::from(encoded);
     T::read_cfg(&mut buf, &()).ok()
 }
-
-struct FuzzRng {
-    bytes: Vec<u8>,
-    index: usize,
-}
-
-impl FuzzRng {
-    fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes, index: 0 }
-    }
-}
-
-impl rand::RngCore for FuzzRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut bytes = [0u8; 4];
-        self.fill_bytes(&mut bytes);
-        u32::from_le_bytes(bytes)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut bytes = [0u8; 8];
-        self.fill_bytes(&mut bytes);
-        u64::from_le_bytes(bytes)
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        for byte in dest.iter_mut() {
-            if self.index >= self.bytes.len() {
-                self.index = 0;
-            }
-            if self.bytes.is_empty() {
-                *byte = 0;
-            } else {
-                *byte = self.bytes[self.index];
-                self.index = (self.index + 1) % self.bytes.len();
-            }
-        }
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-}
-
-impl rand::CryptoRng for FuzzRng {}
 
 fn private_key_from_bytes(bytes: &[u8; PRIVATE_KEY_SIZE]) -> Option<PrivateKey> {
     use commonware_codec::ReadExt;

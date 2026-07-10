@@ -3,7 +3,7 @@
 
 use commonware_consensus::simplex::types::{Certificate, Vote};
 use commonware_cryptography::{sha256::Digest as Sha256Digest, PublicKey};
-use rand::Rng;
+use rand::{Rng, RngExt as _};
 
 /// `MessageScope::Any` weight in [`sample`].
 const ANY_SCOPE_WEIGHT: u32 = 50;
@@ -82,14 +82,14 @@ impl MessageScope {
 /// [`VOTE_KINDS`] / [`CERTIFICATE_KINDS`] so a new variant added to either
 /// list is automatically covered.
 pub fn sample(rng: &mut impl Rng) -> MessageScope {
-    let bucket = rng.gen_range(0..TOTAL_SCOPE_WEIGHT);
+    let bucket = rng.random_range(0..TOTAL_SCOPE_WEIGHT);
     if bucket < ANY_SCOPE_WEIGHT {
         MessageScope::Any
     } else if bucket < ANY_SCOPE_WEIGHT + VOTE_SCOPE_WEIGHT {
-        let k = VOTE_KINDS[rng.gen_range(0..VOTE_KINDS.len())];
+        let k = VOTE_KINDS[rng.random_range(0..VOTE_KINDS.len())];
         MessageScope::Vote(k)
     } else {
-        let k = CERTIFICATE_KINDS[rng.gen_range(0..CERTIFICATE_KINDS.len())];
+        let k = CERTIFICATE_KINDS[rng.random_range(0..CERTIFICATE_KINDS.len())];
         MessageScope::Certificate(k)
     }
 }

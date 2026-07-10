@@ -16,11 +16,11 @@ use commonware_runtime::{
     deterministic, Buf, BufMut, Clock, IoBuf, Quota, Runner, Spawner as _, Supervisor as _,
 };
 use commonware_utils::{
-    channel::oneshot, futures::Pool, ordered::Set, vec::Bounded, FuzzRng, NZUsize,
+    channel::oneshot, futures::Pool, ordered::Set, vec::Bounded, FuzzRng, NZUsize, TestRng,
 };
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
-use rand::{seq::SliceRandom, SeedableRng};
+use rand::seq::SliceRandom;
 use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
 /// Default rate limit set high enough to not interfere with normal operation
@@ -327,7 +327,7 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
             Recipients::One(peers[index].clone())
         }
         RecipientPattern::Some(seed) => {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(*seed);
+            let mut rng = TestRng::new(*seed);
             let mut shuffled_peers = peers.to_vec();
             shuffled_peers.shuffle(&mut rng);
 

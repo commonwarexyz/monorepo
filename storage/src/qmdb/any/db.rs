@@ -234,7 +234,7 @@ where
             || self.resolve_cached(keys, &map, 0),
             || {
                 let manual = strategy.manual();
-                let chunk = keys.len().div_ceil(manual.parallelism_hint());
+                let chunk = keys.len().div_ceil(manual.parallelism());
                 let shards = manual.map_collect_vec(
                     keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
                     |(ci, shard_keys)| self.resolve_cached(shard_keys, &map, ci * chunk),
@@ -841,6 +841,9 @@ where
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), crate::qmdb::Error<F>> {
-        self.log.destroy().await.map_err(Into::into)
+        // Destructure before the await boundary to avoid stack growth from
+        // retaining the entire `self` in the future.
+        let Self { log, .. } = self;
+        log.destroy().await.map_err(Into::into)
     }
 }
