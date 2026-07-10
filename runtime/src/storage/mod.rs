@@ -267,12 +267,13 @@ stability_scope!(BETA {
         ///
         /// A torn creation can only leave a subset of the canonical header-region bytes a
         /// writer produces (writes tear at any point, and unsynced pages flush in any order),
-        /// with every unflushed byte zero. Each byte is therefore required to be zero or its
-        /// canonical value: the magic and runtime version are fixed; the data offset, if any of
-        /// its bytes persisted, must be a supported power of two whose region covers the file;
-        /// and everything past the 16-byte header must be zero. The blob version bytes are
-        /// unconstrained (the version is application-chosen, so any value is canonical for some
-        /// writer), and so are the CRC bytes (a CRC over an unknown version is unknown).
+        /// with every unflushed byte zero. The file must therefore be a zero-subset of ONE
+        /// canonical image: the magic and runtime version are fixed; the data offset, if any
+        /// of its bytes persisted, must be a supported power of two whose region covers the
+        /// file; everything past the 16-byte header must be zero; and any persisted CRC bytes
+        /// must agree with a single candidate image (some blob version and offset consistent
+        /// with every other persisted byte). Bytes from two different valid headers cannot
+        /// both survive.
         ///
         /// Only meaningful for contents whose header failed to parse. Accepting a file implies
         /// it holds no synced data: a synced V1 blob has a durable, parseable header and its
@@ -296,25 +297,80 @@ stability_scope!(BETA {
                 }
             }
 
+            // Zero padding (bytes 16 to the data offset).
+            if raw.len() > 16 && raw[16..].iter().any(|&byte| byte != 0) {
+                return false;
+            }
+
             // Data offset (bytes 8-11): a power of two has a single nonzero byte, so a
             // nonzero persisted value must equal a supported offset exactly, and the file
-            // cannot extend past the region that offset defines.
+            // cannot extend past the region that offset defines. Unpersisted bytes leave
+            // every supported offset covering the file as a candidate.
             let mut offset_bytes = [0u8; 4];
             if raw.len() > 8 {
                 let persisted_len = raw.len().min(12) - 8;
                 offset_bytes[..persisted_len].copy_from_slice(&raw[8..8 + persisted_len]);
             }
             let offset = u32::from_be_bytes(offset_bytes) as u64;
-            if offset != 0
-                && (!offset.is_power_of_two()
+            let offsets: Vec<u32> = if offset != 0 {
+                if !offset.is_power_of_two()
                     || !Self::SUPPORTED_DATA_OFFSETS.contains(&offset)
-                    || raw.len() as u64 > offset)
-            {
-                return false;
-            }
+                    || raw.len() as u64 > offset
+                {
+                    return false;
+                }
+                vec![offset as u32]
+            } else {
+                let mut candidate = *Self::SUPPORTED_DATA_OFFSETS.start();
+                let mut offsets = Vec::new();
+                while candidate <= *Self::SUPPORTED_DATA_OFFSETS.end() {
+                    if candidate >= raw.len() as u64 {
+                        offsets.push(candidate as u32);
+                    }
+                    candidate <<= 1;
+                }
+                offsets
+            };
 
-            // Zero padding (bytes 16 to the data offset).
-            raw.len() <= 16 || raw[16..].iter().all(|&byte| byte == 0)
+            // CRC (bytes 12-15): persisted bytes must agree with the CRC of a single
+            // candidate image, over some blob version consistent with the persisted version
+            // bytes (6-7). All-zero CRC bytes are consistent with any image; otherwise the
+            // (rare, unparseable-header-only) search below is bounded by 2^16 versions per
+            // candidate offset.
+            let mut crc_bytes = [0u8; 4];
+            if raw.len() > 12 {
+                let persisted_len = raw.len().min(16) - 12;
+                crc_bytes[..persisted_len].copy_from_slice(&raw[12..12 + persisted_len]);
+            }
+            if crc_bytes.iter().all(|&byte| byte == 0) {
+                return true;
+            }
+            let version_byte = |index: usize| raw.get(index).copied().filter(|&byte| byte != 0);
+            let (hi, lo) = (version_byte(6), version_byte(7));
+            let mut image = [0u8; 12];
+            image[..4].copy_from_slice(&BlobHeaderLayout::V1.magic());
+            image[4..6].copy_from_slice(&BlobHeaderLayout::V1.runtime_version().to_be_bytes());
+            for offset in offsets {
+                image[8..12].copy_from_slice(&offset.to_be_bytes());
+                for version in 0..=u16::MAX {
+                    let bytes = version.to_be_bytes();
+                    if hi.is_some_and(|byte| byte != bytes[0])
+                        || lo.is_some_and(|byte| byte != bytes[1])
+                    {
+                        continue;
+                    }
+                    image[6..8].copy_from_slice(&bytes);
+                    let crc = Crc32::checksum(&image).to_be_bytes();
+                    if crc_bytes
+                        .iter()
+                        .zip(crc)
+                        .all(|(&byte, expected)| byte == 0 || byte == expected)
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
         }
 
         /// Creates the header region for a new blob using the latest version from the range and
@@ -942,6 +998,18 @@ pub(crate) mod tests {
                 "longer than any header region",
                 vec![0u8; (*Header::SUPPORTED_DATA_OFFSETS.end() + 1) as usize],
             ),
+            ("mixed images: version from one, CRC from another", {
+                // No single torn write can produce bytes from two different valid headers.
+                let mut raw = v1_blob_bytes(Header::V1_DATA_OFFSET, 5, b"");
+                let other = v1_blob_bytes(Header::V1_DATA_OFFSET, 6, b"");
+                raw[12..16].copy_from_slice(&other[12..16]);
+                raw
+            }),
+            ("corrupted CRC byte on an intact header", {
+                let mut raw = v1_blob_bytes(Header::V1_DATA_OFFSET, 5, b"");
+                raw[13] = raw[13].wrapping_add(1).max(1);
+                raw
+            }),
         ];
         for (label, raw) in cases {
             assert!(
