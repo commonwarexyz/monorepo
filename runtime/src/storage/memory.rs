@@ -387,43 +387,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_blob_nondefault_data_offset() {
-        let storage = Storage::new(test_pool());
-
-        // Insert a blob whose header records a larger data offset than this build writes, as
-        // a future writer would produce it.
-        let data_offset = 4 * Header::V1_DATA_OFFSET;
-        let payload = b"from the future";
-        {
-            let mut partitions = storage.partitions.lock();
-            let partition = partitions.entry("partition".into()).or_default();
-            partition.insert(
-                b"future".to_vec(),
-                crate::storage::tests::v1_blob_bytes(data_offset, 0, payload),
-            );
-        }
-
-        // The blob opens with the recorded offset: the logical size covers only the payload,
-        // and reads and writes translate against it.
-        let (blob, size) = storage.open("partition", b"future").await.unwrap();
-        assert_eq!(size, payload.len() as u64);
-        assert_eq!(
-            blob.read_at(0, payload.len()).await.unwrap().coalesce(),
-            payload
-        );
-        blob.write_at(size, b"!").await.unwrap();
-        blob.sync().await.unwrap();
-        drop(blob);
-
-        let (blob, size) = storage.open("partition", b"future").await.unwrap();
-        assert_eq!(size, payload.len() as u64 + 1);
-        assert_eq!(
-            blob.read_at(0, size as usize).await.unwrap().coalesce(),
-            b"from the future!"
-        );
-    }
-
-    #[tokio::test]
     async fn test_blob_magic_mismatch() {
         let storage = Storage::new(test_pool());
 
@@ -446,13 +409,11 @@ mod tests {
     async fn test_blob_torn_creation_recovers() {
         let storage = Storage::new(test_pool());
 
-        // Manually insert a torn-creation leftover: a writeback-subset of a canonical V1
-        // header region (the full state enumeration lives in the Header::interrupted_creation
+        // Manually insert a torn-creation leftover: a prefix of a canonical V1 header
+        // region (the full state enumeration lives in the Header::interrupted_creation
         // unit tables)
         let (region, _) = Header::create(&(0..=0));
-        let mut torn_version = region;
-        torn_version[5] = 0;
-        let states = [torn_version];
+        let states = [region[..10].to_vec()];
         for (i, state) in states.into_iter().enumerate() {
             let name = format!("torn_{i}").into_bytes();
             {
@@ -481,5 +442,24 @@ mod tests {
             assert_eq!(read.coalesce(), b"data");
             drop(blob);
         }
+    }
+
+    #[tokio::test]
+    async fn test_blob_zero_payload_with_lost_crc_stays_corrupt() {
+        let storage = Storage::new(test_pool());
+
+        // A synced V1 blob whose payload is all zeros, with the header's CRC bytes
+        // rotted away: the file extends past the header region, so healing it would
+        // erase the payload.
+        let mut raw = crate::storage::tests::v1_blob_bytes(0, &[0u8; 100]);
+        raw[8..12].fill(0);
+        {
+            let mut partitions = storage.partitions.lock();
+            let partition = partitions.entry("partition".into()).or_default();
+            partition.insert(b"rotted".to_vec(), raw);
+        }
+
+        let result = storage.open("partition", b"rotted").await;
+        assert!(matches!(result, Err(crate::Error::BlobCorrupt(_, _, _))));
     }
 }

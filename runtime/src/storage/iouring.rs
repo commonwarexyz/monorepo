@@ -63,9 +63,9 @@ fn resolve_header(
     };
 
     // The header failed to parse: read the full contents to distinguish a torn creation from
-    // corruption. Files longer than any header region hold data and are never torn creations,
+    // corruption. Files longer than the creation region hold data and are never torn creations,
     // so the read is bounded.
-    if !err.may_be_torn_creation() || raw_len > *Header::SUPPORTED_DATA_OFFSETS.end() {
+    if !err.may_be_torn_creation() || raw_len > Header::V1_DATA_OFFSET {
         return Err(err.into_error(partition, name));
     }
     let mut raw = vec![0u8; raw_len as usize];
@@ -672,45 +672,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_blob_nondefault_data_offset() {
-        let (storage, storage_directory) = create_test_storage();
-
-        // Write a blob whose header records a larger data offset than this build writes, as a
-        // future writer would produce it.
-        let data_offset = 4 * Header::V1_DATA_OFFSET;
-        let payload = b"from the future";
-        let partition_dir = storage_directory.join("partition");
-        std::fs::create_dir_all(&partition_dir).unwrap();
-        std::fs::write(
-            partition_dir.join(hex(b"future")),
-            crate::storage::tests::v1_blob_bytes(data_offset, 0, payload),
-        )
-        .unwrap();
-
-        // The blob opens with the recorded offset: the logical size covers only the payload,
-        // and reads and writes translate against it.
-        let (blob, size) = storage.open("partition", b"future").await.unwrap();
-        assert_eq!(size, payload.len() as u64);
-        assert_eq!(
-            blob.read_at(0, payload.len()).await.unwrap().coalesce(),
-            payload
-        );
-        blob.write_at(size, b"!".to_vec()).await.unwrap();
-        blob.sync().await.unwrap();
-        drop(blob);
-
-        let (blob, size) = storage.open("partition", b"future").await.unwrap();
-        assert_eq!(size, payload.len() as u64 + 1);
-        assert_eq!(
-            blob.read_at(0, size as usize).await.unwrap().coalesce(),
-            b"from the future!"
-        );
-        drop(blob);
-
-        let _ = std::fs::remove_dir_all(&storage_directory);
-    }
-
-    #[tokio::test]
     async fn test_blob_magic_mismatch() {
         // Verify opening a blob with an invalid runtime header fails as corrupt.
         let (storage, storage_directory) = create_test_storage();
@@ -1265,11 +1226,9 @@ mod tests {
         let path = storage_directory.join("partition").join(hex(b"torn"));
         let region = std::fs::read(&path).unwrap();
 
-        // Simulate a torn creation: a writeback-subset of the canonical header region (the
-        // full state enumeration lives in the Header::interrupted_creation unit tables).
-        let mut torn_version = region.clone();
-        torn_version[5] = 0;
-        let states = [torn_version];
+        // Simulate a torn creation: a prefix of the canonical header region (the full
+        // state enumeration lives in the Header::interrupted_creation unit tables).
+        let states = [region[..10].to_vec()];
         for state in states {
             std::fs::write(&path, &state).unwrap();
             let (blob, size) = storage.open("partition", b"torn").await.unwrap();
@@ -1283,9 +1242,10 @@ mod tests {
             drop(blob);
         }
 
-        // Foreign bytes are corruption, not a torn creation.
-        let mut corrupt = region.clone();
-        corrupt[5] = 0;
+        // Foreign bytes are corruption, not a torn creation: nonzero padding behind a
+        // torn (unparseable) prefix.
+        let mut corrupt = vec![0u8; region.len()];
+        corrupt[..10].copy_from_slice(&region[..10]);
         corrupt[100] = 0xFF;
         std::fs::write(&path, &corrupt).unwrap();
         let result = storage.open("partition", b"torn").await;
