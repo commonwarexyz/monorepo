@@ -3,9 +3,8 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::{Rayon, Sequential, Strategy};
-use commonware_runtime::Strategizer;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Strategizer, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as JournalConfig,
