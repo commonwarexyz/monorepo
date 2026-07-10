@@ -106,7 +106,8 @@ impl Drop for PageFetchGuard {
 /// items. Hints are best-effort, never truth: [Clock::get_at] only resolves a slot that still
 /// holds the page's key live, so entries staled by eviction, invalidation, or hint collisions
 /// read as misses and fall back to the [Clock]'s own lookup. Hints need no maintenance on
-/// eviction or invalidation, and their memory is fixed at construction.
+/// eviction or invalidation, and their memory is fixed at construction, so no blob offset can
+/// grow them.
 struct Cache {
     /// Maps each (blob id, page number) to its logical page buffer.
     cache: Clock<(u64, u64), IoBufMut>,
@@ -365,7 +366,7 @@ impl CacheRef {
                         // This shared future still owns `page_fetches[key]`. As long as at least
                         // one waiter remains armed, that entry pins this generation in place, so a
                         // replacement fetch for the same page cannot be inserted before we cache
-                        // the successful result afterward. Only when every waiter cancels can the last
+                        // the successful result below. Only when every waiter cancels can the last
                         // guard remove the entry and let a later reader start a new generation.
                         let mut cache = cache.write();
                         if let Ok(page) = &result {
@@ -932,7 +933,7 @@ mod tests {
             let data = vec![1u8; MIN_PAGE_SIZE as usize * 2];
 
             // Cache pages at a high (but not max) aligned offset so we can verify both pages.
-            // Use an offset a few pages before max to avoid overflow when verifying.
+            // Use an offset that's a few pages below max to avoid overflow when verifying.
             let aligned_max_offset = u64::MAX - (u64::MAX % MIN_PAGE_SIZE);
             let high_offset = aligned_max_offset - (MIN_PAGE_SIZE * 2);
             let remaining = cache_ref.cache(0, &data, high_offset);

@@ -9,8 +9,8 @@ use crate::{buffer::tip::Buffer, BufferPool, IoBuf};
 /// over one slice. Bytes move left to right exactly once:
 ///
 /// ```text
-///   append ──copy──▶ tip ──freeze full pages──▶ full_pages ──flush──▶ blob + page cache
-///   append_owned (whole pages) ──zero-copy────▶ full_pages
+///   append: copy -> tip -> freeze full pages -> full_pages -> flush -> blob + page cache
+///   append_owned (whole pages): retain without copying -> full_pages
 /// ```
 ///
 /// A flush may write tail bytes before it publishes that progress; cancellation leaves the tail
@@ -56,9 +56,17 @@ impl Tail {
         self.tip.size()
     }
 
-    /// The finished page-aligned bytes awaiting their write.
-    pub(super) fn full_pages(&self) -> &[IoBuf] {
+    /// Return the finished pages awaiting their write.
+    ///
+    /// Moves any full pages from the tip first.
+    pub(super) fn full_pages(&mut self) -> &[IoBuf] {
+        self.spill_full_pages();
         &self.full_pages
+    }
+
+    /// True if the tail contains a full page that has not been written.
+    pub(super) const fn has_full_pages(&self) -> bool {
+        !self.full_pages.is_empty() || self.tip.len() >= self.page_size
     }
 
     /// The tip bytes.
@@ -114,7 +122,7 @@ impl Tail {
     }
 
     /// Move the tip's full-page prefix into immutable storage, leaving its partial suffix.
-    pub(super) fn spill_full_pages(&mut self) {
+    fn spill_full_pages(&mut self) {
         let full_bytes = self.tip.len() / self.page_size * self.page_size;
         if full_bytes == 0 {
             return;

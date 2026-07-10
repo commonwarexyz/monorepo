@@ -52,29 +52,29 @@ use commonware_cryptography::Crc32;
 use std::num::{NonZeroU16, NonZeroUsize};
 use tracing::warn;
 
-/// The state of the tip page's on-disk CRC record.
-enum PartialPage {
-    /// No committed partial page exists; the tip page's record can be written whole.
+/// CRC record for a partial final page already stored in the blob.
+///
+/// This is disk metadata, separate from the writer's in-memory tail.
+enum PartialRecord {
+    /// The blob has no partial final page.
     None,
-    /// The on-disk record is known; flushes write around its authoritative slot.
-    Committed(Checksum),
-    /// A canceled shrink left the on-disk record in an unknown slot state. It must be re-read
-    /// (see [Writer::verify_partial_page]) before any write to the page: writing a whole
-    /// record over an unknown one could tear the disk's authoritative slot.
-    Unverified,
+    /// The record is known; flush preserves its authoritative slot.
+    Known(Checksum),
+    /// Re-read the record before writing this page again.
+    NeedsVerification,
 }
 
-impl PartialPage {
-    /// The committed record, if any.
+impl PartialRecord {
+    /// The known record, if any.
     ///
     /// # Panics
     ///
-    /// Panics on [PartialPage::Unverified]: the record must be verified before use.
+    /// Panics when the record needs verification.
     fn record(&self) -> Option<&Checksum> {
         match self {
             Self::None => None,
-            Self::Committed(record) => Some(record),
-            Self::Unverified => panic!("partial page record must be verified before use"),
+            Self::Known(record) => Some(record),
+            Self::NeedsVerification => panic!("partial record must be verified before use"),
         }
     }
 }
@@ -89,8 +89,8 @@ pub struct Writer<B: Blob> {
     /// The underlying blob being wrapped.
     blob: B,
 
-    /// The state of the tip page's on-disk CRC record.
-    partial_page_state: PartialPage,
+    /// CRC record for the blob's partial final page.
+    partial_record: PartialRecord,
 
     /// Durability state for plain writes, resizes, and range-sync writes.
     sync_state: SyncState,
@@ -110,6 +110,7 @@ impl<B: Blob> Writer<B> {
     const fn current_page(&self) -> u64 {
         self.tail.start() / self.cache_ref.page_size()
     }
+
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.sync_state.write_at(&self.blob, offset, bufs).await
@@ -156,7 +157,7 @@ impl<B: Blob> Writer<B> {
         capacity: usize,
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
-        let (partial_page_state, pages, invalid_data_found) =
+        let (partial_record, pages, invalid_data_found) =
             Self::read_last_valid_page(&blob, original_blob_size, cache_ref.page_size()).await?;
         if invalid_data_found {
             // Invalid data was detected, trim it from the blob.
@@ -171,13 +172,13 @@ impl<B: Blob> Writer<B> {
 
         let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
 
-        let (current_page, partial_page_state, partial_data) = match partial_page_state {
+        let (current_page, partial_record, partial_data) = match partial_record {
             Some((partial_page, crc_record)) => (
                 pages - 1,
-                PartialPage::Committed(crc_record),
+                PartialRecord::Known(crc_record),
                 Some(partial_page),
             ),
-            None => (pages, PartialPage::None, None),
+            None => (pages, PartialRecord::None, None),
         };
 
         let tail = Tail::new(
@@ -190,7 +191,7 @@ impl<B: Blob> Writer<B> {
 
         Ok(Self {
             blob,
-            partial_page_state,
+            partial_record,
             sync_state: if needs_sync {
                 SyncState::dirty()
             } else {
@@ -281,8 +282,8 @@ impl<B: Blob> Writer<B> {
     }
 
     /// Resolve an unknown partial-page record.
-    async fn verify_partial_page(&mut self) -> Result<(), Error> {
-        if !matches!(self.partial_page_state, PartialPage::Unverified) {
+    async fn verify_partial_record(&mut self) -> Result<(), Error> {
+        if !matches!(self.partial_record, PartialRecord::NeedsVerification) {
             return Ok(());
         }
         // A canceled shrink can leave either CRC slot authoritative. Read it before writing the
@@ -293,7 +294,7 @@ impl<B: Blob> Writer<B> {
             self.cache_ref.page_size(),
         )
         .await?;
-        self.partial_page_state = PartialPage::Committed(record);
+        self.partial_record = PartialRecord::Known(record);
         Ok(())
     }
 
@@ -308,7 +309,7 @@ impl<B: Blob> Writer<B> {
 
         // If no CRC slot is protected, everything goes out in one write.
         let Some((prefix_len, slot)) =
-            Self::identify_protected_regions(self.partial_page_state.record())
+            Self::identify_protected_regions(self.partial_record.record())
         else {
             self.write_at_maybe_sync(write_at_offset, physical_pages, sync)
                 .await?;
@@ -351,13 +352,6 @@ impl<B: Blob> Writer<B> {
         Ok(())
     }
 
-    /// Flush the in-memory tail and make a single write durable when possible.
-    ///
-    /// Returns `true` if the flush already made its writes durable.
-    async fn flush_durable(&mut self) -> Result<bool, Error> {
-        self.flush_inner(true).await
-    }
-
     /// Flush the in-memory tail to disk.
     ///
     /// If `sync` is true and the flush emits a single write, that write is made durable
@@ -367,22 +361,19 @@ impl<B: Blob> Writer<B> {
     ///
     /// Returns `true` if the flush made its writes durable, so no additional sync is needed.
     async fn flush_inner(&mut self, sync: bool) -> Result<bool, Error> {
-        // Keep the tip partial while preparing and publishing this flush.
-        self.tail.spill_full_pages();
-
         // Re-issue any dropped resize before deriving writes from writer state. Writes and
         // syncs settle on their own; this covers paths that may emit no writes at all
         // (sync, seal, snapshot, replay) and would otherwise leave the resize incomplete.
         self.sync_state.settle(&self.blob).await?;
 
-        // A canceled shrink leaves the tip page's on-disk record in an unknown slot state;
-        // re-read it so following writes avoid the true authoritative slot.
-        self.verify_partial_page().await?;
+        // A canceled shrink can leave the CRC record for the blob's partial final page
+        // uncertain. Re-read it so following writes preserve the authoritative slot.
+        self.verify_partial_record().await?;
 
         // Prepare physical pages for the tail. The old partial-page record determines how the
         // first page preserves its committed CRC slot.
-        let (physical_pages, partial_page_state) =
-            self.to_physical_pages(self.partial_page_state.record());
+        let old_record = self.partial_record.record().cloned();
+        let (physical_pages, partial_record) = self.prepare_physical_pages(old_record.as_ref());
 
         // If there's nothing to write, return early.
         if physical_pages.is_empty() {
@@ -393,15 +384,16 @@ impl<B: Blob> Writer<B> {
 
         // Update state only after the writes succeed, for cancellation safety. Populate the
         // page cache with every written page, then advance the written prefix past them.
+        let cache_ref = &self.cache_ref;
+        let id = self.id;
         let mut cache_offset = self.tail.start();
         for pages in self.tail.full_pages() {
-            let remaining = self.cache_ref.cache(self.id, pages.as_ref(), cache_offset);
+            let remaining = cache_ref.cache(id, pages.as_ref(), cache_offset);
             assert_eq!(remaining, 0, "full pages must be page-aligned");
             cache_offset += pages.len() as u64;
         }
         self.tail.advance_full_pages();
-        self.partial_page_state =
-            partial_page_state.map_or(PartialPage::None, PartialPage::Committed);
+        self.partial_record = partial_record.map_or(PartialRecord::None, PartialRecord::Known);
 
         Ok(synced)
     }
@@ -495,15 +487,18 @@ impl<B: Blob> Writer<B> {
     /// - `prefix_len`: bytes `[0, prefix_len)` are committed logical data already covered by the
     ///   protected CRC and do not need to be rewritten
     /// - `protected_crc`: which CRC slot must not be overwritten by the next flush
-    fn identify_protected_regions(partial_page_state: Option<&Checksum>) -> Option<(usize, Slot)> {
-        let crc_record = partial_page_state?;
+    fn identify_protected_regions(partial_record: Option<&Checksum>) -> Option<(usize, Slot)> {
+        let crc_record = partial_record?;
         let (old_len, _) = crc_record.get_crc();
         // The protected CRC is the authoritative (longer) slot.
         Some((old_len as usize, crc_record.authoritative()))
     }
 
     /// Prepare physical-page writes from the in-memory tail.
-    fn to_physical_pages(&self, old_crc_record: Option<&Checksum>) -> (IoBufs, Option<Checksum>) {
+    fn prepare_physical_pages(
+        &mut self,
+        old_crc_record: Option<&Checksum>,
+    ) -> (IoBufs, Option<Checksum>) {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
         let mut write_buffer = IoBufs::default();
@@ -511,8 +506,9 @@ impl<B: Blob> Writer<B> {
         // Full pages come first. The earliest one may extend a committed partial page, so its
         // record preserves the old CRC.
         let mut first_crc = old_crc_record;
+        let cache_ref = &self.cache_ref;
         for pages in self.tail.full_pages() {
-            self.append_full_pages(pages, &mut first_crc, &mut write_buffer);
+            Self::append_full_pages(cache_ref, pages, &mut first_crc, &mut write_buffer);
         }
 
         let partial_page = self.tail.tip();
@@ -557,22 +553,19 @@ impl<B: Blob> Writer<B> {
         (write_buffer, Some(crc_record))
     }
 
-    /// Append full logical pages and CRC records without copying payload bytes.
+    /// Append full logical pages, along with a CRC record for each.
     fn append_full_pages(
-        &self,
+        cache_ref: &CacheRef,
         pages: &IoBuf,
         first_crc: &mut Option<&Checksum>,
         write_buffer: &mut IoBufs,
     ) {
-        let logical_page_size = self.cache_ref.page_size() as usize;
+        let logical_page_size = cache_ref.page_size() as usize;
         let logical_page_size_u16 =
             u16::try_from(logical_page_size).expect("page size must fit in u16 for CRC record");
         debug_assert!(pages.len().is_multiple_of(logical_page_size));
         let page_count = pages.len() / logical_page_size;
-        let mut crcs = self
-            .cache_ref
-            .pool()
-            .alloc(CHECKSUM_SIZE as usize * page_count);
+        let mut crcs = cache_ref.pool().alloc(CHECKSUM_SIZE as usize * page_count);
 
         for page in pages.as_ref().chunks_exact(logical_page_size) {
             let crc = Crc32::checksum(page);
@@ -692,7 +685,7 @@ impl<B: Blob> Writer<B> {
 
         // Compute both physical and logical blob sizes.
         let current_page = self.current_page();
-        let (physical_blob_size, logical_blob_size) = self.partial_page_state.record().map_or_else(
+        let (physical_blob_size, logical_blob_size) = self.partial_record.record().map_or_else(
             || {
                 // All pages are full.
                 let physical = physical_page_size * current_page;
@@ -742,7 +735,7 @@ impl<B: Blob> Writer<B> {
     /// durability is completed with [`Blob::sync`].
     pub async fn sync(&mut self) -> Result<(), Error> {
         // A single emitted write can be made durable directly during the flush.
-        if self.flush_durable().await? {
+        if self.flush_inner(true).await? {
             return Ok(());
         }
 
@@ -823,7 +816,7 @@ impl<B: Blob> Writer<B> {
         let tail_offset = full_pages
             .checked_mul(logical_page_size)
             .ok_or(Error::OffsetOverflow)?;
-        let current_physical_size = if self.partial_page_state.record().is_some() {
+        let current_physical_size = if self.partial_record.record().is_some() {
             self.current_page()
                 .checked_add(1)
                 .and_then(|pages| pages.checked_mul(physical_page_size))
@@ -850,7 +843,7 @@ impl<B: Blob> Writer<B> {
         // The earlier sync wrote out any partial tip, so a boundary shrink always reduces the
         // physical page count and the truncate is never a no-op.
         if partial_bytes == 0 {
-            self.partial_page_state = PartialPage::None;
+            self.partial_record = PartialRecord::None;
             self.tail.restart_at(tail_offset, &[]);
             return self.sync_state.resize(&self.blob, new_physical_size).await;
         }
@@ -871,9 +864,9 @@ impl<B: Blob> Writer<B> {
         // claims nothing after it. If the following truncate is dropped, the writer
         // under-claims and never claims deleted pages. If a following CRC slot write is dropped,
         // the record's on-disk slot state is unknown, so mark it unverified: the next write
-        // to the page re-reads the record first (see [Self::verify_partial_page]) and writes
+        // to the page re-reads the record first (see [Self::verify_partial_record]) and writes
         // around whichever slot is actually authoritative.
-        self.partial_page_state = PartialPage::Unverified;
+        self.partial_record = PartialRecord::NeedsVerification;
         self.tail.restart_at(tail_offset, page_data.as_ref());
 
         // If the target stays within the current tip page, the physical page count is
@@ -899,7 +892,7 @@ impl<B: Blob> Writer<B> {
 
         // Update state only after the rewrite succeeds, for cancellation safety.
         self.tail.restart_at(tail_offset, new_data);
-        self.partial_page_state = PartialPage::Committed(final_record);
+        self.partial_record = PartialRecord::Known(final_record);
 
         Ok(())
     }
@@ -913,7 +906,7 @@ impl<B: Blob> Writer<B> {
     /// Construct an immutable read handle for the current blob state.
     fn sealed_handle(&self, id: u64) -> super::Sealed<B> {
         assert!(
-            self.tail.full_pages().is_empty(),
+            !self.tail.has_full_pages(),
             "sealing requires a flushed tail"
         );
         let partial_page = if self.tail.tip_is_empty() {
@@ -972,20 +965,20 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
 
-    impl PartialPage {
-        /// True if no committed partial page exists.
+    impl PartialRecord {
+        /// True if no partial page record exists.
         const fn is_none(&self) -> bool {
             matches!(self, Self::None)
         }
 
-        /// True if the on-disk record is known.
-        const fn is_committed(&self) -> bool {
-            matches!(self, Self::Committed(_))
+        /// True if the record is known.
+        const fn is_known(&self) -> bool {
+            matches!(self, Self::Known(_))
         }
 
-        /// True if the on-disk record must be re-read before the next write.
-        const fn is_unverified(&self) -> bool {
-            matches!(self, Self::Unverified)
+        /// True if the record must be re-read before the next write.
+        const fn needs_verification(&self) -> bool {
+            matches!(self, Self::NeedsVerification)
         }
     }
 
@@ -1832,7 +1825,7 @@ mod tests {
 
             // The canceled sync must not publish a partial-page checksum state.
             assert_eq!(writer.current_page(), 0);
-            assert!(writer.partial_page_state.is_none());
+            assert!(writer.partial_record.is_none());
             assert_eq!(writer.size(), data.len() as u64);
             assert_eq!(writer.tail.tip(), data.as_slice());
             let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
@@ -1841,7 +1834,7 @@ mod tests {
             // Retrying sync should write the partial page and publish its checksum.
             writer.sync().await.unwrap();
             assert_eq!(writer.current_page(), 0);
-            assert!(writer.partial_page_state.is_committed());
+            assert!(writer.partial_record.is_known());
             let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data.as_slice());
         });
@@ -1875,7 +1868,7 @@ mod tests {
 
             // The canceled shrink published its reduced claim before the truncate: the writer
             // claims exactly the pages the blob still holds and can read all of them.
-            assert!(writer.partial_page_state.is_unverified());
+            assert!(writer.partial_record.needs_verification());
             assert_eq!(writer.size(), 2 * page as u64);
             let read = writer.read_at(0, 2 * page).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), &data[..2 * page]);
@@ -1931,7 +1924,7 @@ mod tests {
 
             // The writer claims only the target page and earlier pages, all readable: page 0
             // from the blob and page 1 from the in-memory tip.
-            assert!(writer.partial_page_state.is_unverified());
+            assert!(writer.partial_record.needs_verification());
             assert_eq!(writer.current_page(), 1);
             assert_eq!(writer.size(), 2 * page as u64);
             let read = writer.read_at(0, 2 * page).await.unwrap().coalesce();
@@ -1987,7 +1980,7 @@ mod tests {
             // The writer claims the shrunken size and the surviving pages remain readable.
             assert_eq!(writer.size(), 2 * page as u64);
             assert_eq!(writer.current_page(), 2);
-            assert!(writer.partial_page_state.is_none());
+            assert!(writer.partial_record.is_none());
             let read = writer.read_at(0, 2 * page).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), &data[..2 * page]);
 
@@ -2223,7 +2216,7 @@ mod tests {
 
             // The canceled rewrite leaves the old tip bytes staged with the record cleared,
             // so the next flush rewrites the whole record instead of trusting a stale one.
-            assert!(writer.partial_page_state.is_unverified());
+            assert!(writer.partial_record.needs_verification());
             assert_eq!(writer.size(), data.len() as u64);
             let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data.as_slice());
@@ -2282,7 +2275,7 @@ mod tests {
             gate.cancel(writer.resize((2 * page + 30) as u64)).await;
 
             // Memory still claims the old size and can read all of it from the tip.
-            assert!(writer.partial_page_state.is_unverified());
+            assert!(writer.partial_record.needs_verification());
             assert_eq!(writer.size(), data.len() as u64);
             let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data.as_slice());
@@ -2333,7 +2326,7 @@ mod tests {
 
             // The whole claimed range stays readable: the last page is served from the tip
             // even though its on-disk record now validates to the shorter length.
-            assert!(writer.partial_page_state.is_unverified());
+            assert!(writer.partial_record.needs_verification());
             assert_eq!(writer.size(), data.len() as u64);
             let read = writer.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data.as_slice());
@@ -2541,13 +2534,13 @@ mod tests {
 
             // Cancel the shrink parked before its first slot write: disk is untouched.
             gate.cancel(writer.resize((2 * page + 30) as u64)).await;
-            assert!(writer.partial_page_state.is_unverified());
+            assert!(writer.partial_record.needs_verification());
 
             // Arm a tear for the next write: the healing sync must not issue one.
             tear.arm(3);
             writer.sync().await.unwrap();
             assert_eq!(tear.fired(), 0, "no-op heal must not write");
-            assert!(writer.partial_page_state.is_committed());
+            assert!(writer.partial_record.is_known());
 
             // The old size remains durable.
             drop(writer);
@@ -2593,7 +2586,7 @@ mod tests {
             let target = (2 * page + 30) as u64;
             gate.set_skip(2);
             gate.cancel(writer.resize(target)).await;
-            assert!(writer.partial_page_state.is_unverified());
+            assert!(writer.partial_record.needs_verification());
 
             // Tear the healing write so none of the free slot's bytes land (its stale
             // contents remain invalid); the authoritative slot is never touched.
@@ -2703,7 +2696,7 @@ mod tests {
 
             // Cancel the shrink parked before its first slot write.
             gate.cancel(writer.resize((2 * page + 30) as u64)).await;
-            assert!(writer.partial_page_state.is_unverified());
+            assert!(writer.partial_record.needs_verification());
 
             // The next sync's flush completes the tip page in place.
             let big: Vec<u8> = (0..500).map(|i| (i % 241) as u8).collect();
@@ -3908,12 +3901,12 @@ mod tests {
         );
     }
 
-    /// Test that `to_physical_pages` emits full pages zero-copy while still materializing the
+    /// Test that `prepare_physical_pages` emits full pages zero-copy while still materializing the
     /// trailing partial page into one padded physical page.
     #[test_traced("DEBUG")]
-    fn test_to_physical_pages_zero_copy_full_pages_and_materialized_partial() {
+    fn test_prepare_physical_pages_zero_copy_full_pages_and_materialized_partial() {
         // Build a tip buffer containing two full logical pages plus a trailing partial
-        // page, convert it with `to_physical_pages`, then verify:
+        // page, prepare physical pages, then verify:
         // - the result is chunked rather than one contiguous buffer for the full-page portion
         // - the logical payload bytes for the first two pages are preserved in order
         // - the partial page is padded with zeros up to one full logical page
@@ -3922,7 +3915,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             // Open a new blob.
             let (blob, blob_size) = context
-                .open("test_partition", b"to_physical_pages_zero_copy")
+                .open("test_partition", b"prepare_physical_pages_zero_copy")
                 .await
                 .unwrap();
             assert_eq!(blob_size, 0);
@@ -3943,19 +3936,17 @@ mod tests {
                 .map(|i| (i % 251) as u8)
                 .collect();
 
-            // Normalize the tail as flush does before encoding it.
             append.append(&data);
-            append.tail.spill_full_pages();
 
             // Convert the in-memory tail into physical-page writes.
-            let (physical_pages, partial_page_state) = append.to_physical_pages(None);
+            let (physical_pages, partial_record) = append.prepare_physical_pages(None);
 
             // Two full pages should each contribute a logical slice and a CRC slice, and the
             // trailing partial page should contribute one materialized padded physical page.
             assert_eq!(physical_pages.chunk_count(), 5);
 
             // The returned partial-page CRC state must describe the exact trailing logical length.
-            let crc_record = partial_page_state.expect("partial page state must be returned");
+            let crc_record = partial_record.expect("partial record must be returned");
             let (len, _) = crc_record.get_crc();
             assert_eq!(len as usize, partial_len);
 
