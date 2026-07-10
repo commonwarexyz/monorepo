@@ -333,9 +333,9 @@
 //! Returning `false` from `verify` means the proposal is permanently invalid and causes a local
 //! nullify. Returning `false` from `certify` means the notarized payload is permanently
 //! uncertifiable for that round and also causes a local nullify. Closing `certify` does not provide
-//! a fast-skip signal and can halt progress because certification requests are not retried. The safe
-//! way to stop working on certification is to keep the request pending until Simplex drops it after
-//! finalizing the block or a descendant.
+//! a fast-skip signal and can halt progress because certification requests are not retried during
+//! the same run. The safe way to stop working on certification is to keep the request pending until
+//! Simplex drops it after finalizing the block or a descendant.
 
 pub mod elector;
 pub mod scheme;

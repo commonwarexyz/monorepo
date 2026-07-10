@@ -226,12 +226,12 @@ mod tests {
         deterministic,
         mocks::{
             fail_pending_syncs, release_next_pending_syncs, release_pending_syncs,
-            DelayedSyncContext,
+            DelayedSyncContext, PendingSyncs,
         },
         telemetry::metrics::has_metric_value,
         BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, sync::Mutex, NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
@@ -278,7 +278,7 @@ mod tests {
     fn test_put_after_start_sync_is_accepted_before_handle_completes() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -339,7 +339,7 @@ mod tests {
     fn test_duplicate_put_start_sync_observes_in_flight_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -400,7 +400,7 @@ mod tests {
     fn test_overlapping_put_start_sync_waits_for_in_flight_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -461,7 +461,7 @@ mod tests {
     fn test_sync_after_put_start_sync_waits_for_in_flight_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -512,7 +512,7 @@ mod tests {
     fn test_destroy_after_put_start_sync_waits_for_in_flight_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -562,7 +562,7 @@ mod tests {
     fn test_prune_after_put_start_sync_waits_for_in_flight_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -616,7 +616,7 @@ mod tests {
     fn test_prune_surfaces_failed_in_flight_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -651,7 +651,7 @@ mod tests {
     fn test_put_start_sync_after_prune_drops_pruned_sync_requests() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -693,7 +693,7 @@ mod tests {
     fn test_overlapping_put_start_sync_restarts_after_all_handles_complete() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -740,7 +740,7 @@ mod tests {
     fn test_overlapping_put_start_sync_restarts_only_completed_handles() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -783,7 +783,7 @@ mod tests {
     fn test_failed_start_sync_is_returned_by_next_start_sync_handle() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),

@@ -1,9 +1,10 @@
 //! Mock implementations of runtime primitives for testing.
 
 use crate::{
+    signal::Signal,
     telemetry::metrics::{Metric, Registered},
     Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    Storage, Supervisor,
+    Spawner, Storage, Supervisor,
 };
 use bytes::{Bytes, BytesMut};
 use commonware_utils::{
@@ -11,6 +12,7 @@ use commonware_utils::{
     sync::Mutex,
 };
 use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
+use rand::{TryCryptoRng, TryRng};
 use std::{future::Future, mem, sync::Arc};
 
 /// Default buffer size (64 KB). Controls both how much data the stream
@@ -332,9 +334,13 @@ pub struct DeferredSync {
 }
 
 /// Syncs deferred by a [DelayedSyncContext] or [DelayedSyncBlob], in the order started.
-pub type PendingSyncs = Arc<Mutex<Vec<DeferredSync>>>;
+#[derive(Clone, Default)]
+pub struct PendingSyncs {
+    syncs: Arc<Mutex<Vec<DeferredSync>>>,
+    gate: Arc<Mutex<SyncGateState>>,
+}
 
-/// Context wrapper whose blobs defer [Blob::start_sync] completion until explicitly released.
+/// Context wrapper whose blobs defer [Blob::start_sync] and can gate blocking syncs in tests.
 #[derive(Clone)]
 pub struct DelayedSyncContext<E> {
     pub inner: E,
@@ -361,6 +367,63 @@ impl<E: Supervisor> Supervisor for DelayedSyncContext<E> {
     }
 }
 
+impl<E: Spawner> Spawner for DelayedSyncContext<E> {
+    fn shared(mut self, blocking: bool) -> Self {
+        self.inner = self.inner.shared(blocking);
+        self
+    }
+
+    fn dedicated(mut self) -> Self {
+        self.inner = self.inner.dedicated();
+        self
+    }
+
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let pending = self.pending;
+        self.inner.spawn(move |inner| f(Self { inner, pending }))
+    }
+
+    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
+        self.inner.stop(value, timeout).await
+    }
+
+    fn stopped(&self) -> Signal {
+        self.inner.stopped()
+    }
+}
+
+impl<E: Clock> Clock for DelayedSyncContext<E> {
+    fn current(&self) -> std::time::SystemTime {
+        self.inner.current()
+    }
+
+    fn sleep(&self, duration: std::time::Duration) -> impl Future<Output = ()> + Send + 'static {
+        self.inner.sleep(duration)
+    }
+
+    fn sleep_until(
+        &self,
+        deadline: std::time::SystemTime,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        self.inner.sleep_until(deadline)
+    }
+}
+
+impl<E: Clock> GovernorClock for DelayedSyncContext<E> {
+    type Instant = std::time::SystemTime;
+
+    fn now(&self) -> Self::Instant {
+        self.current()
+    }
+}
+
+impl<E: Clock> ReasonablyRealtime for DelayedSyncContext<E> {}
+
 impl<E: Metrics> Metrics for DelayedSyncContext<E> {
     fn register<N: Into<String>, H: Into<String>, M: Metric>(
         &self,
@@ -385,6 +448,24 @@ impl<E: BufferPooler> BufferPooler for DelayedSyncContext<E> {
         self.inner.storage_buffer_pool()
     }
 }
+
+impl<E: TryRng> TryRng for DelayedSyncContext<E> {
+    type Error = E::Error;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        self.inner.try_next_u32()
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        self.inner.try_next_u64()
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        self.inner.try_fill_bytes(dest)
+    }
+}
+
+impl<E: TryCryptoRng> TryCryptoRng for DelayedSyncContext<E> {}
 
 impl<E: Storage> Storage for DelayedSyncContext<E> {
     type Blob = DelayedSyncBlob<E::Blob>;
@@ -415,7 +496,7 @@ impl<E: Storage> Storage for DelayedSyncContext<E> {
     }
 }
 
-/// Blob wrapper that parks each started sync until it is explicitly completed.
+/// Blob wrapper that parks each started sync and supports one-shot blocking sync tracking.
 #[derive(Clone)]
 pub struct DelayedSyncBlob<B> {
     inner: B,
@@ -459,7 +540,12 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.inner.write_at_sync(offset, bufs).await
+        if !self.pending.tracking() {
+            return self.inner.write_at_sync(offset, bufs).await;
+        }
+        self.inner.write_at(offset, bufs).await?;
+        self.pending.wait().await?;
+        self.inner.sync().await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -467,17 +553,22 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        self.pending.wait().await?;
         self.inner.sync().await
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        let (release, receiver) = oneshot::channel();
-        let (notifier, blocked) = oneshot::channel();
-        self.pending.lock().push(DeferredSync { release, blocked });
+        let pending = self.pending.clone();
         let inner = self.inner.clone();
+        if pending.tracking() {
+            return Handle::from_future(async move {
+                pending.wait().await?;
+                inner.sync().await
+            });
+        }
+        let waiter = pending.defer();
         Handle::from_future(async move {
-            let _ = notifier.send(());
-            receiver.await.map_err(|_| Error::Closed)??;
+            waiter.wait().await?;
             inner.sync().await
         })
     }
@@ -518,6 +609,83 @@ pub fn fail_pending_syncs(pending: &PendingSyncs) {
     for sync in mem::take(&mut *pending.lock()) {
         let err = std::io::Error::other("injected sync failure");
         let _ = sync.release.send(Err(Error::Io(err.into())));
+    }
+}
+
+struct SyncWaiter {
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<Result<(), Error>>,
+}
+
+impl SyncWaiter {
+    async fn wait(self) -> Result<(), Error> {
+        self.entered.send_lossy(());
+        self.release.await.map_err(|_| Error::Closed)??;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct SyncGateState {
+    tracking: bool,
+    calls: usize,
+    waiter: Option<SyncWaiter>,
+}
+
+impl PendingSyncs {
+    /// Locks the deferred sync queue.
+    pub fn lock(&self) -> commonware_utils::sync::MutexGuard<'_, Vec<DeferredSync>> {
+        self.syncs.lock()
+    }
+
+    /// Begins one-shot tracking of durability operations and blocks the first one.
+    pub fn arm(&self) {
+        let (release, release_rx) = oneshot::channel();
+        let (entered, blocked) = oneshot::channel();
+        let mut state = self.gate.lock();
+        assert!(!state.tracking, "sync gate already armed");
+        assert!(state.waiter.is_none(), "sync gate already has a waiter");
+        state.tracking = true;
+        state.calls = 0;
+        state.waiter = Some(SyncWaiter {
+            entered,
+            release: release_rx,
+        });
+        self.syncs.lock().push(DeferredSync { release, blocked });
+    }
+
+    /// Returns the number of durability operations observed since [Self::arm].
+    pub fn calls(&self) -> usize {
+        self.gate.lock().calls
+    }
+
+    fn tracking(&self) -> bool {
+        self.gate.lock().tracking
+    }
+
+    fn defer(&self) -> SyncWaiter {
+        let (release, release_rx) = oneshot::channel();
+        let (entered, blocked) = oneshot::channel();
+        self.syncs.lock().push(DeferredSync { release, blocked });
+        SyncWaiter {
+            entered,
+            release: release_rx,
+        }
+    }
+
+    async fn wait(&self) -> Result<(), Error> {
+        let waiter = {
+            let mut state = self.gate.lock();
+            if !state.tracking {
+                return Ok(());
+            }
+            state.calls += 1;
+            state.waiter.take()
+        };
+        let Some(waiter) = waiter else {
+            return Ok(());
+        };
+        waiter.wait().await
     }
 }
 

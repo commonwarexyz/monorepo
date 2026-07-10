@@ -436,10 +436,12 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic,
-        mocks::{fail_pending_syncs, release_pending_syncs, DelayedSyncContext},
+        mocks::{
+            fail_pending_syncs, release_pending_syncs, DelayedSyncContext, PendingSyncs,
+        },
         BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
     };
-    use commonware_utils::{sync::Mutex, NZUsize, NZU16};
+    use commonware_utils::{NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};
     use std::sync::{
@@ -1578,7 +1580,7 @@ mod tests {
     fn test_segmented_fixed_prune_waits_for_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -1632,7 +1634,7 @@ mod tests {
     fn test_segmented_fixed_destroy_waits_for_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -1684,7 +1686,7 @@ mod tests {
     fn test_segmented_fixed_clear_waits_for_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -1746,7 +1748,7 @@ mod tests {
     fn test_segmented_fixed_rewind_waits_for_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -1806,7 +1808,7 @@ mod tests {
     fn test_segmented_fixed_prune_surfaces_failed_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let pending = Arc::new(Mutex::new(Vec::new()));
+            let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),

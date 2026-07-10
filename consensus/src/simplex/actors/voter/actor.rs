@@ -34,11 +34,10 @@ use commonware_runtime::{
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{channel::oneshot, futures::AbortablePool};
-use core::{future::Future, mem, panic};
+use core::{future::Future, panic};
 use futures::{pin_mut, StreamExt};
 use rand_core::CryptoRng;
 use std::{
-    collections::BTreeSet,
     num::NonZeroUsize,
     pin::Pin,
     task::{self, Poll},
@@ -136,7 +135,7 @@ pub struct Actor<
     write_buffer: NonZeroUsize,
     page_cache: CacheRef,
     journal: Option<Journal<E, Artifact<S, D>>>,
-    dirty: BTreeSet<u64>,
+    dirty: Option<View>,
 
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
@@ -202,7 +201,7 @@ impl<
                 write_buffer: cfg.write_buffer,
                 page_cache: cfg.page_cache,
                 journal: None,
-                dirty: BTreeSet::new(),
+                dirty: None,
 
                 mailbox_receiver,
 
@@ -248,9 +247,6 @@ impl<
                 ))
                 .await
                 .expect("unable to prune journal");
-
-            // Pruned sections can no longer be synced, so drop any pending syncs for them.
-            self.dirty = self.dirty.split_off(&min_active.get());
         }
     }
 
@@ -264,11 +260,15 @@ impl<
                 .append(view.get(), &artifact)
                 .await
                 .expect("unable to append to journal");
-            self.dirty.insert(view.get());
+            assert!(
+                self.dirty.is_none_or(|dirty| dirty == view),
+                "event loop iteration appended to multiple journal sections"
+            );
+            self.dirty = Some(view);
         }
     }
 
-    /// Syncs all journal sections with pending appends.
+    /// Syncs the journal section with pending appends.
     ///
     /// Invoked once per event loop iteration, after [Self::construct] and before
     /// [Self::notify] (regardless of whether anything will be broadcast), so
@@ -276,24 +276,22 @@ impl<
     /// syncs to this boundary (rather than syncing after each append) coalesces
     /// all appends in the same loop iteration into a single sync.
     async fn sync_journal(&mut self) {
-        if self.dirty.is_empty() {
-            return;
-        }
+        let Some(view) = self.dirty else { return };
         let journal = self
             .journal
             .as_mut()
             .expect("pending journal sections without a journal");
-        let sections = mem::take(&mut self.dirty);
         let span = info_span!(
             "simplex.voter.journal.sync",
             epoch = self.state.epoch().traced(),
-            views = ?sections
+            view = view.traced()
         );
         journal
-            .sync(sections)
+            .sync(view.get())
             .instrument(span)
             .await
             .expect("unable to sync journal");
+        self.dirty = None;
     }
 
     /// Send a vote to every peer.
@@ -833,7 +831,7 @@ impl<
         staged: Staged<S, D>,
     ) {
         assert!(
-            self.dirty.is_empty(),
+            self.dirty.is_none(),
             "journal must be synced before broadcast"
         );
 
