@@ -502,11 +502,13 @@ pub mod capture {
 
     impl tracing::Subscriber for NodeSubscriber {
         fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
-            let Some(inner) = &self.inner else {
+            if m.is_event() && m.target().contains("commonware_consensus::simplex") {
                 return true;
-            };
-            (m.is_event() && m.target().contains("commonware_consensus::simplex"))
-                || inner.enabled(m)
+            }
+            match &self.inner {
+                Some(inner) => inner.enabled(m),
+                None => false,
+            }
         }
         fn new_span(&self, a: &tracing::span::Attributes<'_>) -> tracing::span::Id {
             match &self.inner {
@@ -693,6 +695,21 @@ mod capture_tests {
             .any(|t| t.contains("recv_proposal") && t.contains("send_notarize")));
         // node 0 (recv/send) diverges from node 1 (timeout only) -> dispersion > 0.
         assert!(summary.dispersion() > 0.0);
+    }
+
+    #[test]
+    fn standalone_subscriber_scopes_interest_to_simplex_events() {
+        // Without an inner tee, only simplex events are enabled; other
+        // callsites must not pay event construction just to be dropped.
+        let log = EventLog::new();
+        let d = Dispatch::new(NodeSubscriber::new(0, log.clone()));
+        dispatcher::with_default(&d, || {
+            assert!(tracing::event_enabled!(target: T, tracing::Level::INFO));
+            assert!(!tracing::event_enabled!(
+                target: "commonware_runtime::storage",
+                tracing::Level::INFO
+            ));
+        });
     }
 
     #[test]
