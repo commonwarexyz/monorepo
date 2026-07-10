@@ -341,8 +341,9 @@ pub struct PendingSyncs {
 }
 
 /// Forwards [Supervisor], [Clock], [GovernorClock], [ReasonablyRealtime],
-/// [Metrics], and [BufferPooler] to the wrapped context for test context
-/// wrappers with one extra field (named by the second argument).
+/// [Metrics], [BufferPooler], [TryRng], and [TryCryptoRng] to the wrapped
+/// context for test context wrappers with one extra field (named by the
+/// second argument).
 macro_rules! forward_context {
     ($wrapper:ident, $field:ident) => {
         impl<E: Supervisor> Supervisor for $wrapper<E> {
@@ -419,6 +420,24 @@ macro_rules! forward_context {
                 self.inner.storage_buffer_pool()
             }
         }
+
+        impl<E: TryRng> TryRng for $wrapper<E> {
+            type Error = E::Error;
+
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                self.inner.try_next_u32()
+            }
+
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                self.inner.try_next_u64()
+            }
+
+            fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+                self.inner.try_fill_bytes(dest)
+            }
+        }
+
+        impl<E: TryCryptoRng> TryCryptoRng for $wrapper<E> {}
     };
 }
 
@@ -460,24 +479,6 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
         self.inner.stopped()
     }
 }
-
-impl<E: TryRng> TryRng for DelayedSyncContext<E> {
-    type Error = E::Error;
-
-    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        self.inner.try_next_u32()
-    }
-
-    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        self.inner.try_next_u64()
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
-        self.inner.try_fill_bytes(dest)
-    }
-}
-
-impl<E: TryCryptoRng> TryCryptoRng for DelayedSyncContext<E> {}
 
 impl<E: Storage> Storage for DelayedSyncContext<E> {
     type Blob = DelayedSyncBlob<E::Blob>;
