@@ -16,8 +16,8 @@
 //!
 //! # Storage-page alignment
 //!
-//! Physical page `p` begins at blob offset `p * physical_page_size`, and a blob created with
-//! [crate::BlobHeaderLayout::V1] begins its data on a 4096-byte boundary. Choosing a logical page size
+//! Physical page `p` begins at blob offset `p * physical_page_size`, and a newly created blob
+//! begins its data on a 4096-byte boundary. Choosing a logical page size
 //! such that the physical page size is a power of two (see [page_size]) therefore keeps
 //! every physical page from crossing a 4096-byte storage-page boundary (and starts every physical
 //! page of at least 4096 bytes exactly on one).

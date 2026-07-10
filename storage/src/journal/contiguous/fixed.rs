@@ -1484,8 +1484,8 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::Writer,
         deterministic::{self, Context},
-        Blob, BlobHeaderLayout, BufferPooler, Error as RuntimeError, Metrics as _, Runner,
-        Spawner as _, Storage, Supervisor as _,
+        Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
+        Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};
@@ -1556,63 +1556,6 @@ mod tests {
             let mut checkpoint = Checkpoint::open(context, partition).await?;
             checkpoint.stage_clear(target).await
         }
-    }
-
-    #[test_traced]
-    fn test_mixed_blob_layouts() {
-        // A database written before the v1 blob layout keeps its V0 blobs when reopened, while
-        // blobs created after the upgrade are V1 -- and the journal reads across both.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
-
-            // Write the initial journal under a context that forces V0 blob creation,
-            // simulating pre-upgrade storage: blob 0 (full) and blob 1 (partial).
-            let old_context = commonware_runtime::mocks::ForceV0Context {
-                inner: context.child("old"),
-            };
-            let mut journal = Journal::<_, Digest>::init(old_context, cfg.clone())
-                .await
-                .unwrap();
-            for i in 0u64..3 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Reopen with the standard context and extend: existing data reads back, and the
-            // appends fill blob 1 then create blob 2 (now V1).
-            let mut journal = Journal::<_, Digest>::init(context.child("new"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 0..3);
-            for i in 3u64..5 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            for i in 0u64..5 {
-                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
-            }
-            drop(journal);
-
-            // The pre-upgrade blobs remain V0 on disk; only the newly created blob is V1.
-            for (blob, expected) in [
-                (0u64, BlobHeaderLayout::V0),
-                (1, BlobHeaderLayout::V0),
-                (2, BlobHeaderLayout::V1),
-            ] {
-                let (_, info) = context
-                    .open_versioned(
-                        &blob_partition(&cfg),
-                        &blob.to_be_bytes(),
-                        0..=0,
-                        BlobHeaderLayout::V1,
-                    )
-                    .await
-                    .unwrap();
-                assert_eq!(info.layout, expected);
-            }
-        });
     }
 
     #[test_traced]

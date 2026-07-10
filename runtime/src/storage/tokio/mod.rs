@@ -1,6 +1,6 @@
 use super::Header;
 #[commonware_macros::stability(BETA)]
-use crate::{BlobHeaderLayout, BlobInfo};
+use crate::BlobInfo;
 use crate::{BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 #[cfg(unix)]
@@ -118,7 +118,6 @@ impl crate::Storage for Storage {
         partition: &str,
         name: &[u8],
         versions: RangeInclusive<u16>,
-        layout: BlobHeaderLayout,
     ) -> Result<(Self::Blob, BlobInfo), Error> {
         super::validate_partition_name(partition)?;
 
@@ -186,7 +185,7 @@ impl crate::Storage for Storage {
             Some(resolved) => resolved,
             None => {
                 // Truncate to zero before writing, per the [Header::create] contract.
-                let (region, info) = Header::create(&versions, layout);
+                let (region, info) = Header::create(&versions);
                 let data_offset = region.len() as u64;
                 file.set_len(0)
                     .await
@@ -293,8 +292,8 @@ impl crate::Storage for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BufferPoolConfig,
-        Storage as _,
+        storage::tests::run_storage_tests, telemetry::metrics::Registry, Blob, BlobHeaderLayout,
+        BufferPoolConfig, Storage as _,
     };
     use commonware_utils::sys_rng;
     use rand::RngExt as _;
@@ -600,6 +599,49 @@ mod tests {
             b"from the future!"
         );
         drop(blob);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_v0_legacy_read() {
+        let storage_directory =
+            env::temp_dir().join(format!("test_v0_legacy_read_{}", random_suffix()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+
+        // Fabricate a legacy V0 blob on disk (creation is always V1): an 8-byte header
+        // followed immediately by the payload.
+        let payload = b"hello world";
+        let partition_dir = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_dir).unwrap();
+        let file_path = partition_dir.join(hex(b"v0"));
+        std::fs::write(&file_path, crate::storage::tests::v0_blob_bytes(0, payload)).unwrap();
+
+        // The blob opens with its data intact and remains readable and writable in place.
+        let (blob, size) = storage.open("partition", b"v0").await.unwrap();
+        assert_eq!(size, payload.len() as u64);
+        assert_eq!(
+            blob.read_at(0, payload.len()).await.unwrap().coalesce(),
+            payload
+        );
+        blob.write_at(size, b"!".to_vec()).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        // On disk the payload still sits immediately after the 8-byte V0 header.
+        let raw_content = std::fs::read(&file_path).unwrap();
+        assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + payload.len() + 1);
+        assert_eq!(
+            &raw_content[..Header::MAGIC_LENGTH],
+            &BlobHeaderLayout::V0.magic()
+        );
+        assert_eq!(&raw_content[Header::PRELUDE_SIZE..], b"hello world!");
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
