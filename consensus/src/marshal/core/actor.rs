@@ -18,7 +18,7 @@ use crate::{
     },
     simplex::{
         scheme::Scheme,
-        types::{seeded_rng, verify_certificates, Finalization, Notarization, Subject},
+        types::{verify_certificates, Finalization, Notarization, Subject},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
     Block, Epochable, Heightable, Reporter,
@@ -1112,16 +1112,10 @@ where
         let Some(scoped) = self.provider.scoped(finalization.epoch()) else {
             panic!("floor finalization epoch unavailable");
         };
-        let mut rng = seeded_rng(self.context.as_mut());
-        let span = Span::current();
-        let finalization = self
-            .strategy
-            .spawn(move |strategy| {
-                let valid = span.in_scope(|| finalization.verify(&mut rng, &scoped, &strategy));
-                valid.then_some(finalization)
-            })
-            .await
-            .expect("floor finalization must verify");
+        assert!(
+            finalization.verify(self.context.as_mut(), &scoped, &self.strategy),
+            "floor finalization must verify"
+        );
 
         let commitment = finalization.proposal.payload;
         let digest = V::commitment_to_inner(commitment);
@@ -1484,6 +1478,25 @@ where
             return false;
         }
 
+        // Extract (subject, certificate) pairs for batch verification.
+        let certs: Vec<_> = delivers
+            .iter()
+            .map(|item| match item {
+                PendingVerification::Finalized { finalization, .. } => (
+                    Subject::Finalize {
+                        proposal: &finalization.proposal,
+                    },
+                    &finalization.certificate,
+                ),
+                PendingVerification::Notarized { notarization, .. } => (
+                    Subject::Notarize {
+                        proposal: &notarization.proposal,
+                    },
+                    &notarization.certificate,
+                ),
+            })
+            .collect();
+
         // Group indices by epoch.
         let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
         for (i, item) in delivers.iter().enumerate() {
@@ -1494,57 +1507,23 @@ where
             by_epoch.entry(epoch).or_default().push(i);
         }
 
-        // Resolve epoch-scoped verifiers before moving the batch into the strategy job.
-        let groups: Vec<_> = by_epoch
-            .into_iter()
-            .filter_map(|(epoch, indices)| {
-                self.provider.scoped(epoch).map(|scoped| (scoped, indices))
-            })
-            .collect();
-
-        let count = delivers.len();
-        let (delivers, verified) = if groups.is_empty() {
-            (delivers, vec![false; count])
-        } else {
-            let mut rng = seeded_rng(self.context.as_mut());
-            let span = Span::current();
-            self.strategy
-                .spawn(move |strategy| {
-                    span.in_scope(|| {
-                        let mut verified = vec![false; count];
-                        for (scoped, indices) in groups {
-                            let certificates: Vec<_> = indices
-                                .iter()
-                                .map(|&index| match &delivers[index] {
-                                    PendingVerification::Finalized { finalization, .. } => (
-                                        Subject::Finalize {
-                                            proposal: &finalization.proposal,
-                                        },
-                                        &finalization.certificate,
-                                    ),
-                                    PendingVerification::Notarized { notarization, .. } => (
-                                        Subject::Notarize {
-                                            proposal: &notarization.proposal,
-                                        },
-                                        &notarization.certificate,
-                                    ),
-                                })
-                                .collect();
-                            let results =
-                                verify_certificates(&mut rng, &scoped, &certificates, &strategy);
-                            for (index, result) in indices.into_iter().zip(results) {
-                                verified[index] = result;
-                            }
-                        }
-                        (delivers, verified)
-                    })
-                })
-                .await
-        };
+        // Batch verify each epoch group.
+        let mut verified = vec![false; delivers.len()];
+        for (epoch, indices) in &by_epoch {
+            let Some(scoped) = self.provider.scoped(*epoch) else {
+                continue;
+            };
+            let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
+            let results =
+                verify_certificates(self.context.as_mut(), &scoped, &group, &self.strategy);
+            for (j, &idx) in indices.iter().enumerate() {
+                verified[idx] = results[j];
+            }
+        }
 
         // Process each verified item, rejecting unverified ones.
         let mut wrote = false;
-        for (index, item) in delivers.into_iter().enumerate() {
+        for (index, item) in delivers.drain(..).enumerate() {
             if !verified[index] {
                 match item {
                     PendingVerification::Finalized { response, .. }

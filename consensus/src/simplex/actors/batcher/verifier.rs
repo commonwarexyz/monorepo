@@ -1,15 +1,20 @@
 use crate::{
     simplex::{
         scheme::Scheme,
-        types::{seeded_rng, Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},
+        types::{Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},
     },
     types::Participant,
 };
 use commonware_cryptography::{certificate::Verification, Digest};
 use commonware_parallel::Strategy;
-use rand_core::CryptoRng;
+use rand::rngs::StdRng;
+use rand_core::{CryptoRng, SeedableRng};
 use std::sync::Arc;
 use tracing::Span;
+
+fn seeded_rng<R: CryptoRng>(rng: &mut R) -> StdRng {
+    StdRng::from_rng(rng)
+}
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
 ///
