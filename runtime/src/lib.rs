@@ -352,10 +352,10 @@ stability_scope!(BETA {
 
     /// Interface that runtimes implement to provide parallel execution strategies.
     pub trait Strategizer: Spawner {
-        /// Returns a new cloneable [Rayon] strategy with the requested planning parallelism.
+        /// Returns a new [Rayon] strategy with the requested parallelism.
         ///
         /// # Arguments
-        /// - `parallelism`: The parallelism the strategy should plan for.
+        /// - `parallelism`: The number of tasks to execute concurrently in the pool.
         ///
         /// # Panics
         ///
