@@ -427,11 +427,8 @@ fn mean_pairwise_jaccard_distance(sets: &[&BTreeSet<(Token, Token)>]) -> f64 {
 /// (teed).
 pub mod capture {
     use super::{Event, EventKind, NodeHistory, Summary};
-    use std::{
-        collections::BTreeMap,
-        fmt::Write as _,
-        sync::{Arc, Mutex},
-    };
+    use commonware_utils::sync::Mutex;
+    use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
     /// Shared, ordered, node-attributed event log.
     #[derive(Clone, Default)]
@@ -454,7 +451,7 @@ pub mod capture {
         pub fn summary(&self) -> Summary {
             let mut s = Summary::new();
             let mut snapshots: BTreeMap<(u32, EventKind, u64), NodeHistory> = BTreeMap::new();
-            for &ev in self.0.lock().unwrap().iter() {
+            for &ev in self.0.lock().iter() {
                 if let Some(send) = ev.kind.matching_send() {
                     if let Some(sender) = ev.sender.filter(|&sender| sender != ev.node) {
                         if let Some(history) = snapshots.get(&(sender, send, ev.view)) {
@@ -479,7 +476,7 @@ pub mod capture {
         }
 
         fn push(&self, ev: Event) {
-            self.0.lock().unwrap().push(ev);
+            self.0.lock().push(ev);
         }
     }
 
