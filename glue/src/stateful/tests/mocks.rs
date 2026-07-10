@@ -79,6 +79,12 @@ impl<E: Send> ManagedDb<E> for TestDb {
         0
     }
 
+    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+        // Committed state is pinned at target 0, so any positive target is
+        // ahead of what this database holds.
+        *target > 0
+    }
+
     async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
         Ok(())
     }

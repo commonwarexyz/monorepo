@@ -170,7 +170,10 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     type Error: Debug + Send;
 
     /// Configuration needed to construct a new database instance.
-    type Config: Send;
+    ///
+    /// `Clone` allows startup to retry initialization through a different
+    /// route (e.g. falling back from marshal recovery to peer state sync).
+    type Config: Clone + Send;
 
     /// Sync target type for state sync of this database.
     ///
@@ -219,6 +222,19 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Return the sync target for this database's current committed state.
     fn sync_target(&self) -> Self::SyncTarget;
 
+    /// Return true when the database's committed state is BEHIND `target`:
+    /// reaching it would require applying operations the database does not
+    /// have, so rewind repair cannot succeed and the caller must recover via
+    /// replay or peer state sync instead.
+    ///
+    /// Defaults to `false`, which preserves the legacy behavior of always
+    /// attempting rewind repair. Implementations whose sync targets carry an
+    /// ordered position should override this so startup can distinguish a
+    /// repairable (ahead) database from an unrepairable (behind) one.
+    fn behind_sync_target(&self, _target: &Self::SyncTarget) -> bool {
+        false
+    }
+
     /// Rewind committed state to `target`.
     ///
     /// Implementations must ensure rewind effects are durable before returning
@@ -248,7 +264,10 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// - Single database sets use that database's [`ManagedDb::Config`].
     /// - Multi-database tuple sets use a tuple of per-database configs
     ///   `(Db1::Config, Db2::Config, ...)`.
-    type Config: Send;
+    ///
+    /// `Clone` allows startup to retry initialization through a different
+    /// route (e.g. falling back from marshal recovery to peer state sync).
+    type Config: Clone + Send;
 
     /// Per-database sync targets extracted from a finalized block.
     ///
@@ -287,6 +306,15 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Return sync targets for the set's current committed state.
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
+
+    /// Return true when any database in the set is behind its corresponding
+    /// target (see [`ManagedDb::behind_sync_target`]). A behind set cannot be
+    /// repaired by rewind: recovery must replay the gap or run peer state
+    /// sync.
+    fn behind_sync_targets(
+        &self,
+        targets: &Self::SyncTargets,
+    ) -> impl Future<Output = bool> + Send;
 
     /// Rewind the set to the provided per-database targets.
     ///
@@ -465,6 +493,11 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     async fn committed_targets(&self) -> Self::SyncTargets {
         let database = self.read().await;
         T::sync_target(&*database)
+    }
+
+    async fn behind_sync_targets(&self, targets: &Self::SyncTargets) -> bool {
+        let database = self.read().await;
+        T::behind_sync_target(&*database, targets)
     }
 
     async fn rewind_to_targets(&self, target: Self::SyncTargets) {
@@ -706,6 +739,16 @@ macro_rules! impl_database_set {
                         $T::sync_target(&*database)
                     },
                 )+)
+            }
+
+            async fn behind_sync_targets(&self, targets: &Self::SyncTargets) -> bool {
+                let behind = join!($(
+                    async {
+                        let database = self.$idx.read().await;
+                        $T::behind_sync_target(&*database, &targets.$idx)
+                    },
+                )+);
+                false $(|| behind.$idx)+
             }
 
             async fn rewind_to_targets(&self, targets: Self::SyncTargets) {

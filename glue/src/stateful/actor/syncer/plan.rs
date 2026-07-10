@@ -173,16 +173,35 @@ mod tests {
         });
     }
 
+    /// A completed sync may be re-armed by startup recovery when the
+    /// databases are found behind the marshal floor, as long as the re-armed
+    /// floor does not move backward.
     #[test]
-    #[should_panic(expected = "completed state sync cannot be marked in-progress")]
-    fn completed_sync_cannot_be_marked_in_progress() {
+    fn completed_sync_can_be_rearmed_forward() {
         deterministic::Runner::default().start(|context| async move {
-            let partition_prefix = "completed_sync_cannot_be_marked_in_progress";
+            let partition_prefix = "completed_sync_can_be_rearmed_forward";
             let mut metadata =
                 StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
             metadata.set_complete(Height::new(7)).await;
             metadata
                 .begin_sync(FloorMarker::new(Height::new(8), Sha256::fill(8)))
+                .await;
+            assert!(metadata.in_progress());
+            metadata.set_complete(Height::new(8)).await;
+            assert_eq!(metadata.sync_height(), Some(Height::new(8)));
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "re-armed state sync floor cannot be behind the completed height")]
+    fn completed_sync_cannot_be_rearmed_backward() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition_prefix = "completed_sync_cannot_be_rearmed_backward";
+            let mut metadata =
+                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            metadata.set_complete(Height::new(7)).await;
+            metadata
+                .begin_sync(FloorMarker::new(Height::new(6), Sha256::fill(6)))
                 .await;
         });
     }

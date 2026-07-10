@@ -546,6 +546,12 @@ where
         )
     }
 
+    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+        // The database is behind when the target's operation range ends past
+        // the committed bounds: rewind cannot apply operations it never had.
+        *target.range.end() > self.bounds().end
+    }
+
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
         self.sync().await?;
@@ -641,6 +647,12 @@ where
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
+    }
+
+    fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
+        // The database is behind when the target's operation range ends past
+        // the committed bounds: rewind cannot apply operations it never had.
+        *target.range.end() > self.bounds().end
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {

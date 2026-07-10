@@ -3963,6 +3963,100 @@ mod tests {
         });
     }
 
+    /// A startup floor above the durable processed height JUMPS marshal
+    /// ahead: the floor block becomes the dispatch anchor and the durable
+    /// processed height advances to just below it, without waiting for the
+    /// application to acknowledge the skipped blocks. This is the intended
+    /// `Start::Floor` contract (the application layer is responsible for
+    /// bringing its databases to the floor — rewinding, replaying, or state
+    /// syncing as needed), so this test pins the jump semantics: a caller
+    /// that passes a floor on a routine restart must be prepared for the
+    /// application-side consequences.
+    #[test_traced("WARN")]
+    fn test_standard_start_floor_above_processed_height_jumps_to_floor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let partition_prefix = "start-floor-above-processed-height";
+
+            // Finalized chain through height 6, but the application only
+            // acknowledged through height 3 before the previous run died.
+            let mut parent = Sha256::hash(b"genesis-parent");
+            let mut blocks = Vec::new();
+            let mut finalizations = Vec::new();
+            for height in 1..=6u64 {
+                let block = make_raw_block(parent, Height::new(height), 100 * height);
+                parent = block.digest();
+                let finalization = StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(height)),
+                        View::new(height - 1),
+                        StandardHarness::commitment(&block),
+                    ),
+                    &schemes,
+                    QUORUM,
+                );
+                finalizations.push((Height::new(height), finalization));
+                blocks.push(block);
+            }
+            seed_inconsistent_restart_state(
+                context.child("seed_restart_state"),
+                partition_prefix,
+                &blocks,
+                &finalizations,
+            )
+            .await;
+            seed_processed_height(
+                context.child("seed_processed"),
+                partition_prefix,
+                Height::new(3),
+            )
+            .await;
+
+            // Restart with the highest stored finalization as the floor (what
+            // a naive restart passes).
+            let floor_finalization = finalizations
+                .last()
+                .expect("finalizations seeded")
+                .1
+                .clone();
+            let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                Some(RecordingBuffer::default()),
+                Start::Floor(floor_finalization),
+            )
+            .await;
+
+            // Dispatch resumes at the floor anchor itself: the skipped blocks
+            // are never redelivered.
+            select! {
+                height = started_rx => {
+                    assert_eq!(
+                        height.expect("dispatch resume signal missing"),
+                        Height::new(6),
+                        "dispatch must resume at the floor anchor"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("dispatch did not resume after startup");
+                },
+            }
+
+            // The durable processed height jumps to just below the floor,
+            // without application acknowledgement of the skipped blocks.
+            assert_eq!(
+                mailbox.get_processed_height().await,
+                Some(Height::new(5)),
+                "startup floor must jump the durable processed height to floor - 1"
+            );
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_standard_set_floor_holds_dispatch_until_anchor_arrives() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));

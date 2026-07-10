@@ -20,6 +20,7 @@ use commonware_storage::{
 };
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use rand_core::Rng;
+use tracing::warn;
 
 mod actor;
 pub(crate) use actor::{Config, Syncer};
@@ -281,8 +282,16 @@ where
             Some(SyncState::InProgress(existing)) => {
                 existing.ensure_not_behind(&floor);
             }
-            Some(SyncState::Complete(_)) => {
-                panic!("completed state sync cannot be marked in-progress");
+            Some(SyncState::Complete(existing)) => {
+                // A completed sync normally forbids re-arming, but startup
+                // re-runs peer state sync when the databases recover behind
+                // the marshal floor (rewind repair is impossible and the
+                // replay window may be pruned). Forward progress is still
+                // enforced: the re-armed floor can never move backward.
+                assert!(
+                    floor.height >= *existing,
+                    "re-armed state sync floor cannot be behind the completed height"
+                );
             }
             None => {}
         }
@@ -296,8 +305,10 @@ where
     /// Records that one-time state sync completed at the given height.
     ///
     /// Once this height is set, future startups skip peer state sync and initialize
-    /// from the later of this height and marshal's processed height instead. This
-    /// action is irreversible.
+    /// from the later of this height and marshal's processed height instead. The
+    /// completed height only moves forward; startup re-runs peer state sync past it
+    /// only when the databases recover behind the marshal floor and rewind repair
+    /// is impossible.
     pub(crate) async fn set_complete(&mut self, height: Height) {
         match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::InProgress(floor)) => {
@@ -365,6 +376,32 @@ where
     /// in the initialized database set and should be acknowledged without
     /// applying them again.
     pub skip_finalized_until: Option<Height>,
+
+    /// When set, the databases recovered BEHIND the marshal floor and the
+    /// anchor sits at their actual committed height: the caller must replay
+    /// retained finalized blocks `(anchor, replay_to]` from marshal before
+    /// processing begins, catching the databases up to the floor.
+    pub replay_to: Option<Height>,
+}
+
+/// The outcome of attempting to initialize databases from marshal on startup.
+pub(crate) enum MarshalStartup<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    /// The databases are consistent with (or were rewound down to) the
+    /// marshal floor and processing can begin.
+    Ready(StartupResult<E, A>),
+
+    /// The databases recovered BEHIND the marshal floor and the retained
+    /// finalized blocks cannot close the gap (the databases' committed state
+    /// matches no retained block, so the replay window was pruned). The
+    /// caller must recover by running peer state sync to the floor.
+    DatabasesBehindFloor {
+        /// The marshal floor height the databases failed to reach.
+        floor: Height,
+    },
 }
 
 /// Initializes databases at marshal's current startup anchor.
@@ -375,14 +412,17 @@ where
 /// and post-sync restarts share the same path.
 ///
 /// If the databases are found to be inconsistent with the marshal floor, this
-/// function will attempt to repair by rewinding the databases which are ahead. If the
-/// databases are entirely inconsistent, this function will panic.
+/// function will attempt to repair by rewinding the databases which are ahead.
+/// Databases that are instead BEHIND the floor cannot be repaired by rewind;
+/// [MarshalStartup::DatabasesBehindFloor] is returned so the caller can
+/// recover via peer state sync. If the databases are entirely inconsistent,
+/// this function will panic.
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
-    mut sync_metadata: StateSyncMetadata<E, V::Commitment>,
-) -> StartupResult<E, A>
+    sync_metadata: &mut StateSyncMetadata<E, V::Commitment>,
+) -> MarshalStartup<E, A>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
@@ -415,16 +455,66 @@ where
     let processed_targets = A::sync_targets(&floor_block);
 
     // In the case that the committed targets do not match the marshal floor, we may
-    // have suffered a crash that left the set in an inconsistent state. In this case,
-    // we attempt to repair by rewinding the databases back to the marshal floor. If
-    // the rewind fails to produce a consistent state, we must crash. This can occur
-    // if the databases were corrupted or pruned too aggressively.
+    // have suffered a crash that left the set in an inconsistent state. Databases
+    // AHEAD of the floor are repaired by rewinding back to it. Databases BEHIND the
+    // floor cannot be repaired by rewind: if marshal still retains the block the
+    // databases are committed at (and everything up to the floor), the caller can
+    // replay the gap locally; otherwise startup must fall back to peer state sync.
     if databases.committed_targets().await != processed_targets {
+        if databases.behind_sync_targets(&processed_targets).await {
+            // Walk down from the floor looking for the block whose targets
+            // match the databases' committed state. Finding it means every
+            // block in the gap is retained (heights between it and the floor
+            // were visited on the way down), so a local replay can catch the
+            // databases up. Hitting a pruned height first means the replay
+            // window is gone.
+            let committed_targets = databases.committed_targets().await;
+            let mut height = marshal_floor;
+            let replay_anchor = loop {
+                let Some(previous) = height.previous() else {
+                    break None;
+                };
+                height = previous;
+                let Some(block) = marshal.get_block(Identifier::Height(height)).await else {
+                    break None;
+                };
+                let block = V::into_inner(block);
+                if A::sync_targets(&block) == committed_targets {
+                    break Some(block);
+                }
+            };
+            let Some(anchor_block) = replay_anchor else {
+                warn!(
+                    floor = %marshal_floor,
+                    "databases behind marshal floor and replay window pruned; \
+                     peer state sync required"
+                );
+                return MarshalStartup::DatabasesBehindFloor {
+                    floor: marshal_floor,
+                };
+            };
+            warn!(
+                floor = %marshal_floor,
+                anchor = %anchor_block.height(),
+                "databases behind marshal floor; replaying retained blocks to catch up"
+            );
+            let anchor = Anchor {
+                height: anchor_block.height(),
+                round: anchor_block.context().round(),
+                digest: anchor_block.digest(),
+            };
+            return MarshalStartup::Ready(StartupResult {
+                sync: SyncResult { databases, anchor },
+                skip_finalized_until,
+                replay_to: Some(marshal_floor),
+            });
+        }
         databases.rewind_to_targets(processed_targets.clone()).await;
         let rewound_targets = databases.committed_targets().await;
         assert!(
             rewound_targets == processed_targets,
-            "databases must be consistent with marshal floor after rewind"
+            "databases must be consistent with marshal floor (height {marshal_floor}) after \
+             rewind: the rewound targets still disagree with the floor block's targets"
         );
     }
 
@@ -438,8 +528,9 @@ where
         round: floor_block.context().round(),
         digest: floor_block.digest(),
     };
-    StartupResult {
+    MarshalStartup::Ready(StartupResult {
         sync: SyncResult { databases, anchor },
         skip_finalized_until,
-    }
+        replay_to: None,
+    })
 }
