@@ -172,7 +172,6 @@ where
     E: Rng + Spawner + Context,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
-    <A::Databases as DatabaseSet<E>>::Config: Clone,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
@@ -267,12 +266,11 @@ where
     async fn start_from_marshal(mut self) {
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
-            skip_finalized_until,
-            replay_to,
+            floor,
         } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
             &self.marshal,
-            self.db_config.clone(),
+            self.db_config,
             self.sync_metadata.sync_height(),
         )
         .await;
@@ -294,27 +292,24 @@ where
         );
 
         // If the databases recovered behind the marshal floor, replay the
-        // retained finalized blocks up to the floor before processing begins.
-        // Replay is crash-safe because each replayed block is durably
-        // finalized. After an interrupted multi-database finalize, the next
-        // startup rewinds to the newest common anchor before resuming.
-        let floor = replay_to.unwrap_or(anchor.height);
-        if let Some(replay_to) = replay_to {
-            let context = self.context.as_present();
-            let mut height = anchor.height;
-            while height < replay_to {
-                height = height.next();
-                let block = self
-                    .marshal
-                    .get_block(Identifier::Height(height))
-                    .await
-                    .expect("blocks in the verified replay window must be retained");
-                let (status, _prune) = processor.finalize(context, V::into_inner(block)).await;
-                assert!(
-                    matches!(status, FinalizeStatus::Persisted { .. }),
-                    "replayed block must persist"
-                );
-            }
+        // retained finalized blocks up to it before processing begins. Replay
+        // is crash-safe because each replayed block is durably finalized.
+        // After an interrupted multi-database finalize, the next startup
+        // rewinds to the newest common anchor before resuming.
+        let context = self.context.as_present();
+        let mut height = anchor.height;
+        while height < floor {
+            height = height.next();
+            let block = self
+                .marshal
+                .get_block(Identifier::Height(height))
+                .await
+                .expect("blocks in the verified replay window must be retained");
+            let (status, _prune) = processor.finalize(context, V::into_inner(block)).await;
+            assert!(
+                matches!(status, FinalizeStatus::Persisted { .. }),
+                "replayed block must persist"
+            );
         }
 
         // Once the databases are aligned with the floor, record completion so
@@ -328,7 +323,7 @@ where
             input_provider: self.input_provider,
             marshal: self.marshal,
             processor,
-            skip_finalized_until,
+            skip_finalized_until: floor,
         }
         .start()
         .await

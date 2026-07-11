@@ -360,19 +360,16 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// The initialized database set and anchor.
+    /// The initialized database set and the anchor it converged on.
     pub sync: SyncResult<E, A>,
 
-    /// Once any startup replay completes, finalized marshal blocks at or
-    /// below this height are reflected in the database set and should be
-    /// acknowledged without applying them again.
-    pub skip_finalized_until: Option<Height>,
-
-    /// When set, replay retained finalized blocks through this height before
-    /// processing begins. [Self::sync] then holds the replay anchor, and the
-    /// walk that selected it has already verified that every block in the
-    /// gap is retained.
-    pub replay_to: Option<Height>,
+    /// Marshal's startup floor, at or above the anchor. Retained finalized
+    /// blocks in `(sync.anchor.height, floor]` must be replayed before
+    /// processing begins (the walk that selected the anchor verified they
+    /// are retained). Once that replay completes, finalized blocks
+    /// redelivered at or below the floor are already reflected in the
+    /// databases and should be acknowledged without applying them again.
+    pub floor: Height,
 }
 
 /// Initializes databases at marshal's current startup floor.
@@ -386,7 +383,7 @@ where
 /// function will attempt to repair by rewinding the databases which are ahead.
 /// Databases that are instead behind the floor cannot be repaired by rewind:
 /// the finalized blocks between their committed state and the floor must be
-/// replayed over them ([StartupResult::replay_to]). A missing replay block is
+/// replayed over them ([StartupResult::floor]). A missing replay block is
 /// unreachable without storage corruption or a marshal floor above databases
 /// that never synced, so this function panics on it instead of falling back
 /// to peer state sync. If the databases are entirely inconsistent, this
@@ -425,13 +422,6 @@ where
         }
     };
     let floor_height = floor_block.height();
-
-    // Marshal redelivers finalized blocks above its durable processed height.
-    // Once startup (including any replay) completes, blocks at or below the
-    // floor are reflected in the databases and must be acknowledged without
-    // being applied again.
-    let skip_finalized_until =
-        (floor_height > processed_height.unwrap_or_else(Height::zero)).then_some(floor_height);
 
     let databases = A::Databases::init(context.child("db_set"), db_config).await;
     let floor_targets = A::sync_targets(&floor_block);
@@ -491,8 +481,7 @@ where
                     databases,
                     anchor: Anchor::from(&anchor_block),
                 },
-                skip_finalized_until,
-                replay_to: Some(floor_height),
+                floor: floor_height,
             };
         }
         databases.rewind_to_targets(floor_targets.clone()).await;
@@ -508,8 +497,7 @@ where
             databases,
             anchor: Anchor::from(&floor_block),
         },
-        skip_finalized_until,
-        replay_to: None,
+        floor: floor_height,
     }
 }
 
@@ -841,8 +829,8 @@ pub(crate) mod tests {
             )
             .await;
             assert_eq!(
-                result.replay_to,
-                Some(Height::new(5)),
+                result.floor,
+                Height::new(5),
                 "replay must extend through the marshal floor",
             );
             assert_eq!(
@@ -850,7 +838,6 @@ pub(crate) mod tests {
                 Height::zero(),
                 "the replay anchor must sit at the databases' committed height",
             );
-            assert_eq!(result.skip_finalized_until, None);
         });
     }
 }
