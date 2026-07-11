@@ -69,6 +69,19 @@ struct ResolverDelivery<V: Variant> {
     response: oneshot::Sender<bool>,
 }
 
+/// Completion marker for entries in the actor's durability sync pool.
+enum PooledSync {
+    /// Observed only so the fatal policy in `Durable` applies; no
+    /// continuation runs on completion.
+    Observed,
+    /// A finalized-archive sync batch became durable. Carries the sequence
+    /// assigned by [`Actor::start_finalized_sync`] so the completion arm can
+    /// release the application-dispatch barrier for every batch the sync
+    /// covers (a sync makes durable every write accepted before it started,
+    /// including batches registered under earlier sequences).
+    Finalized(u64),
+}
+
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
 /// of blocks.
@@ -130,6 +143,13 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
+    // Finalized-archive write batches that are buffered but not yet durable,
+    // keyed by the sequence of the pooled sync that first covers them and
+    // holding the lowest height written in the batch. `try_dispatch_blocks`
+    // never dispatches at or above the lowest pending height.
+    pending_finalized_syncs: BTreeMap<u64, Height>,
+    // Sequence assigned to the next pooled finalized-archive sync.
+    finalized_sync_seq: u64,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -240,6 +260,8 @@ where
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
+                pending_finalized_syncs: BTreeMap::new(),
+                finalized_sync_seq: 0,
                 cache,
                 finalizations_by_height,
                 finalized_blocks,
@@ -355,11 +377,12 @@ where
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<Arc<V::Block>, SubscriptionKeyFor<V>>>::default();
 
-        // Observe durable syncs that no consensus caller awaits (the notarization
-        // path). A flush failure inside `start_sync` is reported only through the
-        // returned handle, so every handle must be observed to apply the fatal
-        // policy; this pool does so without blocking the actor on fsync.
-        let mut syncs = Pool::<bool>::default();
+        // Observe durable syncs that no consensus caller awaits (the
+        // notarization and finalization paths). A flush failure inside
+        // `start_sync` is reported only through the returned handle, so every
+        // handle must be observed to apply the fatal policy; this pool does so
+        // without blocking the actor on fsync.
+        let mut syncs = Pool::<PooledSync>::default();
 
         // Anchor all startup work under a single root span. Tip recovery, floor
         // installation, gap repair, and the initial dispatch all run before any
@@ -392,6 +415,9 @@ where
             }
 
             // Attempt to repair any gaps in the finalized blocks archive, if there are any.
+            //
+            // Sync inline (blocking): the mailbox is not being served yet, and
+            // the dispatch below must observe durable repairs.
             if self
                 .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
                 .await
@@ -415,8 +441,15 @@ where
                 debug!("context shutdown, stopping marshal");
             },
             // Drive durability syncs: a real sync failure panics inside the
-            // pooled future (the fatal policy), aborting the actor.
-            _ = syncs.next_completed() => {},
+            // pooled future (the fatal policy), aborting the actor. A completed
+            // finalized-archive sync additionally releases the dispatch barrier
+            // for the batches it covers and resumes application dispatch.
+            sync = syncs.next_completed() => {
+                if let PooledSync::Finalized(seq) = sync {
+                    self.finalized_sync_completed(seq);
+                    self.try_dispatch_blocks(&mut application).await;
+                }
+            },
             // Handle waiter completions first
             Ok(completion) = waiters.next_completed() else continue => match completion {
                 Ok(block) => {
@@ -541,7 +574,7 @@ where
         message: Message<P::Scheme, V>,
         resolver: &mut R,
         waiters: &mut AbortablePool<Result<Arc<V::Block>, SubscriptionKeyFor<V>>>,
-        syncs: &mut Pool<bool>,
+        syncs: &mut Pool<PooledSync>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
@@ -696,7 +729,10 @@ where
                     .cache
                     .put_notarization(round, digest, notarization)
                     .await;
-                syncs.push(handle.durable(round, "notarization"));
+                syncs.push(async move {
+                    handle.durable(round, "notarization").await;
+                    PooledSync::Observed
+                });
 
                 // A notarization alone is not enough to fetch missing proposal
                 // data. If the block is not locally available, remember the
@@ -711,7 +747,10 @@ where
                             .cache
                             .put_notarized(round, digest, Arc::unwrap_or_clone(block).into())
                             .await;
-                        syncs.push(handle.durable(round, "notarized"));
+                        syncs.push(async move {
+                            handle.durable(round, "notarized").await;
+                            PooledSync::Observed
+                        });
                     }
                 } else {
                     debug!(?round, "notarized block unavailable locally");
@@ -753,8 +792,23 @@ where
                     {
                         // If a floor anchor is pending, repair and dispatch are
                         // no-ops until the anchor block is stored.
-                        self.try_repair_gaps(buffer, resolver, application).await;
-                        self.sync_finalized().await;
+                        if self.try_repair_gaps(buffer, resolver, application).await {
+                            // Repair wrote blocks at heights below the new
+                            // finalization, so sync inline (blocking): the
+                            // batch's lowest height is not tracked, which the
+                            // pooled dispatch barrier would need. Repair only
+                            // runs while catching up, so the mailbox stall is
+                            // acceptable here.
+                            self.sync_finalized().await;
+                        } else {
+                            // Hot path: only `height` was written. Make it
+                            // durable on the sync pool so the mailbox keeps
+                            // serving reads (e.g. the proposer's
+                            // `get_verified`) during the fsync; dispatch of
+                            // this block is deferred to the pool-completion
+                            // arm by the barrier in `try_dispatch_blocks`.
+                            self.start_finalized_sync(height, round, syncs).await;
+                        }
                         self.try_dispatch_blocks(application).await;
                         debug!(?round, %height, "finalized block stored");
                     }
@@ -964,7 +1018,9 @@ where
 
         if needs_sync {
             // Sync archives before responding to peers so accepted repair data is
-            // durable before this node serves it.
+            // durable before this node serves it. Inline (blocking) is required:
+            // the produce responses below run in this same arm and must not be
+            // sent before the data they serve is durable.
             self.sync_finalized().await;
             self.try_dispatch_blocks(application).await;
         }
@@ -1182,7 +1238,8 @@ where
     /// shutdown, however, a subscriber may hold a block that marshal never
     /// durably stored. Subscriptions make no durability promise. Durable
     /// height-ordered delivery is provided by application dispatch, which
-    /// only sends blocks after [`Self::sync_finalized`].
+    /// only sends blocks once the finalized archives are durable (see
+    /// [`Self::try_dispatch_blocks`]).
     ///
     /// Returns true if the block was consumed as the floor anchor.
     async fn ingest<Buf: Buffer<V>>(
@@ -1241,6 +1298,9 @@ where
                 .expect("pending floor anchor missing");
             self.update_processed_round_floor(height, finalization.round(), resolver)
                 .await;
+            // Sync inline (blocking): floor transitions are rare, and repair
+            // batches do not track the lowest height the pooled dispatch
+            // barrier would need.
             if self.try_repair_gaps(buffer, resolver, application).await {
                 self.sync_finalized().await;
             }
@@ -1271,6 +1331,9 @@ where
             }
         )
         .expect("failed to store floor anchor");
+        // Sync inline (blocking): every step below (metadata sync, pruning,
+        // dispatch) requires the anchor to already be durable, and floor
+        // transitions are rare.
         self.sync_finalized().await;
 
         if height > self.tip {
@@ -1304,6 +1367,10 @@ where
         // Intentionally keep existing block subscriptions alive. Canceling
         // waiters can have catastrophic consequences (nodes can get stuck in
         // different views) as actors do not retry subscriptions on failed channels.
+        //
+        // Sync inline (blocking): floor transitions are rare, and repair
+        // batches do not track the lowest height the pooled dispatch barrier
+        // would need.
         if self.try_repair_gaps(buffer, resolver, application).await {
             self.sync_finalized().await;
         }
@@ -1725,25 +1792,30 @@ where
     /// updated later, in a subsequent `select_loop!` iteration, when the ack
     /// handler updates the processed height.
     ///
-    /// Callers must only invoke this after [`Self::sync_finalized`] has made any
-    /// preceding finalized-archive writes durable. In other words, anything fed
-    /// to the application from this method is already durably persisted in marshal.
+    /// Anything fed to the application from this method is already durably
+    /// persisted in marshal: callers must make preceding finalized-archive
+    /// writes durable with [`Self::sync_finalized`] (blocking) or register
+    /// them with [`Self::start_finalized_sync`] (pooled) before yielding to
+    /// the `select_loop!`. Registered batches gate dispatch below: no block at
+    /// or above the lowest non-durable height is dispatched until the covering
+    /// pooled sync completes, at which point the pool-completion arm re-runs
+    /// this method.
     ///
     /// Acks are processed in FIFO order so the processed floor height always
     /// advances sequentially.
     ///
     /// # Crash safety
     ///
-    /// Because `select_loop!` arms run to completion, the caller's
-    /// [`Self::sync_finalized`] always executes before the ack handler runs. This
-    /// guarantees archive data is durable before the processed floor height
-    /// advances:
+    /// Because `select_loop!` arms run to completion, archive data is always
+    /// durable before the ack handler advances the processed floor height:
     ///
     /// ```text
     /// Iteration N (caller):
-    ///   store_finalization  ->  Archive::put (buffered)
-    ///   sync_finalized      ->  archive durable
-    ///   try_dispatch_blocks  ->  sends blocks to app, enqueues pending acks
+    ///   store_finalization   ->  Archive::put (buffered)
+    ///   sync_finalized       ->  archive durable
+    ///     (or start_finalized_sync -> dispatch of the batch deferred to the
+    ///      pool-completion arm, which runs after the archive is durable)
+    ///   try_dispatch_blocks  ->  sends durable blocks to app, enqueues pending acks
     ///
     /// Iteration M (ack handler, M > N):
     ///   ack handler       ->  update_processed_height  ->  metadata buffered
@@ -1758,10 +1830,18 @@ where
             return;
         }
 
+        // Durability barrier: a pooled finalized-archive sync may still be in
+        // flight (see `start_finalized_sync`), and buffered writes are readable
+        // from the archives before they are durable.
+        let non_durable = self.pending_finalized_syncs.values().min().copied();
+
         while self.pending_acks.has_capacity() {
             let next_height = self
                 .pending_acks
                 .next_dispatch_height(self.stream.next_height());
+            if non_durable.is_some_and(|lowest| next_height >= lowest) {
+                return;
+            }
             let Some(block) = self.get_finalized_block(next_height).await else {
                 return;
             };
@@ -1794,7 +1874,8 @@ where
         self.last_proposed_block.take().map(|(_, _, block)| block)
     }
 
-    /// Sync both finalization archives to durable storage.
+    /// Sync both finalization archives to durable storage, blocking the actor
+    /// until they are durable.
     ///
     /// Must be called within the same `select_loop!` arm as any preceding
     /// [`Self::store_finalization`] / [`Self::try_repair_gaps`] writes, before yielding back
@@ -1802,6 +1883,11 @@ where
     /// [`Self::try_dispatch_blocks`] must run only after this sync completes.
     /// It also ensures archives are durable before the ack handler advances
     /// the processed floor height. See [`Self::try_dispatch_blocks`] for details.
+    ///
+    /// Blocking the actor stalls every mailbox caller behind the fsync. Paths
+    /// that know the lowest height they wrote (and do not serve the written
+    /// data later in the same arm) should prefer the non-blocking
+    /// [`Self::start_finalized_sync`].
     #[tracing::instrument(name = "marshal.actor.sync_finalized", level = "info", skip_all)]
     async fn sync_finalized(&mut self) {
         if let Err(e) = try_join!(
@@ -1819,6 +1905,78 @@ where
         ) {
             panic!("failed to sync finalization archives: {e}");
         }
+
+        // A blocking sync waits on (and covers) every previously accepted
+        // write, including batches whose pooled syncs are still in flight, so
+        // all pending batches are durable once it returns.
+        self.pending_finalized_syncs.clear();
+    }
+
+    /// Start a non-blocking sync of both finalization archives on the
+    /// durability pool.
+    ///
+    /// The pooled entry resolves to [`PooledSync::Finalized`] once every write
+    /// accepted before this call is durable. Until the pool-completion arm
+    /// observes it, [`Self::try_dispatch_blocks`] will not dispatch any block
+    /// at or above `lowest` (the lowest height written in this batch),
+    /// preserving the durability barrier described there without blocking the
+    /// mailbox on an fsync like [`Self::sync_finalized`].
+    ///
+    /// Like [`Self::sync_finalized`], this must be called within the same
+    /// `select_loop!` arm as the writes it covers, before yielding back to the
+    /// loop.
+    #[tracing::instrument(name = "marshal.actor.start_finalized_sync", level = "info", skip_all)]
+    async fn start_finalized_sync(
+        &mut self,
+        lowest: Height,
+        round: Round,
+        syncs: &mut Pool<PooledSync>,
+    ) {
+        let seq = self.finalized_sync_seq;
+        self.finalized_sync_seq += 1;
+        self.pending_finalized_syncs.insert(seq, lowest);
+
+        let (blocks, finalizations) = match try_join!(
+            async {
+                let handle = self.finalized_blocks.start_sync().await.map_err(Box::new)?;
+                Ok::<_, BoxedError>(handle)
+            },
+            async {
+                let handle = self
+                    .finalizations_by_height
+                    .start_sync()
+                    .await
+                    .map_err(Box::new)?;
+                Ok::<_, BoxedError>(handle)
+            },
+        ) {
+            Ok(handles) => handles,
+            Err(e) => panic!("failed to start finalization archive sync: {e}"),
+        };
+        syncs.push(async move {
+            let (blocks, finalizations) = join(
+                blocks.durable(round, "finalized blocks"),
+                finalizations.durable(round, "finalizations"),
+            )
+            .await;
+            if blocks && finalizations {
+                PooledSync::Finalized(seq)
+            } else {
+                // Runtime shutdown before the sync completed: nothing may be
+                // released for dispatch.
+                PooledSync::Observed
+            }
+        });
+    }
+
+    /// Releases the dispatch barrier for every finalized-archive batch covered
+    /// by the completed pooled sync `seq`.
+    ///
+    /// A sync makes durable every write accepted before it started, so all
+    /// batches with an equal or lower sequence are released, regardless of the
+    /// order in which pooled syncs complete.
+    fn finalized_sync_completed(&mut self, seq: u64) {
+        self.pending_finalized_syncs = self.pending_finalized_syncs.split_off(&(seq + 1));
     }
 
     // -------------------- Immutable Storage --------------------
@@ -1876,10 +2034,11 @@ where
     /// guarantee for downstream application state transitions on their own.
     ///
     /// Writes are buffered and not synced. The caller must call
-    /// [sync_finalized](Self::sync_finalized) before yielding to the
-    /// `select_loop!` so that archive data is durable before the ack handler
-    /// advances the processed floor height. See [`Self::try_dispatch_blocks`] for the
-    /// crash safety invariant.
+    /// [sync_finalized](Self::sync_finalized) (blocking) or
+    /// [start_finalized_sync](Self::start_finalized_sync) (pooled) before
+    /// yielding to the `select_loop!` so that archive data is durable before
+    /// the ack handler advances the processed floor height. See
+    /// [`Self::try_dispatch_blocks`] for the crash safety invariant.
     async fn store_finalization(
         &mut self,
         height: Height,
