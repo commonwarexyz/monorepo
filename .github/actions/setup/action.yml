@@ -183,11 +183,14 @@ runs:
           exit 0
         fi
 
-        SCCACHE_IDLE_TIMEOUT=0 \
-        SCCACHE_REGION=auto \
-        SCCACHE_S3_RW_MODE="READ_WRITE" \
-        SCCACHE_S3_USE_SSL=true \
-        sccache --start-server
+        if ! SCCACHE_IDLE_TIMEOUT=0 \
+          SCCACHE_REGION=auto \
+          SCCACHE_S3_RW_MODE="READ_WRITE" \
+          SCCACHE_S3_USE_SSL=true \
+          sccache --start-server; then
+          echo "::warning::sccache server failed to start (cache backend unreachable), sccache disabled for this job."
+          exit 0
+        fi
 
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
