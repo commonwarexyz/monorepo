@@ -223,10 +223,10 @@ impl Application<deterministic::Context> for TestApp {
     async fn apply(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _block: &Self::Block,
+        block: &Self::Block,
         _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
-        TestMerkleized(_block.height().get())
+        TestMerkleized(block.height().get())
     }
 }
 

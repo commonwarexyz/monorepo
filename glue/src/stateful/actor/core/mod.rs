@@ -308,13 +308,13 @@ mod tests {
         Application, Proposed,
     };
     use commonware_consensus::{
-        marshal::{self, ancestry, core::Actor as MarshalActor},
+        marshal::{self, ancestry, core::Actor as MarshalActor, Update},
         simplex::{
             mocks::scheme as scheme_mocks,
             types::{Finalization, Finalize, Proposal},
         },
         types::{Epoch, FixedEpocher, Round, View, ViewDelta},
-        Application as _, CertifiableBlock as _, Heightable as _,
+        Application as _, CertifiableBlock as _, Heightable as _, Reporter as _,
     };
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider},
@@ -326,9 +326,19 @@ mod tests {
         buffer::paged::CacheRef, deterministic, Clock as _, Runner as _, Supervisor as _,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
+    use commonware_utils::{
+        acknowledgement::Exact, channel::mpsc, sync::TracedAsyncRwLock, Acknowledgement as _,
+        NZUsize, NZU16, NZU64,
+    };
     use futures::Stream;
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use std::{
+        convert::Infallible,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
     #[derive(Clone)]
     struct TestMultiApp;
@@ -379,6 +389,65 @@ mod tests {
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
             let height = block.height().get();
             (TestMerkleized(height), TestMerkleized(height))
+        }
+    }
+
+    /// A [TestApp] clone whose finalized hook records that it fired.
+    #[derive(Clone)]
+    struct FinalizedProbeApp {
+        notified: Arc<AtomicBool>,
+    }
+
+    impl Application<deterministic::Context> for FinalizedProbeApp {
+        type SigningScheme = TestScheme;
+        type Context = <TestBlock as commonware_consensus::CertifiableBlock>::Context;
+        type Block = TestBlock;
+        type Databases = Arc<TracedAsyncRwLock<TestDb>>;
+        type InputProvider = ();
+
+        fn sync_targets(block: &Self::Block) -> u64 {
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            TestBlock::new(0, 0)
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Self::Block> + Send,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+            _input: &mut Self::InputProvider,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            None
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Self::Block> + Send,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+            None
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+            TestMerkleized(block.height().get())
+        }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _databases: &Self::Databases,
+        ) {
+            self.notified.store(true, Ordering::SeqCst);
         }
     }
 
@@ -568,6 +637,58 @@ mod tests {
         });
     }
 
+    /// The genesis block is an axiom: a fresh boot receives it back from
+    /// marshal and must acknowledge it without invoking the application's
+    /// finalized hook.
+    #[test]
+    fn startup_never_notifies_genesis() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (marshal, _handler) = start_processed_marshal(&context, "genesis-silent", 0).await;
+
+            let notified = Arc::new(AtomicBool::new(false));
+            let plan = SyncPlan::init(&context, "genesis-silent-stateful").await;
+            let (stateful, mut mailbox) = Stateful::init(
+                context.child("stateful"),
+                Config {
+                    application: FinalizedProbeApp {
+                        notified: notified.clone(),
+                    },
+                    db_config: 0,
+                    input_provider: (),
+                    marshal,
+                    mailbox_size: NZUsize!(8),
+                    plan,
+                    resolvers: NoStateSyncResolver,
+                    sync_config: sync_config(),
+                    prune_config: None,
+                },
+            );
+            let handle = stateful.start();
+            select! {
+                _ = mailbox.subscribe_databases() => {},
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("stateful did not finish startup");
+                },
+            }
+
+            // Redeliver genesis as marshal does on a fresh boot.
+            let (acknowledgement, acknowledged) = Exact::handle();
+            let _ = mailbox.report(Update::Block(TestBlock::new(0, 0), acknowledgement));
+            select! {
+                _ = acknowledged => {},
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("genesis must be acknowledged");
+                },
+            }
+            assert!(
+                !notified.load(Ordering::SeqCst),
+                "genesis must not be reported to the application",
+            );
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
     /// A crash between one database's durable finalize and the rest of the
     /// set leaves the finished member ahead of marshal's floor (the
     /// acknowledgement only follows once every member is durable). Startup
@@ -614,8 +735,8 @@ mod tests {
     }
 
     /// Databases behind a marshal floor are unreachable without storage
-    /// corruption or a floor above databases that never synced: startup must
-    /// panic instead of running peer state sync.
+    /// corruption or a floor above them: startup must panic instead of
+    /// running peer state sync.
     #[test]
     #[should_panic(expected = "cannot be behind marshal floor")]
     fn startup_panics_when_databases_behind_floor() {

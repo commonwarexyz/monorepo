@@ -1785,6 +1785,26 @@ mod tests {
         });
     }
 
+    /// A tuple set is behind when any member is behind, even if another
+    /// member is ahead.
+    #[test]
+    fn tuple_behind_sync_targets_flags_any_behind_member() {
+        type DbSet = (Shared<CountingRewindDb>, Shared<CountingRewindDb>);
+
+        assert!(
+            <DbSet as DatabaseSet<deterministic::Context>>::behind_sync_targets(&(4, 5), &(5, 5))
+        );
+        assert!(
+            <DbSet as DatabaseSet<deterministic::Context>>::behind_sync_targets(&(6, 4), &(5, 5))
+        );
+        assert!(
+            !<DbSet as DatabaseSet<deterministic::Context>>::behind_sync_targets(&(5, 5), &(5, 5))
+        );
+        assert!(
+            !<DbSet as DatabaseSet<deterministic::Context>>::behind_sync_targets(&(6, 6), &(5, 5))
+        );
+    }
+
     #[test]
     fn database_set_prune_calls_managed_db_prune() {
         deterministic::Runner::default().start(|_context| async move {

@@ -48,10 +48,10 @@
 //!   databases before the actor is spawned. New nodes initialize from
 //!   genesis. Restarted nodes reconcile the database set against the later of
 //!   marshal's processed anchor and the stored state sync height, rewinding if
-//!   needed. Blocks are acknowledged only after they are durably finalized,
-//!   so databases can only recover behind that floor through storage
-//!   corruption or a marshal floor above databases that never synced.
-//!   Startup panics in that case instead of running peer state sync again.
+//!   needed. Outside of state sync, blocks are acknowledged only after they
+//!   are durably finalized, so databases can only recover behind that floor
+//!   through storage corruption or a marshal floor above them. Startup
+//!   panics in that case instead of running peer state sync again.
 //!   If marshal is behind that stored height, the actor acknowledges old
 //!   finalized blocks without applying them again until marshal catches up.
 //!   The actor then starts directly in normal processing mode while marshal

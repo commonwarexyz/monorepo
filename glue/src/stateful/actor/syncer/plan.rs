@@ -191,6 +191,24 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "interrupted state sync must resume from a newly selected floor")]
+    fn interrupted_sync_without_floor_cannot_start() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition_prefix = "interrupted_sync_without_floor";
+            let mut metadata =
+                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            metadata
+                .begin_sync(FloorMarker::new(Height::new(7), Sha256::fill(7)))
+                .await;
+            drop(metadata);
+
+            let plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
+            let _ = plan.into_parts();
+        });
+    }
+
+    #[test]
     #[should_panic(expected = "state sync cannot restart after completion")]
     fn completed_sync_cannot_be_rearmed() {
         deterministic::Runner::default().start(|context| async move {

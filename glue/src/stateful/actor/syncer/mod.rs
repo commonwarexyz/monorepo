@@ -360,10 +360,11 @@ where
 /// processed height, this falls back to marshal's genesis block so fresh boots
 /// and post-sync restarts share the same path.
 ///
-/// Databases ahead of the floor are repaired by rewinding back to it. Blocks
-/// are acknowledged only after they are durably finalized, so databases
-/// behind the floor are unreachable without storage corruption or a marshal
-/// floor above databases that never synced, and this function panics on
+/// Databases ahead of the floor are repaired by rewinding back to it.
+/// Outside of state sync (which resumes through the state-sync path when
+/// interrupted), blocks are acknowledged only after they are durably
+/// finalized, so databases behind the floor are unreachable without storage
+/// corruption or a marshal floor above them, and this function panics on
 /// them instead of falling back to peer state sync. If the databases are
 /// entirely inconsistent, this function will panic.
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
@@ -406,13 +407,13 @@ where
 
     // In the case that the committed targets do not match the marshal floor,
     // we may have suffered a crash that left the set in an inconsistent
-    // state. Blocks are acknowledged only after they are durably finalized
-    // and marshal prunes at least an ack window behind its processed height,
-    // so crash recovery only finds databases at or ahead of the floor, which
-    // rewind repairs. Databases behind the floor would require replaying
-    // state the node no longer guarantees to retain, and are unreachable
-    // without storage corruption or a marshal floor above databases that
-    // never synced.
+    // state. Outside of state sync, blocks are acknowledged only after they
+    // are durably finalized and marshal prunes at least an ack window behind
+    // its processed height, so crash recovery only finds databases at or
+    // ahead of the floor, which rewind repairs. Databases behind the floor
+    // would require replaying state the node no longer guarantees to retain,
+    // and are unreachable without storage corruption or a marshal floor
+    // above them.
     let committed_targets = databases.committed_targets().await;
     if committed_targets != floor_targets {
         assert!(
@@ -685,8 +686,8 @@ pub(crate) mod tests {
     /// [`marshal::Start::Floor`]) anchors marshal on the floor block, records
     /// the anchor's predecessor as processed, and prunes below the anchor.
     /// Databases behind that anchor are unreachable without storage
-    /// corruption or a floor above databases that never synced, so startup
-    /// must panic instead of falling back to peer state sync.
+    /// corruption or a floor above them, so startup must panic instead of
+    /// falling back to peer state sync.
     #[test]
     #[should_panic(expected = "cannot be behind marshal floor")]
     fn startup_floor_jump_panics_when_databases_behind_floor() {
