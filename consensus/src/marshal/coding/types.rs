@@ -546,7 +546,7 @@ impl<B: Block> Clone for CodedBlockCfg<B> {
 impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Reads a block from `buf` and validates it against `cfg.expected`,
     /// re-encoding with `strategy` to recompute the coding commitment.
-    fn read_validated(
+    pub(crate) fn read_validated(
         buf: &mut impl bytes::Buf,
         cfg: &CodedBlockCfg<B>,
         strategy: &impl Strategy,

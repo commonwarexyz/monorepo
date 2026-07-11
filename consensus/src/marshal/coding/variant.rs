@@ -11,10 +11,12 @@ use crate::{
     types::{coding::Commitment, Round},
     CertifiableBlock,
 };
-use commonware_codec::Read;
+use bytes::Buf;
+use commonware_codec::{Error as CodecError, Read};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{certificate::Scheme, Committable, Digestible, Hasher, PublicKey};
 use commonware_p2p::Recipients;
+use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
 use std::future::Future;
 
@@ -70,14 +72,21 @@ where
         payload.config() == coding_config_for_participants(n_participants)
     }
 
-    fn block_cfg(
+    fn decode_block(
+        mut buf: impl Buf,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: Self::Commitment,
-    ) -> <Self::Block as Read>::Cfg {
-        CodedBlockCfg {
+        strategy: &impl Strategy,
+    ) -> Result<Self::Block, CodecError> {
+        let cfg = CodedBlockCfg {
             inner: block_cfg.clone(),
             expected,
+        };
+        let block = CodedBlock::read_validated(&mut buf, &cfg, strategy)?;
+        if buf.has_remaining() {
+            return Err(CodecError::ExtraData(buf.remaining()));
         }
+        Ok(block)
     }
 
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
