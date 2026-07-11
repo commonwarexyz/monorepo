@@ -21,6 +21,9 @@ use std::{
 pub enum EventKind {
     Propose,
     ReceiveProposal,
+    VerifyRequested,
+    VerifyFailed,
+    ProposalInvalid,
     SendNotarize,
     SendNullify,
     SendFinalize,
@@ -39,6 +42,8 @@ pub enum EventKind {
     QuorumNotarization,
     QuorumNullification,
     QuorumFinalization,
+    CertifyRequested,
+    CertifyFailed,
     TimeoutFired,
     EnterView,
 }
@@ -49,6 +54,9 @@ impl EventKind {
         match self {
             Self::Propose => "propose",
             Self::ReceiveProposal => "recv_proposal",
+            Self::VerifyRequested => "verify_requested",
+            Self::VerifyFailed => "verify_failed",
+            Self::ProposalInvalid => "proposal_invalid",
             Self::SendNotarize => "send_notarize",
             Self::SendNullify => "send_nullify",
             Self::SendFinalize => "send_finalize",
@@ -67,6 +75,8 @@ impl EventKind {
             Self::QuorumNotarization => "quorum_notarization",
             Self::QuorumNullification => "quorum_nullification",
             Self::QuorumFinalization => "quorum_finalization",
+            Self::CertifyRequested => "certify_requested",
+            Self::CertifyFailed => "certify_failed",
             Self::TimeoutFired => "timeout",
             Self::EnterView => "enter_view",
         }
@@ -79,6 +89,9 @@ impl EventKind {
         matches!(
             self,
             Self::Propose
+                | Self::VerifyRequested
+                | Self::VerifyFailed
+                | Self::ProposalInvalid
                 | Self::SendNotarize
                 | Self::SendNullify
                 | Self::SendFinalize
@@ -88,6 +101,8 @@ impl EventKind {
                 | Self::QuorumNotarization
                 | Self::QuorumNullification
                 | Self::QuorumFinalization
+                | Self::CertifyRequested
+                | Self::CertifyFailed
                 | Self::TimeoutFired
                 | Self::EnterView
         )
@@ -167,6 +182,23 @@ impl EventKind {
             "timing out view" => Self::TimeoutFired,
             "leader elected" => Self::EnterView,
             "requested proposal from automaton" => Self::Propose,
+            "requested proposal verification" => Self::VerifyRequested,
+            // Emitted at two causal stages: the voter state machine rejecting
+            // the proposal's ancestry before any automaton request (state
+            // module) and the automaton answering false to a request (actor
+            // module).
+            "proposal failed verification" => {
+                if target.ends_with("::voter::state") {
+                    Self::ProposalInvalid
+                } else {
+                    Self::VerifyFailed
+                }
+            }
+            // A dropped automaton response (cancellation) is a failure
+            // outcome, same as an explicit rejection.
+            "failed to verify proposal" => Self::VerifyFailed,
+            "attempting certification" => Self::CertifyRequested,
+            "proposal failed certification" | "failed to certify proposal" => Self::CertifyFailed,
             _ => return None,
         })
     }
@@ -698,6 +730,76 @@ mod capture_tests {
     }
 
     #[test]
+    fn automaton_verify_and_certify_are_tracked() {
+        // Verify carries its view inside the proposal/round Debug blobs;
+        // certification carries a plain view field.
+        let log = EventLog::new();
+        let d = Dispatch::new(NodeSubscriber::new(0, log.clone()));
+        dispatcher::with_default(&d, || {
+            tracing::debug!(
+                target: T,
+                proposal = "Proposal { round: Round { epoch: Epoch(333), view: View(1) } }",
+                "requested proposal verification"
+            );
+            tracing::warn!(
+                target: T,
+                round = "Round { epoch: Epoch(333), view: View(1) }",
+                "proposal failed verification"
+            );
+            tracing::debug!(target: T, view = %1u64, "attempting certification");
+            tracing::warn!(
+                target: T,
+                round = "Round { epoch: Epoch(333), view: View(1) }",
+                "proposal failed certification"
+            );
+        });
+
+        let toks = log.summary().tokens();
+        assert!(
+            toks.contains("hb:verify_requested@new->verify_failed@cur"),
+            "expected verify request/failure pair, got {toks:?}"
+        );
+        assert!(toks.contains("hb:certify_requested@cur->certify_failed@cur"));
+    }
+
+    #[test]
+    fn cancellation_and_prerequest_rejection_are_captured() {
+        // A cancelled certification (dropped response) is a failure outcome,
+        // and a pre-request ancestry rejection is its own kind: neither is
+        // silently dropped nor conflated with an automaton rejection. The
+        // cancellation's `err` field precedes `round`, so view extraction must
+        // skip it.
+        let log = EventLog::new();
+        let d = Dispatch::new(NodeSubscriber::new(0, log.clone()));
+        dispatcher::with_default(&d, || {
+            tracing::warn!(
+                target: "commonware_consensus::simplex::actors::voter::state",
+                round = "Round { epoch: Epoch(333), view: View(1) }",
+                err = "InvalidParent",
+                "proposal failed verification"
+            );
+            tracing::debug!(target: T, view = %1u64, "attempting certification");
+            tracing::debug!(
+                target: T,
+                err = "RecvError(())",
+                round = "Round { epoch: Epoch(333), view: View(1) }",
+                "failed to certify proposal"
+            );
+        });
+
+        let toks = log.summary().tokens();
+        assert!(
+            toks.contains("hb:proposal_invalid@new->certify_requested@cur"),
+            "expected the pre-request rejection as its own kind, got {toks:?}"
+        );
+        assert!(
+            toks.contains("hb:certify_requested@cur->certify_failed@cur"),
+            "expected the cancellation as a failure outcome, got {toks:?}"
+        );
+        assert!(!toks.iter().any(|t| t.contains("verify_failed")));
+    }
+
+    #[test]
     fn standalone_subscriber_scopes_interest_to_simplex_events() {
         // Without an inner tee, only simplex events are enabled; other
         // callsites must not pay event construction just to be dropped.
@@ -915,6 +1017,42 @@ mod tests {
             EventKind::classify(T, "received finalization for request", ""),
             Some(EventKind::ProcessFinalization)
         );
+        // Automaton request points and their failure outcomes; a dropped
+        // response (cancellation) is a failure too.
+        assert_eq!(
+            EventKind::classify(T, "requested proposal verification", ""),
+            Some(EventKind::VerifyRequested)
+        );
+        assert_eq!(
+            EventKind::classify(T, "proposal failed verification", ""),
+            Some(EventKind::VerifyFailed)
+        );
+        assert_eq!(
+            EventKind::classify(T, "failed to verify proposal", ""),
+            Some(EventKind::VerifyFailed)
+        );
+        assert_eq!(
+            EventKind::classify(T, "attempting certification", ""),
+            Some(EventKind::CertifyRequested)
+        );
+        assert_eq!(
+            EventKind::classify(T, "proposal failed certification", ""),
+            Some(EventKind::CertifyFailed)
+        );
+        assert_eq!(
+            EventKind::classify(T, "failed to certify proposal", ""),
+            Some(EventKind::CertifyFailed)
+        );
+        // The same message from the state machine is a pre-request rejection
+        // (invalid ancestry), not an automaton answer.
+        assert_eq!(
+            EventKind::classify(
+                "commonware_consensus::simplex::actors::voter::state",
+                "proposal failed verification",
+                ""
+            ),
+            Some(EventKind::ProposalInvalid)
+        );
         // The floor is classified by its certificate variant.
         assert_eq!(
             EventKind::classify(T, "broadcasting nullification floor", "Notarization(..)"),
@@ -1035,6 +1173,9 @@ mod tests {
         let kinds = [
             Propose,
             ReceiveProposal,
+            VerifyRequested,
+            VerifyFailed,
+            ProposalInvalid,
             SendNotarize,
             SendNullify,
             SendFinalize,
@@ -1053,6 +1194,8 @@ mod tests {
             QuorumNotarization,
             QuorumNullification,
             QuorumFinalization,
+            CertifyRequested,
+            CertifyFailed,
             TimeoutFired,
             EnterView,
         ];
@@ -1060,12 +1203,14 @@ mod tests {
         // `kinds` (and the counts below) to be updated in lockstep.
         for k in kinds {
             match k {
-                Propose | ReceiveProposal | SendNotarize | SendNullify | SendFinalize
-                | SendNotarization | SendNullification | SendFinalization | ReceiveNotarize
-                | ReceiveNullify | ReceiveFinalize | ReceiveNotarization | ReceiveNullification
+                Propose | ReceiveProposal | VerifyRequested | VerifyFailed | ProposalInvalid
+                | SendNotarize | SendNullify | SendFinalize | SendNotarization
+                | SendNullification | SendFinalization | ReceiveNotarize | ReceiveNullify
+                | ReceiveFinalize | ReceiveNotarization | ReceiveNullification
                 | ReceiveFinalization | ProcessNotarization | ProcessNullification
                 | ProcessFinalization | QuorumNotarization | QuorumNullification
-                | QuorumFinalization | TimeoutFired | EnterView => {}
+                | QuorumFinalization | CertifyRequested | CertifyFailed | TimeoutFired
+                | EnterView => {}
             }
         }
 
@@ -1077,14 +1222,48 @@ mod tests {
         let dispersion = DISPERSION_BUCKETS as usize;
         let lsh = LSH_BANDS * LSH_BUCKETS as usize;
         let universe = pairs + dispersion + lsh;
-        assert_eq!(tags, 66);
-        assert_eq!(pairs, 4356);
-        assert_eq!(universe, 4356 + 8 + 512);
+        assert_eq!(tags, 81);
+        assert_eq!(pairs, 6561);
+        assert_eq!(universe, 6561 + 8 + 512);
 
-        // The whole signal fits the 2^16 coverage table with < 10% occupancy, so it
-        // saturates by construction, unlike state_cov's unbounded state:/local:
-        // fingerprints.
-        assert!(universe * 10 < (1 << 16));
+        // The whole signal fits the 2^16 coverage table with under 1/8 occupancy,
+        // so it saturates by construction, unlike state_cov's unbounded
+        // state:/local: fingerprints.
+        assert!(universe * 8 < (1 << 16));
+
+        // Aliasing through the production counter mapping is measured, not
+        // assumed: token names that collide in the table cannot be rewarded
+        // independently, so the loss must stay a small fraction of the universe.
+        let rels = [Rel::Behind, Rel::Current, Rel::Ahead];
+        let tag_strings: Vec<String> = kinds
+            .iter()
+            .copied()
+            .flat_map(|k| rels.iter().map(move |r| format!("{}@{}", k.tag(), r.tag())))
+            .collect();
+        let mut names = Vec::with_capacity(universe);
+        for a in &tag_strings {
+            for b in &tag_strings {
+                names.push(format!("hb:{a}->{b}"));
+            }
+        }
+        for bucket in 0..DISPERSION_BUCKETS {
+            names.push(format!("hb:dispersion={bucket}"));
+        }
+        for band in 0..LSH_BANDS {
+            for slot in 0..LSH_BUCKETS {
+                names.push(format!("hb:lsh:b{band}={slot}"));
+            }
+        }
+        assert_eq!(names.len(), universe);
+        let slots: BTreeSet<u64> = names
+            .iter()
+            .map(|n| fnv1a_hash(n.as_bytes()) % crate::state_cov::STATE_COUNTERS as u64)
+            .collect();
+        assert!(
+            slots.len() * 100 >= universe * 94,
+            "{} of {universe} tokens land in distinct counters",
+            slots.len()
+        );
     }
 
     #[test]

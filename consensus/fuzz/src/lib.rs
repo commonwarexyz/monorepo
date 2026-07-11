@@ -462,10 +462,20 @@ impl Arbitrary<'_> for FuzzInput {
             _ => ForwardingPolicy::SilentLeader,
         };
 
-        // Single-target certify variants are not sampled here because standard
-        // N4F1C3 modes have only three honest certifiers; disabling one drops
-        // below the quorum of three.
-        let certify = CertifyChoice::Always;
+        // Single-target certify variants stall N4F1C3: its three honest
+        // certifiers are exactly the finalize quorum, so disabling one halts
+        // finalization for the rest of the run. Sample them only when every
+        // validator is honest and the quorum keeps one certifier of slack.
+        let certify = if configuration == N4F0C4 {
+            let target_idx = u.int_in_range(0..=configuration.n as u8 - 1)?;
+            match u.int_in_range(0..=3)? {
+                0 => CertifyChoice::SingleCancel { target_idx },
+                1 => CertifyChoice::SinglePending { target_idx },
+                _ => CertifyChoice::Always,
+            }
+        } else {
+            CertifyChoice::Always
+        };
 
         let reporting = ReporterWiring::arbitrary(u)?;
 
@@ -1497,6 +1507,8 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
     input.partition = Partition::Connected;
     input.configuration = N4F1C3;
     input.degraded_network = false;
+    // Three honest certifiers are exactly the finalize quorum here.
+    input.certify = CertifyChoice::Always;
 
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
@@ -1664,6 +1676,9 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
     }
     input.partition = Partition::Connected;
     input.configuration = N4F1C3;
+    // Twins reuse the standard input; a certify variant sampled for an
+    // all-honest configuration would stall this quorum-tight one.
+    input.certify = CertifyChoice::Always;
 
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
@@ -2441,6 +2456,23 @@ mod tests {
 
         assert_eq!(unwrapped.auditor_state, wrapped.auditor_state);
         assert_eq!(unwrapped.reporter_states, wrapped.reporter_states);
+    }
+
+    #[test]
+    fn single_target_certify_preserves_liveness_with_full_honesty() {
+        // With four honest validators, disabling one certifier leaves exactly
+        // the finalize quorum: the run must still finalize (the liveness wait
+        // completes) and pass invariants. This is the configuration under
+        // which `FuzzInput::arbitrary` samples certify variants.
+        for certify in [
+            CertifyChoice::SingleCancel { target_idx: 0 },
+            CertifyChoice::SinglePending { target_idx: 0 },
+        ] {
+            let mut input = audit_input();
+            input.certify = certify;
+            let audit = run_standard_once::<simplex::SimplexId>(input, false, true, false, None);
+            assert!(audit.is_some(), "run with {certify:?} produced no audit");
+        }
     }
 
     #[test]

@@ -187,7 +187,7 @@ where
 /// the campaign lights a previously-zero counter and the input is retained. Sized
 /// well above the number of structurally-distinct tokens a small Simplex run
 /// produces, to keep hash collisions (two states sharing a counter) rare.
-const STATE_COUNTERS: usize = 1 << 16;
+pub(crate) const STATE_COUNTERS: usize = 1 << 16;
 
 static COUNTERS: Counters<STATE_COUNTERS> = Counters::new();
 
