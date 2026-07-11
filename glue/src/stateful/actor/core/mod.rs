@@ -19,9 +19,9 @@ use commonware_consensus::{
     marshal::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
-        Identifier,
     },
     simplex::types::Finalization,
+    Heightable,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_runtime::{spawn_cell, telemetry::metrics::GaugeExt, ContextCell, Handle, Spawner};
@@ -260,28 +260,21 @@ where
 
     /// Starts the application by initializing the database set at marshal's current floor.
     ///
-    /// If the databases recover BEHIND the marshal floor (an unclean shutdown
-    /// or a marshal startup floor above them), startup replays retained
-    /// finalized blocks to catch up and falls back to peer state sync when the
-    /// replay window has been pruned.
+    /// If the databases recover behind the marshal floor (an unclean shutdown
+    /// or a marshal startup floor above them), startup replays finalized
+    /// blocks over them before processing begins.
     async fn start_from_marshal(mut self) {
-        let startup = syncer::init_databases_from_marshal::<E, A, S, V>(
+        let syncer::StartupResult {
+            sync: SyncResult { databases, anchor },
+            skip_finalized_until,
+            replay,
+        } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
             &self.marshal,
             self.db_config.clone(),
             self.sync_metadata.sync_height(),
         )
         .await;
-        let syncer::StartupResult {
-            sync: SyncResult { databases, anchor },
-            skip_finalized_until,
-            replay_to,
-        } = match startup {
-            syncer::MarshalStartup::Ready(result) => result,
-            syncer::MarshalStartup::DatabasesBehindFloor(finalization) => {
-                return self.start_state_sync(finalization).await;
-            }
-        };
 
         // Attach the resolvers to the initialized databases before starting the processor,
         // so that this instance can serve peers database operations and proofs. The
@@ -299,28 +292,19 @@ where
             self.prune_config,
         );
 
-        // The databases recovered behind the marshal floor: replay the
-        // retained finalized blocks up to the floor before processing begins.
-        // Replay is crash-safe because each replayed block is durably
-        // finalized. After an interrupted multi-database finalize, the next
-        // startup rewinds to the newest common anchor before resuming.
-        let floor = replay_to.unwrap_or(anchor.height);
-        if let Some(replay_to) = replay_to {
-            let context = self.context.as_present();
-            let mut height = anchor.height;
-            while height < replay_to {
-                height = height.next();
-                let block = self
-                    .marshal
-                    .get_block(Identifier::Height(height))
-                    .await
-                    .expect("blocks in the verified replay window must be retained");
-                let (status, _prune) = processor.finalize(context, V::into_inner(block)).await;
-                assert!(
-                    matches!(status, FinalizeStatus::Persisted { .. }),
-                    "replayed block must persist"
-                );
-            }
+        // The databases recovered behind the marshal floor: apply the replay
+        // blocks up to the floor before processing begins. Replay is
+        // crash-safe because each replayed block is durably finalized. After
+        // an interrupted multi-database finalize, the next startup rewinds to
+        // the newest common anchor before resuming.
+        let floor = replay.last().map_or(anchor.height, Heightable::height);
+        let context = self.context.as_present();
+        for block in replay {
+            let (status, _prune) = processor.finalize(context, block).await;
+            assert!(
+                matches!(status, FinalizeStatus::Persisted { .. }),
+                "replayed block must persist"
+            );
         }
 
         // Once the databases are aligned with the floor, record completion so
@@ -650,27 +634,29 @@ mod tests {
         });
     }
 
+    /// Databases behind a marshal floor whose replay window has been pruned
+    /// must wait for the missing blocks instead of running peer state sync
+    /// or recording a completed sync height.
     #[test]
-    fn startup_falls_back_to_peer_sync_at_latest_certified_block() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+    fn startup_waits_when_replay_window_pruned() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let mut signing_context = context.child("signing");
-            let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-fallback", 1);
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-pruned", 1);
             let provider = ConstantProvider::new(fixture.schemes[0].clone());
-            let processed_block = TestBlock::new(5, 5);
             let anchor_block = TestBlock::new(6, 6);
             let finalization = make_finalization(&fixture, &anchor_block);
             let (marshal, _handler) = start_marshal(
                 &context,
-                "startup-fallback",
+                "startup-pruned",
                 marshal::Start::Floor(finalization.clone()),
                 provider,
-                vec![processed_block, anchor_block.clone()],
+                vec![anchor_block.clone()],
                 vec![(anchor_block, finalization)],
                 AckingReporter::new(commonware_consensus::types::Height::zero()),
             )
             .await;
 
-            let partition_prefix = "startup-fallback-stateful";
+            let partition_prefix = "startup-pruned-stateful";
             let plan = SyncPlan::init(&context, partition_prefix).await;
             let (stateful, mailbox) = Stateful::init(
                 context.child("stateful"),
@@ -681,7 +667,7 @@ mod tests {
                     marshal,
                     mailbox_size: NZUsize!(8),
                     plan,
-                    resolvers: NoopResolver,
+                    resolvers: NoStateSyncResolver,
                     sync_config: sync_config(),
                     prune_config: None,
                 },
@@ -689,12 +675,10 @@ mod tests {
             let handle = stateful.start();
 
             select! {
-                databases = mailbox.subscribe_databases() => {
-                    assert_eq!(databases.read().await.target(), 6);
+                _ = mailbox.subscribe_databases() => {
+                    panic!("startup must wait for pruned replay blocks instead of completing");
                 },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("stateful did not finish fallback state sync");
-                },
+                _ = context.sleep(Duration::from_secs(5)) => {},
             }
             handle.abort();
             let _ = handle.await;
@@ -704,7 +688,8 @@ mod tests {
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             assert_eq!(
                 plan.sync_height(),
-                Some(commonware_consensus::types::Height::new(6))
+                None,
+                "a stalled startup must not record sync completion"
             );
         });
     }

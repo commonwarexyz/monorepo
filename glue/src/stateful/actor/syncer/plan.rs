@@ -23,8 +23,7 @@ use commonware_storage::Context;
 ///
 /// Once state sync completes, this plan never selects peer state sync again.
 /// Future startups recover from the later of that synced height and marshal's
-/// processed height instead, re-running peer state sync only when the
-/// databases recover behind that floor and the replay window has been pruned.
+/// processed height instead.
 pub struct SyncPlan<E, S, V>
 where
     E: Context,
@@ -174,35 +173,16 @@ mod tests {
         });
     }
 
-    /// A completed sync may be re-armed by startup recovery when the
-    /// databases are found behind the marshal floor, as long as the re-armed
-    /// floor does not move backward.
     #[test]
-    fn completed_sync_can_be_rearmed_forward() {
+    #[should_panic(expected = "state sync cannot restart after completion")]
+    fn completed_sync_cannot_be_rearmed() {
         deterministic::Runner::default().start(|context| async move {
-            let partition_prefix = "completed_sync_can_be_rearmed_forward";
+            let partition_prefix = "completed_sync_cannot_be_rearmed";
             let mut metadata =
                 StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
             metadata.set_complete(Height::new(7)).await;
             metadata
                 .begin_sync(FloorMarker::new(Height::new(8), Sha256::fill(8)))
-                .await;
-            assert!(metadata.in_progress());
-            metadata.set_complete(Height::new(8)).await;
-            assert_eq!(metadata.sync_height(), Some(Height::new(8)));
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "re-armed state sync floor cannot be behind the completed height")]
-    fn completed_sync_cannot_be_rearmed_backward() {
-        deterministic::Runner::default().start(|context| async move {
-            let partition_prefix = "completed_sync_cannot_be_rearmed_backward";
-            let mut metadata =
-                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
-            metadata.set_complete(Height::new(7)).await;
-            metadata
-                .begin_sync(FloorMarker::new(Height::new(6), Sha256::fill(6)))
                 .await;
         });
     }

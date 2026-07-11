@@ -13,14 +13,12 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Startup anchor for marshal.
 ///
-/// Durable progress from a previous run takes precedence when it already
-/// supersedes the configured anchor. In the other direction, a [Start::Floor]
-/// ABOVE durable progress jumps ahead exactly like a runtime
-/// [`set_floor`](crate::marshal::core::Mailbox::set_floor): marshal anchors on
-/// the floor block, records the anchor's predecessor as processed, and prunes
-/// below the anchor without waiting for the application to process the
-/// skipped blocks. The application layer is responsible for bringing its
-/// databases to the floor (rewind, replay, or state sync).
+/// Durable progress from a previous run takes precedence when it supersedes
+/// the configured anchor. A [Start::Floor] above durable progress behaves
+/// like a [`set_floor`](crate::marshal::core::Mailbox::set_floor) call:
+/// marshal anchors on the floor block, records its predecessor as processed,
+/// and prunes below the anchor. The application layer is responsible for
+/// bringing its databases to the floor.
 pub enum Start<S: Scheme, C: Digest, B> {
     /// Start from the height-zero genesis block.
     Genesis(B),

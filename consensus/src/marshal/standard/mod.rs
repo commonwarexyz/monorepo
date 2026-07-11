@@ -3963,7 +3963,7 @@ mod tests {
         });
     }
 
-    /// A startup floor above the durable processed height JUMPS marshal
+    /// A startup floor above the durable processed height jumps marshal
     /// ahead: the floor block becomes the dispatch anchor and the durable
     /// processed height advances to just below it, without waiting for the
     /// application to acknowledge the skipped blocks. This is the intended
