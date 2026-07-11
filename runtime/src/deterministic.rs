@@ -141,24 +141,32 @@ impl Metrics {
 /// A SHA-256 digest.
 type Digest = [u8; 32];
 
+/// Hashes an unambiguous sequence of fields for deterministic runtime auditing.
 pub(crate) struct AuditHasher(Sha256);
 
 impl AuditHasher {
+    /// Creates an empty audit hasher.
     pub(crate) fn new() -> Self {
         Self(Sha256::new())
     }
 
+    /// Adds a length-prefixed field to the audit.
     pub(crate) fn update(&mut self, value: impl AsRef<[u8]>) {
         let value = value.as_ref();
         self.0.update((value.len() as u64).to_be_bytes());
         self.0.update(value);
     }
 
+    /// Adds the logical contents of `bufs` as one length-prefixed field.
+    ///
+    /// Physical chunk boundaries are excluded because they are not part of the storage or network
+    /// operation being audited.
     pub(crate) fn update_bufs(&mut self, bufs: &IoBufs) {
         self.0.update((bufs.len() as u64).to_be_bytes());
         bufs.for_each_chunk(|chunk| self.0.update(chunk));
     }
 
+    /// Returns the digest of all fields added to the audit.
     pub(crate) fn finalize(self) -> Digest {
         self.0.finalize().into()
     }
