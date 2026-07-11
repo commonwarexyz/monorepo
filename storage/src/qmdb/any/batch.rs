@@ -22,8 +22,8 @@ use crate::{
     },
     Context,
 };
-use ahash::AHashSet;
-use commonware_codec::Codec;
+use ahash::{AHashMap, AHashSet};
+use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
@@ -252,6 +252,32 @@ where
     batch: UnmerkleizedBatch<F, H, U, S>,
     keys: Vec<U::Key>,
     resolutions: Vec<StagedResolution<F, U>>,
+    /// Slot -> distinct-key id, assigned by first occurrence across [`stage`]
+    /// (UnmerkleizedBatch::stage) and [`expand`](Staged::expand) (1:1 with `keys`). Built while
+    /// staging so [`resolve_updates`](Staged::resolve_updates) deduplicates updates by direct
+    /// indexing instead of hashing every key on the merkleize path.
+    key_ids: Vec<u32>,
+    /// Key -> distinct-key id backing `key_ids`, retained so `expand` assigns consistent ids
+    /// to keys staged again in a later chunk. Only probed, never iterated.
+    key_id_map: AHashMap<U::Key, u32>,
+}
+
+/// Assign each staged key its distinct-key id (by first occurrence), appending to `ids`.
+fn assign_key_ids<K: Clone + Eq + core::hash::Hash>(
+    map: &mut AHashMap<K, u32>,
+    ids: &mut Vec<u32>,
+    keys: &[K],
+) {
+    assert!(
+        map.len() + keys.len() <= u32::MAX as usize,
+        "staged read count overflows key id space"
+    );
+    ids.reserve(keys.len());
+    for key in keys {
+        let next = map.len() as u32;
+        let id = *map.entry(key.clone()).or_insert(next);
+        ids.push(id);
+    }
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -709,6 +735,17 @@ where
         batch_ops: &[Operation<F, U>],
         reader: &R,
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
+        // Fast path: a strictly ascending batch entirely within the committed region needs no
+        // in-memory resolution, reordering, or per-location bookkeeping, so the positions can
+        // be handed to the reader directly. Floor-raise candidates (always committed, always
+        // ascending) and depth-0 mutation reads take this path every batch.
+        if locations.is_sorted_by(|a, b| a < b)
+            && locations.last().is_some_and(|last| **last < self.db_size)
+        {
+            let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
+            return Ok(reader.read_many(&positions).await?);
+        }
+
         // Resolve the in-memory regions synchronously.
         let mut results: Vec<Option<Operation<F, U>>> = locations
             .iter()
@@ -755,6 +792,33 @@ where
             .into_iter()
             .map(|r| r.expect("operation should be resolved"))
             .collect())
+    }
+
+    /// Like [`read_ops`](Self::read_ops), but returns chunk-partitioned results whose
+    /// concatenation preserves `locations` order.
+    ///
+    /// A strictly ascending batch entirely within the committed region (every floor-raise
+    /// candidate read) stays partitioned as the reader probed it, so no serial reassembly
+    /// runs on the calling task; other shapes resolve through [`read_ops`](Self::read_ops)
+    /// and return a single chunk.
+    async fn read_ops_sharded<E, C>(
+        &self,
+        locations: &[Location<F>],
+        batch_ops: &[Operation<F, U>],
+        reader: &authenticated::Journal<F, E, C, H, S>,
+    ) -> Result<Vec<Vec<Operation<F, U>>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        Operation<F, U>: CodecShared,
+    {
+        if locations.is_sorted_by(|a, b| a < b)
+            && locations.last().is_some_and(|last| **last < self.db_size)
+        {
+            let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
+            return Ok(reader.read_many_sharded(&positions).await?);
+        }
+        Ok(vec![self.read_ops(locations, batch_ops, reader).await?])
     }
 
     /// Gather existing-key locations for all keys in `mutations`.
@@ -843,11 +907,17 @@ where
 
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
     /// merkleize, diff merge, and `MerkleizedBatch` construction.
+    ///
+    /// `diff` may arrive in any order: it is key-sorted on the strategy pool, overlapping the
+    /// first floor-raise candidate read. `superseded_locs` holds the committed locations
+    /// superseded by `diff` (every `Some` `base_old_loc`), in any order; the floor raise
+    /// skips re-reading them.
     #[allow(clippy::too_many_arguments)]
     async fn finish<E, C, I, const N: usize>(
         self,
         mut ops: Vec<Operation<F, U>>,
-        mut diff: DiffVec<U::Key, F, U::Value>,
+        diff: DiffVec<U::Key, F, U::Value>,
+        mut superseded_locs: Vec<Location<F>>,
         active_keys_delta: isize,
         user_steps: u64,
         metadata: Option<U::Value>,
@@ -865,6 +935,20 @@ where
         let total_active_keys = self.base_active_keys as isize + active_keys_delta;
         let mut floor = self.base_inactivity_floor_loc;
 
+        // Key-sort the diff as one job on the strategy: candidate classification (after the
+        // first floor-raise read below) is the earliest consumer that needs it sorted, so the
+        // sort overlaps the candidate gathering and read instead of the calling task.
+        let mut diff_sort = Some(db.strategy().spawn(move |strategy| {
+            let mut diff = diff;
+            strategy.sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
+            diff
+        }));
+        // Replaced by the sorted diff at the first `diff_sort` await; empty until then.
+        let mut diff: DiffVec<U::Key, F, U::Value> = Vec::new();
+
+        // New diff entries for keys moved by the floor raise, merged into `diff` below.
+        let mut floor_diff = Vec::new();
+
         if total_active_keys > 0 {
             // Floor raise: advance the inactivity floor by `total_steps` active operations.
             // `fixed_tip` prevents scanning into floor-raise moves just appended.
@@ -872,13 +956,13 @@ where
             let fixed_tip = self.base_size + ops.len() as u64;
             let mut moved = 0u64;
             let mut scan_from = floor;
-            let mut floor_diff = Vec::with_capacity(total_steps as usize);
-            let mut superseded_locs: Vec<_> = diff
-                .iter()
-                .filter_map(|(_, entry)| entry.base_old_loc())
-                .collect();
-            strategy.sort_by(&mut superseded_locs, |a, b| a.cmp(b));
-            superseded_locs.dedup();
+            floor_diff.reserve(total_steps as usize);
+            // Locations are unique (each committed location belongs to exactly one key), so a
+            // presorted collection needs neither the sort nor the dedup.
+            if !superseded_locs.is_sorted_by(|a, b| a < b) {
+                strategy.sort_by(&mut superseded_locs, |a, b| a.cmp(b));
+                superseded_locs.dedup();
+            }
 
             // The raise appends at most `total_steps` moved ops plus the CommitFloor. Reserve
             // once instead of growing mid-loop.
@@ -921,7 +1005,15 @@ where
                     } else {
                         // Batch-read candidates: page-cache hits are served by one batched read,
                         // disk misses are fetched concurrently.
-                        let resolved = self.read_ops(&read_candidates, &ops, &db.log).await?;
+                        let resolved = self
+                            .read_ops_sharded(&read_candidates, &ops, &db.log)
+                            .await?;
+
+                        // Classification is the first consumer of the sorted diff; by now the
+                        // sort has overlapped the fill and read above.
+                        if let Some(job) = diff_sort.take() {
+                            diff = job.await;
+                        }
 
                         // Classify read candidates against the pre-raise state (see
                         // [`FloorOutcome`]). Revalidation is required even for candidates whose
@@ -968,13 +1060,22 @@ where
 
                         // Classification is already partitioned by candidate chunk, so use
                         // manual strategy execution and keep each location aligned with the
-                        // operation resolved for the same filtered candidate.
+                        // operation resolved for the same filtered candidate. Chunks are
+                        // subdivided past the pool parallelism because the snapshot probes
+                        // that dominate classification have variable latency, so finer
+                        // chunks balance the tail.
                         let manual = strategy.manual();
-                        let chunk_len = read_candidates.len().div_ceil(manual.parallelism());
-                        let chunks: Vec<CandidateChunk<'_, F, U>> = read_candidates
-                            .chunks(chunk_len)
-                            .zip(resolved.chunks(chunk_len))
-                            .collect();
+                        let target = read_candidates
+                            .len()
+                            .div_ceil(manual.parallelism() * 4)
+                            .max(1);
+                        let mut chunks: Vec<CandidateChunk<'_, F, U>> = Vec::new();
+                        let mut offset = 0;
+                        for chunk in &resolved {
+                            let locs = &read_candidates[offset..offset + chunk.len()];
+                            offset += chunk.len();
+                            chunks.extend(locs.chunks(target).zip(chunk.chunks(target)));
+                        }
                         let outcomes = manual.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
                             chunk_locs
                                 .iter()
@@ -989,7 +1090,7 @@ where
                 // preserves candidate order, so a candidate that does not match the next
                 // pending read was superseded and only advances the floor.
                 let mut outcomes = outcomes.into_iter().flatten();
-                let mut reads = resolved.into_iter();
+                let mut reads = resolved.into_iter().flatten();
                 let mut pending = read_candidates.iter().peekable();
                 for candidate in candidates {
                     floor = Location::new(*candidate + 1);
@@ -1031,18 +1132,35 @@ where
                     }
                 }
             }
-            if !floor_diff.is_empty() {
-                // `floor_diff` only accumulates keys that were not already present in `diff`.
-                // A key can only be moved once during this floor raise because, after it is
-                // moved, its new location lies above `fixed_tip` and the scan never revisits it.
-                strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
-                diff = merge_sorted_diffs(diff, floor_diff);
-                assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
-            }
         } else {
             // DB is empty after this batch; raise floor to tip.
             floor = Location::new(self.base_size + ops.len() as u64);
             debug!(tip = ?floor, "db is empty, raising floor to tip");
+        }
+
+        // The floor raise may have exited without classifying any candidate (or been skipped
+        // entirely); every path below needs the sorted diff.
+        if let Some(job) = diff_sort.take() {
+            diff = job.await;
+        }
+
+        // Merge the floor raise's new diff entries as one job on the strategy: nothing below
+        // reads `diff` until after the journal merkleization, so the merge overlaps the
+        // hashing instead of the calling task. `floor_diff` only accumulates keys that were
+        // not already present in `diff` (a key can only be moved once during this floor raise
+        // because, after it is moved, its new location lies above `fixed_tip` and the scan
+        // never revisits it), so the merge inputs are disjoint.
+        let mut diff_merge = None;
+        if !floor_diff.is_empty() {
+            let strategy = db.strategy();
+            diff_merge = Some(strategy.spawn(move |strategy| {
+                let mut floor_diff = floor_diff;
+                strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
+                let diff = merge_sorted_diffs(diff, floor_diff);
+                debug_assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
+                diff
+            }));
+            diff = Vec::new();
         }
 
         // CommitFloor operation.
@@ -1063,6 +1181,9 @@ where
             .log
             .merkleize(self.journal_batch, ops, inactive_peaks)
             .await?;
+        if let Some(job) = diff_merge.take() {
+            diff = job.await;
+        }
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
         let ancestors: Vec<_> = self
@@ -1180,6 +1301,7 @@ where
             .checked_add(keys.len())
             .expect("staged read index overflow");
         let (values, mut keys, mut resolutions) = self.batch.stage_reads(keys, db).await?;
+        assign_key_ids(&mut self.key_id_map, &mut self.key_ids, &keys);
         self.keys.append(&mut keys);
         self.resolutions.append(&mut resolutions);
         Ok((start..end, values, self))
@@ -1223,41 +1345,66 @@ where
         let Self {
             mut batch,
             keys,
-            mut resolutions,
+            resolutions,
+            key_ids,
+            key_id_map,
         } = self;
         let mut staged_updates = StagedUpdates::<F, U>::new();
         if updates.is_empty() {
             return (Self::apply_upserts(batch, upserts), staged_updates);
         }
 
-        // Walk updates newest-first so the first surviving occurrence of a key is its last
-        // write. Pre-seeding with the upsert keys drops overlapping updates: upserts are applied
-        // last and win.
-        let mut handled = AHashSet::with_capacity(updates.len() + upserts.len());
-        handled.extend(upserts.iter().map(|(key, _)| key));
-        staged_updates.reserve(updates.len());
-        for (slot, value) in updates.into_iter().rev() {
+        // Resolve last-write-wins per distinct key without hashing on the merkleize path:
+        // `key_ids` maps each slot to its distinct-key id, so a forward walk leaves each id's
+        // final write (the same winner as a newest-first scan). Overlapping updates for upsert
+        // keys are dropped (upserts are applied last and win); detecting the overlap is the
+        // one remaining hash probe, skipped entirely for the common upsert-free call.
+        let upsert_keys: AHashSet<&U::Key> = upserts.iter().map(|(key, _)| key).collect();
+        let mut winners: Vec<Option<(u32, Option<U::Value>)>> = vec![None; key_id_map.len()];
+        for (slot, value) in updates {
             assert!(slot < keys.len(), "update index out of staged read range");
-            let key = &keys[slot];
-            if !handled.insert(key) {
+            if !upsert_keys.is_empty() && upsert_keys.contains(&keys[slot]) {
                 continue;
             }
-            match resolutions[slot].take() {
-                Some((loc, payload)) if value.is_some() || U::STAGES_DELETES => {
-                    // This staged update is the surviving write for `key`. Do not also emit an
-                    // older batch mutation for the same key.
+            winners[key_ids[slot] as usize] = Some((slot as u32, value));
+        }
+
+        // Split the winners: updates whose slot resolved to a committed location become
+        // staged updates, the rest fall back to batch mutations. A surviving staged write
+        // must not also emit an older batch mutation for the same key, so it is removed here.
+        let mut order: Vec<(Location<F>, u32)> = Vec::with_capacity(winners.len());
+        for winner in &mut winners {
+            let Some((slot, value)) = winner else {
+                continue;
+            };
+            let key = &keys[*slot as usize];
+            match &resolutions[*slot as usize] {
+                Some((loc, _)) if value.is_some() || U::STAGES_DELETES => {
                     batch.mutations.remove(key);
-                    staged_updates.push((key.clone(), loc, payload, value));
+                    order.push((*loc, *slot));
                 }
                 _ => {
+                    let (_, value) = winner.take().expect("winner checked above");
                     batch.mutations.insert(key.clone(), value);
                 }
             }
         }
 
-        // Locations are unique after last-write-wins dedup, so the parallel sort
-        // is deterministic.
-        strategy.sort_by(&mut staged_updates, |a, b| a.1.cmp(&b.1));
+        // Locations are unique after last-write-wins dedup, so the parallel sort is
+        // deterministic. Sorting compact `(location, slot)` pairs instead of the staged
+        // tuples keeps its memory traffic low; the tuples are then materialized in sorted
+        // order across the strategy.
+        strategy.manual().sort_by(&mut order, |a, b| a.0.cmp(&b.0));
+        staged_updates = strategy.map_collect_vec(&order, |&(loc, slot)| {
+            let slot = slot as usize;
+            let (_, value) = winners[key_ids[slot] as usize]
+                .as_ref()
+                .expect("winner recorded for staged slot");
+            let (_, payload) = resolutions[slot]
+                .as_ref()
+                .expect("resolution checked above");
+            (keys[slot].clone(), loc, payload.clone(), value.clone())
+        });
         (Self::apply_upserts(batch, upserts), staged_updates)
     }
 }
@@ -1497,12 +1644,17 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
         let (results, keys, resolutions) = self.stage_reads(keys, db).await?;
+        let mut key_id_map = AHashMap::with_capacity(keys.len());
+        let mut key_ids = Vec::new();
+        assign_key_ids(&mut key_id_map, &mut key_ids, &keys);
         Ok((
             results,
             Staged {
                 batch: self,
                 keys,
                 resolutions,
+                key_ids,
+                key_id_map,
             },
         ))
     }
@@ -1618,6 +1770,10 @@ where
             Vec::with_capacity(mutations.len() + staged_updates.len() + 1);
         let mut diff: DiffVec<K, F, V::Value> =
             Vec::with_capacity(mutations.len() + staged_updates.len());
+        // Committed locations superseded by this batch, collected for the floor raise (which
+        // skips re-reading them). Emission order is ascending in `base_old_loc` except for
+        // entries resolved through ancestor diffs, so `finish` usually skips its sort.
+        let mut superseded_locs: Vec<Location<F>> = Vec::with_capacity(diff.capacity());
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
 
@@ -1625,6 +1781,7 @@ where
         // location of the key it supersedes.
         let mut emit = |key: K, base_old_loc: Option<Location<F>>, mutation: Option<V::Value>| {
             let new_loc = Location::new(m.base_size + ops.len() as u64);
+            superseded_locs.extend(base_old_loc);
             match mutation {
                 Some(value) => {
                     ops.push(Operation::Update(update::Unordered(
@@ -1708,6 +1865,7 @@ where
             .sort_by(&mut creates, |(a, _, _), (b, _, _)| a.cmp(b));
         for (key, value, base_old_loc) in creates {
             let new_loc = Location::new(m.base_size + ops.len() as u64);
+            superseded_locs.extend(base_old_loc);
             ops.push(Operation::Update(update::Unordered(
                 key.clone(),
                 value.clone(),
@@ -1723,12 +1881,11 @@ where
             active_keys_delta += 1;
         }
 
-        db.strategy().sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
-
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish(
             ops,
             diff,
+            superseded_locs,
             active_keys_delta,
             user_steps,
             metadata,
@@ -2137,12 +2294,18 @@ where
             }
         }
 
-        db.strategy().sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
+        // Committed locations superseded by this batch, for the floor raise (`finish` sorts
+        // the diff itself).
+        let superseded_locs: Vec<_> = diff
+            .iter()
+            .filter_map(|(_, entry)| entry.base_old_loc())
+            .collect();
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish(
             ops,
             diff,
+            superseded_locs,
             active_keys_delta,
             user_steps,
             metadata,
@@ -3415,6 +3578,27 @@ mod tests {
         2
     );
 
+    /// Build a [`Staged`] handle with the slot key-id map `stage`/`expand` would have built.
+    fn staged_with<F: Family, H: Hasher, U: update::Update + Send + Sync, S: Strategy>(
+        batch: UnmerkleizedBatch<F, H, U, S>,
+        keys: Vec<U::Key>,
+        resolutions: Vec<StagedResolution<F, U>>,
+    ) -> Staged<F, H, U, S>
+    where
+        Operation<F, U>: Codec,
+    {
+        let mut key_id_map = AHashMap::with_capacity(keys.len());
+        let mut key_ids = Vec::new();
+        assign_key_ids(&mut key_id_map, &mut key_ids, &keys);
+        Staged {
+            batch,
+            keys,
+            resolutions,
+            key_ids,
+            key_id_map,
+        }
+    }
+
     #[test]
     fn unordered_staged_resolve_updates_collapses_duplicates_before_sorting() {
         let runner = deterministic::Runner::default();
@@ -3444,10 +3628,10 @@ mod tests {
             let fallback = colliding_digest(0x91, 4);
             let upsert = colliding_digest(0x91, 5);
 
-            let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
-                batch: db.new_batch(),
-                keys: vec![k0, k1, k0, k2, k1, k3],
-                resolutions: vec![
+            let staged = staged_with::<mmr::Family, Sha256, TestUpdate, Sequential>(
+                db.new_batch(),
+                vec![k0, k1, k0, k2, k1, k3],
+                vec![
                     Some((loc(30), ())),
                     Some((loc(10), ())),
                     Some((loc(30), ())),
@@ -3455,7 +3639,7 @@ mod tests {
                     Some((loc(10), ())),
                     None,
                 ],
-            };
+            );
 
             let (batch, staged_updates) = staged.resolve_updates(
                 vec![
@@ -3541,11 +3725,11 @@ mod tests {
                 Some((loc(502), ())),
             ]);
 
-            let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
-                batch: db.new_batch(),
-                keys: staged_keys,
+            let staged = staged_with::<mmr::Family, Sha256, TestUpdate, Sequential>(
+                db.new_batch(),
+                staged_keys,
                 resolutions,
-            };
+            );
 
             // Update order is oldest first: the resolved `mut_newer` write and the unresolved
             // `staged_newer` write come first so newer writes through the other arm must beat
@@ -3617,11 +3801,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
-                batch: db.new_batch().write(key, Some(prior)),
-                keys: vec![key],
-                resolutions: vec![Some((old_loc, ()))],
-            };
+            let staged = staged_with::<mmr::Family, Sha256, TestUpdate, Sequential>(
+                db.new_batch().write(key, Some(prior)),
+                vec![key],
+                vec![Some((old_loc, ()))],
+            );
             let staged = staged
                 .merkleize(vec![(0, Some(replacement))], Vec::new(), None, &db)
                 .await
@@ -3660,15 +3844,15 @@ mod tests {
             let value_a = colliding_digest(0x94, 0);
             let value_b = colliding_digest(0x94, 1);
 
-            let staged = Staged::<mmr::Family, Sha256, TestUpdate, Sequential> {
-                batch: db.new_batch(),
-                keys: vec![delete_key, update_a, update_b],
-                resolutions: vec![
+            let staged = staged_with::<mmr::Family, Sha256, TestUpdate, Sequential>(
+                db.new_batch(),
+                vec![delete_key, update_a, update_b],
+                vec![
                     Some((loc(11), next_delete)),
                     Some((loc(30), next_a)),
                     Some((loc(7), next_b)),
                 ],
-            };
+            );
 
             let (batch, staged_updates) = staged.resolve_updates(
                 vec![(0, None), (1, Some(value_a)), (2, Some(value_b))],
