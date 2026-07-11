@@ -8664,6 +8664,237 @@ mod tests {
         successful_certification_replayed_after_restart(secp256r1::fixture);
     }
 
+    /// Tests that the leader of a newly entered view requests a proposal from the
+    /// automaton before the entering iteration's housekeeping (journal sync,
+    /// broadcast, batcher update, and pruning) completes, so the application can
+    /// build the payload concurrently with that housekeeping.
+    ///
+    /// 1. Advance to a view we follow and deliver a proposal + notarization so
+    ///    certification is requested (arming the section sync gate).
+    /// 2. Successful certification enters the next view, which we lead. The
+    ///    entering iteration's journal sync parks behind the gate.
+    /// 3. While the sync is still parked, the automaton must observe a propose
+    ///    request for the new view building on the just-certified parent.
+    fn propose_requested_before_housekeeping<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"propose_before_housekeeping".to_vec();
+        let partition = "propose_before_housekeeping".to_string();
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let epoch = Epoch::new(333);
+            // With round-robin, the leader of `view` is participant
+            // `(epoch + view) % n`: we (participant 0) follow the certified view
+            // and lead the view entered by its certification.
+            let certified_view = View::new(6);
+            let propose_view = View::new(7);
+
+            let pending_syncs = PendingSyncs::default();
+            let voter_context = DelayedSyncContext {
+                inner: context.child("voter"),
+                pending: pending_syncs.clone(),
+            };
+            let pending_syncs_for_certifier = pending_syncs.clone();
+
+            // Arm the sync gate when certification for the target view is
+            // requested: the next durability operation is the entering
+            // iteration's coalesced section sync.
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Custom(Box::new(
+                    move |round, _| {
+                        assert_eq!(round.view(), certified_view);
+                        pending_syncs_for_certifier.arm();
+                        true
+                    },
+                )),
+            };
+            let (mut app_actor, application) =
+                mocks::application::Application::new(context.child("app"), app_cfg);
+            #[allow(clippy::type_complexity)]
+            let propose_calls: Arc<Mutex<Vec<(Round, (View, Sha256Digest))>>> =
+                Arc::new(Mutex::new(Vec::new()));
+            let propose_tracker = propose_calls.clone();
+            app_actor.set_propose_observer(Box::new(move |ctx| {
+                propose_tracker.lock().push((ctx.round, ctx.parent));
+            }));
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition,
+                epoch,
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                mailbox_size: NZUsize!(128),
+                leader_timeout: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
+            let (resolver_sender, _resolver_receiver) =
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) =
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            assert!(matches!(
+                batcher_receiver.recv().await.unwrap(),
+                batcher::Message::Update { .. }
+            ));
+
+            // Advance to the certified view as a follower.
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                certified_view,
+            )
+            .await;
+
+            // Send proposal + payload so verification passes.
+            let proposal = Proposal::new(
+                Round::new(epoch, certified_view),
+                certified_view.previous().unwrap(),
+                Sha256::hash(b"propose_before_housekeeping_payload"),
+            );
+            let leader_idx = ((epoch.get() + certified_view.get()) % n as u64) as usize;
+            let leader = participants[leader_idx].clone();
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
+            mailbox.proposal(proposal.clone());
+
+            // Wait until our notarize for the certified view is constructed. The
+            // gate is armed in the strictly later iteration that requests
+            // certification, by which point the notarize iteration's journal sync
+            // has completed.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(notarize))
+                            if notarize.view() == certified_view => break,
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("timed out waiting for notarize in view {certified_view}");
+                    },
+                }
+            }
+
+            // Send the notarization to trigger certification (arming the gate).
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox.resolved(Certificate::Notarization(notarization));
+
+            // Wait until the entering iteration's section sync parks behind the gate.
+            while pending_syncs.lock().is_empty() {
+                reschedule().await;
+            }
+            let deferred = next_pending_sync(&pending_syncs);
+            let blocked = deferred.blocked;
+            blocked.await.expect("gated section sync was dropped");
+
+            // While the journal sync (and everything that follows it in the
+            // entering iteration: broadcast, batcher update, and pruning) is
+            // still parked, the automaton must receive our proposal request for
+            // the newly entered view.
+            let deadline = context.current() + Duration::from_secs(5);
+            let (round, parent) = loop {
+                let observed = propose_calls
+                    .lock()
+                    .iter()
+                    .find(|(round, _)| round.view() == propose_view)
+                    .copied();
+                if let Some(observed) = observed {
+                    break observed;
+                }
+                assert!(
+                    context.current() < deadline,
+                    "propose for view {propose_view} was not requested while the entering \
+                     iteration's journal sync was still pending"
+                );
+                context.sleep(Duration::from_millis(10)).await;
+            };
+            assert_eq!(round, Round::new(epoch, propose_view));
+            assert_eq!(
+                parent,
+                (certified_view, proposal.payload),
+                "proposal must build on the just-certified parent"
+            );
+
+            // Release the sync and confirm the voter completes the entering
+            // iteration's housekeeping (the batcher observes the new view).
+            deferred.release.send(Ok(())).unwrap();
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Update { current, .. } if current == propose_view => break,
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("timed out waiting for batcher update to view {propose_view}");
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_propose_requested_before_housekeeping() {
+        propose_requested_before_housekeeping(ed25519::fixture);
+        propose_requested_before_housekeeping(bls12381_multisig::fixture::<MinPk, _>);
+    }
+
     /// Tests that a failed certification (certify returns false) is correctly replayed
     /// from the journal after a restart. The replayed failure should trigger a timeout
     /// for the view (not re-certify or advance).

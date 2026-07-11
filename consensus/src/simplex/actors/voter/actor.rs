@@ -1168,6 +1168,35 @@ impl<
                 resolved = processed_resolved;
             },
             on_end => {
+                // If we entered a new view this iteration, request a proposal from the
+                // automaton now (if we are that view's leader) so it can start building
+                // while we complete the housekeeping below (journal sync, broadcast,
+                // batcher update, and pruning).
+                //
+                // This is equivalent to waiting for the next iteration's `on_start`
+                // (nothing else runs in between, so the state visible to
+                // [State::try_propose] is identical), but it removes the housekeeping
+                // below from the "enter view -> propose" critical path. Requesting a
+                // proposal appends nothing to the journal and sends nothing to the
+                // network, so the sync-before-broadcast barrier in [Self::notify] is
+                // unaffected: any vote derived from the proposal is constructed,
+                // journaled, and synced in the (strictly later) iteration that
+                // processes the automaton's response.
+                let entered = self.state.current_view();
+                if entered > start {
+                    // Any outstanding request targets a stale view (requests are only
+                    // issued for the then-current view and the view just advanced), so
+                    // drop it before issuing a new one (mirroring `on_start`).
+                    if let Some(ref pp) = pending_propose {
+                        if pp.view() != entered {
+                            pending_propose = None;
+                        }
+                    }
+                    if pending_propose.is_none() {
+                        pending_propose = self.try_propose().await;
+                    }
+                }
+
                 // Attempt to send any new view messages
                 //
                 // The batcher may drop votes we construct here if it has not yet been updated to the
@@ -1212,11 +1241,11 @@ impl<
                 // report into the application still nest under the view span.
                 self.state.close_decided_spans();
 
-                // After sending all required messages, prune any views
-                // we no longer need
-                self.prune_views().await;
-
-                // Update the batcher if we have moved to a new view
+                // Update the batcher if we have moved to a new view. This runs
+                // before pruning so the batcher can start aggregating votes for
+                // the new view while we prune: pruning only drops views below
+                // the activity floor (beneath the last finalized view), which
+                // the update never reads.
                 let current_view = self.state.current_view();
                 if current_view > start {
                     let leader = self
@@ -1235,6 +1264,10 @@ impl<
                     let (span, finalized) = self.state.batcher_context(current_view);
                     batcher.update(span, current_view, leader, finalized, forwardable_proposal);
                 }
+
+                // After sending all required messages, prune any views
+                // we no longer need
+                self.prune_views().await;
             },
         }
 
