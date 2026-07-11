@@ -11,6 +11,59 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
 use std::{marker::PhantomData, sync::Arc};
 
+/// A full application block sent directly to a predicted future leader.
+///
+/// The coding commitment travels with the block so the receiver can recompute
+/// and validate the full commitment before admitting it to the
+/// reconstructed-block cache.
+pub(crate) struct ForwardedBlock<B: Block, C: Scheme, H: Hasher> {
+    commitment: Commitment,
+    inner: B,
+    _scheme: PhantomData<(C, H)>,
+}
+
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> ForwardedBlock<B, C, H> {
+    pub(crate) fn new(block: &CodedBlock<B, C, H>) -> Self {
+        Self {
+            commitment: block.commitment(),
+            inner: block.inner().clone(),
+            _scheme: PhantomData,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (Commitment, B) {
+        (self.commitment, self.inner)
+    }
+}
+
+impl<B: Block, C: Scheme, H: Hasher> Write for ForwardedBlock<B, C, H> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.commitment.write(buf);
+        self.inner.write(buf);
+    }
+}
+
+impl<B: Block, C: Scheme, H: Hasher> EncodeSize for ForwardedBlock<B, C, H> {
+    fn encode_size(&self) -> usize {
+        self.commitment.encode_size() + self.inner.encode_size()
+    }
+}
+
+impl<B: Block, C: Scheme, H: Hasher> Read for ForwardedBlock<B, C, H> {
+    type Cfg = B::Cfg;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            commitment: Commitment::read(buf)?,
+            inner: B::read_cfg(buf, cfg)?,
+            _scheme: PhantomData,
+        })
+    }
+}
+
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
 pub struct Shard<C: Scheme, H: Hasher> {

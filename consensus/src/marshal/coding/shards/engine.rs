@@ -144,7 +144,7 @@ use super::{
 };
 use crate::{
     marshal::coding::{
-        types::{CodedBlock, Shard},
+        types::{CodedBlock, ForwardedBlock, Shard},
         validation::{validate_reconstruction, ReconstructionError as InvariantError},
     },
     types::{coding::Commitment, Epoch, Round},
@@ -170,7 +170,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     bitmap::BitMap,
-    channel::{fallible::OneshotExt, oneshot},
+    channel::{fallible::OneshotExt, mpsc, oneshot},
     ordered::{Quorum, Set},
 };
 use rand_core::Rng;
@@ -180,6 +180,10 @@ use std::{
 };
 use thiserror::Error;
 use tracing::{debug, warn};
+
+type ForwardRequest<B, C, H> = (Round, CodedBlock<B, C, H>);
+type ForwardSender<B, C, H> = mpsc::Sender<ForwardRequest<B, C, H>>;
+type ForwardReceiver<B, C, H> = mpsc::Receiver<ForwardRequest<B, C, H>>;
 
 /// An error that can occur during reconstruction of a [`CodedBlock`] from [`Shard`]s
 #[derive(Debug, Error)]
@@ -302,6 +306,9 @@ where
     /// Receiver for incoming messages to the actor.
     mailbox: mailbox::Receiver<Message<B, C, H, P>>,
 
+    /// Sender half retained for the optional full-block forwarding ingress.
+    forwarding_mailbox: Mailbox<B, C, H, P>,
+
     /// The scheme provider.
     scheme_provider: S,
 
@@ -386,10 +393,12 @@ where
     pub fn new(context: E, config: Config<P, S, X, D, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
+        let forwarding_mailbox = Mailbox::new(sender);
         (
             Self {
                 context: ContextCell::new(context),
                 mailbox,
+                forwarding_mailbox: forwarding_mailbox.clone(),
                 scheme_provider: config.scheme_provider,
                 blocker: config.blocker,
                 shard_codec_cfg: config.shard_codec_cfg,
@@ -407,7 +416,7 @@ where
                 block_subscriptions: BTreeMap::new(),
                 metrics,
             },
-            Mailbox::new(sender),
+            forwarding_mailbox,
         )
     }
 
@@ -416,13 +425,144 @@ where
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network))
+        spawn_cell!(self.context, self.run(network, None))
+    }
+
+    /// Start shard dissemination plus a dedicated full-block channel used to
+    /// send proposals directly to a predicted future leader.
+    pub fn start_with_forwarding<FS, FR, F>(
+        mut self,
+        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        forwarding_network: (FS, FR),
+        forwarder: F,
+    ) -> Handle<()>
+    where
+        FS: Sender<PublicKey = P>,
+        FR: Receiver<PublicKey = P>,
+        F: Fn(Round) -> Option<P> + Send + Sync + 'static,
+        B: CertifiableBlock<Context = crate::simplex::types::Context<Commitment, P>>,
+    {
+        spawn_cell!(
+            self.context,
+            self.run_with_forwarding(network, forwarding_network, forwarder)
+        )
+    }
+
+    async fn run_with_forwarding<SS, SR, FS, FR, F>(
+        self,
+        network: (SS, SR),
+        forwarding_network: (FS, FR),
+        forwarder: F,
+    ) where
+        SS: Sender<PublicKey = P>,
+        SR: Receiver<PublicKey = P>,
+        FS: Sender<PublicKey = P>,
+        FR: Receiver<PublicKey = P>,
+        F: Fn(Round) -> Option<P> + Send + Sync + 'static,
+        B: CertifiableBlock<Context = crate::simplex::types::Context<Commitment, P>>,
+    {
+        let (proposals, proposal_rx) = mpsc::channel(self.background_channel_capacity.get());
+        let context = self.context.child("full_block_forwarding");
+        let mailbox = self.forwarding_mailbox.clone();
+        let block_codec_cfg = self.block_codec_cfg.clone();
+        let blocker = self.blocker.clone();
+        let capacity = self.background_channel_capacity;
+        let strategy = self.strategy.clone();
+        drop(context.spawn(move |context| {
+            Self::run_forwarding(
+                context,
+                forwarding_network,
+                forwarder,
+                proposal_rx,
+                mailbox,
+                block_codec_cfg,
+                blocker,
+                capacity,
+                strategy,
+            )
+        }));
+        self.run(network, Some(proposals)).await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_forwarding<FS, FR, F>(
+        context: E,
+        (sender, receiver): (FS, FR),
+        forwarder: F,
+        mut proposals: ForwardReceiver<B, C, H>,
+        mailbox: Mailbox<B, C, H, P>,
+        block_codec_cfg: B::Cfg,
+        mut blocker: X,
+        background_channel_capacity: NonZeroUsize,
+        strategy: T,
+    ) where
+        FS: Sender<PublicKey = P>,
+        FR: Receiver<PublicKey = P>,
+        F: Fn(Round) -> Option<P> + Send + Sync + 'static,
+        B: CertifiableBlock<Context = crate::simplex::types::Context<Commitment, P>>,
+    {
+        let mut sender = WrappedSender::<_, ForwardedBlock<B, C, H>>::new(
+            context.network_buffer_pool().clone(),
+            sender,
+        );
+        let (receiver_service, mut receiver) =
+            WrappedBackgroundReceiver::<_, P, X, _, ForwardedBlock<B, C, H>, T>::new(
+                context.child("ingress"),
+                receiver,
+                block_codec_cfg,
+                blocker.clone(),
+                background_channel_capacity,
+                strategy.clone(),
+            );
+        let _receiver_handle = receiver_service.start();
+
+        select_loop! {
+            context,
+            on_stopped => {
+                debug!("full-block forwarding stopped");
+            },
+            Some((round, block)) = proposals.recv() else {
+                debug!("full-block proposal channel closed");
+                return;
+            } => {
+                let Some(peer) = forwarder(round) else {
+                    continue;
+                };
+                let _ = sender.send(
+                    Recipients::One(peer),
+                    ForwardedBlock::new(&block),
+                    true,
+                );
+            },
+            Some((peer, forwarded)) = receiver.recv() else {
+                debug!("full-block receiver closed");
+                return;
+            } => {
+                let (commitment, block) = forwarded.into_parts();
+                let coded = strategy
+                    .spawn(move |strategy| {
+                        CodedBlock::<B, C, H>::new(block, commitment.config(), &strategy)
+                    })
+                    .await;
+                if coded.commitment() != commitment {
+                    commonware_p2p::block!(
+                        blocker,
+                        peer,
+                        "invalid proactively forwarded block"
+                    );
+                    continue;
+                }
+                let round = coded.context().round;
+                mailbox.forwarded(round, coded);
+            },
+        }
     }
 
     /// Run the shard engine's event loop.
     async fn run(
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        forwarding: Option<ForwardSender<B, C, H>>,
     ) {
         let mut sender = WrappedSender::<_, Shard<C, H>>::new(
             self.context.network_buffer_pool().clone(),
@@ -485,7 +625,13 @@ where
 
                 match message {
                     Message::Proposed { block, round } => {
+                        if let Some(forwarding) = &forwarding {
+                            let _ = forwarding.try_send((round, block.clone()));
+                        }
                         self.broadcast_shards(&mut sender, round, block);
+                    }
+                    Message::Forwarded { block, round } => {
+                        self.cache_block(round, block);
                     }
                     Message::Discovered {
                         commitment,
@@ -2078,6 +2224,28 @@ mod tests {
                 }
             },
         );
+    }
+
+    #[test_traced]
+    fn test_forwarded_full_block_resolves_subscription_without_notarization() {
+        let fixture = Fixture {
+            num_peers: 4,
+            ..Default::default()
+        };
+
+        fixture.start(|_, _, _, peers, _, coding_config| async move {
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let subscription = peers[1].mailbox.subscribe(commitment);
+
+            // This is the receive-side action of proactive forwarding.
+            // No Discovered or Notarized message is required to wake a
+            // verifier already waiting on the block commitment.
+            peers[1].mailbox.forwarded(round, coded_block.clone());
+            assert_eq!(subscription.await.unwrap(), coded_block);
+        });
     }
 
     #[test_traced]
