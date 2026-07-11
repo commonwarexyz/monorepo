@@ -171,6 +171,7 @@ where
     E: Rng + Spawner + Context,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
+    <A::Databases as DatabaseSet<E>>::Config: Clone,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
@@ -301,8 +302,8 @@ where
         // The databases recovered behind the marshal floor: replay the
         // retained finalized blocks up to the floor before processing begins.
         // Replay is crash-safe because each replayed block is durably
-        // finalized, so an interrupted replay resumes from a higher anchor on
-        // the next startup.
+        // finalized. After an interrupted multi-database finalize, the next
+        // startup rewinds to the newest common anchor before resuming.
         let floor = replay_to.unwrap_or(anchor.height);
         if let Some(replay_to) = replay_to {
             let context = self.context.as_present();
@@ -344,9 +345,13 @@ where
 mod tests {
     use super::{Config, Stateful};
     use crate::stateful::{
-        actor::syncer::SyncPlan,
-        db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
-        tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
+        actor::syncer::{
+            tests::{make_finalization, start_marshal, AckingReporter},
+            SyncPlan,
+        },
+        db::{AttachableResolver, DatabaseSet, StateSyncDb, SyncEngineConfig},
+        tests::mocks::{TestApp, TestBlock, TestDb, TestMerkleized, TestScheme, TestVariant},
+        Application, Proposed,
     };
     use commonware_consensus::{
         marshal::{self, ancestry, core::Actor as MarshalActor},
@@ -355,7 +360,7 @@ mod tests {
             types::{Finalization, Finalize, Proposal},
         },
         types::{Epoch, FixedEpocher, Round, View, ViewDelta},
-        Application as _, CertifiableBlock as _,
+        Application as _, CertifiableBlock as _, Heightable as _,
     };
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider},
@@ -368,7 +373,60 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
+    use futures::Stream;
     use std::{convert::Infallible, sync::Arc, time::Duration};
+
+    #[derive(Clone)]
+    struct TestMultiApp;
+
+    impl Application<deterministic::Context> for TestMultiApp {
+        type SigningScheme = TestScheme;
+        type Context = <TestBlock as commonware_consensus::CertifiableBlock>::Context;
+        type Block = TestBlock;
+        type Databases = (
+            Arc<TracedAsyncRwLock<TestDb>>,
+            Arc<TracedAsyncRwLock<TestDb>>,
+        );
+        type InputProvider = ();
+
+        fn sync_targets(block: &Self::Block) -> (u64, u64) {
+            let height = block.height().get();
+            (height, height)
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            TestBlock::new(0, 0)
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Self::Block> + Send,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+            _input: &mut Self::InputProvider,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            None
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Self::Block> + Send,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+            None
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+            let height = block.height().get();
+            (TestMerkleized(height), TestMerkleized(height))
+        }
+    }
 
     #[derive(Clone)]
     struct NoopResolver;
@@ -384,13 +442,37 @@ mod tests {
             _context: deterministic::Context,
             _config: Self::Config,
             _resolver: NoopResolver,
+            target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            Ok(Self::new(target))
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoStateSyncResolver;
+
+    impl AttachableResolver<TestDb> for NoStateSyncResolver {
+        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<TestDb>>) {}
+    }
+
+    impl StateSyncDb<deterministic::Context, NoStateSyncResolver> for TestDb {
+        type SyncError = Infallible;
+
+        async fn sync_db(
+            _context: deterministic::Context,
+            _config: Self::Config,
+            _resolver: NoStateSyncResolver,
             _target: Self::SyncTarget,
             _tip_updates: mpsc::Receiver<Self::SyncTarget>,
             _finish: Option<mpsc::Receiver<()>>,
             _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            Ok(Self)
+            panic!("test must recover from retained blocks without peer state sync")
         }
     }
 
@@ -433,6 +515,198 @@ mod tests {
 
         Finalization::from_finalizes(&fixture.verifier, &votes, &Sequential)
             .expect("finalization quorum")
+    }
+
+    const fn sync_config() -> SyncEngineConfig {
+        SyncEngineConfig {
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: 1,
+            max_outstanding_requests: 1,
+            update_channel_size: NZUsize!(1),
+            max_retained_roots: 1,
+        }
+    }
+
+    async fn start_processed_marshal(
+        context: &deterministic::Context,
+        partition_prefix: &str,
+        height: u64,
+    ) -> (
+        marshal::core::Mailbox<TestScheme, TestVariant>,
+        marshal::resolver::handler::Handler<Sha256Digest>,
+    ) {
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(&mut signing_context, partition_prefix.as_bytes(), 1);
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+        let blocks = (1..=height)
+            .map(|height| TestBlock::new(height, height as u8))
+            .collect::<Vec<_>>();
+        let finalizations = blocks
+            .iter()
+            .cloned()
+            .map(|block| {
+                let finalization = make_finalization(&fixture, &block);
+                (block, finalization)
+            })
+            .collect();
+        let (marshal, handler) = start_marshal(
+            context,
+            partition_prefix,
+            marshal::Start::Genesis(TestBlock::new(0, 0)),
+            provider,
+            blocks,
+            finalizations,
+            AckingReporter::new(commonware_consensus::types::Height::new(height)),
+        )
+        .await;
+        while marshal.get_processed_height().await
+            != Some(commonware_consensus::types::Height::new(height))
+        {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        (marshal, handler)
+    }
+
+    #[test]
+    fn startup_replays_retained_blocks_and_marks_sync_complete() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (marshal, _handler) = start_processed_marshal(&context, "startup-replay", 5).await;
+
+            let partition_prefix = "startup-replay-stateful";
+            let plan = SyncPlan::init(&context, partition_prefix).await;
+            let (stateful, mailbox) = Stateful::init(
+                context.child("stateful"),
+                Config {
+                    application: TestApp,
+                    db_config: 0,
+                    input_provider: (),
+                    marshal,
+                    mailbox_size: NZUsize!(8),
+                    plan,
+                    resolvers: NoStateSyncResolver,
+                    sync_config: sync_config(),
+                    prune_config: None,
+                },
+            );
+            let handle = stateful.start();
+
+            select! {
+                databases = mailbox.subscribe_databases() => {
+                    assert_eq!(databases.read().await.target(), 5);
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("stateful did not finish startup replay");
+                },
+            }
+            handle.abort();
+            let _ = handle.await;
+            drop(mailbox);
+
+            let plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
+            assert_eq!(
+                plan.sync_height(),
+                Some(commonware_consensus::types::Height::new(5))
+            );
+        });
+    }
+
+    #[test]
+    fn startup_rewinds_torn_database_set_to_common_replay_anchor() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (marshal, _handler) =
+                start_processed_marshal(&context, "startup-torn-replay", 5).await;
+
+            // Simulate a crash after the first database durably finalized
+            // block 5 but before the second advanced from block 4.
+            let plan = SyncPlan::init(&context, "startup-torn-replay-stateful").await;
+            let (stateful, mailbox) = Stateful::init(
+                context.child("stateful"),
+                Config {
+                    application: TestMultiApp,
+                    db_config: (5, 4),
+                    input_provider: (),
+                    marshal,
+                    mailbox_size: NZUsize!(8),
+                    plan,
+                    resolvers: (NoStateSyncResolver, NoStateSyncResolver),
+                    sync_config: sync_config(),
+                    prune_config: None,
+                },
+            );
+            let handle = stateful.start();
+
+            select! {
+                databases = mailbox.subscribe_databases() => {
+                    assert_eq!(databases.0.read().await.target(), 5);
+                    assert_eq!(databases.1.read().await.target(), 5);
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("stateful did not recover torn database set");
+                },
+            }
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    #[test]
+    fn startup_falls_back_to_peer_sync_at_latest_certified_block() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let mut signing_context = context.child("signing");
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-fallback", 1);
+            let provider = ConstantProvider::new(fixture.schemes[0].clone());
+            let processed_block = TestBlock::new(5, 5);
+            let anchor_block = TestBlock::new(6, 6);
+            let finalization = make_finalization(&fixture, &anchor_block);
+            let (marshal, _handler) = start_marshal(
+                &context,
+                "startup-fallback",
+                marshal::Start::Floor(finalization.clone()),
+                provider,
+                vec![processed_block, anchor_block.clone()],
+                vec![(anchor_block, finalization)],
+                AckingReporter::new(commonware_consensus::types::Height::zero()),
+            )
+            .await;
+
+            let partition_prefix = "startup-fallback-stateful";
+            let plan = SyncPlan::init(&context, partition_prefix).await;
+            let (stateful, mailbox) = Stateful::init(
+                context.child("stateful"),
+                Config {
+                    application: TestApp,
+                    db_config: 0,
+                    input_provider: (),
+                    marshal,
+                    mailbox_size: NZUsize!(8),
+                    plan,
+                    resolvers: NoopResolver,
+                    sync_config: sync_config(),
+                    prune_config: None,
+                },
+            );
+            let handle = stateful.start();
+
+            select! {
+                databases = mailbox.subscribe_databases() => {
+                    assert_eq!(databases.read().await.target(), 6);
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("stateful did not finish fallback state sync");
+                },
+            }
+            handle.abort();
+            let _ = handle.await;
+            drop(mailbox);
+
+            let plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
+            assert_eq!(
+                plan.sync_height(),
+                Some(commonware_consensus::types::Height::new(6))
+            );
+        });
     }
 
     #[test]
@@ -487,19 +761,13 @@ mod tests {
                 context.child("stateful"),
                 Config {
                     application: TestApp,
-                    db_config: (),
+                    db_config: 0,
                     input_provider: (),
                     marshal,
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
-                    sync_config: SyncEngineConfig {
-                        fetch_batch_size: NZU64!(1),
-                        apply_batch_size: 1,
-                        max_outstanding_requests: 1,
-                        update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
-                    },
+                    sync_config: sync_config(),
                     prune_config: None,
                 },
             );

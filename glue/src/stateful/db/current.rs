@@ -1558,6 +1558,10 @@ mod tests {
                     .await
                     .unwrap();
             }
+            let target_after_second = {
+                let guard = db.read().await;
+                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard)
+            };
 
             {
                 let mut guard = db.write().await;
@@ -1573,6 +1577,11 @@ mod tests {
                 <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard)
             };
             assert_eq!(target_after_rewind, target_after_first);
+            let guard = db.read().await;
+            assert!(<OrderedFixedDb as ManagedDb<_>>::behind_sync_target(
+                &*guard,
+                &target_after_second,
+            ));
         });
     }
 

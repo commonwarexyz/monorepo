@@ -25,14 +25,14 @@ pub(crate) type TestVariant = Standard<TestBlock>;
 pub(crate) struct TestUnmerkleized;
 
 #[derive(Clone, Copy)]
-pub(crate) struct TestMerkleized;
+pub(crate) struct TestMerkleized(pub(crate) u64);
 
 impl Unmerkleized for TestUnmerkleized {
     type Merkleized = TestMerkleized;
     type Error = Infallible;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Self::Error> {
-        Ok(TestMerkleized)
+        Ok(TestMerkleized(0))
     }
 }
 
@@ -41,7 +41,7 @@ impl Merkleized for TestMerkleized {
     type Unmerkleized = TestUnmerkleized;
 
     fn root(&self) -> Self::Digest {
-        Sha256Digest::from([0; 32])
+        Sha256Digest::from([self.0 as u8; 32])
     }
 
     fn new_batch(&self) -> Self::Unmerkleized {
@@ -50,42 +50,54 @@ impl Merkleized for TestMerkleized {
 }
 
 #[derive(Default)]
-pub(crate) struct TestDb;
+pub(crate) struct TestDb {
+    target: u64,
+}
+
+impl TestDb {
+    pub(crate) const fn new(target: u64) -> Self {
+        Self { target }
+    }
+
+    pub(crate) const fn target(&self) -> u64 {
+        self.target
+    }
+}
 
 impl<E: Send> ManagedDb<E> for TestDb {
     type Unmerkleized = TestUnmerkleized;
     type Merkleized = TestMerkleized;
     type Error = Infallible;
-    type Config = ();
+    type Config = u64;
     type SyncTarget = u64;
 
-    async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-        Ok(Self)
+    async fn init(_context: E, target: Self::Config) -> Result<Self, Self::Error> {
+        Ok(Self::new(target))
     }
 
     async fn new_batch(_db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
-    fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
-        true
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        batch.0 == *target
     }
 
-    async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Self::Error> {
+        self.target = batch.0;
         Ok(())
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
-        0
+        self.target
     }
 
     fn behind_sync_target(&self, target: &Self::SyncTarget) -> bool {
-        // Committed state is pinned at target 0, so any positive target is
-        // ahead of what this database holds.
-        *target > 0
+        *target > self.target
     }
 
-    async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Self::Error> {
+        self.target = target;
         Ok(())
     }
 }
@@ -214,12 +226,12 @@ impl Application<deterministic::Context> for TestApp {
         _block: &Self::Block,
         _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
-        TestMerkleized
+        TestMerkleized(_block.height().get())
     }
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Arc::new(TracedAsyncRwLock::new("test", TestDb))
+    Arc::new(TracedAsyncRwLock::new("test", TestDb::default()))
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

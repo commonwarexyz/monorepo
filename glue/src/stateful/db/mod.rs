@@ -170,10 +170,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     type Error: Debug + Send;
 
     /// Configuration needed to construct a new database instance.
-    ///
-    /// `Clone` allows startup to retry initialization through a different
-    /// route (e.g. falling back from marshal recovery to peer state sync).
-    type Config: Clone + Send;
+    type Config: Send;
 
     /// Sync target type for state sync of this database.
     ///
@@ -258,10 +255,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// - Single database sets use that database's [`ManagedDb::Config`].
     /// - Multi-database tuple sets use a tuple of per-database configs
     ///   `(Db1::Config, Db2::Config, ...)`.
-    ///
-    /// `Clone` allows startup to retry initialization through a different
-    /// route (e.g. falling back from marshal recovery to peer state sync).
-    type Config: Clone + Send;
+    type Config: Send;
 
     /// Per-database sync targets extracted from a finalized block.
     ///
@@ -2840,7 +2834,7 @@ mod tests {
             let finalize =
                 <(Shared<BlockingFinalizeDb>, Shared<BlockingFinalizeDb>) as DatabaseSet<
                     deterministic::Context,
-                >>::finalize(&databases, (TestMerkleized, TestMerkleized));
+                >>::finalize(&databases, (TestMerkleized(0), TestMerkleized(0)));
             pin_mut!(finalize);
             assert!(finalize.as_mut().now_or_never().is_none());
 
@@ -2875,7 +2869,7 @@ mod tests {
                 Shared<FailingFinalizeDb>,
             ) as DatabaseSet<deterministic::Context>>::finalize(
                 &databases,
-                (TestMerkleized, TestMerkleized),
+                (TestMerkleized(0), TestMerkleized(0)),
             )
             .await;
         });

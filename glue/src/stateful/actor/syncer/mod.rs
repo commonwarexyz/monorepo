@@ -377,10 +377,8 @@ where
     /// applying them again.
     pub skip_finalized_until: Option<Height>,
 
-    /// When set, the databases recovered BEHIND the marshal floor and the
-    /// anchor sits at their actual committed height: the caller must replay
-    /// retained finalized blocks `(anchor, replay_to]` from marshal before
-    /// processing begins, catching the databases up to the floor.
+    /// When set, replay retained finalized blocks through this height before
+    /// processing begins.
     pub replay_to: Option<Height>,
 }
 
@@ -400,8 +398,8 @@ where
     /// The databases recovered BEHIND the marshal floor and the retained
     /// finalized blocks cannot close the gap (the databases' committed state
     /// matches no retained block, so the replay window was pruned). The
-    /// caller must recover by running peer state sync to the returned floor
-    /// finalization.
+    /// caller must recover by running peer state sync to the returned certified
+    /// finalization at or above the floor.
     DatabasesBehindFloor(Finalization<S, V::Commitment>),
 }
 
@@ -473,12 +471,12 @@ where
     let committed_targets = databases.committed_targets().await;
     if committed_targets != floor_targets {
         if databases.behind_sync_targets(&floor_targets).await {
-            // Walk down from the floor looking for the block whose targets
-            // match the databases' committed state. Finding it means every
-            // block in the gap is retained (heights between it and the floor
-            // were visited on the way down), so a local replay can catch the
-            // databases up. Hitting a pruned height first means the replay
-            // window is gone.
+            // Walk down from the floor looking for the newest block none of
+            // the databases are behind. This is an exact match for a single
+            // database, and a rewindable common anchor for a database set
+            // left partially committed by a crash. Finding it means every
+            // block in the gap is retained, so local replay can catch the set
+            // up. Hitting a pruned height first requires peer state sync.
             let mut height = floor_height;
             let replay_anchor = loop {
                 let Some(previous) = height.previous() else {
@@ -489,22 +487,43 @@ where
                     break None;
                 };
                 let block = V::into_inner(block);
-                if A::sync_targets(&block) == committed_targets {
-                    break Some(block);
+                let targets = A::sync_targets(&block);
+                if !databases.behind_sync_targets(&targets).await {
+                    break Some((block, targets));
                 }
             };
-            let Some(anchor_block) = replay_anchor else {
+            let Some((anchor_block, anchor_targets)) = replay_anchor else {
                 warn!(
                     floor = %floor_height,
                     "databases behind marshal floor and replay window pruned; \
                      recovering via peer state sync"
                 );
-                let finalization = marshal
-                    .get_finalization(floor_height)
+                // Finalization storage is sparse: implicitly finalized and
+                // backfilled blocks need not have a certificate at their
+                // height. Marshal's latest finalized block always has a
+                // direct certificate, so use it as the peer-sync target.
+                let (certified_height, _) = marshal
+                    .get_info(Identifier::Latest)
                     .await
-                    .expect("marshal must retain a finalization at its floor");
+                    .expect("marshal must retain a certified finalized block");
+                assert!(
+                    certified_height >= floor_height,
+                    "latest certified height must cover the marshal floor"
+                );
+                let finalization = marshal
+                    .get_finalization(certified_height)
+                    .await
+                    .expect("marshal must retain its latest finalization");
                 return MarshalStartup::DatabasesBehindFloor(finalization);
             };
+            if committed_targets != anchor_targets {
+                databases.rewind_to_targets(anchor_targets.clone()).await;
+                assert!(
+                    databases.committed_targets().await == anchor_targets,
+                    "databases must agree on replay anchor {} after rewind",
+                    anchor_block.height()
+                );
+            }
             warn!(
                 floor = %floor_height,
                 anchor = %anchor_block.height(),
@@ -538,7 +557,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{init_databases_from_marshal, MarshalStartup};
     use crate::stateful::tests::mocks::{TestApp, TestBlock, TestScheme, TestVariant};
     use commonware_actor::Feedback;
@@ -632,13 +651,13 @@ mod tests {
     /// and holds later acknowledgements, so marshal stays alive without
     /// advancing its processed height further.
     #[derive(Clone)]
-    struct AckingReporter {
+    pub(crate) struct AckingReporter {
         ack_until: Height,
         held: Arc<Mutex<Vec<Exact>>>,
     }
 
     impl AckingReporter {
-        fn new(ack_until: Height) -> Self {
+        pub(crate) fn new(ack_until: Height) -> Self {
             Self {
                 ack_until,
                 held: Arc::new(Mutex::new(Vec::new())),
@@ -683,7 +702,7 @@ mod tests {
         }
     }
 
-    fn make_finalization(
+    pub(crate) fn make_finalization(
         fixture: &Fixture<TestScheme>,
         block: &TestBlock,
     ) -> Finalization<TestScheme, Sha256Digest> {
@@ -706,7 +725,7 @@ mod tests {
     /// Start a marshal actor over pre-seeded finalized blocks and
     /// finalizations. The returned handler must be kept alive for the actor
     /// to keep serving mailbox requests.
-    async fn start_marshal(
+    pub(crate) async fn start_marshal(
         context: &deterministic::Context,
         partition_prefix: &str,
         start: marshal::Start<TestScheme, Sha256Digest, TestBlock>,
@@ -819,10 +838,7 @@ mod tests {
             );
 
             let startup = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
-                &context,
-                &marshal,
-                (),
-                None,
+                &context, &marshal, 0, None,
             )
             .await;
             let MarshalStartup::DatabasesBehindFloor(floor) = startup else {
@@ -872,10 +888,7 @@ mod tests {
             }
 
             let startup = init_databases_from_marshal::<_, TestApp, TestScheme, TestVariant>(
-                &context,
-                &marshal,
-                (),
-                None,
+                &context, &marshal, 0, None,
             )
             .await;
             let MarshalStartup::Ready(result) = startup else {
@@ -884,7 +897,7 @@ mod tests {
             assert_eq!(
                 result.replay_to,
                 Some(Height::new(5)),
-                "replay must extend to the marshal floor",
+                "replay must extend through the marshal floor",
             );
             assert_eq!(
                 result.sync.anchor.height,
