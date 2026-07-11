@@ -831,8 +831,9 @@ mod tests {
     use super::*;
     use crate::{
         iobuf::{
-            cache_line_size, page_size, pool::BufferPoolThreadCacheConfig, BufferPool,
-            BufferPoolConfig,
+            cache_line_size, page_size,
+            pool::{BufferPoolThreadCacheConfig, MAX_CLASS_MAX_OVERRIDES},
+            BufferPool, BufferPoolConfig,
         },
         telemetry::metrics::Registry,
     };
@@ -855,6 +856,7 @@ mod tests {
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
             prefill: false,
             alignment: NZUsize!(page_size()),
+            class_max_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
         }
     }
 
