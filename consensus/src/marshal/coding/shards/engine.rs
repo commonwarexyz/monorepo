@@ -764,6 +764,7 @@ where
             );
             return;
         }
+        self.metrics.forwarded_blocks_received_total.inc();
         if self
             .reconstructed_blocks
             .contains_key(&forwarded.commitment())
@@ -782,6 +783,7 @@ where
             });
         if self.pending_forwards.len() > self.max_pending_forwards.get() {
             self.pending_forwards.pop_first();
+            self.metrics.forwarded_blocks_evicted_total.inc();
         }
         self.try_decode_forwards(decodes);
     }

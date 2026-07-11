@@ -77,10 +77,7 @@ impl<C: Scheme, H: Hasher> Read for Message<C, H> {
         match u8::read(buf)? {
             SHARD_TAG => Ok(Self::Shard(Shard::read_cfg(buf, cfg)?)),
             FORWARDED_BLOCK_TAG => Ok(Self::Forwarded(ForwardedBlock::read(buf)?)),
-            _ => Err(commonware_codec::Error::Invalid(
-                "marshal::coding::Message",
-                "invalid tag",
-            )),
+            tag => Err(commonware_codec::Error::InvalidEnum(tag)),
         }
     }
 }
@@ -154,7 +151,7 @@ impl ForwardedBlock {
         }
         if block.commitment() != self.commitment {
             return Err(commonware_codec::Error::Invalid(
-                "marshal::coding::ForwardedBlock",
+                "ForwardedBlock",
                 "commitment mismatch",
             ));
         }
@@ -1041,6 +1038,40 @@ mod test {
             let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
             encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
             assert_eq!(encoded_pool_bytes, encoded.as_ref());
+        });
+    }
+
+    #[test]
+    fn test_message_encode_with_pool_matches_encode() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool = context.network_buffer_pool();
+
+            const CONFIG: CodingConfig = CodingConfig {
+                minimum_shards: NZU16!(1),
+                extra_shards: NZU16!(2),
+            };
+
+            // Network sends encode with the pool (write_bufs), so both
+            // message variants must match the plain encoding exactly.
+            let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(1), 100);
+            let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
+            let shard = coded_block.shard(0).unwrap();
+            let forwarded = ForwardedBlock::new(Round::default(), &coded_block);
+
+            let encoded = coded_block.encode();
+            let mut encoded_pool = coded_block.encode_with_pool(pool);
+            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
+            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
+            assert_eq!(encoded_pool_bytes, encoded.as_ref());
+
+            for message in [Message::Shard(shard), Message::Forwarded(forwarded)] {
+                let encoded = message.encode();
+                let mut encoded_pool = message.encode_with_pool(pool);
+                let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
+                encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
+                assert_eq!(encoded_pool_bytes, encoded.as_ref());
+            }
         });
     }
 
