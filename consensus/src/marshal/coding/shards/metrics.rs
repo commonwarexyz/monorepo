@@ -28,14 +28,15 @@ pub struct ShardMetrics<P: PublicKey> {
     pub blocks_reconstructed_total: Counter,
     /// Total number of block reconstruction failures.
     pub reconstruction_failures_total: Counter,
-    /// Total number of proposals forwarded to a predicted leader.
-    pub blocks_forwarded_total: Counter,
-    /// Total number of route-authorized forwarded blocks received.
-    pub forwarded_blocks_received_total: Counter,
-    /// Total number of forwarded blocks evicted before being decoded.
-    pub forwarded_blocks_evicted_total: Counter,
-    /// Total number of forwarded blocks validated and cached.
-    pub forwarded_blocks_accepted_total: Counter,
+    /// Total number of extra shards forwarded to a predicted future leader.
+    pub shards_forwarded_total: Counter,
+    /// Total number of leader-sent foreign-index shards dropped because the
+    /// local router did not recognize their round.
+    ///
+    /// With a total router (one that resolves every round, like a fixed
+    /// round-robin elector), this should never increment: a nonzero value
+    /// indicates a router bug, a router rollout skew, or a Byzantine probe.
+    pub forwarded_shards_unrouted_total: Counter,
 }
 
 impl<P: PublicKey> ShardMetrics<P> {
@@ -64,21 +65,13 @@ impl<P: PublicKey> ShardMetrics<P> {
             "reconstruction_failures_total",
             "Total number of block reconstruction failures",
         );
-        let blocks_forwarded_total = context.counter(
-            "blocks_forwarded_total",
-            "Total number of proposals forwarded to a predicted leader",
+        let shards_forwarded_total = context.counter(
+            "shards_forwarded_total",
+            "Total number of extra shards forwarded to a predicted future leader",
         );
-        let forwarded_blocks_received_total = context.counter(
-            "forwarded_blocks_received_total",
-            "Total number of route-authorized forwarded blocks received",
-        );
-        let forwarded_blocks_evicted_total = context.counter(
-            "forwarded_blocks_evicted_total",
-            "Total number of forwarded blocks evicted before being decoded",
-        );
-        let forwarded_blocks_accepted_total = context.counter(
-            "forwarded_blocks_accepted_total",
-            "Total number of forwarded blocks validated and cached",
+        let forwarded_shards_unrouted_total = context.counter(
+            "forwarded_shards_unrouted_total",
+            "Total number of leader-sent foreign-index shards dropped for unrecognized rounds",
         );
 
         Self {
@@ -88,10 +81,8 @@ impl<P: PublicKey> ShardMetrics<P> {
             shards_received,
             blocks_reconstructed_total,
             reconstruction_failures_total,
-            blocks_forwarded_total,
-            forwarded_blocks_received_total,
-            forwarded_blocks_evicted_total,
-            forwarded_blocks_accepted_total,
+            shards_forwarded_total,
+            forwarded_shards_unrouted_total,
         }
     }
 }

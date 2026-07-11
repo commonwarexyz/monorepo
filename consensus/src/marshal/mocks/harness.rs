@@ -2746,7 +2746,6 @@ impl TestHarness for CodingHarness {
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
             forward_router: shards::NoForwarding,
-            max_pending_forwards: NZUsize!(8),
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
@@ -2947,7 +2946,6 @@ impl TestHarness for CodingHarness {
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
             forward_router: shards::NoForwarding,
-            max_pending_forwards: NZUsize!(8),
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
