@@ -510,13 +510,35 @@ impl Arbitrary<'_> for FuzzInput {
 pub(crate) type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Verifier>::PublicKey;
 type CertCfgOf<P> =
     <<<P as simplex::Simplex>::Scheme as Verifier>::Certificate as commonware_codec::Read>::Cfg;
-/// Happens-before sink for a [`SniffingReceiver`]: receiving node id, shared
-/// event log, and the participant set used to resolve wire senders to node ids.
-type SniffSink<P> = Option<(
-    u32,
-    happens_before::capture::EventLog,
-    Arc<[PublicKeyOf<P>]>,
-)>;
+/// Happens-before sink for a [`SniffingReceiver`].
+struct Sniff<P: simplex::Simplex> {
+    /// Receiving node id events are attributed to.
+    node: u32,
+    /// Shared event log.
+    log: happens_before::capture::EventLog,
+    /// Participant set used to resolve wire senders to node ids.
+    peers: Arc<[PublicKeyOf<P>]>,
+    /// Participant indices whose identity is ambiguous (a twin pair runs two
+    /// engines under one key): a receive from them resolves to no sender, so
+    /// neither half's history can be merged.
+    ambiguous: Arc<[u32]>,
+}
+
+type SniffSink<P> = Option<Sniff<P>>;
+
+fn sniff_sink<P: simplex::Simplex>(
+    hb_log: &Option<happens_before::capture::EventLog>,
+    node: u32,
+    peers: &Arc<[PublicKeyOf<P>]>,
+    ambiguous: &Arc<[u32]>,
+) -> SniffSink<P> {
+    hb_log.as_ref().map(|log| Sniff {
+        node,
+        log: log.clone(),
+        peers: peers.clone(),
+        ambiguous: ambiguous.clone(),
+    })
+}
 
 type ReporterOf<P> = reporter::Reporter<
     deterministic::Context,
@@ -1245,11 +1267,16 @@ where
 
     async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
         let (sender, payload) = self.inner.recv().await?;
-        if let Some((node, log, peers)) = &self.sink {
+        if let Some(sniff) = &self.sink {
             if let Some((view, kind)) = sniff_event::<P>(self.channel, &payload, &self.cert_cfg) {
-                let from = peers.iter().position(|p| p == &sender).map(|i| i as u32);
-                log.record(happens_before::Event {
-                    node: *node,
+                let from = sniff
+                    .peers
+                    .iter()
+                    .position(|p| p == &sender)
+                    .map(|i| i as u32)
+                    .filter(|i| !sniff.ambiguous.contains(i));
+                sniff.log.record(happens_before::Event {
+                    node: sniff.node,
                     view,
                     kind,
                     sender: from,
@@ -1310,6 +1337,7 @@ fn run_standard_once<P: simplex::Simplex>(
 
         // Spawn honest validators
         let peers: Arc<[PublicKeyOf<P>]> = participants.clone().into();
+        let ambiguous: Arc<[u32]> = Vec::new().into();
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
@@ -1319,9 +1347,7 @@ fn run_standard_once<P: simplex::Simplex>(
             // Pass-through when not capturing.
             let pending = {
                 let (vote_sender, vote_receiver) = pending;
-                let sink = hb_log
-                    .as_ref()
-                    .map(|log| (i as u32, log.clone(), peers.clone()));
+                let sink = sniff_sink(&hb_log, i as u32, &peers, &ambiguous);
                 let cfg = schemes[i].certificate_codec_config();
                 (
                     vote_sender,
@@ -1330,9 +1356,7 @@ fn run_standard_once<P: simplex::Simplex>(
             };
             let recovered = {
                 let (cert_sender, cert_receiver) = recovered;
-                let sink = hb_log
-                    .as_ref()
-                    .map(|log| (i as u32, log.clone(), peers.clone()));
+                let sink = sniff_sink(&hb_log, i as u32, &peers, &ambiguous);
                 let cfg = schemes[i].certificate_codec_config();
                 (
                     cert_sender,
@@ -1346,9 +1370,7 @@ fn run_standard_once<P: simplex::Simplex>(
             };
             let resolver = {
                 let (backfill_sender, backfill_receiver) = resolver;
-                let sink = hb_log
-                    .as_ref()
-                    .map(|log| (i as u32, log.clone(), peers.clone()));
+                let sink = sniff_sink(&hb_log, i as u32, &peers, &ambiguous);
                 let cfg = schemes[i].certificate_codec_config();
                 (
                     backfill_sender,
@@ -1639,12 +1661,20 @@ enum TwinsRole {
     Campaign,
 }
 
-fn run_with_twins_mutator<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool) {
-    run_twins::<P>(input, TwinsRole::Mutator, state_coverage);
+fn run_with_twins_mutator<P: simplex::Simplex>(
+    input: FuzzInput,
+    state_coverage: bool,
+    happens_before: bool,
+) {
+    let _ = run_twins::<P>(input, TwinsRole::Mutator, state_coverage, happens_before);
 }
 
-fn run_with_twins_campaign<P: simplex::Simplex>(input: FuzzInput, state_coverage: bool) {
-    run_twins::<P>(input, TwinsRole::Campaign, state_coverage);
+fn run_with_twins_campaign<P: simplex::Simplex>(
+    input: FuzzInput,
+    state_coverage: bool,
+    happens_before: bool,
+) {
+    let _ = run_twins::<P>(input, TwinsRole::Campaign, state_coverage, happens_before);
 }
 
 fn twins_resolver_view<P: simplex::Simplex>(
@@ -1670,8 +1700,18 @@ fn twins_resolver_view<P: simplex::Simplex>(
 /// Only the secondary half (Disrupter vs full engine) and the liveness wait
 /// shape (absolute view vs prefix-trailing count) differ; both are keyed on
 /// `role`. Invariants and liveness always run over honest reporters only.
-fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_coverage: bool) {
-    if state_coverage {
+///
+/// Happens-before capture covers honest validators only: twin halves share
+/// one identity across two engines, so neither tracing attribution nor
+/// sender-resolved merges are sound for them; honest receives from a twin
+/// resolve to no sender. Returns the summary when capture is enabled.
+fn run_twins<P: simplex::Simplex>(
+    mut input: FuzzInput,
+    role: TwinsRole,
+    state_coverage: bool,
+    happens_before: bool,
+) -> Option<happens_before::Summary> {
+    if state_coverage || happens_before {
         state_cov::reset();
     }
     input.partition = Partition::Connected;
@@ -1683,9 +1723,12 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
+    let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
-    let execute = || {
+    let hb_log_run = hb_log.clone();
+    let execute = |warn_dispatch: Option<Dispatch>| {
         executor.start(|mut context| async move {
+            let hb_log = hb_log_run;
             let (mut oracle, participants, schemes, mut registrations) =
                 setup_network::<P>(&mut context, &input).await;
             let participants: Arc<[_]> = participants.into();
@@ -1742,7 +1785,8 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
             let twin_elector = twins::Elector::new(P::Elector::default(), &scenario, n);
 
             // Spawn Byzantine twins (indices from `case.compromised`):
-            // primary (legitimate engine) + secondary (Disrupter).
+            // primary (legitimate engine) + secondary (Disrupter). Twin halves
+            // are never happens-before captured (no subscriber, no sniffing).
             for idx in case.compromised.iter().copied() {
                 let validator = participants[idx].clone();
                 let context = context.child("twin").with_attribute("index", idx);
@@ -2014,6 +2058,11 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
             // Spawn honest validators (every index NOT in `case.compromised`).
             // They share the twins-aware elector so leaders agree across twin and
             // honest engines for the scripted prefix.
+            let ambiguous: Arc<[u32]> = compromised
+                .iter()
+                .map(|&i| i as u32)
+                .collect::<Vec<_>>()
+                .into();
             for (idx, validator) in participants.iter().enumerate() {
                 if compromised.contains(&idx) {
                     continue;
@@ -2022,25 +2071,76 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                let reporter = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
-                    ctx,
-                    &oracle,
-                    participants.as_ref(),
-                    schemes[idx].clone(),
-                    validator.clone(),
-                    twin_elector.clone(),
-                    relay.clone(),
-                    Duration::from_secs(1),
-                    Duration::from_millis(1_500),
-                    input.mailbox_size,
-                    input.fetch_concurrent,
-                    input.forwarding,
-                    pending,
-                    recovered,
-                    resolver,
-                    input.certify,
-                    input.reporting,
-                );
+                let pending = {
+                    let (vote_sender, vote_receiver) = pending;
+                    let sink = sniff_sink(&hb_log, idx as u32, &participants, &ambiguous);
+                    let cfg = schemes[idx].certificate_codec_config();
+                    (
+                        vote_sender,
+                        SniffingReceiver::<P, _>::new(vote_receiver, SniffChannel::Vote, cfg, sink),
+                    )
+                };
+                let recovered = {
+                    let (cert_sender, cert_receiver) = recovered;
+                    let sink = sniff_sink(&hb_log, idx as u32, &participants, &ambiguous);
+                    let cfg = schemes[idx].certificate_codec_config();
+                    (
+                        cert_sender,
+                        SniffingReceiver::<P, _>::new(
+                            cert_receiver,
+                            SniffChannel::Certificate,
+                            cfg,
+                            sink,
+                        ),
+                    )
+                };
+                let resolver = {
+                    let (backfill_sender, backfill_receiver) = resolver;
+                    let sink = sniff_sink(&hb_log, idx as u32, &participants, &ambiguous);
+                    let cfg = schemes[idx].certificate_codec_config();
+                    (
+                        backfill_sender,
+                        SniffingReceiver::<P, _>::new(
+                            backfill_receiver,
+                            SniffChannel::Resolver,
+                            cfg,
+                            sink,
+                        ),
+                    )
+                };
+                let spawn = || {
+                    spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                        ctx,
+                        &oracle,
+                        participants.as_ref(),
+                        schemes[idx].clone(),
+                        validator.clone(),
+                        twin_elector.clone(),
+                        relay.clone(),
+                        Duration::from_secs(1),
+                        Duration::from_millis(1_500),
+                        input.mailbox_size,
+                        input.fetch_concurrent,
+                        input.forwarding,
+                        pending,
+                        recovered,
+                        resolver,
+                        input.certify,
+                        input.reporting,
+                    )
+                };
+                let reporter = match &hb_log {
+                    Some(log) => {
+                        let mut subscriber =
+                            happens_before::capture::NodeSubscriber::new(idx as u32, log.clone());
+                        if let Some(inner) = &warn_dispatch {
+                            subscriber = subscriber.with_inner(inner.clone());
+                        }
+                        let dispatch = Dispatch::new(subscriber);
+                        dispatcher::with_default(&dispatch, spawn)
+                    }
+                    None => spawn(),
+                };
                 reporters.push(reporter);
             }
 
@@ -2111,11 +2211,31 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole, state_c
         });
     };
 
-    if state_coverage {
-        run_with_warn_trace_collection(|_| execute());
+    if happens_before {
+        if state_coverage {
+            // Per-node subscribers shadow the collector for validator tasks, so
+            // its dispatch is teed through them to keep trace-event tokens fed.
+            run_with_warn_trace_collection(|dispatch| execute(Some(dispatch.clone())));
+        } else {
+            execute(None);
+        }
+    } else if state_coverage {
+        run_with_warn_trace_collection(|_| execute(None));
     } else {
-        execute();
+        execute(None);
     }
+
+    // Twins force a valid configuration, so tokens are observed unconditionally.
+    let hb_summary = hb_log.as_ref().map(|log| log.summary());
+    if let Some(summary) = &hb_summary {
+        let mut tokens = summary.tokens();
+        if let Some(bucket) = summary.dispersion_bucket() {
+            tokens.insert(format!("hb:dispersion={bucket}"));
+        }
+        tokens.extend(summary.lsh_tokens());
+        state_cov::observe_tokens(tokens);
+    }
+    hb_summary
 }
 
 fn run_fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput)
@@ -2382,10 +2502,10 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
             run::<P>(input, C::STATE, C::HAPPENS_BEFORE)
         })),
         Mode::TwinsMutator => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_with_twins_mutator::<P>(input, C::STATE)
+            run_with_twins_mutator::<P>(input, C::STATE, C::HAPPENS_BEFORE)
         })),
         Mode::TwinsCampaign => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_with_twins_campaign::<P>(input, C::STATE)
+            run_with_twins_campaign::<P>(input, C::STATE, C::HAPPENS_BEFORE)
         })),
         Mode::Byzzfuzz => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
@@ -2473,6 +2593,18 @@ mod tests {
             let audit = run_standard_once::<simplex::SimplexId>(input, false, true, false, None);
             assert!(audit.is_some(), "run with {certify:?} produced no audit");
         }
+    }
+
+    #[test]
+    fn twins_happens_before_traces_honest_validators_only() {
+        // N4F1C3 twins compromise one identity (two engines, one key): the
+        // three honest validators are captured, twin halves contribute no
+        // attributed events, and receives from the twin merge nothing.
+        let summary =
+            run_twins::<simplex::SimplexId>(audit_input(), TwinsRole::Campaign, false, true)
+                .expect("happens-before summary");
+        assert_eq!(summary.node_count(), 3, "only honest validators tracked");
+        assert!(!summary.tokens().is_empty());
     }
 
     #[test]
