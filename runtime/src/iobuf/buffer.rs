@@ -857,6 +857,7 @@ mod tests {
             prefill: false,
             alignment: NZUsize!(page_size()),
             class_max_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
+            class_thread_cache_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
         }
     }
 

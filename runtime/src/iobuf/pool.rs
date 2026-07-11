@@ -52,6 +52,11 @@
 //! freelist before attempting to create a new tracked buffer. Returned buffers
 //! first try to re-enter the dropping thread's local cache, spilling a bounded
 //! batch back to the global freelist if needed.
+//!
+//! Per-thread cache capacity is derived per class from that class's capacity,
+//! unless overridden with [`BufferPoolConfig::with_class_thread_cache`]. An
+//! override of `0` disables thread-local caching for the class, routing every
+//! allocation and free through the shared global freelist.
 
 use super::{freelist::Freelist, page_size, IoBufMut};
 use crate::{
@@ -78,7 +83,8 @@ use std::{
 /// amortizing shared-queue traffic.
 const MIN_TLS_BATCH_CAPACITY: usize = 4;
 
-/// Maximum number of per-class capacity overrides in a [`BufferPoolConfig`].
+/// Maximum number of per-class overrides of one kind (capacity or
+/// thread-cache capacity) in a [`BufferPoolConfig`].
 ///
 /// Overrides are stored inline in a fixed-size array (rather than a `Vec`) so
 /// the config stays free of drop glue and remains assignable from `const`
@@ -173,6 +179,15 @@ pub struct BufferPoolConfig {
     /// (not in a `Vec`) so the config has no drop glue and stays assignable
     /// from `const` builder methods.
     pub(crate) class_max_overrides: [Option<(NonZeroUsize, NonZeroU32)>; MAX_CLASS_MAX_OVERRIDES],
+    /// Per-class thread-cache capacity overrides set by
+    /// [`Self::with_class_thread_cache`].
+    ///
+    /// Each entry is `(class_size, capacity)` with `class_size` already
+    /// rounded up to a power of two; used slots precede the `None` slots. A
+    /// capacity of `0` disables thread-local caching for the class. Stored
+    /// inline (not in a `Vec`) so the config has no drop glue and stays
+    /// assignable from `const` builder methods.
+    pub(crate) class_thread_cache_overrides: [Option<(NonZeroUsize, u32)>; MAX_CLASS_MAX_OVERRIDES],
 }
 
 impl BufferPoolConfig {
@@ -192,6 +207,7 @@ impl BufferPoolConfig {
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
             class_max_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
+            class_thread_cache_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
         }
     }
 
@@ -210,6 +226,7 @@ impl BufferPoolConfig {
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
             class_max_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
+            class_thread_cache_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
         }
     }
 
@@ -260,7 +277,8 @@ impl BufferPoolConfig {
     /// threads can strand up to ~`C / 2` buffers in aggregate and the
     /// effective shared capacity is ~`C / 2`. Size overrides with the full
     /// worst case in mind: all `C * class_size` bytes can stay resident for
-    /// the lifetime of the pool.
+    /// the lifetime of the pool. Use [`Self::with_class_thread_cache`] to pin
+    /// the class's per-thread cache size instead of deriving it from `max`.
     ///
     /// # Panics
     ///
@@ -310,6 +328,90 @@ impl BufferPoolConfig {
             .flatten()
             .find(|(key, _)| key.get().max(min_size) == class_size)
             .map_or(self.max_per_class, |&(_, max)| max)
+    }
+
+    /// Returns a copy of this config with a thread-cache capacity override for
+    /// one size class.
+    ///
+    /// `class_size` is rounded up to a power of two and, at pool construction,
+    /// clamped to at least [`Self::min_size`] — the same rounding used to
+    /// route allocation requests to classes (see [`Self::with_class_max`]).
+    /// The overridden class caps each thread's local cache at `capacity`
+    /// buffers, winning over both the automatic per-class sizing and any
+    /// pool-wide policy set with [`Self::with_thread_cache_capacity`] or
+    /// [`Self::with_thread_cache_disabled`]. All other classes keep the
+    /// pool-wide policy.
+    ///
+    /// A `capacity` of `0` disables thread-local caching for the class: every
+    /// allocation and free goes through the shared global freelist. This is
+    /// the right setting for classes with strong alloc/free thread asymmetry —
+    /// buffers allocated on one set of threads (e.g. network readers or
+    /// erasure encoders) but freed on another (e.g. engine or worker-pool
+    /// threads). With thread caching enabled, such a workload strands freed
+    /// buffers in the freeing threads' local caches, where the allocating
+    /// threads can never see them: the shared freelist stays empty and every
+    /// allocation misses even though the class is nowhere near its capacity.
+    ///
+    /// Calling this again with a key that resolves to the same class replaces
+    /// the earlier override. Pool construction panics if an override matches
+    /// no class (key larger than [`Self::max_size`]) or if a non-zero
+    /// `capacity` exceeds the class's buffer capacity ([`Self::max_per_class`]
+    /// or its [`Self::with_class_max`] override), which could never be
+    /// satisfied.
+    ///
+    /// # Panics
+    ///
+    /// Panics if more than 16 distinct classes are overridden.
+    pub const fn with_class_thread_cache(
+        mut self,
+        class_size: NonZeroUsize,
+        capacity: u32,
+    ) -> Self {
+        let Some(key) = class_size.get().checked_next_power_of_two() else {
+            panic!("class_size must round up to a power of two")
+        };
+        let Some(key) = NonZeroUsize::new(key) else {
+            unreachable!()
+        };
+
+        let mut index = 0;
+        while index < self.class_thread_cache_overrides.len() {
+            match self.class_thread_cache_overrides[index] {
+                Some((existing, _)) => {
+                    // Replace an existing override for the same class.
+                    if existing.get() == key.get() {
+                        self.class_thread_cache_overrides[index] = Some((key, capacity));
+                        return self;
+                    }
+                }
+                None => {
+                    // Used slots are contiguous, so the first empty slot is
+                    // where a new override is appended.
+                    self.class_thread_cache_overrides[index] = Some((key, capacity));
+                    return self;
+                }
+            }
+            index += 1;
+        }
+        panic!("too many per-class thread-cache overrides")
+    }
+
+    /// Returns the thread-cache capacity override for the class whose buffer
+    /// size is `class_size`, or `None` if the class keeps the pool-wide
+    /// policy.
+    ///
+    /// Override keys below [`Self::min_size`] clamp to the smallest class,
+    /// matching allocation-request rounding. The array is scanned in reverse
+    /// insertion order so the most recent override wins when several keys
+    /// clamp to the same class.
+    fn class_thread_cache(&self, class_size: usize) -> Option<u32> {
+        let min_size = self.min_size.get();
+        self.class_thread_cache_overrides
+            .iter()
+            .rev()
+            .flatten()
+            .find(|(key, _)| key.get().max(min_size) == class_size)
+            .map(|&(_, capacity)| capacity)
     }
 
     /// Returns a copy of this config with a new expected parallelism.
@@ -422,8 +524,12 @@ impl BufferPoolConfig {
     /// - `max_size < min_size`
     /// - `pool_min_size > min_size`
     /// - explicit `thread_cache_capacity > max_per_class` (or greater than any
-    ///   per-class capacity override)
+    ///   per-class capacity override, unless that class's thread-cache
+    ///   capacity is itself overridden)
     /// - a per-class capacity override matches no size class
+    /// - a per-class thread-cache override matches no size class
+    /// - a non-zero per-class thread-cache override exceeds its class's
+    ///   capacity
     fn validate(&self) {
         self.validate_size_class_bounds();
         assert!(
@@ -453,19 +559,39 @@ impl BufferPoolConfig {
             );
         }
         for (key, max) in self.class_max_overrides.iter().flatten() {
+            let class_size = key.get().max(self.min_size.get());
             assert!(
-                key.get().max(self.min_size.get()) <= self.max_size.get(),
+                class_size <= self.max_size.get(),
                 "class max override for size {key} does not match any size class (max_size {})",
                 self.max_size
             );
+            // The pool-wide capacity never applies to a class whose
+            // thread-cache capacity is itself overridden, so skip the check
+            // for those classes.
             if let BufferPoolThreadCacheConfig::Enabled(Some(thread_cache_capacity)) =
                 self.thread_cache_config
             {
                 assert!(
-                    thread_cache_capacity.get() <= max.get() as usize,
+                    self.class_thread_cache(class_size).is_some()
+                        || thread_cache_capacity.get() <= max.get() as usize,
                     "thread_cache_capacity ({thread_cache_capacity}) must be <= class max override ({max}) for size {key}"
                 );
             }
+        }
+        for (key, capacity) in self.class_thread_cache_overrides.iter().flatten() {
+            let class_size = key.get().max(self.min_size.get());
+            assert!(
+                class_size <= self.max_size.get(),
+                "class thread-cache override for size {key} does not match any size class (max_size {})",
+                self.max_size
+            );
+            // A cache larger than the class itself could never fill; zero is
+            // always valid and disables thread-local caching for the class.
+            let class_max = self.class_max(class_size);
+            assert!(
+                *capacity == 0 || *capacity <= class_max.get(),
+                "class thread-cache override ({capacity}) for size {key} must be <= class capacity ({class_max})"
+            );
         }
     }
 
@@ -483,8 +609,11 @@ impl BufferPoolConfig {
         min_size << index
     }
 
-    /// Resolves the effective per-thread cache size for one size class with
-    /// effective capacity `max_per_class`.
+    /// Resolves the effective per-thread cache size for the class whose buffer
+    /// size is `class_size` and whose effective capacity is `max_per_class`.
+    ///
+    /// A per-class override from [`Self::with_class_thread_cache`] wins over
+    /// every pool-wide policy, including [`Self::with_thread_cache_disabled`].
     ///
     /// Derived capacities divide half of the class budget across the expected
     /// parallelism so cross-thread reuse remains effective. The class's own
@@ -496,7 +625,10 @@ impl BufferPoolConfig {
     /// instead would let TLS caches strand more than an entire lowered class,
     /// or under-size the caches of exactly the hot class a raised override
     /// targets. Small class budgets may resolve to zero.
-    fn resolve_thread_cache_capacity(&self, max_per_class: NonZeroU32) -> usize {
+    fn resolve_thread_cache_capacity(&self, class_size: usize, max_per_class: NonZeroU32) -> usize {
+        if let Some(capacity) = self.class_thread_cache(class_size) {
+            return capacity as usize;
+        }
         match self.thread_cache_config {
             BufferPoolThreadCacheConfig::Enabled(None) => {
                 let max_per_class = max_per_class.get() as usize;
@@ -1593,9 +1725,10 @@ impl BufferPool {
             let size = BufferPoolConfig::class_size(config.min_size.get(), i);
             let class_id = NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed);
             // Capacity and (automatic) thread-cache sizing are per class so a
-            // capacity override also scales that class's TLS caches.
+            // capacity override also scales that class's TLS caches, and a
+            // thread-cache override replaces the derived sizing entirely.
             let max_per_class = config.class_max(size);
-            let thread_cache_capacity = config.resolve_thread_cache_capacity(max_per_class);
+            let thread_cache_capacity = config.resolve_thread_cache_capacity(size, max_per_class);
             let class = SizeClassHandle::new(
                 class_id,
                 size,
@@ -1880,6 +2013,7 @@ mod tests {
             prefill: false,
             alignment: NZUsize!(page_size()),
             class_max_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
+            class_thread_cache_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
         }
     }
 
@@ -1971,6 +2105,7 @@ mod tests {
             prefill: false,
             alignment: NZUsize!(page_size()),
             class_max_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
+            class_thread_cache_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
         };
         config.validate();
     }
@@ -2091,6 +2226,7 @@ mod tests {
             prefill: false,
             alignment: NZUsize!(128),
             class_max_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
+            class_thread_cache_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
         });
 
         let buf = pool.try_alloc(200).unwrap();
@@ -2137,6 +2273,7 @@ mod tests {
             prefill: true,
             alignment: page,
             class_max_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
+            class_thread_cache_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
         });
 
         // Should be able to allocate max_per_class buffers immediately
@@ -2416,6 +2553,7 @@ mod tests {
             prefill: false,
             alignment: NZUsize!(4),
             class_max_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
+            class_thread_cache_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
         }
         .with_budget_bytes(NZUsize!(280));
         assert_eq!(config.max_per_class.get(), 10);
@@ -2431,6 +2569,7 @@ mod tests {
             prefill: false,
             alignment: NZUsize!(4),
             class_max_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
+            class_thread_cache_overrides: [None; MAX_CLASS_MAX_OVERRIDES],
         }
         .with_budget_bytes(NZUsize!(10));
         assert_eq!(small_budget.max_per_class.get(), 1);
@@ -2475,6 +2614,85 @@ mod tests {
         BufferPoolConfig::for_network()
             .with_thread_cache_capacity(NZUsize!(8))
             .with_class_max(NZUsize!(1024), NZU32!(4))
+            .validate();
+    }
+
+    #[test]
+    fn test_config_with_class_thread_cache() {
+        // Keys round up to the power-of-two class size, the last override for
+        // a class wins, and other classes keep the pool-wide policy.
+        let config = BufferPoolConfig::for_network()
+            .with_max_size(NZUsize!(512 * 1024))
+            .with_max_per_class(NZU32!(64))
+            .with_class_thread_cache(NZUsize!(290 * 1024), 8) // rounds to 512KiB
+            .with_class_thread_cache(NZUsize!(1024), 4)
+            .with_class_thread_cache(NZUsize!(512 * 1024), 0); // replaces 512KiB
+        config.validate();
+        assert_eq!(
+            config.class_thread_cache_overrides.iter().flatten().count(),
+            2
+        );
+        assert_eq!(config.class_thread_cache(512 * 1024), Some(0));
+        assert_eq!(config.class_thread_cache(1024), Some(4));
+        assert_eq!(config.class_thread_cache(2048), None);
+
+        // Keys below min_size clamp to the smallest class, matching
+        // allocation-request rounding, and the most recent override wins.
+        let config = BufferPoolConfig::for_network()
+            .with_class_thread_cache(NZUsize!(1024), 7)
+            .with_class_thread_cache(NZUsize!(512), 9);
+        assert_eq!(config.class_thread_cache(1024), Some(9));
+    }
+
+    #[test]
+    #[should_panic(expected = "does not match any size class")]
+    fn test_config_class_thread_cache_override_above_max_size_panics() {
+        BufferPoolConfig::for_network()
+            .with_max_size(NZUsize!(2048))
+            .with_class_thread_cache(NZUsize!(4096), 0)
+            .validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "must be <= class capacity")]
+    fn test_config_class_thread_cache_override_above_class_capacity_panics() {
+        // A non-zero per-thread cache larger than the whole class could never
+        // be satisfied.
+        BufferPoolConfig::for_network()
+            .with_max_per_class(NZU32!(4))
+            .with_class_thread_cache(NZUsize!(1024), 8)
+            .validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "must be <= class capacity")]
+    fn test_config_class_thread_cache_override_above_class_max_override_panics() {
+        // The bound uses the class's effective capacity: a with_class_max
+        // override lowers it below the pool-wide default, in either call
+        // order.
+        BufferPoolConfig::for_network()
+            .with_max_per_class(NZU32!(64))
+            .with_class_thread_cache(NZUsize!(1024), 8)
+            .with_class_max(NZUsize!(1024), NZU32!(4))
+            .validate();
+    }
+
+    #[test]
+    fn test_config_class_thread_cache_override_zero_always_valid() {
+        // Zero disables thread-local caching for the class and is valid for
+        // any class capacity.
+        BufferPoolConfig::for_network()
+            .with_max_per_class(NZU32!(1))
+            .with_class_thread_cache(NZUsize!(1024), 0)
+            .validate();
+
+        // The pool-wide capacity never applies to a class with its own
+        // thread-cache override, so it is not checked against that class's
+        // (lowered) capacity.
+        BufferPoolConfig::for_network()
+            .with_thread_cache_capacity(NZUsize!(8))
+            .with_class_max(NZUsize!(1024), NZU32!(4))
+            .with_class_thread_cache(NZUsize!(1024), 0)
             .validate();
     }
 
@@ -2532,6 +2750,126 @@ mod tests {
         let overridden_class = &pool.inner.classes[pool.class_index(512 * 1024).unwrap()];
         assert_eq!(default_class.thread_cache_capacity, 64 / (2 * 4));
         assert_eq!(overridden_class.thread_cache_capacity, 256 / (2 * 4));
+    }
+
+    #[test]
+    fn test_class_thread_cache_override_wins_over_policy() {
+        // The override wins over automatic per-class sizing.
+        let pool = test_pool(
+            BufferPoolConfig::for_network()
+                .with_max_size(NZUsize!(512 * 1024))
+                .with_max_per_class(NZU32!(64))
+                .with_parallelism(NZUsize!(4))
+                .with_class_thread_cache(NZUsize!(512 * 1024), 2),
+        );
+        let default_class = &pool.inner.classes[pool.class_index(1024).unwrap()];
+        let overridden_class = &pool.inner.classes[pool.class_index(512 * 1024).unwrap()];
+        assert_eq!(default_class.thread_cache_capacity, 64 / (2 * 4));
+        assert_eq!(overridden_class.thread_cache_capacity, 2);
+
+        // The override wins over an explicit pool-wide capacity.
+        let pool = test_pool(
+            BufferPoolConfig::for_network()
+                .with_max_size(NZUsize!(2048))
+                .with_max_per_class(NZU32!(64))
+                .with_thread_cache_capacity(NZUsize!(8))
+                .with_class_thread_cache(NZUsize!(2048), 0),
+        );
+        let default_class = &pool.inner.classes[pool.class_index(1024).unwrap()];
+        let overridden_class = &pool.inner.classes[pool.class_index(2048).unwrap()];
+        assert_eq!(default_class.thread_cache_capacity, 8);
+        assert_eq!(overridden_class.thread_cache_capacity, 0);
+
+        // The override wins over pool-wide disabled thread caching.
+        let pool = test_pool(
+            BufferPoolConfig::for_network()
+                .with_max_size(NZUsize!(2048))
+                .with_max_per_class(NZU32!(64))
+                .with_thread_cache_disabled()
+                .with_class_thread_cache(NZUsize!(2048), 4),
+        );
+        let default_class = &pool.inner.classes[pool.class_index(1024).unwrap()];
+        let overridden_class = &pool.inner.classes[pool.class_index(2048).unwrap()];
+        assert_eq!(default_class.thread_cache_capacity, 0);
+        assert_eq!(overridden_class.thread_cache_capacity, 4);
+    }
+
+    #[test]
+    fn test_class_thread_cache_zero_does_not_retain_buffers_locally() {
+        let pool = test_pool(
+            BufferPoolConfig::for_network()
+                .with_max_size(NZUsize!(2048))
+                .with_max_per_class(NZU32!(8))
+                .with_thread_cache_capacity(NZUsize!(4))
+                .with_class_thread_cache(NZUsize!(1024), 0),
+        );
+        let zero_class = &pool.inner.classes[pool.class_index(1024).unwrap()];
+        let cached_class = &pool.inner.classes[pool.class_index(2048).unwrap()];
+
+        let zero = pool.try_alloc(1024).expect("tracked allocation");
+        let cached = pool.try_alloc(2048).expect("tracked allocation");
+        drop(zero);
+        drop(cached);
+
+        // The zero-TLS class returns straight to the shared freelist while the
+        // non-overridden class retains its buffer in this thread's cache.
+        assert_eq!(get_local_len(zero_class), 0);
+        assert_eq!(get_global_len(zero_class), 1);
+        assert_eq!(get_local_len(cached_class), 1);
+        assert_eq!(get_global_len(cached_class), 0);
+    }
+
+    #[test]
+    fn test_class_thread_cache_zero_cures_cross_thread_stranding() {
+        // Mirrors the production asymmetry: buffers allocated on one thread
+        // are freed on another. The zero-TLS class must return frees to the
+        // shared freelist so the allocating thread can reuse every one of
+        // them, while the non-overridden class strands a buffer in the freeing
+        // thread's local cache.
+        let pool = test_pool(
+            BufferPoolConfig::for_network()
+                .with_max_size(NZUsize!(2048))
+                .with_max_per_class(NZU32!(2))
+                .with_thread_cache_capacity(NZUsize!(1))
+                .with_class_thread_cache(NZUsize!(1024), 0),
+        );
+        let zero_class = &pool.inner.classes[pool.class_index(1024).unwrap()];
+
+        // Exhaust both classes on the main thread.
+        let zero_bufs = (0..2)
+            .map(|_| pool.try_alloc(1024).expect("tracked allocation"))
+            .collect::<Vec<_>>();
+        let cached_bufs = (0..2)
+            .map(|_| pool.try_alloc(2048).expect("tracked allocation"))
+            .collect::<Vec<_>>();
+        assert_eq!(pool.try_alloc(1024).unwrap_err(), PoolError::Exhausted);
+        assert_eq!(pool.try_alloc(2048).unwrap_err(), PoolError::Exhausted);
+
+        // Free everything on a worker thread that stays alive, so anything it
+        // retains in TLS remains invisible to the main thread.
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            drop(zero_bufs);
+            drop(cached_bufs);
+            returned_tx.send(()).expect("signal returned buffers");
+            release_rx.recv().expect("release worker");
+        });
+        returned_rx.recv().expect("wait for returned buffers");
+
+        // Every zero-TLS free is globally visible: the class is fully
+        // reusable from this thread even though the worker is still alive.
+        assert_eq!(get_global_len(zero_class), 2);
+        let _first = pool.try_alloc(1024).expect("first shared reuse");
+        let _second = pool.try_alloc(1024).expect("second shared reuse");
+
+        // The non-overridden class stranded one buffer in the worker's local
+        // cache: only its overflow free reached the shared freelist.
+        let _spilled = pool.try_alloc(2048).expect("spilled buffer reuse");
+        assert_eq!(pool.try_alloc(2048).unwrap_err(), PoolError::Exhausted);
+
+        release_tx.send(()).expect("release worker");
+        handle.join().expect("worker should not panic");
     }
 
     #[test]
