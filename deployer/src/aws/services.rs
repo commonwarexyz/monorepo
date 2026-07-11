@@ -1025,11 +1025,13 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
         r#"set -e
 
 # Enable BBR congestion control and size TCP buffers for large single-flow
-# transfers over cross-region RTTs (e.g. multi-MB block forwards): the
+# transfers over cross-region RTTs (e.g. multi-MB shard forwards): the
 # distribution default 4MiB write buffer caps one flow at ~60MB/s over a
-# 65ms path. Disable slow-start-after-idle so per-view bursty connections
-# keep their congestion window between views.
-echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.rmem_max=67108864\nnet.core.wmem_max=67108864\nnet.ipv4.tcp_rmem=4096 262144 67108864\nnet.ipv4.tcp_wmem=4096 262144 67108864\nnet.ipv4.tcp_slow_start_after_idle=0" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
+# 65ms path, while 16MiB sustains ~245MB/s — one windowful for any
+# per-view transfer — and bounds worst-case kernel socket memory across
+# ~50 peer connections. Disable slow-start-after-idle so per-view bursty
+# connections keep their congestion window between views.
+echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.rmem_max=16777216\nnet.core.wmem_max=16777216\nnet.ipv4.tcp_rmem=4096 262144 16777216\nnet.ipv4.tcp_wmem=4096 262144 16777216\nnet.ipv4.tcp_slow_start_after_idle=0" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
 
 {image_services}
 
