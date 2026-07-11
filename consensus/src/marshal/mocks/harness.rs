@@ -2733,7 +2733,7 @@ impl TestHarness for CodingHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             shard_codec_cfg: CodecConfig {
@@ -2745,6 +2745,8 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
+            forward_router: shards::NoForwarding,
+            max_pending_forwards: NZUsize!(8),
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
@@ -2932,7 +2934,7 @@ impl TestHarness for CodingHarness {
         };
         let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             shard_codec_cfg: CodecConfig {
@@ -2944,6 +2946,8 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
+            forward_router: shards::NoForwarding,
+            max_pending_forwards: NZUsize!(8),
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);

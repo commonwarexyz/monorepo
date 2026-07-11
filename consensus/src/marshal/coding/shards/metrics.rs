@@ -28,6 +28,10 @@ pub struct ShardMetrics<P: PublicKey> {
     pub blocks_reconstructed_total: Counter,
     /// Total number of block reconstruction failures.
     pub reconstruction_failures_total: Counter,
+    /// Total number of proposals forwarded to a predicted leader.
+    pub blocks_forwarded_total: Counter,
+    /// Total number of forwarded blocks validated and cached.
+    pub forwarded_blocks_accepted_total: Counter,
 }
 
 impl<P: PublicKey> ShardMetrics<P> {
@@ -56,6 +60,14 @@ impl<P: PublicKey> ShardMetrics<P> {
             "reconstruction_failures_total",
             "Total number of block reconstruction failures",
         );
+        let blocks_forwarded_total = context.counter(
+            "blocks_forwarded_total",
+            "Total number of proposals forwarded to a predicted leader",
+        );
+        let forwarded_blocks_accepted_total = context.counter(
+            "forwarded_blocks_accepted_total",
+            "Total number of forwarded blocks validated and cached",
+        );
 
         Self {
             erasure_decode_duration,
@@ -64,6 +76,8 @@ impl<P: PublicKey> ShardMetrics<P> {
             shards_received,
             blocks_reconstructed_total,
             reconstruction_failures_total,
+            blocks_forwarded_total,
+            forwarded_blocks_accepted_total,
         }
     }
 }

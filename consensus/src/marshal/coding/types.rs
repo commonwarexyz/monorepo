@@ -1,9 +1,10 @@
 //! Types for erasure coding.
 
 use crate::{
-    types::{coding::Commitment, Height},
+    types::{coding::Commitment, Height, Round},
     Block, CertifiableBlock, Heightable,
 };
+use bytes::Bytes;
 use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
@@ -11,56 +12,220 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
 use std::{marker::PhantomData, sync::Arc};
 
-/// A full application block sent directly to a predicted future leader.
-///
-/// The coding commitment travels with the block so the receiver can recompute
-/// and validate the full commitment before admitting it to the
-/// reconstructed-block cache.
-pub(crate) struct ForwardedBlock<B: Block, C: Scheme, H: Hasher> {
-    commitment: Commitment,
-    inner: B,
-    _scheme: PhantomData<(C, H)>,
+const SHARD_TAG: u8 = 0;
+const FORWARDED_BLOCK_TAG: u8 = 1;
+
+/// A message sent over the shard engine's network channel.
+pub(crate) enum Message<C: Scheme, H: Hasher> {
+    /// An erasure-coded shard.
+    Shard(Shard<C, H>),
+    /// A full block proactively forwarded to a predicted future leader.
+    Forwarded(ForwardedBlock),
 }
 
-impl<B: CertifiableBlock, C: Scheme, H: Hasher> ForwardedBlock<B, C, H> {
-    pub(crate) fn new(block: &CodedBlock<B, C, H>) -> Self {
-        Self {
-            commitment: block.commitment(),
-            inner: block.inner().clone(),
-            _scheme: PhantomData,
+impl<C: Scheme, H: Hasher> Write for Message<C, H> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        match self {
+            Self::Shard(shard) => {
+                SHARD_TAG.write(buf);
+                shard.write(buf);
+            }
+            Self::Forwarded(forwarded) => {
+                FORWARDED_BLOCK_TAG.write(buf);
+                forwarded.write(buf);
+            }
         }
     }
 
-    pub(crate) fn into_parts(self) -> (Commitment, B) {
-        (self.commitment, self.inner)
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        match self {
+            Self::Shard(shard) => {
+                SHARD_TAG.write(buf);
+                shard.write_bufs(buf);
+            }
+            Self::Forwarded(forwarded) => {
+                FORWARDED_BLOCK_TAG.write(buf);
+                forwarded.write_bufs(buf);
+            }
+        }
     }
 }
 
-impl<B: Block, C: Scheme, H: Hasher> Write for ForwardedBlock<B, C, H> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.commitment.write(buf);
-        self.inner.write(buf);
-    }
-}
-
-impl<B: Block, C: Scheme, H: Hasher> EncodeSize for ForwardedBlock<B, C, H> {
+impl<C: Scheme, H: Hasher> EncodeSize for Message<C, H> {
     fn encode_size(&self) -> usize {
-        self.commitment.encode_size() + self.inner.encode_size()
+        1 + match self {
+            Self::Shard(shard) => shard.encode_size(),
+            Self::Forwarded(forwarded) => forwarded.encode_size(),
+        }
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        1 + match self {
+            Self::Shard(shard) => shard.encode_inline_size(),
+            Self::Forwarded(forwarded) => forwarded.encode_inline_size(),
+        }
     }
 }
 
-impl<B: Block, C: Scheme, H: Hasher> Read for ForwardedBlock<B, C, H> {
-    type Cfg = B::Cfg;
+impl<C: Scheme, H: Hasher> Read for Message<C, H> {
+    type Cfg = <Shard<C, H> as Read>::Cfg;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
+        match u8::read(buf)? {
+            SHARD_TAG => Ok(Self::Shard(Shard::read_cfg(buf, cfg)?)),
+            FORWARDED_BLOCK_TAG => Ok(Self::Forwarded(ForwardedBlock::read(buf)?)),
+            _ => Err(commonware_codec::Error::Invalid(
+                "marshal::coding::Message",
+                "invalid tag",
+            )),
+        }
+    }
+}
+
+/// A coded block sent directly to a predicted future leader.
+///
+/// Only the round and commitment header are decoded from the wire. The block
+/// itself is retained as opaque bytes because its header is untrusted and
+/// validation requires an expensive re-encoding. Receivers defer
+/// [`Self::decode`] until local consensus state independently expects the
+/// claimed commitment.
+pub(crate) struct ForwardedBlock {
+    /// The proposal round claimed by the sender.
+    round: Round,
+    /// The commitment claimed for the encoded block.
+    commitment: Commitment,
+    /// The encoded [`CodedBlock`].
+    block: Bytes,
+}
+
+impl ForwardedBlock {
+    /// Create a new [`ForwardedBlock`] for a proposal in `round`.
+    pub(crate) fn new<B: CertifiableBlock, C: Scheme, H: Hasher>(
+        round: Round,
+        block: &CodedBlock<B, C, H>,
+    ) -> Self {
+        let mut buf = Vec::with_capacity(block.encode_size());
+        block.write(&mut buf);
+        Self {
+            round,
+            commitment: block.commitment(),
+            block: buf.into(),
+        }
+    }
+
+    /// The proposal round claimed by the sender.
+    pub(crate) const fn round(&self) -> Round {
+        self.round
+    }
+
+    /// The commitment claimed for the encoded block.
+    pub(crate) const fn commitment(&self) -> Commitment {
+        self.commitment
+    }
+
+    /// Decode and validate the block against the claimed commitment.
+    ///
+    /// This mirrors the marshal block-fetch path: [`CodedBlockCfg`] checks the
+    /// coding config and block digest while re-encoding, and the full
+    /// commitment comparison also authenticates the coding root and the
+    /// application context. Callers must first establish that the claimed
+    /// commitment is independently expected, so that a decode failure is
+    /// attributable to the sender.
+    ///
+    /// Validation materializes every shard, so the returned block is rebuilt
+    /// with [`CodedBlock::new_trusted`] to retain only the application block
+    /// until shards are actually needed.
+    pub(crate) fn decode<B: CertifiableBlock, C: Scheme, H: Hasher>(
+        self,
+        block_codec_cfg: &<B as Read>::Cfg,
+        strategy: &impl Strategy,
+    ) -> Result<CodedBlock<B, C, H>, commonware_codec::Error> {
+        let cfg = CodedBlockCfg {
+            inner: block_codec_cfg.clone(),
+            expected: self.commitment,
+        };
+        let mut buf = self.block;
+        let block = CodedBlock::<B, C, H>::read_validated(&mut buf, &cfg, strategy)?;
+        if !buf.is_empty() {
+            return Err(commonware_codec::Error::ExtraData(buf.len()));
+        }
+        if block.commitment() != self.commitment {
+            return Err(commonware_codec::Error::Invalid(
+                "marshal::coding::ForwardedBlock",
+                "commitment mismatch",
+            ));
+        }
+        Ok(CodedBlock::new_trusted(block.into_inner(), self.commitment))
+    }
+}
+
+impl Write for ForwardedBlock {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.round.write(buf);
+        self.commitment.write(buf);
+        buf.put_slice(&self.block);
+    }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.round.write_bufs(buf);
+        self.commitment.write_bufs(buf);
+        buf.push(self.block.clone());
+    }
+}
+
+impl EncodeSize for ForwardedBlock {
+    fn encode_size(&self) -> usize {
+        self.round.encode_size() + self.commitment.encode_size() + self.block.len()
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        self.round.encode_inline_size() + self.commitment.encode_inline_size()
+    }
+}
+
+impl Read for ForwardedBlock {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let round = Round::read(buf)?;
+        let commitment = Commitment::read(buf)?;
+
+        // The block occupies the remainder of the message without a claimed
+        // length, so allocation is bounded by the bytes actually received.
+        let block = buf.copy_to_bytes(buf.remaining());
         Ok(Self {
-            commitment: Commitment::read(buf)?,
-            inner: B::read_cfg(buf, cfg)?,
-            _scheme: PhantomData,
+            round,
+            commitment,
+            block,
         })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for ForwardedBlock {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            round: u.arbitrary()?,
+            commitment: u.arbitrary()?,
+            block: Bytes::from(u.arbitrary::<Vec<u8>>()?),
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<C: Scheme, H: Hasher> arbitrary::Arbitrary<'_> for Message<C, H>
+where
+    C::Shard: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        if u.arbitrary()? {
+            Ok(Self::Shard(u.arbitrary()?))
+        } else {
+            Ok(Self::Forwarded(u.arbitrary()?))
+        }
     }
 }
 
@@ -342,11 +507,20 @@ impl<B: Block, C: Scheme, H: Hasher> Write for CodedBlock<B, C, H> {
         self.inner.write(buf);
         self.config.write(buf);
     }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.inner.write_bufs(buf);
+        self.config.write_bufs(buf);
+    }
 }
 
 impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
     fn encode_size(&self) -> usize {
         self.inner.encode_size() + self.config.encode_size()
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        self.inner.encode_inline_size() + self.config.encode_inline_size()
     }
 }
 
@@ -372,12 +546,13 @@ impl<B: Block> Clone for CodedBlockCfg<B> {
     }
 }
 
-impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
-    type Cfg = CodedBlockCfg<B>;
-
-    fn read_cfg(
+impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
+    /// Reads a block from `buf` and validates it against `cfg.expected`,
+    /// re-encoding with `strategy` to recompute the coding commitment.
+    fn read_validated(
         buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
+        cfg: &CodedBlockCfg<B>,
+        strategy: &impl Strategy,
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, &cfg.inner)?;
         let config = CodingConfig::read(buf)?;
@@ -398,10 +573,9 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
         let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
         inner.write(&mut buf);
         config.write(&mut buf);
-        let (commitment, shards) =
-            C::encode(&config, buf.as_slice(), &Sequential).map_err(|_| {
-                commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
-            })?;
+        let (commitment, shards) = C::encode(&config, buf.as_slice(), strategy).map_err(|_| {
+            commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
+        })?;
 
         Ok(Self {
             inner: Arc::new(inner),
@@ -410,6 +584,17 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
             shards: Some(shards.into()),
             _hasher: PhantomData,
         })
+    }
+}
+
+impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
+    type Cfg = CodedBlockCfg<B>;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Self::read_validated(buf, cfg, &Sequential)
     }
 }
 
@@ -866,6 +1051,7 @@ mod test {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Shard<ReedSolomon<Sha256>, Sha256>>,
+            CodecConformance<Message<ReedSolomon<Sha256>, Sha256>>,
         }
     }
 }

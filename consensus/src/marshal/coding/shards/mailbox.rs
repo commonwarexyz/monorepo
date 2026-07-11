@@ -28,13 +28,6 @@ where
         /// The round in which the block was proposed.
         round: Round,
     },
-    /// A fully decoded block received over the proactive forwarding channel.
-    Forwarded {
-        /// The validated erasure-coded block.
-        block: CodedBlock<B, C, H>,
-        /// The proposal round embedded in the block context.
-        round: Round,
-    },
     /// A notification from consensus that a [`Commitment`] has been discovered.
     Discovered {
         /// The [`Commitment`] of the proposed block.
@@ -124,7 +117,6 @@ where
             Self::SubscribeByCommitment { response, .. }
             | Self::SubscribeByDigest { response, .. } => response.is_closed(),
             Self::Proposed { .. }
-            | Self::Forwarded { .. }
             | Self::Discovered { .. }
             | Self::Notarized { .. }
             | Self::Prune { .. } => false,
@@ -226,11 +218,6 @@ where
     /// Broadcast a proposed erasure coded block's shards to the participants.
     pub fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
         let _ = self.sender.enqueue(Message::Proposed { block, round });
-    }
-
-    /// Cache a validated full block received through proactive forwarding.
-    pub(crate) fn forwarded(&self, round: Round, block: CodedBlock<B, C, H>) {
-        let _ = self.sender.enqueue(Message::Forwarded { block, round });
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].

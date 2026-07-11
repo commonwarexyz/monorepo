@@ -5,7 +5,7 @@
 //!
 //! # Overview
 //!
-//! The shard engine serves two primary functions:
+//! The shard engine serves the following functions:
 //! 1. Broadcast: When a node proposes a block, the engine broadcasts
 //!    erasure-coded shards to all participants and to non-participants in
 //!    aggregate membership (peers in [`commonware_p2p::PeerSetUpdate::all`]
@@ -17,6 +17,10 @@
 //!    reconstruct blocks: participants receive their own indexed shard from
 //!    the leader, while non-participants reconstruct from shards gossiped
 //!    by participants. All participants gossip their validated shard to peers.
+//! 3. Proactive Block Forwarding (optional): When a [`ForwardRouter`] is
+//!    configured, a proposing leader also sends the full block to the round's
+//!    predicted future leader, letting that node obtain the block before
+//!    enough shards would otherwise arrive to reconstruct it.
 //!
 //! # Message Flow
 //!
@@ -110,6 +114,19 @@
 //! _Per-peer buffers are only kept for peers in `latest.primary`, matching [`commonware_broadcast::buffered`].
 //! When a peer is no longer in `latest.primary`, all its buffered shards are evicted._
 //!
+//! # Proactive Block Forwarding
+//!
+//! The [`ForwardRouter`] names at most one `(leader, recipient)` pair per
+//! round. A recipient retains a bounded number of forwarded blocks (one per
+//! claimed round), still encoded, and only decodes a candidate once consensus
+//! has independently discovered the same round and leader for the claimed
+//! commitment and a local subscriber is waiting for that commitment. Validation
+//! mirrors the marshal block-fetch path: the block is decoded against the
+//! expected [`Commitment`] and re-encoded to authenticate the coding root,
+//! and a sender whose block fails validation is blocked. Forwarding is
+//! best-effort: a dropped or evicted candidate simply falls back to shard
+//! reconstruction.
+//!
 //! # Peer Validation and Blocking Rules
 //!
 //! The engine enforces strict validation to prevent Byzantine attacks:
@@ -139,12 +156,12 @@
 //! discovery._
 
 use super::{
-    mailbox::{Mailbox, Message},
+    mailbox::{Mailbox, Message as MailboxMessage},
     metrics::ShardMetrics,
 };
 use crate::{
     marshal::coding::{
-        types::{CodedBlock, ForwardedBlock, Shard},
+        types::{coding_config_for_participants, CodedBlock, ForwardedBlock, Message, Shard},
         validation::{validate_reconstruction, ReconstructionError as InvariantError},
     },
     types::{coding::Commitment, Epoch, Round},
@@ -170,7 +187,8 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     bitmap::BitMap,
-    channel::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{fallible::OneshotExt, oneshot},
+    futures::Pool,
     ordered::{Quorum, Set},
 };
 use rand_core::Rng;
@@ -181,9 +199,58 @@ use std::{
 use thiserror::Error;
 use tracing::{debug, warn};
 
-type ForwardRequest<B, C, H> = (Round, CodedBlock<B, C, H>);
-type ForwardSender<B, C, H> = mpsc::Sender<ForwardRequest<B, C, H>>;
-type ForwardReceiver<B, C, H> = mpsc::Receiver<ForwardRequest<B, C, H>>;
+/// The forwarding route for a proposal round.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForwardRoute<P: PublicKey> {
+    /// The leader allowed to forward the proposal.
+    pub leader: P,
+    /// The predicted future leader that should retain the proposal.
+    pub recipient: P,
+}
+
+/// Predicts the [`ForwardRoute`] for a proposal round.
+///
+/// Implementations must be deterministic and must agree across all
+/// participants for any round they recognize: recipients block a sender that
+/// deviates from the route. A router may recognize rounds around the caller's
+/// current view to tolerate modest view skew, and should return `None`
+/// whenever the route cannot yet be predicted safely.
+pub trait ForwardRouter<P: PublicKey>: Clone + Send + Sync + 'static {
+    /// Returns the route for `round`, or `None` if forwarding is not active
+    /// for that round.
+    fn route(&self, round: Round) -> Option<ForwardRoute<P>>;
+}
+
+/// A [`ForwardRouter`] that disables proactive forwarding.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoForwarding;
+
+impl<P: PublicKey> ForwardRouter<P> for NoForwarding {
+    fn route(&self, _: Round) -> Option<ForwardRoute<P>> {
+        None
+    }
+}
+
+impl<P: PublicKey, F> ForwardRouter<P> for F
+where
+    F: Fn(Round) -> Option<ForwardRoute<P>> + Clone + Send + Sync + 'static,
+{
+    fn route(&self, round: Round) -> Option<ForwardRoute<P>> {
+        self(round)
+    }
+}
+
+/// A route-authorized forwarded block retained in encoded form until local
+/// demand authorizes decoding.
+struct PendingForward<P: PublicKey> {
+    /// The authenticated sender, verified against the round's [`ForwardRoute`].
+    peer: P,
+    /// The forwarded block, still encoded.
+    block: ForwardedBlock,
+}
+
+/// The result of validating a forwarded block off the main loop.
+type ForwardDecode<B, C, H, P> = (P, Round, Result<CodedBlock<B, C, H>, CodecError>);
 
 /// An error that can occur during reconstruction of a [`CodedBlock`] from [`Shard`]s
 #[derive(Debug, Error)]
@@ -216,7 +283,7 @@ enum BlockSubscriptionKey<D> {
 }
 
 /// Configuration for the [`Engine`].
-pub struct Config<P, S, X, D, C, H, B, T>
+pub struct Config<P, S, X, D, C, H, B, T, R>
 where
     P: PublicKey,
     S: Provider<Scope = Epoch>,
@@ -226,6 +293,7 @@ where
     H: Hasher,
     B: CertifiableBlock,
     T: Strategy,
+    R: ForwardRouter<P>,
 {
     /// The scheme provider.
     pub scheme_provider: S,
@@ -270,6 +338,25 @@ where
     /// [`commonware_broadcast::buffered::Engine`]. Broadcast delivery uses the
     /// aggregate [`commonware_p2p::PeerSetUpdate::all`] union.
     pub peer_provider: D,
+
+    /// Router for proactive full-block forwarding.
+    ///
+    /// When a proposal's round has a route, the proposing leader sends the
+    /// full block to the predicted future leader alongside shard
+    /// dissemination, letting the recipient obtain the block before it could
+    /// otherwise be reconstructed. See [`ForwardRouter`] for the agreement
+    /// requirements a router must satisfy, and use [`NoForwarding`] to
+    /// disable forwarding entirely.
+    pub forward_router: R,
+
+    /// Maximum number of forwarded blocks retained while awaiting local
+    /// demand.
+    ///
+    /// Retention is keyed by claimed round and each candidate is bounded by
+    /// the network's maximum message size, so a Byzantine leader can occupy
+    /// at most one candidate per round it is authorized to forward in. The
+    /// worst-case memory usage is `max_pending_forwards * max_message_size`.
+    pub max_pending_forwards: NonZeroUsize,
 }
 
 /// A cached reconstructed block and the consensus round that produced it.
@@ -287,7 +374,7 @@ where
 ///
 /// When enough [`Shard`]s are present in the mailbox, the [`Engine`] may facilitate
 /// reconstruction of the original [`CodedBlock`] and notify any subscribers waiting for it.
-pub struct Engine<E, S, X, D, C, H, B, P, T>
+pub struct Engine<E, S, X, D, C, H, B, P, T, R>
 where
     E: BufferPooler + Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
@@ -299,15 +386,13 @@ where
     B: CertifiableBlock,
     P: PublicKey,
     T: Strategy,
+    R: ForwardRouter<P>,
 {
     /// Context held by the actor.
     context: ContextCell<E>,
 
     /// Receiver for incoming messages to the actor.
-    mailbox: mailbox::Receiver<Message<B, C, H, P>>,
-
-    /// Sender half retained for the optional full-block forwarding ingress.
-    forwarding_mailbox: Mailbox<B, C, H, P>,
+    mailbox: mailbox::Receiver<MailboxMessage<B, C, H, P>>,
 
     /// The scheme provider.
     scheme_provider: S,
@@ -372,11 +457,27 @@ where
     block_subscriptions:
         BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<CodedBlock<B, C, H>>>>,
 
+    /// Router for proactive full-block forwarding.
+    forward_router: R,
+
+    /// Forwarded blocks retained until local demand authorizes decoding,
+    /// keyed by their claimed round.
+    ///
+    /// Asynchrony can leave several rounds in flight at once (view skew,
+    /// consecutive leader predictions), so one candidate is retained per
+    /// round. The encoded bytes are untrusted beyond route authorization, so
+    /// retention is bounded to [`Config::max_pending_forwards`] candidates
+    /// with the oldest rounds evicted first.
+    pending_forwards: BTreeMap<Round, PendingForward<P>>,
+
+    /// Maximum number of retained forwarded blocks.
+    max_pending_forwards: NonZeroUsize,
+
     /// Metrics for the shard engine.
     metrics: ShardMetrics<P>,
 }
 
-impl<E, S, X, D, C, H, B, P, T> Engine<E, S, X, D, C, H, B, P, T>
+impl<E, S, X, D, C, H, B, P, T, R> Engine<E, S, X, D, C, H, B, P, T, R>
 where
     E: BufferPooler + Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
@@ -388,17 +489,19 @@ where
     B: CertifiableBlock,
     P: PublicKey,
     T: Strategy,
+    R: ForwardRouter<P>,
 {
     /// Create a new [`Engine`] with the given configuration.
-    pub fn new(context: E, config: Config<P, S, X, D, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
+    pub fn new(
+        context: E,
+        config: Config<P, S, X, D, C, H, B, T, R>,
+    ) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
-        let forwarding_mailbox = Mailbox::new(sender);
         (
             Self {
                 context: ContextCell::new(context),
                 mailbox,
-                forwarding_mailbox: forwarding_mailbox.clone(),
                 scheme_provider: config.scheme_provider,
                 blocker: config.blocker,
                 shard_codec_cfg: config.shard_codec_cfg,
@@ -414,9 +517,12 @@ where
                 reconstructed_blocks: BTreeMap::new(),
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
+                forward_router: config.forward_router,
+                pending_forwards: BTreeMap::new(),
+                max_pending_forwards: config.max_pending_forwards,
                 metrics,
             },
-            forwarding_mailbox,
+            Mailbox::new(sender),
         )
     }
 
@@ -425,151 +531,20 @@ where
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network, None))
-    }
-
-    /// Start shard dissemination plus a dedicated full-block channel used to
-    /// send proposals directly to a predicted future leader.
-    pub fn start_with_forwarding<FS, FR, F>(
-        mut self,
-        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        forwarding_network: (FS, FR),
-        forwarder: F,
-    ) -> Handle<()>
-    where
-        FS: Sender<PublicKey = P>,
-        FR: Receiver<PublicKey = P>,
-        F: Fn(Round) -> Option<P> + Send + Sync + 'static,
-        B: CertifiableBlock<Context = crate::simplex::types::Context<Commitment, P>>,
-    {
-        spawn_cell!(
-            self.context,
-            self.run_with_forwarding(network, forwarding_network, forwarder)
-        )
-    }
-
-    async fn run_with_forwarding<SS, SR, FS, FR, F>(
-        self,
-        network: (SS, SR),
-        forwarding_network: (FS, FR),
-        forwarder: F,
-    ) where
-        SS: Sender<PublicKey = P>,
-        SR: Receiver<PublicKey = P>,
-        FS: Sender<PublicKey = P>,
-        FR: Receiver<PublicKey = P>,
-        F: Fn(Round) -> Option<P> + Send + Sync + 'static,
-        B: CertifiableBlock<Context = crate::simplex::types::Context<Commitment, P>>,
-    {
-        let (proposals, proposal_rx) = mpsc::channel(self.background_channel_capacity.get());
-        let context = self.context.child("full_block_forwarding");
-        let mailbox = self.forwarding_mailbox.clone();
-        let block_codec_cfg = self.block_codec_cfg.clone();
-        let blocker = self.blocker.clone();
-        let capacity = self.background_channel_capacity;
-        let strategy = self.strategy.clone();
-        drop(context.spawn(move |context| {
-            Self::run_forwarding(
-                context,
-                forwarding_network,
-                forwarder,
-                proposal_rx,
-                mailbox,
-                block_codec_cfg,
-                blocker,
-                capacity,
-                strategy,
-            )
-        }));
-        self.run(network, Some(proposals)).await;
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn run_forwarding<FS, FR, F>(
-        context: E,
-        (sender, receiver): (FS, FR),
-        forwarder: F,
-        mut proposals: ForwardReceiver<B, C, H>,
-        mailbox: Mailbox<B, C, H, P>,
-        block_codec_cfg: B::Cfg,
-        mut blocker: X,
-        background_channel_capacity: NonZeroUsize,
-        strategy: T,
-    ) where
-        FS: Sender<PublicKey = P>,
-        FR: Receiver<PublicKey = P>,
-        F: Fn(Round) -> Option<P> + Send + Sync + 'static,
-        B: CertifiableBlock<Context = crate::simplex::types::Context<Commitment, P>>,
-    {
-        let mut sender = WrappedSender::<_, ForwardedBlock<B, C, H>>::new(
-            context.network_buffer_pool().clone(),
-            sender,
-        );
-        let (receiver_service, mut receiver) =
-            WrappedBackgroundReceiver::<_, P, X, _, ForwardedBlock<B, C, H>, T>::new(
-                context.child("ingress"),
-                receiver,
-                block_codec_cfg,
-                blocker.clone(),
-                background_channel_capacity,
-                strategy.clone(),
-            );
-        let _receiver_handle = receiver_service.start();
-
-        select_loop! {
-            context,
-            on_stopped => {
-                debug!("full-block forwarding stopped");
-            },
-            Some((round, block)) = proposals.recv() else {
-                debug!("full-block proposal channel closed");
-                return;
-            } => {
-                let Some(peer) = forwarder(round) else {
-                    continue;
-                };
-                let _ = sender.send(
-                    Recipients::One(peer),
-                    ForwardedBlock::new(&block),
-                    true,
-                );
-            },
-            Some((peer, forwarded)) = receiver.recv() else {
-                debug!("full-block receiver closed");
-                return;
-            } => {
-                let (commitment, block) = forwarded.into_parts();
-                let coded = strategy
-                    .spawn(move |strategy| {
-                        CodedBlock::<B, C, H>::new(block, commitment.config(), &strategy)
-                    })
-                    .await;
-                if coded.commitment() != commitment {
-                    commonware_p2p::block!(
-                        blocker,
-                        peer,
-                        "invalid proactively forwarded block"
-                    );
-                    continue;
-                }
-                let round = coded.context().round;
-                mailbox.forwarded(round, coded);
-            },
-        }
+        spawn_cell!(self.context, self.run(network))
     }
 
     /// Run the shard engine's event loop.
     async fn run(
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        forwarding: Option<ForwardSender<B, C, H>>,
     ) {
-        let mut sender = WrappedSender::<_, Shard<C, H>>::new(
+        let mut sender = WrappedSender::<_, Message<C, H>>::new(
             self.context.network_buffer_pool().clone(),
             sender,
         );
         let (receiver_service, mut receiver) =
-            WrappedBackgroundReceiver::<_, P, X, _, Shard<C, H>, T>::new(
+            WrappedBackgroundReceiver::<_, P, X, _, Message<C, H>, T>::new(
                 self.context.child("shard_ingress"),
                 receiver,
                 self.shard_codec_cfg.clone(),
@@ -580,6 +555,9 @@ where
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
+
+        // Forwarded blocks being validated off the main loop.
+        let mut forward_decodes = Pool::default();
 
         select_loop! {
             self.context,
@@ -624,26 +602,26 @@ where
                 }
 
                 match message {
-                    Message::Proposed { block, round } => {
-                        if let Some(forwarding) = &forwarding {
-                            let _ = forwarding.try_send((round, block.clone()));
-                        }
+                    MailboxMessage::Proposed { block, round } => {
+                        // Forward after shard dissemination: the recipient's
+                        // vote is gated on its assigned shard, which shares a
+                        // network queue with the much larger full block.
+                        let forward = block.clone();
                         self.broadcast_shards(&mut sender, round, block);
+                        self.forward_proposal(&mut sender, round, &forward);
                     }
-                    Message::Forwarded { block, round } => {
-                        self.cache_block(round, block);
-                    }
-                    Message::Discovered {
+                    MailboxMessage::Discovered {
                         commitment,
                         leader,
                         round,
                     } => {
                         self.handle_external_proposal(&mut sender, commitment, leader, round);
+                        self.try_decode_forwards(&mut forward_decodes);
                     }
-                    Message::Notarized { commitment, round } => {
+                    MailboxMessage::Notarized { commitment, round } => {
                         self.handle_notarized_commitment(&mut sender, commitment, round);
                     }
-                    Message::GetByCommitment {
+                    MailboxMessage::GetByCommitment {
                         commitment,
                         response,
                     } => {
@@ -653,19 +631,19 @@ where
                             .map(|entry| entry.block.clone());
                         response.send_lossy(block);
                     }
-                    Message::GetByDigest { digest, response } => {
+                    MailboxMessage::GetByDigest { digest, response } => {
                         let block = self.reconstructed_blocks.values().find_map(|entry| {
                             (entry.block.digest() == digest).then_some(entry.block.clone())
                         });
                         response.send_lossy(block);
                     }
-                    Message::SubscribeAssignedShardVerified {
+                    MailboxMessage::SubscribeAssignedShardVerified {
                         commitment,
                         response,
                     } => {
                         self.handle_assigned_shard_verified_subscription(commitment, response);
                     }
-                    Message::SubscribeByCommitment {
+                    MailboxMessage::SubscribeByCommitment {
                         commitment,
                         response,
                     } => {
@@ -673,31 +651,224 @@ where
                             BlockSubscriptionKey::Commitment(commitment),
                             response,
                         );
+                        self.try_decode_forwards(&mut forward_decodes);
                     }
-                    Message::SubscribeByDigest { digest, response } => {
+                    MailboxMessage::SubscribeByDigest { digest, response } => {
                         self.handle_block_subscription(
                             BlockSubscriptionKey::Digest(digest),
                             response,
                         );
                     }
-                    Message::Prune { through } => {
+                    MailboxMessage::Prune { through } => {
                         self.prune(through);
                     }
                 }
             },
-            Some((peer, shard)) = receiver.recv() else {
+            Some((peer, message)) = receiver.recv() else {
                 debug!("receiver closed, stopping shard engine");
                 return;
             } => {
-                self.handle_network_shard(&mut sender, peer, shard);
+                match message {
+                    Message::Shard(shard) => {
+                        self.handle_network_shard(&mut sender, peer, shard);
+                    }
+                    Message::Forwarded(forwarded) => {
+                        self.handle_forwarded_block(peer, forwarded, &mut forward_decodes);
+                    }
+                }
+            },
+            result = forward_decodes.next_completed() => {
+                self.handle_forward_decoded(result, &mut forward_decodes);
             },
         }
+    }
+
+    /// Forwards a locally proposed block to the round's predicted future
+    /// leader, if the round has a route naming this node as its sender.
+    fn forward_proposal<Sr: Sender<PublicKey = P>>(
+        &mut self,
+        sender: &mut WrappedSender<Sr, Message<C, H>>,
+        round: Round,
+        block: &CodedBlock<B, C, H>,
+    ) {
+        let Some(route) = self.forward_router.route(round) else {
+            return;
+        };
+        let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
+            return;
+        };
+        let me = scheme
+            .me()
+            .and_then(|index| scheme.participants().key(index));
+        if me != Some(&route.leader) || me == Some(&route.recipient) {
+            return;
+        }
+        let forwarded = ForwardedBlock::new(round, block);
+        let sent = sender.send(
+            Recipients::One(route.recipient),
+            Message::Forwarded(forwarded),
+            true,
+        );
+        if !sent.is_empty() {
+            self.metrics.blocks_forwarded_total.inc();
+        }
+    }
+
+    /// Handles a forwarded block received from the network.
+    ///
+    /// Only the round's route-authorized leader may address this node, and
+    /// candidates are retained in encoded form. Decoding is deferred to
+    /// [`Self::try_decode_forwards`], which requires independent local
+    /// demand.
+    fn handle_forwarded_block(
+        &mut self,
+        peer: P,
+        forwarded: ForwardedBlock,
+        decodes: &mut Pool<ForwardDecode<B, C, H, P>>,
+    ) {
+        // Without a local route, no sender can be authorized. Peers may
+        // legitimately disagree about rounds the local router does not
+        // recognize, so this is not a blockable offense.
+        let round = forwarded.round();
+        let Some(route) = self.forward_router.route(round) else {
+            return;
+        };
+        let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
+            return;
+        };
+        let Some(me) = scheme
+            .me()
+            .and_then(|index| scheme.participants().key(index))
+        else {
+            return;
+        };
+        if peer != route.leader {
+            commonware_p2p::block!(self.blocker, peer, "forwarded block from non-leader");
+            return;
+        }
+        if me != &route.recipient {
+            commonware_p2p::block!(
+                self.blocker,
+                peer,
+                "forwarded block sent to unexpected recipient"
+            );
+            return;
+        }
+        let participants = u16::try_from(scheme.participants().len())
+            .expect("scheme must have at most 2^16-1 participants");
+        if forwarded.commitment().config() != coding_config_for_participants(participants) {
+            commonware_p2p::block!(
+                self.blocker,
+                peer,
+                "forwarded block with invalid coding configuration"
+            );
+            return;
+        }
+        if self
+            .reconstructed_blocks
+            .contains_key(&forwarded.commitment())
+        {
+            return;
+        }
+
+        // Retain one candidate per claimed round, evicting the oldest round
+        // once capacity is reached. Skewed views and consecutive leader
+        // predictions can leave several rounds in flight at once.
+        self.pending_forwards
+            .entry(round)
+            .or_insert(PendingForward {
+                peer,
+                block: forwarded,
+            });
+        if self.pending_forwards.len() > self.max_pending_forwards.get() {
+            self.pending_forwards.pop_first();
+        }
+        self.try_decode_forwards(decodes);
+    }
+
+    /// Decodes a retained forwarded block once every independent expectation
+    /// holds: an open local subscription for the commitment and consensus
+    /// state whose round and leader match the candidate.
+    ///
+    /// Requiring consensus-discovered state means a claimed header is never
+    /// its own authority, and a decode failure is attributable to the sender.
+    /// Decodes are serialized so Byzantine leaders cannot occupy more than
+    /// one validation at a time. Newer rounds are preferred: they are the
+    /// live edge that forwarding exists to accelerate.
+    fn try_decode_forwards(&mut self, decodes: &mut Pool<ForwardDecode<B, C, H, P>>) {
+        if !decodes.is_empty() {
+            return;
+        }
+        let claimable = self
+            .pending_forwards
+            .iter()
+            .rev()
+            .find_map(|(round, pending)| {
+                let commitment = pending.block.commitment();
+                let subscribed = self
+                    .block_subscriptions
+                    .contains_key(&BlockSubscriptionKey::Commitment(commitment));
+                let expected = self.state.get(&commitment).is_some_and(|state| {
+                    state.round() == *round && state.leader() == Some(&pending.peer)
+                });
+                (subscribed && expected).then_some(*round)
+            });
+        let Some(round) = claimable else {
+            return;
+        };
+
+        let PendingForward { peer, block } = self
+            .pending_forwards
+            .remove(&round)
+            .expect("pending forward checked as present");
+        let cfg = self.block_codec_cfg.clone();
+        decodes.push(
+            self.strategy
+                .spawn(move |strategy| (peer, round, block.decode(&cfg, &strategy))),
+        );
+    }
+
+    /// Handles a completed forwarded-block validation.
+    fn handle_forward_decoded(
+        &mut self,
+        (peer, round, result): ForwardDecode<B, C, H, P>,
+        decodes: &mut Pool<ForwardDecode<B, C, H, P>>,
+    ) {
+        match result {
+            Ok(block) => {
+                // Consensus state may have moved while validating: the round
+                // may have been pruned or the block reconstructed from
+                // shards. Only admit the block if the expectation that
+                // authorized the decode still holds.
+                let commitment = block.commitment();
+                let expected = self
+                    .state
+                    .get(&commitment)
+                    .is_some_and(|state| state.round() == round && state.leader() == Some(&peer));
+                if expected && !self.reconstructed_blocks.contains_key(&commitment) {
+                    debug!(%commitment, ?peer, "cached forwarded block");
+                    self.metrics.forwarded_blocks_accepted_total.inc();
+                    self.cache_block(round, block);
+                }
+            }
+            Err(err) => {
+                commonware_p2p::block!(
+                    self.blocker,
+                    peer,
+                    ?err,
+                    "received invalid forwarded block"
+                );
+            }
+        }
+
+        // Another candidate may have arrived while the decode was in flight.
+        self.try_decode_forwards(decodes);
     }
 
     /// Handles a decoded shard received from the network.
     fn handle_network_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        sender: &mut WrappedSender<Sr, Message<C, H>>,
         peer: P,
         shard: Shard<C, H>,
     ) {
@@ -848,7 +1019,7 @@ where
     /// Handles leader announcements for a commitment and advances reconstruction.
     fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        sender: &mut WrappedSender<Sr, Message<C, H>>,
         commitment: Commitment,
         leader: P,
         round: Round,
@@ -910,7 +1081,7 @@ where
     /// local assigned shard as verified.
     fn handle_notarized_commitment<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        sender: &mut WrappedSender<Sr, Message<C, H>>,
         commitment: Commitment,
         round: Round,
     ) {
@@ -1044,7 +1215,7 @@ where
     /// - Non-participants in aggregate membership receive the leader's shard.
     fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        sender: &mut WrappedSender<Sr, Message<C, H>>,
         round: Round,
         mut block: CodedBlock<B, C, H>,
     ) {
@@ -1093,7 +1264,7 @@ where
                 );
                 return;
             };
-            let _ = sender.send(Recipients::One(peer.clone()), shard, true);
+            let _ = sender.send(Recipients::One(peer.clone()), Message::Shard(shard), true);
         }
 
         // Send the leader's shard to peers in aggregate membership who are not participants.
@@ -1104,7 +1275,11 @@ where
             .cloned()
             .collect();
         if !non_participants.is_empty() {
-            let _ = sender.send(Recipients::Some(non_participants), leader_shard, true);
+            let _ = sender.send(
+                Recipients::Some(non_participants),
+                Message::Shard(leader_shard),
+                true,
+            );
         }
 
         // Cache the block so we don't have to reconstruct it again.
@@ -1120,11 +1295,11 @@ where
     /// Gossips a validated [`Shard`] using [`commonware_p2p::Recipients::All`].
     fn broadcast_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        sender: &mut WrappedSender<Sr, Message<C, H>>,
         shard: Shard<C, H>,
     ) {
         let commitment = shard.commitment();
-        let peers = sender.send(Recipients::All, shard, true);
+        let peers = sender.send(Recipients::All, Message::Shard(shard), true);
         debug!(
             ?commitment,
             peers = peers.len(),
@@ -1137,7 +1312,7 @@ where
     /// up and subscribers are notified.
     fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        sender: &mut WrappedSender<Sr, Message<C, H>>,
         commitment: Commitment,
     ) {
         if let Some(state) = self.state.get_mut(&commitment) {
@@ -1325,6 +1500,10 @@ where
         let Some(round) = state_round.or(cached_round) else {
             return;
         };
+
+        // Forwarded blocks for pruned rounds can no longer be requested.
+        self.pending_forwards
+            .retain(|pending_round, _| *pending_round > round);
 
         let mut pruned_commitments = Vec::new();
         self.state.retain(|c, s| {
@@ -1836,7 +2015,7 @@ mod tests {
         Manager as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Quota, Runner, Supervisor as _};
+    use commonware_runtime::{deterministic, IoBuf, Quota, Runner, Supervisor as _};
     use commonware_utils::{
         channel::oneshot::error::TryRecvError, ordered::Set, NZUsize, Participant,
     };
@@ -1962,9 +2141,20 @@ mod tests {
     type Prov = MultiEpochProvider;
     type NetworkSender = simulated::Sender<P, deterministic::Context>;
     type D = simulated::Manager<P, deterministic::Context>;
-    type ShardEngine<S> = Engine<deterministic::Context, Prov, X, D, S, H, B, P, Sequential>;
-    type ChurningShardEngine<S> =
-        Engine<deterministic::Context, ChurningProvider, X, D, S, H, B, P, Sequential>;
+    type ShardEngine<S, R = NoForwarding> =
+        Engine<deterministic::Context, Prov, X, D, S, H, B, P, Sequential, R>;
+    type ChurningShardEngine<S> = Engine<
+        deterministic::Context,
+        ChurningProvider,
+        X,
+        D,
+        S,
+        H,
+        B,
+        P,
+        Sequential,
+        NoForwarding,
+    >;
 
     async fn assert_blocked(oracle: &O, blocker: &P, blocked: &P) {
         let blocked_peers = oracle.blocked().await.unwrap();
@@ -2005,6 +2195,8 @@ mod tests {
         num_non_participants: usize,
         /// Network link configuration.
         link: Link,
+        /// Maximum number of retained forwarded blocks per engine.
+        max_pending_forwards: NonZeroUsize,
         /// Marker for the coding scheme type parameter.
         _marker: PhantomData<S>,
     }
@@ -2015,12 +2207,14 @@ mod tests {
                 num_peers: 4,
                 num_non_participants: 0,
                 link: DEFAULT_LINK,
+                max_pending_forwards: NZUsize!(8),
                 _marker: PhantomData,
             }
         }
     }
 
     impl<S: CodingScheme> Fixture<S> {
+        /// Start the fixture with proactive forwarding disabled.
         pub fn start<F: Future<Output = ()>>(
             self,
             f: impl FnOnce(
@@ -2032,6 +2226,27 @@ mod tests {
                 CodingConfig,
             ) -> F,
         ) {
+            self.start_with_router(NoForwarding, f);
+        }
+
+        /// Start the fixture with a forwarding route shared by every engine.
+        /// A shared route is essential: disagreement about the sender or
+        /// recipient is treated as a protocol violation.
+        pub fn start_with_router<F, R>(
+            self,
+            router: R,
+            f: impl FnOnce(
+                Self,
+                deterministic::Context,
+                O,
+                Vec<Peer<S>>,
+                Vec<NonParticipant<S>>,
+                CodingConfig,
+            ) -> F,
+        ) where
+            F: Future<Output = ()>,
+            R: ForwardRouter<P>,
+        {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
                 let mut private_keys = (0..self.num_peers)
@@ -2117,6 +2332,8 @@ mod tests {
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: NZUsize!(1024),
                         peer_provider: oracle.manager(),
+                        forward_router: router.clone(),
+                        max_pending_forwards: self.max_pending_forwards,
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -2156,6 +2373,8 @@ mod tests {
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: NZUsize!(1024),
                         peer_provider: oracle.manager(),
+                        forward_router: router.clone(),
+                        max_pending_forwards: self.max_pending_forwards,
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -2226,26 +2445,303 @@ mod tests {
         );
     }
 
-    #[test_traced]
-    fn test_forwarded_full_block_resolves_subscription_without_notarization() {
-        let fixture = Fixture {
+    /// A [`ForwardRouter`] that routes every round from `leader` to
+    /// `recipient`.
+    fn static_router(leader: P, recipient: P) -> impl ForwardRouter<P> {
+        move |_: Round| {
+            Some(ForwardRoute {
+                leader: leader.clone(),
+                recipient: recipient.clone(),
+            })
+        }
+    }
+
+    /// The first two sorted peer keys, used as the static forwarding route.
+    fn route_keys(num_peers: usize) -> (P, P) {
+        let mut keys: Vec<_> = (0..num_peers)
+            .map(|seed| PrivateKey::from_seed(seed as u64).public_key())
+            .collect();
+        keys.sort();
+        (keys[0].clone(), keys[1].clone())
+    }
+
+    fn forwarded_full_block_resolves_subscription(forward_first: bool) {
+        let fixture = Fixture::<C> {
             num_peers: 4,
             ..Default::default()
         };
+        let (leader, recipient) = route_keys(fixture.num_peers);
+        let router = static_router(leader.clone(), recipient);
 
-        fixture.start(|_, _, _, peers, _, coding_config| async move {
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
-            let commitment = coded_block.commitment();
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let subscription = peers[1].mailbox.subscribe(commitment);
+        fixture.start_with_router(
+            router,
+            move |config, context, _, peers, _, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
 
-            // This is the receive-side action of proactive forwarding.
-            // No Discovered or Notarized message is required to wake a
-            // verifier already waiting on the block commitment.
-            peers[1].mailbox.forwarded(round, coded_block.clone());
-            assert_eq!(subscription.await.unwrap(), coded_block);
-        });
+                let subscription = if forward_first {
+                    peers[0].mailbox.proposed(round, coded_block.clone());
+                    context
+                        .sleep(config.link.latency + Duration::from_millis(1))
+                        .await;
+
+                    // Receiving a full block is only a prefetch. It must remain
+                    // encoded and invisible until consensus supplies the exact
+                    // commitment and a local caller requests it.
+                    assert!(peers[1].mailbox.get(commitment).await.is_none());
+                    peers[1]
+                        .mailbox
+                        .discovered(commitment, leader.clone(), round);
+                    peers[1].mailbox.subscribe(commitment)
+                } else {
+                    peers[1]
+                        .mailbox
+                        .discovered(commitment, leader.clone(), round);
+                    let subscription = peers[1].mailbox.subscribe(commitment);
+                    peers[0].mailbox.proposed(round, coded_block.clone());
+                    subscription
+                };
+
+                select! {
+                    result = subscription => {
+                        let result = result.unwrap();
+                        assert_eq!(result.commitment(), commitment);
+                        assert_eq!(result.inner(), coded_block.inner());
+                        assert!(result.shard(0).is_none());
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("forwarded block subscription did not resolve");
+                    },
+                }
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_forwarded_full_block_before_request() {
+        forwarded_full_block_resolves_subscription(true);
+    }
+
+    #[test_traced]
+    fn test_forwarded_full_block_after_request() {
+        forwarded_full_block_resolves_subscription(false);
+    }
+
+    #[test_traced]
+    fn test_forwarded_full_block_requires_route_leader() {
+        let fixture = Fixture::<C> {
+            num_peers: 4,
+            ..Default::default()
+        };
+        let (leader, recipient) = route_keys(fixture.num_peers);
+        let router = static_router(leader.clone(), recipient);
+
+        fixture.start_with_router(
+            router,
+            move |config, context, oracle, mut peers, _, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let recipient_key = peers[1].public_key.clone();
+
+                peers[1]
+                    .mailbox
+                    .discovered(commitment, leader.clone(), round);
+                let mut block = peers[1].mailbox.subscribe(commitment);
+                let mut assigned = peers[1]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment);
+
+                // A non-leader cannot occupy the speculative slot even with a
+                // correctly encoded block and an otherwise valid route.
+                let unauthorized =
+                    Message::<C, H>::Forwarded(ForwardedBlock::new(round, &coded_block));
+                peers[2].sender.send(
+                    Recipients::One(recipient_key.clone()),
+                    unauthorized.encode(),
+                    true,
+                );
+                context.sleep(config.link.latency * 2).await;
+                assert_blocked(&oracle, &peers[1].public_key, &peers[2].public_key).await;
+                assert!(matches!(block.try_recv(), Err(TryRecvError::Empty)));
+
+                let authorized =
+                    Message::<C, H>::Forwarded(ForwardedBlock::new(round, &coded_block));
+                peers[0]
+                    .sender
+                    .send(Recipients::One(recipient_key), authorized.encode(), true);
+                select! {
+                    result = block => {
+                        let result = result.unwrap();
+                        assert_eq!(result.commitment(), commitment);
+                        assert_eq!(result.inner(), coded_block.inner());
+                        assert!(result.shard(0).is_none());
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("authorized forwarded block did not resolve");
+                    },
+                }
+
+                // Full-block availability is not evidence that the recipient
+                // received its assigned shard from the leader.
+                assert!(matches!(assigned.try_recv(), Err(TryRecvError::Empty)));
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_forwarded_blocks_retained_across_rounds() {
+        let fixture = Fixture::<C> {
+            num_peers: 4,
+            ..Default::default()
+        };
+        let (leader, recipient) = route_keys(fixture.num_peers);
+        let router = static_router(leader.clone(), recipient);
+
+        fixture.start_with_router(
+            router,
+            move |config, context, _, mut peers, _, coding_config| async move {
+                let inner_a = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let block_a = CodedBlock::<B, C, H>::new(inner_a, coding_config, &STRATEGY);
+                let inner_b = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let block_b = CodedBlock::<B, C, H>::new(inner_b, coding_config, &STRATEGY);
+                let round_a = Round::new(Epoch::zero(), View::new(1));
+                let round_b = Round::new(Epoch::zero(), View::new(2));
+                let recipient_key = peers[1].public_key.clone();
+
+                // Forwards for consecutive rounds can be in flight before
+                // either is claimed. Both must be retained.
+                let first = Message::<C, H>::Forwarded(ForwardedBlock::new(round_a, &block_a));
+                peers[0]
+                    .sender
+                    .send(Recipients::One(recipient_key.clone()), first.encode(), true);
+                let second = Message::<C, H>::Forwarded(ForwardedBlock::new(round_b, &block_b));
+                peers[0]
+                    .sender
+                    .send(Recipients::One(recipient_key), second.encode(), true);
+                context.sleep(config.link.latency * 2).await;
+
+                for (block, round) in [(block_a, round_a), (block_b, round_b)] {
+                    peers[1]
+                        .mailbox
+                        .discovered(block.commitment(), leader.clone(), round);
+                    let subscription = peers[1].mailbox.subscribe(block.commitment());
+                    select! {
+                        result = subscription => {
+                            let result = result.unwrap();
+                            assert_eq!(result.commitment(), block.commitment());
+                            assert_eq!(result.inner(), block.inner());
+                        },
+                        _ = context.sleep(Duration::from_secs(5)) => {
+                            panic!("retained forwarded block did not resolve");
+                        },
+                    }
+                }
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_forwarded_capacity_evicts_oldest_round() {
+        let fixture = Fixture::<C> {
+            num_peers: 4,
+            max_pending_forwards: NZUsize!(2),
+            ..Default::default()
+        };
+        let (leader, recipient) = route_keys(fixture.num_peers);
+        let router = static_router(leader.clone(), recipient);
+
+        fixture.start_with_router(
+            router,
+            move |config, context, _, mut peers, _, coding_config| async move {
+                let recipient_key = peers[1].public_key.clone();
+                let mut blocks = Vec::new();
+                for view in 1u64..=3 {
+                    let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(view), 100 + view);
+                    let block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                    let round = Round::new(Epoch::zero(), View::new(view));
+                    let forwarded = Message::<C, H>::Forwarded(ForwardedBlock::new(round, &block));
+                    peers[0].sender.send(
+                        Recipients::One(recipient_key.clone()),
+                        forwarded.encode(),
+                        true,
+                    );
+                    context.sleep(config.link.latency * 2).await;
+                    blocks.push((block, round));
+                }
+
+                // The oldest round was evicted to make room for the newest.
+                let (evicted, evicted_round) = &blocks[0];
+                peers[1]
+                    .mailbox
+                    .discovered(evicted.commitment(), leader.clone(), *evicted_round);
+                let mut subscription = peers[1].mailbox.subscribe(evicted.commitment());
+                context.sleep(Duration::from_millis(100)).await;
+                assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+
+                // The newest round is still retained.
+                let (retained, retained_round) = &blocks[2];
+                peers[1]
+                    .mailbox
+                    .discovered(retained.commitment(), leader.clone(), *retained_round);
+                let subscription = peers[1].mailbox.subscribe(retained.commitment());
+                select! {
+                    result = subscription => {
+                        assert_eq!(result.unwrap().commitment(), retained.commitment());
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("retained forwarded block did not resolve");
+                    },
+                }
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_forwarded_invalid_block_blocks_leader() {
+        let fixture = Fixture::<C> {
+            num_peers: 4,
+            ..Default::default()
+        };
+        let (leader, recipient) = route_keys(fixture.num_peers);
+        let router = static_router(leader.clone(), recipient);
+
+        fixture.start_with_router(
+            router,
+            move |config, context, oracle, mut peers, _, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let recipient_key = peers[1].public_key.clone();
+
+                // Register demand so the candidate is decoded on arrival.
+                peers[1]
+                    .mailbox
+                    .discovered(commitment, leader.clone(), round);
+                let mut subscription = peers[1].mailbox.subscribe(commitment);
+
+                // Corrupt the block body while leaving the claimed header
+                // intact, so the candidate passes route authorization but
+                // fails validation.
+                let message = Message::<C, H>::Forwarded(ForwardedBlock::new(round, &coded_block));
+                let mut corrupted = message.encode().to_vec();
+                let last = corrupted.len() - 1;
+                corrupted[last] ^= 0xFF;
+                peers[0]
+                    .sender
+                    .send(Recipients::One(recipient_key), IoBuf::from(corrupted), true);
+
+                context
+                    .sleep(config.link.latency * 2 + Duration::from_millis(100))
+                    .await;
+                assert_blocked(&oracle, &peers[1].public_key, &peers[0].public_key).await;
+                assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+            },
+        );
     }
 
     #[test_traced]
@@ -2434,7 +2930,7 @@ mod tests {
                     .subscribe_assigned_shard_verified(commitment);
 
                 // Byzantine peer sends the invalid shard.
-                let invalid_bytes = invalid_shard.encode();
+                let invalid_bytes = Message::Shard(invalid_shard).encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), invalid_bytes, true);
@@ -2448,7 +2944,7 @@ mod tests {
                 assert_blocked(&oracle, &peers[2].public_key, &peers[0].public_key).await;
 
                 // Honest proposer sends the valid shard.
-                let valid_bytes = valid_shard.encode();
+                let valid_bytes = Message::Shard(valid_shard).encode();
                 peers[1]
                     .sender
                     .send(Recipients::One(receiver_pk), valid_bytes, true);
@@ -2545,7 +3041,7 @@ mod tests {
                 // Get peer 2's own-index shard (the one the leader sends them).
                 let peer2_index = peers[2].index.get() as u16;
                 let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = peer2_shard.encode();
+                let shard_bytes = Message::Shard(peer2_shard).encode();
 
                 let peer2_pk = peers[2].public_key.clone();
                 let leader = peers[0].public_key.clone();
@@ -2597,15 +3093,14 @@ mod tests {
 
                 // Get peer 2's shard from both blocks.
                 let peer2_index = peers[2].index.get() as u16;
-                let shard_bytes1 = coded_block1
-                    .shard(peer2_index)
-                    .expect("missing shard")
-                    .encode();
+                let shard_bytes1 =
+                    Message::Shard(coded_block1.shard(peer2_index).expect("missing shard"))
+                        .encode();
                 let mut equivocating_shard =
                     coded_block2.shard(peer2_index).expect("missing shard");
                 // Override the commitment so it targets the same reconstruction state.
                 equivocating_shard.commitment = commitment;
-                let shard_bytes2 = equivocating_shard.encode();
+                let shard_bytes2 = Message::Shard(equivocating_shard).encode();
 
                 let peer2_pk = peers[2].public_key.clone();
                 let leader = peers[0].public_key.clone();
@@ -2649,7 +3144,7 @@ mod tests {
                 // Get peer 2's own-index shard.
                 let peer2_index = peers[2].index.get() as u16;
                 let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = peer2_shard.encode();
+                let shard_bytes = Message::Shard(peer2_shard).encode();
 
                 let peer2_pk = peers[2].public_key.clone();
                 let leader = peers[0].public_key.clone();
@@ -2688,7 +3183,7 @@ mod tests {
                 // Get peer 2's own-index shard.
                 let peer2_index = peers[2].index.get() as u16;
                 let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = peer2_shard.encode();
+                let shard_bytes = Message::Shard(peer2_shard).encode();
 
                 let peer2_pk = peers[2].public_key.clone();
 
@@ -2734,7 +3229,7 @@ mod tests {
                 // Get the shard the leader would send to peer 2 (at peer 2's index).
                 let peer2_index = peers[2].index.get() as u16;
                 let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = peer2_shard.encode();
+                let shard_bytes = Message::Shard(peer2_shard).encode();
 
                 let peer2_pk = peers[2].public_key.clone();
                 let leader_a = peers[0].public_key.clone();
@@ -2806,7 +3301,7 @@ mod tests {
                 // Get the shard the leader would send to peer 2 (at peer 2's index).
                 let peer2_index = peers[2].index.get() as u16;
                 let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = peer2_shard.encode();
+                let shard_bytes = Message::Shard(peer2_shard).encode();
 
                 let peer2_pk = peers[2].public_key.clone();
                 let leader = peers[0].public_key.clone();
@@ -2903,7 +3398,7 @@ mod tests {
 
                 let peer2_index = peers[2].index.get() as u16;
                 let shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = shard.encode();
+                let shard_bytes = Message::Shard(shard).encode();
 
                 non_participant_sender.send(Recipients::One(receiver_pk), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
@@ -2953,7 +3448,7 @@ mod tests {
 
                 let peer2_index = peers[2].index.get() as u16;
                 let shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = shard.encode();
+                let shard_bytes = Message::Shard(shard).encode();
                 let mut shard_sub = peers[2]
                     .mailbox
                     .subscribe_assigned_shard_verified(commitment);
@@ -3016,14 +3511,14 @@ mod tests {
                 );
 
                 // Send peer 2 their shard from the leader (1 checked shard).
-                let leader_shard_bytes = peer2_shard.encode();
+                let leader_shard_bytes = Message::Shard(peer2_shard).encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Send peer 1's shard to peer 2 (first time - should succeed, 2 checked shards).
-                let peer1_shard_bytes = peer1_shard.encode();
+                let peer1_shard_bytes = Message::Shard(peer1_shard).encode();
                 peers[1].sender.send(
                     Recipients::One(peer2_pk.clone()),
                     peer1_shard_bytes.clone(),
@@ -3092,21 +3587,21 @@ mod tests {
                 // Send peer 2 the leader's shard (verified immediately).
                 let peer2_index = peers[2].index.get() as u16;
                 let leader_shard = coded_block1.shard(peer2_index).expect("missing shard");
-                let leader_shard_bytes = leader_shard.encode();
+                let leader_shard_bytes = Message::Shard(leader_shard).encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Send peer 1's valid shard to peer 2 (first time - succeeds).
-                let shard_bytes = peer1_shard.encode();
+                let shard_bytes = Message::Shard(peer1_shard).encode();
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Send a different shard from peer 1 (equivocation - should block).
-                let equivocating_bytes = peer1_equivocating_shard.encode();
+                let equivocating_bytes = Message::Shard(peer1_equivocating_shard).encode();
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), equivocating_bytes, true);
@@ -3153,10 +3648,12 @@ mod tests {
                     leader.clone(),
                     Round::new(Epoch::zero(), View::new(1)),
                 );
-                let shard_a = block_a
-                    .shard(peers[1].index.get() as u16)
-                    .expect("missing shard")
-                    .encode();
+                let shard_a = Message::Shard(
+                    block_a
+                        .shard(peers[1].index.get() as u16)
+                        .expect("missing shard"),
+                )
+                .encode();
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_a.clone(), true);
@@ -3169,20 +3666,24 @@ mod tests {
                     Round::new(Epoch::zero(), View::new(2)),
                 );
                 // Leader's shard for peer2.
-                let leader_shard_b = block_b
-                    .shard(peers[2].index.get() as u16)
-                    .expect("missing shard")
-                    .encode();
+                let leader_shard_b = Message::Shard(
+                    block_b
+                        .shard(peers[2].index.get() as u16)
+                        .expect("missing shard"),
+                )
+                .encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), leader_shard_b, true);
 
                 // Three shards for minimum threshold (4 total with leader's).
                 for i in [1usize, 3usize, 4usize] {
-                    let shard = block_b
-                        .shard(peers[i].index.get() as u16)
-                        .expect("missing shard")
-                        .encode();
+                    let shard = Message::Shard(
+                        block_b
+                            .shard(peers[i].index.get() as u16)
+                            .expect("missing shard"),
+                    )
+                    .encode();
                     peers[i]
                         .sender
                         .send(Recipients::One(peer2_pk.clone()), shard, true);
@@ -3260,9 +3761,11 @@ mod tests {
                     .expect("missing shard");
                 equivocating_shard.commitment = commitment_a;
 
-                peers[1]
-                    .sender
-                    .send(Recipients::One(peer2_pk.clone()), shard_a.encode(), true);
+                peers[1].sender.send(
+                    Recipients::One(peer2_pk.clone()),
+                    Message::Shard(shard_a).encode(),
+                    true,
+                );
                 context.sleep(config.link.latency * 2).await;
 
                 peers[2].mailbox.proposed(round_b, block_b);
@@ -3284,9 +3787,11 @@ mod tests {
                     },
                 }
 
-                peers[1]
-                    .sender
-                    .send(Recipients::One(peer2_pk), equivocating_shard.encode(), true);
+                peers[1].sender.send(
+                    Recipients::One(peer2_pk),
+                    Message::Shard(equivocating_shard).encode(),
+                    true,
+                );
                 context.sleep(config.link.latency * 2).await;
 
                 let blocked = oracle.blocked().await.unwrap();
@@ -3338,7 +3843,7 @@ mod tests {
                     let shard = coded_block
                         .shard(peers[sender_idx].index.get() as u16)
                         .expect("missing shard");
-                    let shard_bytes = shard.encode();
+                    let shard_bytes = Message::Shard(shard).encode();
                     peers[sender_idx].sender.send(
                         Recipients::One(peer3_pk.clone()),
                         shard_bytes,
@@ -3357,7 +3862,7 @@ mod tests {
                 // we reach minimum_shards=4 -> batch validation + reconstruction.
                 let peer3_index = peers[3].index.get() as u16;
                 let leader_shard = coded_block.shard(peer3_index).expect("missing shard");
-                let leader_shard_bytes = leader_shard.encode();
+                let leader_shard_bytes = Message::Shard(leader_shard).encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(peer3_pk), leader_shard_bytes, true);
@@ -3415,19 +3920,23 @@ mod tests {
 
                 // Send the leader's shard (for receiver's index) and three shards,
                 // all before leader announcement.
-                let leader_shard = coded_block
-                    .shard(peers[receiver_idx].index.get() as u16)
-                    .expect("missing shard")
-                    .encode();
+                let leader_shard = Message::Shard(
+                    coded_block
+                        .shard(peers[receiver_idx].index.get() as u16)
+                        .expect("missing shard"),
+                )
+                .encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), leader_shard, true);
 
                 for i in [1usize, 2usize, 4usize] {
-                    let shard = coded_block
-                        .shard(peers[i].index.get() as u16)
-                        .expect("missing shard")
-                        .encode();
+                    let shard = Message::Shard(
+                        coded_block
+                            .shard(peers[i].index.get() as u16)
+                            .expect("missing shard"),
+                    )
+                    .encode();
                     peers[i]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard, true);
@@ -3496,10 +4005,12 @@ mod tests {
                 // Four sender-indexed shards are enough to reconstruct without
                 // classifying any sender as the leader.
                 for sender_idx in [1usize, 2, 4, 5] {
-                    let shard = coded_block
-                        .shard(peers[sender_idx].index.get() as u16)
-                        .expect("missing shard")
-                        .encode();
+                    let shard = Message::Shard(
+                        coded_block
+                            .shard(peers[sender_idx].index.get() as u16)
+                            .expect("missing shard"),
+                    )
+                    .encode();
                     peers[sender_idx].sender.send(
                         Recipients::One(receiver.clone()),
                         shard,
@@ -3541,10 +4052,12 @@ mod tests {
                 peers[receiver_idx]
                     .mailbox
                     .discovered(commitment, leader, round);
-                let leader_shard = coded_block
-                    .shard(peers[receiver_idx].index.get() as u16)
-                    .expect("missing leader shard")
-                    .encode();
+                let leader_shard = Message::Shard(
+                    coded_block
+                        .shard(peers[receiver_idx].index.get() as u16)
+                        .expect("missing leader shard"),
+                )
+                .encode();
                 peers[0].sender.send(
                     Recipients::One(receiver),
                     leader_shard,
@@ -3590,10 +4103,12 @@ mod tests {
                     .mailbox
                     .subscribe_assigned_shard_verified(commitment);
 
-                let leader_shard = coded_block
-                    .shard(peers[receiver_idx].index.get() as u16)
-                    .expect("missing receiver shard")
-                    .encode();
+                let leader_shard = Message::Shard(
+                    coded_block
+                        .shard(peers[receiver_idx].index.get() as u16)
+                        .expect("missing receiver shard"),
+                )
+                .encode();
                 peers[leader_idx]
                     .sender
                     .send(Recipients::One(receiver), leader_shard, true);
@@ -3643,10 +4158,12 @@ mod tests {
                 );
 
                 // Send leader's shard (for receiver's index) after leader is known.
-                let leader_shard = coded_block
-                    .shard(peers[receiver_idx].index.get() as u16)
-                    .expect("missing shard")
-                    .encode();
+                let leader_shard = Message::Shard(
+                    coded_block
+                        .shard(peers[receiver_idx].index.get() as u16)
+                        .expect("missing shard"),
+                )
+                .encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), leader_shard, true);
@@ -3661,10 +4178,12 @@ mod tests {
 
                 // Send enough shards after leader known to reconstruct.
                 for i in [1usize, 2usize, 4usize] {
-                    let shard = coded_block
-                        .shard(peers[i].index.get() as u16)
-                        .expect("missing shard")
-                        .encode();
+                    let shard = Message::Shard(
+                        coded_block
+                            .shard(peers[i].index.get() as u16)
+                            .expect("missing shard"),
+                    )
+                    .encode();
                     peers[i]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard, true);
@@ -3729,7 +4248,7 @@ mod tests {
                 // Get peer 2's shard.
                 let peer2_index = peers[2].index.get() as u16;
                 let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = peer2_shard.encode();
+                let shard_bytes = Message::Shard(peer2_shard).encode();
 
                 let peer2_pk = peers[2].public_key.clone();
 
@@ -3785,7 +4304,7 @@ mod tests {
                 let peer2_index = peers[2].index.get() as u16;
                 let mut wrong_shard = coded_block2.shard(peer2_index).expect("missing shard");
                 wrong_shard.commitment = commitment1;
-                let wrong_bytes = wrong_shard.encode();
+                let wrong_bytes = Message::Shard(wrong_shard).encode();
 
                 let peer2_pk = peers[2].public_key.clone();
                 let leader = peers[0].public_key.clone();
@@ -3833,7 +4352,7 @@ mod tests {
                 let mut wrong_index_shard = coded_block.shard(peer1_index).expect("missing shard");
                 // Mutate the index so it doesn't match sender (peer 1).
                 wrong_index_shard.index = peers[4].index.get() as u16;
-                let wrong_bytes = wrong_index_shard.encode();
+                let wrong_bytes = Message::Shard(wrong_index_shard).encode();
 
                 let peer3_pk = peers[3].public_key.clone();
                 let leader = peers[0].public_key.clone();
@@ -3844,7 +4363,7 @@ mod tests {
                     leader,
                     Round::new(Epoch::zero(), View::new(1)),
                 );
-                let shard_bytes = leader_shard.encode();
+                let shard_bytes = Message::Shard(leader_shard).encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(peer3_pk.clone()), shard_bytes, true);
@@ -3890,7 +4409,7 @@ mod tests {
                 let peer1_index = peers[1].index.get() as u16;
                 let mut wrong_shard = coded_block2.shard(peer1_index).expect("missing shard");
                 wrong_shard.commitment = commitment1;
-                let wrong_bytes = wrong_shard.encode();
+                let wrong_bytes = Message::Shard(wrong_shard).encode();
 
                 let peer3_pk = peers[3].public_key.clone();
                 let leader = peers[0].public_key.clone();
@@ -3901,7 +4420,7 @@ mod tests {
                     leader,
                     Round::new(Epoch::zero(), View::new(1)),
                 );
-                let shard_bytes = leader_shard.encode();
+                let shard_bytes = Message::Shard(leader_shard).encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(peer3_pk.clone()), shard_bytes, true);
@@ -3919,7 +4438,7 @@ mod tests {
                 for &idx in &[2, 4] {
                     let peer_index = peers[idx].index.get() as u16;
                     let shard = coded_block1.shard(peer_index).expect("missing shard");
-                    let bytes = shard.encode();
+                    let bytes = Message::Shard(shard).encode();
                     peers[idx]
                         .sender
                         .send(Recipients::One(peer3_pk.clone()), bytes, true);
@@ -3967,10 +4486,12 @@ mod tests {
                     leader,
                     Round::new(Epoch::zero(), View::new(1)),
                 );
-                let leader_shard = coded_block1
-                    .shard(peers[receiver_idx].index.get() as u16)
-                    .expect("missing shard")
-                    .encode();
+                let leader_shard = Message::Shard(
+                    coded_block1
+                        .shard(peers[receiver_idx].index.get() as u16)
+                        .expect("missing shard"),
+                )
+                .encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), leader_shard, true);
@@ -3981,14 +4502,16 @@ mod tests {
                 // - valid shard from peer4
                 peers[1].sender.send(
                     Recipients::One(receiver_pk.clone()),
-                    invalid_shard.encode(),
+                    Message::Shard(invalid_shard).encode(),
                     true,
                 );
                 for idx in [2usize, 4usize] {
-                    let shard = coded_block1
-                        .shard(peers[idx].index.get() as u16)
-                        .expect("missing shard")
-                        .encode();
+                    let shard = Message::Shard(
+                        coded_block1
+                            .shard(peers[idx].index.get() as u16)
+                            .expect("missing shard"),
+                    )
+                    .encode();
                     peers[idx]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard, true);
@@ -4009,10 +4532,12 @@ mod tests {
                 );
 
                 // Send one additional valid shard; this should now satisfy checked threshold.
-                let extra_shard = coded_block1
-                    .shard(peers[5].index.get() as u16)
-                    .expect("missing shard")
-                    .encode();
+                let extra_shard = Message::Shard(
+                    coded_block1
+                        .shard(peers[5].index.get() as u16)
+                        .expect("missing shard"),
+                )
+                .encode();
                 peers[5]
                     .sender
                     .send(Recipients::One(receiver_pk), extra_shard, true);
@@ -4052,7 +4577,7 @@ mod tests {
                 let peer1_index = peers[1].index.get() as u16;
                 let mut wrong_shard = coded_block2.shard(peer1_index).expect("missing shard");
                 wrong_shard.commitment = commitment1;
-                let wrong_bytes = wrong_shard.encode();
+                let wrong_bytes = Message::Shard(wrong_shard).encode();
 
                 let peer3_pk = peers[3].public_key.clone();
 
@@ -4073,7 +4598,7 @@ mod tests {
                 for &idx in &[2, 4] {
                     let peer_index = peers[idx].index.get() as u16;
                     let shard = coded_block1.shard(peer_index).expect("missing shard");
-                    let bytes = shard.encode();
+                    let bytes = Message::Shard(shard).encode();
                     peers[idx]
                         .sender
                         .send(Recipients::One(peer3_pk.clone()), bytes, true);
@@ -4093,7 +4618,7 @@ mod tests {
                 );
                 let peer3_index = peers[3].index.get() as u16;
                 let leader_shard = coded_block1.shard(peer3_index).expect("missing shard");
-                let shard_bytes = leader_shard.encode();
+                let shard_bytes = Message::Shard(leader_shard).encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(peer3_pk), shard_bytes, true);
@@ -4175,7 +4700,7 @@ mod tests {
             let scheme_provider =
                 MultiEpochProvider::single(scheme_epoch0).with_epoch(Epoch::new(1), scheme_epoch1);
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _, _, _> = Config {
                 scheme_provider,
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
@@ -4187,6 +4712,8 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
+                forward_router: NoForwarding,
+                max_pending_forwards: NZUsize!(8),
             };
 
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
@@ -4205,7 +4732,7 @@ mod tests {
             let future_shard = coded_block
                 .shard(future_peer_index.get() as u16)
                 .expect("missing shard");
-            let shard_bytes = future_shard.encode();
+            let shard_bytes = Message::Shard(future_shard).encode();
 
             // Send the shard BEFORE external_proposed (goes to pre-leader buffer).
             future_peer_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
@@ -4304,7 +4831,7 @@ mod tests {
             // and `ingest_buffered_shards`). Leader-shard validation is the third.
             // Any additional lookup for epoch 0 churns to `None`.
             let broadcaster_provider = ChurningProvider::new(broadcaster_scheme, 3);
-            let broadcaster_config: Config<_, _, _, _, C, _, _, _> = Config {
+            let broadcaster_config: Config<_, _, _, _, C, _, _, _, _> = Config {
                 scheme_provider: broadcaster_provider,
                 blocker: broadcaster_control.clone(),
                 shard_codec_cfg: CodecConfig {
@@ -4316,6 +4843,8 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
+                forward_router: NoForwarding,
+                max_pending_forwards: NZUsize!(8),
             };
             let (broadcaster_engine, broadcaster_mailbox) =
                 ChurningShardEngine::new(context.child("broadcaster"), broadcaster_config);
@@ -4327,7 +4856,7 @@ mod tests {
                 private_keys[receiver_idx].clone(),
             )
             .expect("signer scheme should be created");
-            let receiver_config: Config<_, _, _, _, C, _, _, _> = Config {
+            let receiver_config: Config<_, _, _, _, C, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(receiver_scheme),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
@@ -4339,6 +4868,8 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
+                forward_router: NoForwarding,
+                max_pending_forwards: NZUsize!(8),
             };
             let (receiver_engine, receiver_mailbox) =
                 ShardEngine::new(context.child("receiver"), receiver_config);
@@ -4358,20 +4889,17 @@ mod tests {
                 .index(&broadcaster_pk)
                 .expect("broadcaster must be a participant")
                 .get() as u16;
-            let broadcaster_shard = coded_block
-                .shard(broadcaster_index)
-                .expect("missing shard")
-                .encode();
+            let broadcaster_shard =
+                Message::Shard(coded_block.shard(broadcaster_index).expect("missing shard"))
+                    .encode();
             leader_sender.send(Recipients::One(broadcaster_pk), broadcaster_shard, true);
 
             let receiver_index = participants
                 .index(&receiver_pk)
                 .expect("receiver must be a participant")
                 .get() as u16;
-            let receiver_shard = coded_block
-                .shard(receiver_index)
-                .expect("missing shard")
-                .encode();
+            let receiver_shard =
+                Message::Shard(coded_block.shard(receiver_index).expect("missing shard")).encode();
             leader_sender.send(Recipients::One(receiver_pk.clone()), receiver_shard, true);
 
             context.sleep(DEFAULT_LINK.latency * 3).await;
@@ -4442,7 +4970,7 @@ mod tests {
                 leader_shard.commitment = fake_commitment;
                 peers[0].sender.send(
                     Recipients::One(receiver_pk.clone()),
-                    leader_shard.encode(),
+                    Message::Shard(leader_shard).encode(),
                     true,
                 );
 
@@ -4454,7 +4982,7 @@ mod tests {
                     shard.commitment = fake_commitment;
                     peers[idx].sender.send(
                         Recipients::One(receiver_pk.clone()),
-                        shard.encode(),
+                        Message::Shard(shard).encode(),
                         true,
                     );
                 }
@@ -4495,7 +5023,7 @@ mod tests {
                     .expect("missing shard");
                 peers[0].sender.send(
                     Recipients::One(receiver_pk.clone()),
-                    leader_shard1.encode(),
+                    Message::Shard(leader_shard1).encode(),
                     true,
                 );
 
@@ -4504,7 +5032,7 @@ mod tests {
                     let shard = coded_block1.shard(peer_shard_idx).expect("missing shard");
                     peers[idx].sender.send(
                         Recipients::One(receiver_pk.clone()),
-                        shard.encode(),
+                        Message::Shard(shard).encode(),
                         true,
                     );
                 }
@@ -4567,7 +5095,7 @@ mod tests {
                 leader_shard.commitment = fake_commitment;
                 peers[0].sender.send(
                     Recipients::One(receiver_pk.clone()),
-                    leader_shard.encode(),
+                    Message::Shard(leader_shard).encode(),
                     true,
                 );
 
@@ -4577,7 +5105,7 @@ mod tests {
                     shard.commitment = fake_commitment;
                     peers[idx].sender.send(
                         Recipients::One(receiver_pk.clone()),
-                        shard.encode(),
+                        Message::Shard(shard).encode(),
                         true,
                     );
                 }
@@ -4608,7 +5136,7 @@ mod tests {
                     .expect("missing shard");
                 peers[0].sender.send(
                     Recipients::One(receiver_pk.clone()),
-                    real_leader_shard.encode(),
+                    Message::Shard(real_leader_shard).encode(),
                     true,
                 );
 
@@ -4617,7 +5145,7 @@ mod tests {
                     let shard = coded_block.shard(peer_shard_idx).expect("missing shard");
                     peers[idx].sender.send(
                         Recipients::One(receiver_pk.clone()),
-                        shard.encode(),
+                        Message::Shard(shard).encode(),
                         true,
                     );
                 }
@@ -4681,27 +5209,33 @@ mod tests {
                 let certifiable_sub = peers[receiver_idx].mailbox.subscribe(commitment_b);
 
                 // We receive our shard for commitment B from the equivocating leader.
-                let shard_b = block_b
-                    .shard(receiver_shard_idx)
-                    .expect("missing shard")
-                    .encode();
+                let shard_b = Message::Shard(
+                    block_b
+                        .shard(receiver_shard_idx)
+                        .expect("missing shard"),
+                )
+                .encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), shard_b, true);
 
                 // Reconstruct conflicting commitment A first.
-                let shard_a = block_a
-                    .shard(receiver_shard_idx)
-                    .expect("missing shard")
-                    .encode();
+                let shard_a = Message::Shard(
+                    block_a
+                        .shard(receiver_shard_idx)
+                        .expect("missing shard"),
+                )
+                .encode();
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), shard_a, true);
                 for i in [1usize, 2usize, 4usize] {
-                    let shard_a = block_a
-                        .shard(peers[i].index.get() as u16)
-                        .expect("missing shard")
-                        .encode();
+                    let shard_a = Message::Shard(
+                        block_a
+                            .shard(peers[i].index.get() as u16)
+                            .expect("missing shard"),
+                    )
+                    .encode();
                     peers[i]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard_a, true);
@@ -4716,10 +5250,12 @@ mod tests {
 
                 // Commitment B should still be recoverable after A reconstructed.
                 for i in [1usize, 2usize, 4usize] {
-                    let shard_b = block_b
-                        .shard(peers[i].index.get() as u16)
-                        .expect("missing shard")
-                        .encode();
+                    let shard_b = Message::Shard(
+                        block_b
+                            .shard(peers[i].index.get() as u16)
+                            .expect("missing shard"),
+                    )
+                    .encode();
                     peers[i]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard_b, true);
@@ -4790,7 +5326,7 @@ mod tests {
                 // so leader must be blocked.
                 peers[leader_idx].sender.send(
                     Recipients::One(receiver_pk),
-                    unrelated_shard.encode(),
+                    Message::Shard(unrelated_shard).encode(),
                     true,
                 );
                 context.sleep(config.link.latency * 2).await;
@@ -5106,7 +5642,7 @@ mod tests {
             )
             .expect("signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
@@ -5118,6 +5654,8 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
+                forward_router: NoForwarding,
+                max_pending_forwards: NZUsize!(8),
             };
 
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
@@ -5135,7 +5673,7 @@ mod tests {
             let leader_shard = coded_block
                 .shard(receiver_participant.get() as u16)
                 .expect("missing shard");
-            let shard_bytes = leader_shard.encode();
+            let shard_bytes = Message::Shard(leader_shard).encode();
 
             // Send the shard BEFORE leader announcement (it gets buffered).
             leader_sender.send(
@@ -5209,7 +5747,7 @@ mod tests {
             )
             .expect("signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control,
                 shard_codec_cfg: CodecConfig {
@@ -5221,6 +5759,8 @@ mod tests {
                 peer_buffer_size: NZUsize!(4),
                 background_channel_capacity: NZUsize!(16),
                 peer_provider: oracle.manager(),
+                forward_router: NoForwarding,
+                max_pending_forwards: NZUsize!(8),
             };
 
             let (mut engine, _mailbox) = ShardEngine::new(context.child("engine"), config);
@@ -5319,7 +5859,7 @@ mod tests {
                 Scheme::signer(SCHEME_NAMESPACE, epoch1_set.clone(), receiver_key.clone())
                     .expect("epoch 1 signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme_epoch0)
                     .with_epoch(Epoch::new(1), scheme_epoch1),
                 blocker: receiver_control.clone(),
@@ -5332,6 +5872,8 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
+                forward_router: NoForwarding,
+                max_pending_forwards: NZUsize!(8),
             };
 
             // Receiver engine: schemes for both epochs so post-cutover validation can run if needed.
@@ -5353,7 +5895,7 @@ mod tests {
             // Inbound: epoch-0 leader shard arrives before `Discovered` (pre-leader buffer path).
             leader_sender.send(
                 Recipients::One(receiver_pk.clone()),
-                leader_shard.encode(),
+                Message::Shard(leader_shard).encode(),
                 true,
             );
             context.sleep(DEFAULT_LINK.latency * 2).await;
@@ -5475,7 +6017,7 @@ mod tests {
             )
             .expect("signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config: Config<_, _, _, _, C, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
@@ -5487,6 +6029,8 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
+                forward_router: NoForwarding,
+                max_pending_forwards: NZUsize!(8),
             };
 
             let (engine, mailbox) = ShardEngine::new(context.child("evicted"), config);
@@ -5497,10 +6041,22 @@ mod tests {
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
-            let peer2_shard = coded_block.shard(2).expect("missing shard 2").encode();
-            let peer4_shard = coded_block.shard(4).expect("missing shard 4").encode();
-            let peer5_shard = coded_block.shard(5).expect("missing shard 5").encode();
-            let peer6_shard = coded_block.shard(6).expect("missing shard 6").encode();
+            let peer2_shard = Message::Shard(
+                coded_block.shard(2).expect("missing shard 2"),
+            )
+            .encode();
+            let peer4_shard = Message::Shard(
+                coded_block.shard(4).expect("missing shard 4"),
+            )
+            .encode();
+            let peer5_shard = Message::Shard(
+                coded_block.shard(5).expect("missing shard 5"),
+            )
+            .encode();
+            let peer6_shard = Message::Shard(
+                coded_block.shard(6).expect("missing shard 6"),
+            )
+            .encode();
 
             let block_sub = mailbox.subscribe(commitment);
 
@@ -5655,7 +6211,7 @@ mod tests {
                     .expect("missing victim shard");
                 peers[leader_idx].sender.send(
                     Recipients::One(victim.clone()),
-                    leader_shard.encode(),
+                    Message::Shard(leader_shard).encode(),
                     true,
                 );
                 context.sleep(config.link.latency * 2).await;
@@ -5684,7 +6240,7 @@ mod tests {
                     .expect("missing shard");
                 peers[extra_sender_idx].sender.send(
                     Recipients::One(victim.clone()),
-                    extra_shard.encode(),
+                    Message::Shard(extra_shard).encode(),
                     true,
                 );
                 context.sleep(config.link.latency * 2).await;

@@ -427,7 +427,7 @@ mod tests {
             setup_network_with_participants(context.child("network"), NZUsize!(1), participants)
                 .await;
         let control = oracle.control(me.clone());
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _, _> = shards::Config {
             scheme_provider: provider,
             blocker: control.clone(),
             shard_codec_cfg: CodecConfig {
@@ -439,6 +439,8 @@ mod tests {
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
+            forward_router: shards::NoForwarding,
+            max_pending_forwards: NZUsize!(8),
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
