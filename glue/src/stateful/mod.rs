@@ -49,14 +49,13 @@
 //!   genesis. Restarted nodes reconcile the database set against the later of
 //!   marshal's processed anchor and the stored state sync height, rewinding if
 //!   needed. Databases that instead recover behind that floor are caught up
-//!   by replaying finalized blocks. If a replay block is no longer available,
-//!   startup panics instead of running peer state sync again: peers never
-//!   serve blocks below the marshal floor, so an operator must recover the
-//!   node (for example by state syncing a fresh database set). If
-//!   marshal is behind that stored height, the actor acknowledges old
-//!   finalized blocks without applying them again until marshal catches up. The
-//!   actor then starts directly in normal processing mode while marshal continues
-//!   backfilling blocks from the network.
+//!   by replaying retained finalized blocks. A missing replay block is
+//!   unreachable without storage corruption or a marshal floor above
+//!   databases that never synced, so startup panics instead of running peer
+//!   state sync again. If marshal is behind that stored height, the actor
+//!   acknowledges old finalized blocks without applying them again until
+//!   marshal catches up. The actor then starts directly in normal processing
+//!   mode while marshal continues backfilling blocks from the network.
 //!
 //! - **State sync** (floor attached): Run a one-time QMDB state sync from
 //!   marshal's configured floor block, populating each database via

@@ -19,9 +19,9 @@ use commonware_consensus::{
     marshal::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
+        Identifier,
     },
     simplex::types::Finalization,
-    Heightable,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_runtime::{spawn_cell, telemetry::metrics::GaugeExt, ContextCell, Handle, Spawner};
@@ -44,7 +44,8 @@ type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 pub struct PruneConfig {
     /// Marshal's ack window. Must match the marshal config used to construct the marshal
     /// mailbox: pruning retains at least the last `max_pending_acks + 1` finalized blocks so
-    /// that any state a restart may need to rewind to is never pruned.
+    /// that any state a restart may need to rewind to, and any finalized blocks it may need
+    /// to replay to reach the marshal floor, are never pruned.
     pub max_pending_acks: NonZeroUsize,
 
     /// Prune databases and marshal every `maintenance_interval` finalized blocks.
@@ -261,27 +262,20 @@ where
     /// Starts the application by initializing the database set at marshal's current floor.
     ///
     /// If the databases recover behind the marshal floor (an unclean shutdown
-    /// or a marshal startup floor above them), startup replays finalized
-    /// blocks over them before processing begins.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a replay block has been pruned
-    /// (see [syncer::ReplayBlockPruned]): the databases cannot be recovered
-    /// without operator intervention.
+    /// or a marshal startup floor above them), startup replays retained
+    /// finalized blocks over them before processing begins.
     async fn start_from_marshal(mut self) {
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
             skip_finalized_until,
-            replay,
+            replay_to,
         } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
             &self.marshal,
             self.db_config.clone(),
             self.sync_metadata.sync_height(),
         )
-        .await
-        .unwrap_or_else(|err| panic!("{err}"));
+        .await;
 
         // Attach the resolvers to the initialized databases before starting the processor,
         // so that this instance can serve peers database operations and proofs. The
@@ -299,19 +293,28 @@ where
             self.prune_config,
         );
 
-        // The databases recovered behind the marshal floor: apply the replay
-        // blocks up to the floor before processing begins. Replay is
-        // crash-safe because each replayed block is durably finalized. After
-        // an interrupted multi-database finalize, the next startup rewinds to
-        // the newest common anchor before resuming.
-        let floor = replay.last().map_or(anchor.height, Heightable::height);
-        let context = self.context.as_present();
-        for block in replay {
-            let (status, _prune) = processor.finalize(context, block).await;
-            assert!(
-                matches!(status, FinalizeStatus::Persisted { .. }),
-                "replayed block must persist"
-            );
+        // If the databases recovered behind the marshal floor, replay the
+        // retained finalized blocks up to the floor before processing begins.
+        // Replay is crash-safe because each replayed block is durably
+        // finalized. After an interrupted multi-database finalize, the next
+        // startup rewinds to the newest common anchor before resuming.
+        let floor = replay_to.unwrap_or(anchor.height);
+        if let Some(replay_to) = replay_to {
+            let context = self.context.as_present();
+            let mut height = anchor.height;
+            while height < replay_to {
+                height = height.next();
+                let block = self
+                    .marshal
+                    .get_block(Identifier::Height(height))
+                    .await
+                    .expect("blocks in the verified replay window must be retained");
+                let (status, _prune) = processor.finalize(context, V::into_inner(block)).await;
+                assert!(
+                    matches!(status, FinalizeStatus::Persisted { .. }),
+                    "replayed block must persist"
+                );
+            }
         }
 
         // Once the databases are aligned with the floor, record completion so
@@ -645,7 +648,7 @@ mod tests {
     /// cannot be recovered: startup must panic instead of running peer state
     /// sync.
     #[test]
-    #[should_panic(expected = "cannot recover")]
+    #[should_panic(expected = "must be retained")]
     fn startup_panics_when_replay_window_pruned() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let mut signing_context = context.child("signing");
